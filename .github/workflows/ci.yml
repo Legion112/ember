@@ -26,21 +26,21 @@ jobs:
 
       - name: gofmt
         run: |
-          unformatted=$(gofmt -l cmd internal test)
+          unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
             echo "::error::not gofmt'd:"
             echo "$unformatted"
-            gofmt -d cmd internal test
+            gofmt -d .
             exit 1
           fi
 
-      # vet twice. The default invocation never looks behind a build tag, so
-      # without the second line the integration lab compiles only on whichever
-      # machine happens to run it.
+      # vet twice once the lab exists. The default invocation never looks
+      # behind a build tag, so without the tagged run the integration lab
+      # compiles only on whichever machine happens to run it.
       - name: vet
         run: |
           go vet ./...
-          go vet -tags=integration ./test/... || true
+          if [ -d test/integration ]; then go vet -tags=integration ./test/...; fi
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
@@ -79,44 +79,9 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
-  integration:
-    name: docker labs
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: build lab image
-        run: make docker-build
-
-      - name: labs
-        run: |
-          set -o pipefail
-          EMBER_INTEGRATION=1 go test -tags=integration -count=1 -timeout 20m -v \
-            ./test/integration/... 2>&1 | tee /tmp/labs.log
-
-      - name: no lab silently skipped
-        if: always()
-        run: |
-          if grep -q -- '--- SKIP' /tmp/labs.log; then
-            echo "::error::a lab skipped itself instead of running:"
-            grep -B1 -- '--- SKIP' /tmp/labs.log
-            exit 1
-          fi
-          echo "labs that ran: $(grep -c -- '--- PASS' /tmp/labs.log)"
-
-      # Nothing ember created may outlive the suite. A leaked container in CI
-      # is free; the same bug against RunPod is not.
-      - name: no stray containers
-        if: always()
-        run: |
-          stray=$(docker ps -aq --filter 'label=ember.run-id')
-          if [ -n "$stray" ]; then
-            echo "::error::the labs left containers behind:"
-            docker ps -a --filter 'label=ember.run-id'
-            exit 1
-          fi
+  # The `integration` job lands with the Docker lab it runs. It is absent
+  # rather than skipped on purpose: a job that passes because the thing it
+  # tests does not exist is a green tick that means nothing, and
+  # `make test-integration` already stands in the Makefile as the reminder.
+  # See AGENTS.md, "a test that skips itself reports success for something
+  # that never ran".
