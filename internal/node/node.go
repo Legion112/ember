@@ -31,7 +31,19 @@ func (h Handle) IsZero() bool { return h.Provider == "" && h.ID == "" }
 // endpoint is unexported so that the only way to reach a dialable address is
 // through Ready, which checks the state first. See ReadyNode.
 type Node struct {
-	Handle   Handle
+	Handle Handle
+
+	// RunID is ember's own identifier for the run that created this node,
+	// parsed back out of the provider-side label.
+	//
+	// It is here because the label is the source of truth and the local
+	// journal is a cache. A process killed between Create returning and the
+	// node id being written leaves a record that cannot name its node -- and
+	// without this field the node and its record are two unrelated findings
+	// that nothing can reconcile or reap, which defeats the entire purpose of
+	// writing the record before the create call.
+	RunID RunID
+
 	State    State
 	Offer    Offer
 	HostKey  HostKey

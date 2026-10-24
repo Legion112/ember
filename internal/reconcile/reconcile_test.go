@@ -351,3 +351,111 @@ func TestReap_TreatsAMissingNodeAsDestroyed(t *testing.T) {
 		t.Errorf("destroyed %d, want 1", n)
 	}
 }
+
+// labelled is a live node that still carries the run id ember put in its
+// provider-side label, which is how a record with no node id finds it again.
+func labelled(id string, runID node.RunID, state node.State, deadline time.Time) node.Node {
+	n := liveNode(id, state, deadline)
+	n.RunID = runID
+	return n
+}
+
+// TestScan_JoinsAnIntentRecordToItsNodeByRunID is the bug the SIGKILL lab
+// found. A run killed between Create returning and the node id being written
+// used to produce two findings -- an orphaned record that could not name its
+// node, and an untracked node no record mentioned -- and reap could act on
+// neither, although both carried the same run id in ember's own label the
+// whole time.
+func TestScan_JoinsAnIntentRecordToItsNodeByRunID(t *testing.T) {
+	deadline := now.Add(time.Hour)
+	fs := Scan(
+		map[node.ProviderID][]node.Node{
+			"test": {labelled("n1", "run1", node.StateReady, deadline)},
+		},
+		nil,
+		[]statestore.Record{record("run1", "", statestore.PhaseIntent, deadline)},
+		now,
+	)
+
+	if len(fs) != 1 {
+		t.Fatalf("one node produced %d findings: %v", len(fs), fs)
+	}
+	f := fs[0]
+	if f.Kind != KindOrphan {
+		t.Errorf("kind = %v, want orphan: the node is inside its deadline, so reap must not touch it", f.Kind)
+	}
+	if f.Node.Handle.ID != "n1" {
+		t.Errorf("the finding does not name the node: %+v", f.Node.Handle)
+	}
+	if f.Record == nil {
+		t.Error("the finding carries no record, so reap cannot clear it afterwards")
+	}
+	if !strings.Contains(f.Reason, "found again by its label") {
+		t.Errorf("the reason does not explain how the pairing was made: %q", f.Reason)
+	}
+}
+
+// TestScan_AnIntentRecordWhoseNodeIsExpiredIsReapable. Same join, but past the
+// deadline: now it is reap's business, and reap needs the handle the join
+// supplied.
+func TestScan_AnIntentRecordWhoseNodeIsExpiredIsReapable(t *testing.T) {
+	past := now.Add(-time.Hour)
+	fs := Scan(
+		map[node.ProviderID][]node.Node{
+			"test": {labelled("n1", "run1", node.StateReady, past)},
+		},
+		nil,
+		[]statestore.Record{record("run1", "", statestore.PhaseIntent, past)},
+		now,
+	)
+
+	if len(fs) != 1 || fs[0].Kind != KindExpired {
+		t.Fatalf("got %v, want one expired finding", fs)
+	}
+	if fs[0].Node.Handle.ID != "n1" {
+		t.Fatal("an expired finding with no handle is one reap cannot act on")
+	}
+}
+
+// TestScan_AnIntentRecordWithNoMatchingNodeStaysUnanswerable. The create call
+// may still have created something the provider has not listed yet, and only
+// the provider can say -- so it is reported rather than assumed either way.
+func TestScan_AnIntentRecordWithNoMatchingNodeStaysUnanswerable(t *testing.T) {
+	deadline := now.Add(time.Hour)
+	fs := Scan(
+		map[node.ProviderID][]node.Node{"test": {}},
+		nil,
+		[]statestore.Record{record("run1", "", statestore.PhaseIntent, deadline)},
+		now,
+	)
+
+	if len(fs) != 1 || fs[0].Kind != KindOrphan {
+		t.Fatalf("got %v, want one orphan", fs)
+	}
+	if fs[0].Node.Handle.ID != "" {
+		t.Error("a finding with no matching node should carry no handle")
+	}
+	if !strings.Contains(fs[0].Reason, "no node wears this run's label") {
+		t.Errorf("the reason does not say the label was looked for: %q", fs[0].Reason)
+	}
+}
+
+// TestScan_ANodeWithNoRunIDIsStillUntracked. A provider that cannot report a
+// run id -- or one whose label failed to parse -- must not have its node
+// silently joined to an unrelated record.
+func TestScan_ANodeWithNoRunIDIsStillUntracked(t *testing.T) {
+	deadline := now.Add(time.Hour)
+	fs := Scan(
+		map[node.ProviderID][]node.Node{
+			"test": {liveNode("n1", node.StateReady, deadline)}, // no RunID
+		},
+		nil,
+		[]statestore.Record{record("run1", "", statestore.PhaseIntent, deadline)},
+		now,
+	)
+
+	got := kinds(fs)
+	if got[KindUntracked] != 1 || got[KindOrphan] != 1 {
+		t.Fatalf("got %v, want one untracked node and one unanswerable record", got)
+	}
+}

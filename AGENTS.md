@@ -108,6 +108,14 @@ that sentence made unrepresentable rather than merely tested.
   else, which is the entire thing it is for.
 - **The exposure assertion lives above the providers, not inside them.** A
   provider checking its own exposure is a provider grading its own homework.
+- **The label is the source of truth; the journal is a cache.** A record is
+  joined to a live node by provider node id *or* by the run id in the node's
+  label. Matching on node id alone meant a run killed between `Create`
+  returning and the id being written produced two findings -- an orphaned
+  record that could not name its node, and an untracked node no record
+  mentioned -- and `reap` could act on neither, although both carried the same
+  run id the whole time. That defeats the entire reason the record is written
+  before the create call.
 - **No ember function takes an `ssh.HostKeyCallback`.** `hostkey.Trust` has one
   unexported method and that package holds no permissive implementation, so
   `ssh.InsecureIgnoreHostKey()` cannot be typed into the program — not behind a

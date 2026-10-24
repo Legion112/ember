@@ -112,11 +112,24 @@ func Scan(
 		})
 	}
 
-	// Index the live nodes so a record can be matched to one.
+	// Index the live nodes so a record can be matched to one, by provider
+	// node id and also by ember's own run id.
+	//
+	// The run-id index is what makes a record written before the create call
+	// worth writing. A process killed between Create returning and the node
+	// id being stored leaves a record with no node id; matching only on node
+	// id reports that record and its very much alive node as two unrelated
+	// findings, and reap can act on neither. The label carries the run id, so
+	// the two can be joined -- which is what "labels are the source of truth,
+	// the store is a cache" has to mean in practice.
 	live := map[string]node.Node{}
+	byRun := map[string]node.Node{}
 	for prov, nodes := range listings {
 		for _, n := range nodes {
 			live[string(prov)+"/"+n.Handle.ID] = n
+			if n.RunID != "" {
+				byRun[string(prov)+"/"+string(n.RunID)] = n
+			}
 		}
 	}
 
@@ -126,12 +139,20 @@ func Scan(
 		h, hasHandle := rec.Handle()
 
 		if !hasHandle {
-			// An intent that never learned an id. The create call may still
-			// have created something, and only the provider can say.
+			// An intent that never learned an id. Before reporting it as
+			// unanswerable, look for a node wearing this run's label: that is
+			// the crash-between-create-and-record case, and the node is right
+			// there to be classified and reaped like any other.
+			if n, found := byRun[string(rec.Provider)+"/"+string(rec.RunID)]; found {
+				seen[string(rec.Provider)+"/"+n.Handle.ID] = true
+				out = append(out, classify(n, &records[i], rec, now,
+					"created but the run was killed before ember recorded its id; found again by its label"))
+				continue
+			}
 			if rec.Phase.Billable() {
 				out = append(out, Finding{
 					Kind: KindOrphan, Provider: rec.Provider, Record: &records[i],
-					Reason: "recorded before creating, then never got an id; ask the provider whether a node with label " + rec.Label + " exists",
+					Reason: "recorded before creating, then never got an id, and no node wears this run's label; ask the provider whether a node labelled " + rec.Label + " exists",
 				})
 			}
 			continue
@@ -190,6 +211,27 @@ func Scan(
 
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Kind > out[j].Kind })
 	return out
+}
+
+// classify decides what a record paired with a live node amounts to.
+//
+// found explains how the pairing was made, which matters only for the
+// label-matched case: an operator reading "expired" about a node whose record
+// has no id deserves to know why ember is confident they are the same node.
+func classify(n node.Node, rec *statestore.Record, r statestore.Record, now time.Time, found string) Finding {
+	f := Finding{Provider: r.Provider, Node: n, Record: rec}
+	switch {
+	case n.Expired(now):
+		f.Kind = KindExpired
+		f.Reason = fmt.Sprintf("past its deadline (%s) and still %s; %s", r.Deadline.Format(time.RFC3339), n.State, found)
+	default:
+		f.Kind = KindOrphan
+		// Not expired, so reap deliberately leaves it: the deadline is the
+		// authority on when a node may be destroyed, and the node's own
+		// self-destruct is what ends it when ember is no longer running.
+		f.Reason = fmt.Sprintf("%s until %s, but no ember process is holding it; %s", n.State, r.Deadline.Format(time.RFC3339), found)
+	}
+	return f
 }
 
 // Attention counts the findings that are not KindOK.

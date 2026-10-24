@@ -86,9 +86,58 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
-  # The `integration` job lands with the Docker lab it runs. It is absent
-  # rather than skipped on purpose: a job that passes because the thing it
-  # tests does not exist is a green tick that means nothing, and
-  # `make test-integration` already stands in the Makefile as the reminder.
-  # See AGENTS.md, "a test that skips itself reports success for something
-  # that never ran".
+  # The labs run ember's real binary against a real Docker daemon. That is
+  # where the Docker client in internal/dockerengine/dockerclient runs at all
+  # -- the coverage gate excludes it as a branchless adapter -- and it is the
+  # only place a SIGKILL mid-provision can produce the orphan that `ember ls`
+  # and `ember reap` exist to find.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # Vetting the tagged tree separately, because the default invocation
+      # never looks at code behind a build tag: go-tun learned that the hard
+      # way, with a lab that had not compiled for weeks.
+      - name: vet the tagged tree
+        run: go vet -tags=integration ./test/...
+
+      - name: build the lab image
+        run: make docker-build
+
+      - name: labs
+        run: |
+          set -o pipefail
+          EMBER_INTEGRATION=1 go test -tags=integration -count=1 -timeout 20m -v \
+            ./test/integration/... 2>&1 | tee /tmp/labs.log
+
+      # A silently skipped lab is worse than a red build: it reports success
+      # for a security control that never ran. The labs themselves refuse to
+      # skip -- a missing daemon or image is a hard failure naming the command
+      # that fixes it -- and this is the second line of defence.
+      - name: no lab silently skipped
+        if: always()
+        run: |
+          if grep -q -- '--- SKIP' /tmp/labs.log; then
+            echo "::error::a lab skipped itself instead of running:"
+            grep -B1 -- '--- SKIP' /tmp/labs.log
+            exit 1
+          fi
+
+      # Nothing ember created may outlive the job. Each lab asserts this for
+      # itself in its own cleanup; this catches a lab that failed before
+      # registering one.
+      - name: no stray containers
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter label=ember.run-id)
+          if [ -n "$left" ]; then
+            echo "::error::containers wearing ember's label outlived the labs:"
+            docker ps -a --filter label=ember.run-id
+            exit 1
+          fi

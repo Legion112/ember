@@ -82,13 +82,12 @@ cover-check: cover
 # vet runs twice. The default invocation never looks at files behind a build
 # tag, so without the second line the entire integration lab compiles only on
 # the machine that happens to run it.
+# The labs exist now, so this is unconditional. The earlier spelling skipped
+# the tagged vet when it found no lab sources, which was honest while there
+# were none and is a silent pass the moment someone deletes or moves them.
 vet:
 	$(GO) vet ./...
-	@if ls test/integration/*.go >/dev/null 2>&1; then \
-		$(GO) vet -tags=integration ./test/...; \
-	else \
-		echo "no lab sources yet; skipping the tagged vet"; \
-	fi
+	$(GO) vet -tags=integration ./test/...
 
 fmt:
 	$(GO) fmt ./...
@@ -108,6 +107,10 @@ docker-build:
 # The labs refuse to skip themselves: a missing image is a hard failure with
 # the command to fix it, never a t.Skip. A silently skipped lab is worse than
 # a red build because it reports success for something that never ran.
+# The labs are gated twice: the build tag keeps them out of `go test ./...`,
+# and EMBER_INTEGRATION keeps them out of a tagged run by somebody who did not
+# mean to start containers. Neither gate makes them skip -- a missing daemon or
+# a missing image is a hard failure naming the command that fixes it.
 test-integration: docker-build
 	EMBER_INTEGRATION=1 $(GO) test -tags=integration -count=1 -timeout 20m -v ./test/integration/...
 

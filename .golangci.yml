@@ -2,6 +2,11 @@ version: "2"
 
 run:
   timeout: 5m
+  # The integration tag is set here rather than passed on a command line, so
+  # the single lint step in CI covers the labs too. Without it the tagged tree
+  # is linted nowhere, and lab code drifts until somebody runs it by hand.
+  build-tags:
+    - integration
 
 linters:
   default: none
@@ -29,6 +34,16 @@ linters:
       # them: suppressing line by line would mean a nolint on every assertion
       # that matters.
       - path: _test\.go
+        linters:
+          - gosec
+
+      # The lab harness is test support that happens not to live in _test.go
+      # files, because the labs import it as a package. Its whole job is to
+      # launch ember as a subprocess (G204) at a path it computed (G703), and
+      # those paths come from t.TempDir and the Makefile rather than from any
+      # input. Scoped to this one directory, and to gosec only, so the rest of
+      # the tagged tree is linted like anything else.
+      - path: ^test/integration/harness/
         linters:
           - gosec
 

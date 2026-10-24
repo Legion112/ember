@@ -69,8 +69,8 @@ ember up --provider local --image ghcr.io/example/wl:v1 --port demo:8188 --ttl 3
 trusting the local records, and exits 2 when anything needs attention —
 including a provider it could not reach.
 
-Next: the Docker lab, then RunPod and Vast.ai. See `AGENTS.md` for the rules
-all of it is written against.
+Next: RunPod, then Vast.ai. See `AGENTS.md` for the rules all of it is
+written against.
 
 ## Two properties that outrank features
 
@@ -96,9 +96,17 @@ must never look like "nothing is running".
 ```
 make            # fmt, vet, test, build
 make test       # unit tests, race detector, no Docker or network needed
+make lint
 make cover-check
 make test-integration   # Docker labs; needs a working Docker daemon
 ```
+
+The labs run the real `ember` binary against a real Docker daemon: a real
+sshd, a real SSH handshake against a pinned host key, a real forward, and a
+`SIGKILL` mid-provision to produce the orphan that `ls` and `reap` exist to
+find. Nothing in them skips — a missing daemon or image is a hard failure
+naming the command that fixes it, because a lab that skips itself reports
+success for a security control that never ran.
 
 Go 1.27. The Makefile prefers `~/sdk/go1.27.0` when present so the compiler
 cannot drift from what `go.mod` declares.

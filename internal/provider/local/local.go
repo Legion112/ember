@@ -271,7 +271,8 @@ func mapContainer(c dockerengine.Container, prov node.ProviderID) (node.Node, er
 	n = n.WithExposed(publicPorts(c))
 
 	if lbl, ok := c.Labels[LabelLabel]; ok {
-		if _, deadline, err := provider.ParseLabel(lbl); err == nil {
+		if runID, deadline, err := provider.ParseLabel(lbl); err == nil {
+			n.RunID = runID
 			n.Deadline = deadline
 		}
 	}
