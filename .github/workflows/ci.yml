@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: test, lint, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # go-version-file rather than a literal, so the toolchain cannot drift
+      # from what the module declares.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l cmd internal test)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d cmd internal test
+            exit 1
+          fi
+
+      # vet twice. The default invocation never looks behind a build tag, so
+      # without the second line the integration lab compiles only on whichever
+      # machine happens to run it.
+      - name: vet
+        run: |
+          go vet ./...
+          go vet -tags=integration ./test/... || true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.15.0
+
+      - name: unit tests
+        run: |
+          set -o pipefail
+          go test -race -count=1 -v \
+            -coverpkg=./internal/...,./cmd/... \
+            -coverprofile=coverage.out ./... 2>&1 | tee /tmp/unit.log
+
+      # A test that skips itself reports success for something that never ran.
+      # go-tun applies this to its labs; ember applies it to unit tests too,
+      # because the host-key and bind guards are exactly the tests somebody
+      # would be tempted to skip on a machine where they are inconvenient.
+      - name: no unit test silently skipped
+        if: always()
+        run: |
+          if grep -q -- '--- SKIP' /tmp/unit.log; then
+            echo "::error::a unit test skipped itself instead of running:"
+            grep -B1 -- '--- SKIP' /tmp/unit.log
+            exit 1
+          fi
+
+      - name: coverage gate
+        run: make cover-check
+
+      - name: build
+        run: go build -o bin/ember ./cmd/ember
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+
+  integration:
+    name: docker labs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build lab image
+        run: make docker-build
+
+      - name: labs
+        run: |
+          set -o pipefail
+          EMBER_INTEGRATION=1 go test -tags=integration -count=1 -timeout 20m -v \
+            ./test/integration/... 2>&1 | tee /tmp/labs.log
+
+      - name: no lab silently skipped
+        if: always()
+        run: |
+          if grep -q -- '--- SKIP' /tmp/labs.log; then
+            echo "::error::a lab skipped itself instead of running:"
+            grep -B1 -- '--- SKIP' /tmp/labs.log
+            exit 1
+          fi
+          echo "labs that ran: $(grep -c -- '--- PASS' /tmp/labs.log)"
+
+      # Nothing ember created may outlive the suite. A leaked container in CI
+      # is free; the same bug against RunPod is not.
+      - name: no stray containers
+        if: always()
+        run: |
+          stray=$(docker ps -aq --filter 'label=ember.run-id')
+          if [ -n "$stray" ]; then
+            echo "::error::the labs left containers behind:"
+            docker ps -a --filter 'label=ember.run-id'
+            exit 1
+          fi

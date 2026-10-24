@@ -1,0 +1,14 @@
+bin/
+coverage.out
+coverage.html
+
+.idea/
+.vscode/
+
+# ember.yaml is committed as an example; the operator's real config and every
+# secret live outside the repo. See AGENTS.md: a credential in git history is
+# not revocable by deleting the file.
+credentials.yaml
+*.pem
+*.key
+id_ed25519*

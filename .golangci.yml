@@ -1,0 +1,28 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # The three beyond the usual set, each earning its place in this project:
+    # gosec because ember handles private keys and opens sockets; bodyclose
+    # because every provider is an HTTP client and a leaked body is a leaked
+    # connection that eventually stalls a poll loop; errorlint because the
+    # provider sentinels in internal/node are matched with errors.Is and a
+    # stray == comparison would silently stop matching once anything wraps.
+    - gosec
+    - bodyclose
+    - errorlint
+  exclusions:
+    generated: lax
+
+formatters:
+  enable:
+    - gofmt
