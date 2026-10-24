@@ -153,6 +153,44 @@ that sentence made unrepresentable rather than merely tested.
   exported a helper from `exposure` that built one -- a hole in the wall the
   seal exists to be. The branch stays uncovered; an escape hatch for tests is
   an escape hatch.
+- **A tar stream from a rented machine is untrusted input.** Containment is
+  enforced twice, by two different mechanisms: the member name is checked
+  component by component, and every write goes through an `os.Root`. A string
+  check misses a spelling; a Root cannot tell ember the archive was trying
+  something.
+- **A hostile member name is refused, not cleaned.** `path.Clean("/../a.png")`
+  returns `/a.png`: it *absorbs* the `..` because nothing is above root. An
+  earlier version cleaned first and then looked for a leading `..`, so the
+  check could never fire -- every hostile name was silently rewritten into a
+  valid one, nothing escaped because the Root held, and ember reported success
+  for a file called something else. An absolute member name is refused for the
+  same reason: ember's own tar command never produces one.
+- **Only regular files and directories are extracted.** A symlink, hard link,
+  device node or fifo is skipped and *named* in an error. ember is retrieving
+  generated media from a machine it rented, and refusing the kinds outright is
+  shorter than reasoning about where each one could point.
+- **A remote command is argv, and anything unquotable is refused.** An SSH
+  exec request is handed to the remote shell, so a command assembled by
+  concatenation is a shell injection with the operator's own config as the
+  input. The allow-list refuses rather than escapes: a quoting routine never
+  exercised on a hostile input is one nobody knows is wrong.
+- **The exit status is read after the stream, and always.** A `tar` that failed
+  halfway produces a valid prefix of an archive: the extraction is happy, the
+  data is incomplete, and that is exactly how an output fetch loses files
+  quietly. GNU tar over a missing path exits non-zero and writes a valid
+  *empty* archive, which without this would read as a successful fetch of
+  nothing.
+- **Outputs are fetched on a context that survives Ctrl-C.** The node is about
+  to be destroyed either way, whatever it produced is about to stop existing,
+  and a run that failed halfway is often the one whose partial output and logs
+  are worth having.
+- **"Already there" has two meanings.** `mkdir` returning EEXIST over a
+  *directory* is fine -- two outputs can land in overlapping trees. Over a
+  *file* it is not: nothing under it can be written, and treating them alike
+  reported success for a directory that was never created.
+- **A lab seeds state out-of-band, through Docker, not through the code under
+  test.** Widening `sshx.Runner` with stdin support so a test could write a
+  file would be a production interface shaped by a test's convenience.
 - **Tests inject credentials rather than resolving them.** Left to read the
   environment, every CLI test picks up the developer's own `RUNPOD_API_KEY`,
   registers the real provider and makes live API calls -- behaving differently

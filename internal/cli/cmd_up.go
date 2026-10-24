@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,7 +25,10 @@ import (
 	"github.com/Legion112/ember/internal/provider/runpod"
 	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/session"
+	"github.com/Legion112/ember/internal/sshx"
+	"github.com/Legion112/ember/internal/sshx/sshexec"
 	"github.com/Legion112/ember/internal/statestore"
+	"github.com/Legion112/ember/internal/transfer"
 	"github.com/Legion112/ember/internal/tunnel/sshdial"
 )
 
@@ -132,7 +136,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	defer stop()
 
 	return provision.WithNode(ctx, p, spec, opts, func(ctx context.Context, s provision.Session) error {
-		return serveSession(ctx, out, s, opts, spec, *holdFor)
+		return serveSession(ctx, out, s, opts, spec, *holdFor, paths.outputs)
 	})
 }
 
@@ -140,7 +144,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 // node's deadline arrives. The decisions it used to make inline -- when to
 // retry a dial, when to refuse one -- live in internal/session, where they
 // can be tested against an in-process SSH server instead of a rented machine.
-func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts provision.Options, spec node.Spec, hold time.Duration) error {
+func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts provision.Options, spec node.Spec, hold time.Duration, outDir string) error {
 	signers := []ssh.Signer{opts.Identity.Signer}
 	if agentSigners, err := keys.AgentSigners(); err == nil {
 		signers = append(signers, agentSigners...)
@@ -156,7 +160,69 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 	}
 	defer func() { _ = client.Close() }()
 
-	return session.Serve(ctx, out, client, session.Forwards(spec.Ports), so)
+	serveErr := session.Serve(ctx, out, client, session.Forwards(spec.Ports), so)
+
+	// Outputs are fetched even when the session ended badly, and on a context
+	// that survives the operator's Ctrl-C. The node is about to be destroyed
+	// either way: whatever it produced is about to stop existing, and a run
+	// that failed halfway is often exactly the one whose partial output and
+	// logs are worth having.
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputTimeout)
+	defer cancel()
+
+	if err := fetchOutputs(fetchCtx, out, sshexec.New(client.SSH()), s.RunID, spec.Outputs, outDir); err != nil {
+		if serveErr != nil {
+			return errors.Join(serveErr, err)
+		}
+		return err
+	}
+	return serveErr
+}
+
+// outputTimeout bounds the output fetch.
+//
+// Generous, because a run of generated video is gigabytes over a home upload
+// link, and ungenerous enough that a wedged transfer cannot hold the node --
+// and the bill -- open indefinitely.
+const outputTimeout = 30 * time.Minute
+
+// fetchOutputs brings the run's outputs home.
+//
+// It takes the sshx.Runner seam rather than the SSH client, so the reporting
+// and the error handling here are testable against a recording runner instead
+// of needing a node.
+func fetchOutputs(ctx context.Context, out io.Writer, r sshx.Runner, runID node.RunID, outputs []node.OutputPath, base string) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+
+	dir := transfer.RunDir(base, runID, time.Now())
+	outf(out, "fetching %d output path(s) into %s\n", len(outputs), dir)
+
+	res, err := transfer.Fetch(ctx, r, outputs, dir)
+
+	// What arrived is reported even when something failed, because "3 of 4
+	// paths, 1.2 GiB" is what tells the operator whether the run is worth
+	// keeping.
+	outf(out, "fetched %d file(s), %s\n", res.Files, humanBytes(res.Bytes))
+	if err != nil {
+		return fmt.Errorf("fetch outputs into %s: %w", dir, err)
+	}
+	return nil
+}
+
+// humanBytes is for one line of operator-facing output.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	v, exp := float64(n), 0
+	for v >= unit && exp < 4 {
+		v /= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", v, "KMGT"[exp-1])
 }
 
 func dryRunUp(out io.Writer, p provider.Provider, spec node.Spec, opts provision.Options) error {
@@ -170,11 +236,15 @@ func dryRunUp(out io.Writer, p provider.Provider, spec node.Spec, opts provision
 	return nil
 }
 
-type paths struct{ config, state string }
+type paths struct{ config, state, outputs string }
 
 func resolvePaths(cfg config.Config, d deps) (paths, error) {
 	if d.HomeDir != "" {
-		return paths{config: filepath.Join(d.HomeDir, "config"), state: filepath.Join(d.HomeDir, "state")}, nil
+		return paths{
+			config:  filepath.Join(d.HomeDir, "config"),
+			state:   filepath.Join(d.HomeDir, "state"),
+			outputs: filepath.Join(d.HomeDir, "outputs"),
+		}, nil
 	}
 	c, err := cfg.ConfigDirOrDefault()
 	if err != nil {
@@ -184,7 +254,11 @@ func resolvePaths(cfg config.Config, d deps) (paths, error) {
 	if err != nil {
 		return paths{}, err
 	}
-	return paths{config: c, state: s}, nil
+	o, err := cfg.OutputDirOrDefault()
+	if err != nil {
+		return paths{}, err
+	}
+	return paths{config: c, state: s, outputs: o}, nil
 }
 
 // buildRegistry registers every provider this run can reach.
@@ -279,14 +353,19 @@ func buildSpec(cfg config.Config) (node.Spec, error) {
 	if err != nil {
 		return node.Spec{}, err
 	}
+	outputs, err := cfg.ParseOutputs()
+	if err != nil {
+		return node.Spec{}, err
+	}
 	if cfg.Image == "" {
 		return node.Spec{}, fmt.Errorf("no image: pass -image or set it in %s", config.FileName)
 	}
 	return node.NewSpec(node.SpecOptions{
-		Image:  cfg.Image,
-		Ports:  ports,
-		Filter: filter,
-		TTL:    cfg.TTL,
+		Image:   cfg.Image,
+		Ports:   ports,
+		Filter:  filter,
+		TTL:     cfg.TTL,
+		Outputs: outputs,
 	})
 }
 

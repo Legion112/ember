@@ -258,3 +258,76 @@ func TestDirDefaults_ReportWhenTheEnvironmentCannotAnswer(t *testing.T) {
 		t.Errorf("StateDirOrDefault invented %q with no HOME", got)
 	}
 }
+
+func TestParseOutputs(t *testing.T) {
+	c := Config{Outputs: []string{
+		"/workspace/out",
+		"/workspace/run.log:logs",
+		"  /workspace/frames  ",
+		"",
+	}}
+	got, err := c.ParseOutputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %+v", got)
+	}
+	// A bare remote path derives its local name from the base, so
+	// `outputs: [/workspace/out]` lands in "out" rather than a directory
+	// named after the whole remote path.
+	if got[0] != (node.OutputPath{Remote: "/workspace/out", Local: "out"}) {
+		t.Errorf("got %+v", got[0])
+	}
+	if got[1] != (node.OutputPath{Remote: "/workspace/run.log", Local: "logs"}) {
+		t.Errorf("got %+v", got[1])
+	}
+	if got[2].Remote != "/workspace/frames" {
+		t.Errorf("surrounding space was not trimmed: %+v", got[2])
+	}
+}
+
+func TestParseOutputs_RefusesAnEmptyRemote(t *testing.T) {
+	if _, err := (Config{Outputs: []string{":logs"}}).ParseOutputs(); err == nil {
+		t.Fatal("an output with no remote path was accepted")
+	}
+}
+
+func TestParseOutputs_NoneIsNotAnError(t *testing.T) {
+	got, err := (Config{}).ParseOutputs()
+	if err != nil || len(got) != 0 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+// TestOutputDirOrDefault_SitsUnderTheStateDir, so a run's results are beside
+// the journal record of the run that produced them and one XDG_STATE_HOME move
+// takes both.
+func TestOutputDirOrDefault_SitsUnderTheStateDir(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "/tmp/xdgstate")
+	got, err := Default().OutputDirOrDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join("/tmp/xdgstate", "ember", "outputs") {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestOutputDirOrDefault_HonoursTheOverride(t *testing.T) {
+	got, err := Config{OutputDir: "/mnt/renders"}.OutputDirOrDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/mnt/renders" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestOutputDirOrDefault_ReportsAnUnresolvableStateDir(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	if _, err := Default().OutputDirOrDefault(); err == nil {
+		t.Fatal("a state dir that cannot be resolved was accepted")
+	}
+}

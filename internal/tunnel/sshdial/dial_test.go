@@ -369,3 +369,37 @@ func TestDial_UsesTheDefaultNetDialer(t *testing.T) {
 	}
 	_ = c.Close()
 }
+
+// TestClient_SSHExposesTheAuthenticatedConnection, which is how a command can
+// be run on the same session the tunnel uses.
+//
+// Safe to hand out because the host-key check has already happened by the time
+// a Client exists: there is no path to an *ssh.Client in ember that did not
+// come through Dial and its Trust.
+func TestClient_SSHExposesTheAuthenticatedConnection(t *testing.T) {
+	host := newSigner(t)
+	d := Dialer{Net: server(t, host), Keepalive: time.Hour}
+
+	client, err := d.Dial(t.Context(), target(), pinnedTo(t, host), []ssh.Signer{newSigner(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	raw := client.SSH()
+	if raw == nil {
+		t.Fatal("SSH() returned nil on a connected client")
+	}
+
+	// The connection works, which is the thing worth asserting: comparing
+	// two calls to each other would be a no-op, and staticcheck said so.
+	// The test server rejects session channels, so a refusal proves the
+	// request reached it -- a dead connection fails differently.
+	_, err = raw.NewSession()
+	if err == nil {
+		t.Error("the test server accepted a session channel it rejects")
+	}
+	if !strings.Contains(err.Error(), "unknown channel type") {
+		t.Errorf("the request did not reach the server: %v", err)
+	}
+}

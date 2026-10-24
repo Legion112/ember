@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -66,6 +67,14 @@ type Config struct {
 	// this is tunable: one video checkpoint is tens of gigabytes, and a pod
 	// that runs out of disk mid-pull fails after it has started billing.
 	DiskGiB int `yaml:"disk_gib"`
+
+	// OutputDir is where fetched outputs are written, one directory per run.
+	// Empty puts them under the state directory, so a run's results sit
+	// beside the record of the run that made them.
+	OutputDir string `yaml:"output_dir"`
+
+	// Outputs are the paths to retrieve from the node before it dies.
+	Outputs []string `yaml:"outputs"`
 }
 
 // Default is what ember uses with no file and no flags.
@@ -212,6 +221,48 @@ func parsePortNumber(s string) (uint16, error) {
 		return 0, fmt.Errorf("%d is outside 1..65535", n)
 	}
 	return uint16(n), nil
+}
+
+// ParseOutputs turns the configured output paths into OutputPaths.
+//
+// The spelling is "remote" or "remote:local". A bare remote path derives its
+// local name from the base, so `outputs: [/workspace/out]` lands in a
+// directory called "out" rather than one named after the whole remote path.
+func (c Config) ParseOutputs() ([]node.OutputPath, error) {
+	out := make([]node.OutputPath, 0, len(c.Outputs))
+	for _, raw := range c.Outputs {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		remote, local, hasLocal := strings.Cut(s, ":")
+		remote = strings.TrimSpace(remote)
+		local = strings.TrimSpace(local)
+		if !hasLocal || local == "" {
+			local = path.Base(remote)
+		}
+		if remote == "" {
+			return nil, fmt.Errorf("output %q has no remote path; write it as /remote/path or /remote/path:local-name", raw)
+		}
+		out = append(out, node.OutputPath{Remote: remote, Local: local})
+	}
+	return out, nil
+}
+
+// OutputDirOrDefault resolves where fetched outputs are written.
+//
+// Under the state directory by default, so a run's results sit beside the
+// journal record of the run that produced them -- and so a single
+// XDG_STATE_HOME move takes both.
+func (c Config) OutputDirOrDefault() (string, error) {
+	if c.OutputDir != "" {
+		return c.OutputDir, nil
+	}
+	state, err := c.StateDirOrDefault()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(state, "outputs"), nil
 }
 
 // ConfigDirOrDefault resolves where keys and credentials live.

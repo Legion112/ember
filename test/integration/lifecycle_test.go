@@ -4,6 +4,7 @@ package integration
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -102,4 +103,70 @@ func TestLifecycle_CleanRunLeavesAnEmptyJournal(t *testing.T) {
 	if !strings.Contains(ls.Combined(), "no nodes") {
 		t.Errorf("ls does not report a clean slate:\n%s", ls.Combined())
 	}
+}
+
+// TestLifecycle_UpFetchesOutputsBeforeDestroyingTheNode.
+//
+// The pieces are tested separately -- the extraction against in-memory
+// archives, the tar command against a real node -- and this is the one that
+// proves they are wired together in `ember up`. An output fetch that works
+// perfectly in both halves and is never called is indistinguishable, from the
+// operator's side, from one that does not work at all.
+//
+// /etc/hostname is the output path because it exists on any node without the
+// lab having to put it there, which keeps this about the fetch rather than
+// about seeding a file.
+func TestLifecycle_UpFetchesOutputsBeforeDestroyingTheNode(t *testing.T) {
+	l := harness.New(t)
+	l.WriteConfig(map[string]string{"outputs": "[/etc/hostname:host]"})
+	port := harness.FreePort(t)
+
+	res := l.Run(t.Context(), "up",
+		"--hold", "2s",
+		"--port", fmt.Sprintf("sshd:22:%d", port),
+	)
+	if res.ExitCode != 0 {
+		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
+	}
+
+	files := l.FetchedFiles()
+	if len(files) != 1 {
+		t.Fatalf("fetched %v, want exactly one file\n%s", files, res.Combined())
+	}
+	// The run directory's name is a timestamp plus the run id, so the
+	// assertion is on the tail.
+	if !strings.HasSuffix(files[0], filepath.Join("host", "hostname")) {
+		t.Errorf("fetched %q, want it to end in host/hostname", files[0])
+	}
+
+	// And the operator is told, with a count and a size: "3 of 4 paths,
+	// 1.2 GiB" is what says whether a run is worth keeping.
+	if !strings.Contains(res.Combined(), "fetched 1 file") {
+		t.Errorf("the fetch was not reported:\n%s", res.Combined())
+	}
+
+	// The node is still destroyed: the fetch runs before teardown, not
+	// instead of it.
+	if n := len(l.Nodes(t.Context())); n != 0 {
+		t.Errorf("%d node(s) survived", n)
+	}
+}
+
+// TestLifecycle_AFailedOutputFetchStillDestroysTheNode. The fetch happens on
+// a context that outlives the session precisely so it can run during
+// teardown, and a path that was never written must not be able to keep a
+// rented machine alive.
+func TestLifecycle_AFailedOutputFetchStillDestroysTheNode(t *testing.T) {
+	l := harness.New(t)
+	l.WriteConfig(map[string]string{"outputs": "[/workspace/never-written:renders]"})
+	port := harness.FreePort(t)
+
+	res := l.Run(t.Context(), "up",
+		"--hold", "2s",
+		"--port", fmt.Sprintf("sshd:22:%d", port),
+	)
+	if res.ExitCode == 0 {
+		t.Errorf("a missing output path was reported as a clean run\n%s", res.Combined())
+	}
+	l.WaitNoNodes(t.Context(), 2*time.Minute, res.Combined)
 }

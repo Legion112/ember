@@ -21,10 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc64"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -145,6 +147,7 @@ func (l *Lab) WriteConfig(extra map[string]string) {
 		"ttl: 10m",
 		"config_dir: " + filepath.Join(l.Dir, "config"),
 		"state_dir: " + filepath.Join(l.Dir, "state"),
+		"output_dir: " + l.OutputDir(),
 	}
 	for k, v := range extra {
 		lines = append(lines, k+": "+v)
@@ -326,6 +329,40 @@ func (l *Lab) Reap() {
 
 // StateDir is where the journal lives.
 func (l *Lab) StateDir() string { return filepath.Join(l.Dir, "state") }
+
+// OutputDir is where fetched outputs land, one directory per run.
+func (l *Lab) OutputDir() string { return filepath.Join(l.Dir, "outputs") }
+
+// FetchedFiles lists every file under the output directory, relative to it.
+//
+// Flattened rather than returning the run directory, because the run
+// directory's name carries a timestamp a lab should not have to predict.
+func (l *Lab) FetchedFiles() []string {
+	l.t.Helper()
+	var out []string
+	err := filepath.WalkDir(l.OutputDir(), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(l.OutputDir(), p)
+		if err != nil {
+			return err
+		}
+		out = append(out, rel)
+		return nil
+	})
+	if err != nil {
+		l.t.Fatalf("walk the output directory: %v", err)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // Records returns the journal, read through statestore itself.
 //
@@ -592,6 +629,17 @@ func (l *Lab) RotateHostKey(ctx context.Context, id string) {
 	// sshd reads its host keys at startup, so the new key only takes effect
 	// once the running daemon is replaced.
 	l.exec(ctx, id, "pkill", "-HUP", "sshd")
+}
+
+// Exec runs a command inside a node container over the Docker API.
+//
+// Out-of-band on purpose: a lab seeding files on a node should not go through
+// ember's own SSH path, both because that is the thing under test and because
+// widening sshx.Runner with stdin support to let a test write a file would be
+// a production interface shaped by a test's convenience.
+func (l *Lab) Exec(ctx context.Context, id string, args ...string) {
+	l.t.Helper()
+	l.exec(ctx, id, args...)
 }
 
 func (l *Lab) exec(ctx context.Context, id string, args ...string) {

@@ -30,6 +30,13 @@ That rents a node, waits for it, forwards `8188` to `127.0.0.1:8188` over SSH,
 waits for you to finish, fetches the outputs and destroys the node — including
 when you interrupt it.
 
+Outputs come back as a tar stream over the same SSH connection and are
+extracted through an `os.Root`, so nothing a rented machine puts in an archive
+can land outside the run's own directory. Symlinks, hard links and device nodes
+are refused rather than recreated, and the names that were refused are
+reported — a render has no business being a block device, and a silent skip
+would look like a fetch that worked.
+
 ## Why
 
 Renting is roughly two orders of magnitude cheaper than owning while you are
@@ -64,6 +71,8 @@ ember up --provider local --image ghcr.io/example/wl:v1 --port demo:8188 --ttl 3
 | `internal/httpx` | one place for timeouts, body closing and readable API errors |
 | `internal/provision` | rent, wait, hold, destroy — with the money discipline |
 | `internal/statestore` | the journal that makes an orphan findable |
+| `internal/sshx` + `sshexec` | run one command on a node, stream its output |
+| `internal/transfer` | bring the outputs home — tar over SSH, into an `os.Root` |
 | `internal/reconcile` | pure scan over providers and records — what `ls` and `reap` act on |
 | `internal/session`, `internal/config`, `internal/cli` | wiring |
 

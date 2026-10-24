@@ -52,6 +52,14 @@ type Client struct {
 	stop chan struct{}
 }
 
+// SSH exposes the authenticated connection, so a command can be run on the
+// same session the tunnel uses.
+//
+// The host-key check has already happened by the time a Client exists, which
+// is the reason this is safe to hand out: there is no path to an *ssh.Client
+// in ember that did not come through Dial and its Trust.
+func (c *Client) SSH() *ssh.Client { return c.ssh }
+
 // DialContext opens a connection to addr from the node's side of the tunnel.
 func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	return c.ssh.DialContext(ctx, network, addr)
