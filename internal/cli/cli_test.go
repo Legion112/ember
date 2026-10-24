@@ -71,18 +71,23 @@ func TestUsage_ListsEveryCommand(t *testing.T) {
 }
 
 func TestNotYet_FailsButNamesTheSubcommand(t *testing.T) {
-	var out bytes.Buffer
-	err := run([]string{"reap"}, &out)
-	if err == nil || !strings.Contains(err.Error(), "reap") {
-		t.Fatalf("got %v, want an error naming the subcommand", err)
-	}
-	if ExitCode(err) != ExitError {
-		t.Errorf("an unimplemented subcommand is an ordinary error, not a usage error")
-	}
+	for _, c := range commands() {
+		if !c.stub {
+			continue
+		}
+		var out bytes.Buffer
+		err := run([]string{c.name}, &out)
+		if err == nil || !strings.Contains(err.Error(), c.name) {
+			t.Errorf("%s: got %v, want an error naming the subcommand", c.name, err)
+		}
+		if ExitCode(err) != ExitError {
+			t.Errorf("%s: an unimplemented subcommand is an ordinary error, not a usage error", c.name)
+		}
 
-	out.Reset()
-	if err := run([]string{"reap", "-h"}, &out); err != nil {
-		t.Errorf("-h on an unimplemented subcommand should not fail: %v", err)
+		out.Reset()
+		if err := run([]string{c.name, "-h"}, &out); err != nil {
+			t.Errorf("%s: -h on an unimplemented subcommand should not fail: %v", c.name, err)
+		}
 	}
 }
 

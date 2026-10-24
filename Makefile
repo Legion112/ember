@@ -48,7 +48,7 @@ COVERPROFILE := coverage.out
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/node=100,internal/loopback=100,internal/cli=77,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98
+COVER_PKGS := internal/reconcile=96,internal/node=100,internal/loopback=100,internal/cli=83,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98
 COVER_EXCLUDE := cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,internal/dockerengine/dockerclient
 # Overall across the gated set. Below 100 only because internal/keys and
 # internal/hostkey carry the documented stdlib-error gaps above.
@@ -93,9 +93,14 @@ vet:
 fmt:
 	$(GO) fmt ./...
 
+# A missing linter is a hard failure, not a skip. The earlier spelling put the
+# guard and the run on separate recipe lines, where `exit 0` only leaves that
+# line's subshell: make ran the linter regardless, and when it really was
+# absent the target reported success without linting anything. That is how ten
+# findings reached CI once. The version here must match .github/workflows/ci.yml:
+# a linter that disagrees with CI makes `make lint` theatre.
 lint:
-	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed; CI runs it"; exit 0; }
-	golangci-lint run
+	@command -v golangci-lint >/dev/null 2>&1 || { 		echo "golangci-lint is not installed. Install it with:"; 		echo "  $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0"; 		exit 1; 	}; 	golangci-lint run
 
 docker-build:
 	docker build -t $(LAB_IMAGE) -f test/integration/Dockerfile .

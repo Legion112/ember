@@ -70,18 +70,24 @@ type command struct {
 	name    string
 	summary string
 	run     func(args []string, out io.Writer) error
+
+	// stub marks a verb that is listed but not implemented. The flag exists
+	// so the test for that behaviour can find them itself: hardcoding one
+	// meant the test broke every time a verb was finished, which trains
+	// people to edit tests to make them pass.
+	stub bool
 }
 
 // commands is the dispatch table. Output goes through an injected io.Writer so
 // that every subcommand is testable without capturing os.Stdout.
 func commands() []command {
 	return []command{
-		{"version", "print the ember version", cmdVersion},
-		{"up", "rent a node, forward its ports to loopback, destroy it", cmdUp},
-		{"down", "destroy a node by handle", notYet("down")},
-		{"ls", "list nodes ember created, across every configured provider", notYet("ls")},
-		{"reap", "destroy every node past its deadline", notYet("reap")},
-		{"offers", "list rentable offers matching a filter", notYet("offers")},
+		{"version", "print the ember version", cmdVersion, false},
+		{"up", "rent a node, forward its ports to loopback, destroy it", cmdUp, false},
+		{"down", "destroy a node by handle", notYet("down"), true},
+		{"ls", "list nodes ember created, across every configured provider", cmdLs, false},
+		{"reap", "destroy every node past its deadline", cmdReap, false},
+		{"offers", "list rentable offers matching a filter", notYet("offers"), true},
 	}
 }
 
