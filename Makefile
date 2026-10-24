@@ -27,8 +27,11 @@ COVERPROFILE := coverage.out
 # uncovered there is Mint's three stdlib error returns, none of which can fire
 # with crypto/rand.Reader and a valid ed25519 key, and the write/close/rename
 # failures of the pin file. Everything that *decides* anything -- every trust
-# check, every refusal, every parse -- is covered.
-COVER_PKGS := internal/node=100,internal/loopback=100,internal/cli=100,internal/keys=85,internal/hostkey=90
+# check, every refusal, every parse -- is covered. internal/tunnel is at 96:
+# the gap is a listener failing mid-flight while the context is still alive,
+# which needs a seam in net.Listen to provoke. sshdial is at 97 for one
+# keepalive branch.
+COVER_PKGS := internal/node=100,internal/loopback=100,internal/cli=100,internal/keys=85,internal/hostkey=90,internal/tunnel=96,internal/tunnel/sshdial=97
 COVER_EXCLUDE := cmd/ember,cmd/emberwl,cmd/check-coverage
 # Overall across the gated set. Below 100 only because internal/keys and
 # internal/hostkey carry the documented stdlib-error gaps above.
