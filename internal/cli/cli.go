@@ -77,7 +77,7 @@ type command struct {
 func commands() []command {
 	return []command{
 		{"version", "print the ember version", cmdVersion},
-		{"up", "rent a node, run a container on it, forward its ports, destroy it", notYet("up")},
+		{"up", "rent a node, forward its ports to loopback, destroy it", cmdUp},
 		{"down", "destroy a node by handle", notYet("down")},
 		{"ls", "list nodes ember created, across every configured provider", notYet("ls")},
 		{"reap", "destroy every node past its deadline", notYet("reap")},

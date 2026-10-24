@@ -64,11 +64,19 @@ func (d *Client) ImageExists(ctx context.Context, ref string) (bool, error) {
 func (d *Client) NetworkCreate(ctx context.Context, name string, labels map[string]string) (string, error) {
 	resp, err := d.c.NetworkCreate(ctx, name, network.CreateOptions{
 		Driver: "bridge",
-		// Internal keeps the workload off the host's uplink. It cannot reach
-		// the internet from here, which for a lab is the point: a test that
-		// quietly downloads something is a test that behaves differently on
-		// a train.
-		Internal: true,
+		// Not internal, and that is a decision rather than an oversight.
+		//
+		// An internal bridge has no NAT to the outside, so Docker silently
+		// publishes nothing from it -- which made sshd unreachable and left
+		// WaitReady polling for its full ten minutes with no clue as to why.
+		//
+		// It is also the wrong shape for the guarantee ember actually makes.
+		// That guarantee is about *inbound*: nothing ember creates is
+		// reachable from the internet, which is enforced by publishing only
+		// 22 and only on 127.0.0.1. Outbound is a different question, and a
+		// node that cannot reach the internet cannot pull a model, which is
+		// the entire point of renting it.
+		Internal: false,
 		Labels:   labels,
 	})
 	if err != nil {

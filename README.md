@@ -41,17 +41,30 @@ measurements instead of by spec sheets.
 
 ## Status
 
-Early. Working today:
+`ember up --provider local` works end to end today: it rents a container on
+your own Docker daemon, authenticates against a host key ember minted and
+injected, forwards the ports you asked for to loopback, holds them, and
+destroys the node — including after Ctrl-C.
+
+```
+make docker-build
+ember up --provider local --image ghcr.io/example/wl:v1 --port demo:8188 --ttl 30m
+```
 
 | | |
 |---|---|
 | `internal/node` | domain core — nodes, offers, specs, integer money, states |
 | `internal/loopback` | the only listener in the program, provably loopback |
-| `internal/cli` | subcommand dispatch, exit codes |
-| `cmd/check-coverage` | per-package coverage gate with `-strict` |
+| `internal/hostkey` | sealed trust — `InsecureIgnoreHostKey` cannot be typed in |
+| `internal/keys` | the operator's SSH identity, agent fallback |
+| `internal/tunnel` + `sshdial` | the forward and the one place a host-key callback is set |
+| `internal/provider` + `local` | provider seam and the free Docker-backed one |
+| `internal/provision` | rent, wait, hold, destroy — with the money discipline |
+| `internal/statestore` | the journal that makes an orphan findable |
+| `internal/session`, `internal/config`, `internal/cli` | wiring |
 
-Next: the `local` Docker provider and the Docker lab, then SSH tunnelling, then
-RunPod and Vast.ai. See `AGENTS.md` for the rules all of it is written against.
+Next: `ember ls --all` and `ember reap`, the Docker lab, then RunPod and
+Vast.ai. See `AGENTS.md` for the rules all of it is written against.
 
 ## Two properties that outrank features
 

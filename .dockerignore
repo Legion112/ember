@@ -1,0 +1,7 @@
+# Keep the build context small and deterministic. bin/ in particular would
+# ship a host-built binary into an image that builds its own.
+.git
+bin
+assets
+coverage.out
+*.md
