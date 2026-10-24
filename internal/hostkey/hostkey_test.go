@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/Legion112/ember/internal/node"
 )
 
 func pub(t *testing.T) ssh.PublicKey {
@@ -222,5 +224,58 @@ func TestMint_IsFreshEveryTime(t *testing.T) {
 	}
 	if a.Fingerprint().Equal(b.Fingerprint()) {
 		t.Fatal("two nodes were minted the same host key")
+	}
+}
+
+// TestNodeKey_RoundTripsThroughAProviderLabel is the path a real node takes:
+// ember mints a key, the provider records the public half as a label, and the
+// next run reads it back to pin against. If that round trip loses anything,
+// every connection fails with a mismatch and the node looks compromised.
+func TestNodeKey_RoundTripsThroughAProviderLabel(t *testing.T) {
+	p, err := Mint()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorded := p.NodeKey()
+	if recorded.Source != node.HostKeyMinted {
+		t.Errorf("Source = %v, want minted", recorded.Source)
+	}
+	if recorded.IsZero() {
+		t.Fatal("NodeKey produced nothing to record")
+	}
+
+	got, err := FromNodeKey(recorded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(p.Fingerprint()) {
+		t.Fatal("the fingerprint did not survive the label; every connection would read as a mismatch")
+	}
+}
+
+func TestFromNodeKey_Refuses(t *testing.T) {
+	good, err := Mint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := good.NodeKey()
+
+	bad := ok
+	bad.Base64 = "!!!not base64!!!"
+	mismatchedAlgo := ok
+	mismatchedAlgo.Algo = "ssh-rsa"
+	notAKey := ok
+	notAKey.Base64 = "AAAA"
+
+	for name, in := range map[string]node.HostKey{
+		"empty":          {},
+		"bad base64":     bad,
+		"not a key":      notAKey,
+		"algorithm lies": mismatchedAlgo,
+	} {
+		if fp, err := FromNodeKey(in); err == nil {
+			t.Errorf("%s: FromNodeKey accepted it, got %v", name, fp)
+		}
 	}
 }

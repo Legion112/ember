@@ -3,6 +3,7 @@ package hostkey
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 
@@ -23,6 +24,36 @@ type Pair struct {
 
 // Fingerprint identifies the pair.
 func (p Pair) Fingerprint() Fingerprint { return Of(p.Public) }
+
+// NodeKey renders the public half in the dependency-free shape internal/node
+// carries, so a provider can record it on a label without importing an SSH
+// library.
+func (p Pair) NodeKey() node.HostKey {
+	return node.HostKey{
+		Source: node.HostKeyMinted,
+		Algo:   p.Public.Type(),
+		Base64: base64.StdEncoding.EncodeToString(p.Public.Marshal()),
+	}
+}
+
+// FromNodeKey rebuilds a Fingerprint from what a provider recorded.
+func FromNodeKey(k node.HostKey) (Fingerprint, error) {
+	if k.IsZero() {
+		return Fingerprint{}, fmt.Errorf("host key is empty: nothing to pin against")
+	}
+	raw, err := base64.StdEncoding.DecodeString(k.Base64)
+	if err != nil {
+		return Fingerprint{}, fmt.Errorf("host key for pinning: %w", err)
+	}
+	pub, err := ssh.ParsePublicKey(raw)
+	if err != nil {
+		return Fingerprint{}, fmt.Errorf("host key for pinning: %w", err)
+	}
+	if pub.Type() != k.Algo {
+		return Fingerprint{}, fmt.Errorf("host key algorithm %q does not match its blob (%q)", k.Algo, pub.Type())
+	}
+	return Of(pub), nil
+}
 
 // Mint generates a host key for a node ember is about to create.
 //

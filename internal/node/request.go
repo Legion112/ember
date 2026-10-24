@@ -68,10 +68,17 @@ type CreateRequest struct {
 	// injected so that the first connection is already authenticated rather
 	// than trusted on sight. Wrapped in Secret so it cannot be logged.
 	HostKey Secret
+
+	// HostKeyPublic is the matching public half. It is carried separately
+	// rather than derived from HostKey by whoever needs it: a provider that
+	// re-parsed the private key to find the public one would need an SSH
+	// library to do it, and this is public material that costs nothing to
+	// pass along.
+	HostKeyPublic HostKey
 }
 
 // NewCreateRequest validates the pieces and derives the deadline.
-func NewCreateRequest(s Spec, o Offer, runID RunID, now time.Time, authorizedKey string, hostKey Secret) (CreateRequest, error) {
+func NewCreateRequest(s Spec, o Offer, runID RunID, now time.Time, authorizedKey string, hostKey Secret, hostKeyPublic HostKey) (CreateRequest, error) {
 	if s.TTL <= 0 || s.TTL > MaxTTL {
 		return CreateRequest{}, fmt.Errorf("spec ttl %v is outside (0, %v]", s.TTL, MaxTTL)
 	}
@@ -90,6 +97,9 @@ func NewCreateRequest(s Spec, o Offer, runID RunID, now time.Time, authorizedKey
 	if hostKey.IsZero() {
 		return CreateRequest{}, fmt.Errorf("no host key to inject: without one the first connection cannot be authenticated")
 	}
+	if hostKeyPublic.IsZero() {
+		return CreateRequest{}, fmt.Errorf("no host public key: the provider would have nothing to record and nothing could be pinned against")
+	}
 	return CreateRequest{
 		Spec:          s,
 		Offer:         o,
@@ -97,5 +107,6 @@ func NewCreateRequest(s Spec, o Offer, runID RunID, now time.Time, authorizedKey
 		Deadline:      now.Add(s.TTL),
 		AuthorizedKey: authorizedKey,
 		HostKey:       hostKey,
+		HostKeyPublic: hostKeyPublic,
 	}, nil
 }

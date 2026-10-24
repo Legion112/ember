@@ -1,0 +1,292 @@
+package dockerengine
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+)
+
+// RecordingEngine is an in-memory Docker daemon good enough to drive the local
+// provider's logic.
+//
+// Field names follow go-tun's linux.RecordingRunner — Calls, Errors, FailOn —
+// so anyone who has read one fake reads this one without learning anything.
+type RecordingEngine struct {
+	mu sync.Mutex
+
+	// Calls records every operation as "ContainerCreate ember-node-abc".
+	Calls []string
+
+	// Errors fails a specific call, keyed by the same string Calls records.
+	Errors map[string]error
+
+	// FailOn fails any call whose record contains this substring.
+	FailOn string
+
+	// ExecOutput is what Exec returns, keyed by the joined command. A command
+	// with no entry returns the empty string, which is what makes "the host
+	// key was not generated" a case the provider has to handle.
+	ExecOutput map[string]string
+
+	// PortMap is the host port the fake daemon "publishes" a container port
+	// on. Unset ports get 30000+n, so a test that never looks at the number
+	// still gets a plausible one.
+	PortMap map[uint16]uint16
+
+	containers map[string]*Container
+	networks   map[string]*Network
+	images     map[string]bool
+	nextID     int
+	nextPort   uint16
+}
+
+// NewRecordingEngine returns an empty fake daemon.
+func NewRecordingEngine() *RecordingEngine {
+	return &RecordingEngine{
+		Errors:     map[string]error{},
+		ExecOutput: map[string]string{},
+		PortMap:    map[uint16]uint16{},
+		containers: map[string]*Container{},
+		networks:   map[string]*Network{},
+		images:     map[string]bool{},
+		nextPort:   30000,
+	}
+}
+
+// AddImage makes ref appear present to ImageExists.
+func (e *RecordingEngine) AddImage(ref string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.images[ref] = true
+}
+
+// Containers returns the live containers, for assertions.
+func (e *RecordingEngine) Containers() []Container {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]Container, 0, len(e.containers))
+	for _, c := range e.containers {
+		out = append(out, *c)
+	}
+	return out
+}
+
+// Networks returns the live networks, for assertions.
+func (e *RecordingEngine) Networks() []Network {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]Network, 0, len(e.networks))
+	for _, n := range e.networks {
+		out = append(out, *n)
+	}
+	return out
+}
+
+// Recorded returns every call made so far.
+func (e *RecordingEngine) Recorded() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.Calls...)
+}
+
+// record notes a call and reports whether it was configured to fail. The
+// caller holds e.mu.
+func (e *RecordingEngine) record(op, arg string) error {
+	call := strings.TrimSpace(op + " " + arg)
+	e.Calls = append(e.Calls, call)
+	if err, ok := e.Errors[call]; ok {
+		return err
+	}
+	if e.FailOn != "" && strings.Contains(call, e.FailOn) {
+		return fmt.Errorf("recording engine refusing %q (FailOn %q)", call, e.FailOn)
+	}
+	return nil
+}
+
+func (e *RecordingEngine) Ping(context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.record("Ping", "")
+}
+
+func (e *RecordingEngine) ImageExists(_ context.Context, ref string) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("ImageExists", ref); err != nil {
+		return false, err
+	}
+	return e.images[ref], nil
+}
+
+func (e *RecordingEngine) NetworkCreate(_ context.Context, name string, labels map[string]string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("NetworkCreate", name); err != nil {
+		return "", err
+	}
+	e.nextID++
+	id := fmt.Sprintf("net%d", e.nextID)
+	e.networks[id] = &Network{ID: id, Name: name, Labels: copyMap(labels)}
+	return id, nil
+}
+
+func (e *RecordingEngine) NetworkRemove(_ context.Context, id string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("NetworkRemove", id); err != nil {
+		return err
+	}
+	if _, ok := e.networks[id]; !ok {
+		return ErrNotFound
+	}
+	delete(e.networks, id)
+	return nil
+}
+
+func (e *RecordingEngine) NetworkList(_ context.Context, label string) ([]Network, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("NetworkList", label); err != nil {
+		return nil, err
+	}
+	var out []Network
+	for _, n := range e.networks {
+		if hasLabel(n.Labels, label) {
+			out = append(out, *n)
+		}
+	}
+	return out, nil
+}
+
+func (e *RecordingEngine) ContainerCreate(_ context.Context, spec ContainerSpec) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("ContainerCreate", spec.Name); err != nil {
+		return "", err
+	}
+	if err := RefuseHostNetwork(spec.NetworkMode); err != nil {
+		return "", err
+	}
+	e.nextID++
+	id := fmt.Sprintf("c%d", e.nextID)
+
+	ports := map[uint16]uint16{}
+	for _, p := range spec.PublishTCP {
+		if host, ok := e.PortMap[p]; ok {
+			ports[p] = host
+			continue
+		}
+		e.nextPort++
+		ports[p] = e.nextPort
+	}
+	e.containers[id] = &Container{
+		ID: id, Name: spec.Name, Image: spec.Image, State: "created",
+		Labels: copyMap(spec.Labels), Ports: ports,
+		IPs: map[string]string{spec.Network: "10.88.0.2"},
+	}
+	return id, nil
+}
+
+func (e *RecordingEngine) ContainerStart(_ context.Context, id string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("ContainerStart", id); err != nil {
+		return err
+	}
+	c, ok := e.containers[id]
+	if !ok {
+		return ErrNotFound
+	}
+	c.State = "running"
+	return nil
+}
+
+func (e *RecordingEngine) ContainerInspect(_ context.Context, id string) (Container, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("ContainerInspect", id); err != nil {
+		return Container{}, err
+	}
+	c, ok := e.containers[id]
+	if !ok {
+		return Container{}, ErrNotFound
+	}
+	return *c, nil
+}
+
+func (e *RecordingEngine) ContainerRemove(_ context.Context, id string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("ContainerRemove", id); err != nil {
+		return err
+	}
+	if _, ok := e.containers[id]; !ok {
+		return ErrNotFound
+	}
+	delete(e.containers, id)
+	return nil
+}
+
+func (e *RecordingEngine) ContainerList(_ context.Context, label string) ([]Container, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("ContainerList", label); err != nil {
+		return nil, err
+	}
+	var out []Container
+	for _, c := range e.containers {
+		if hasLabel(c.Labels, label) {
+			out = append(out, *c)
+		}
+	}
+	return out, nil
+}
+
+func (e *RecordingEngine) Exec(_ context.Context, id string, cmd []string) (string, error) {
+	joined := strings.Join(cmd, " ")
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("Exec", id+" "+joined); err != nil {
+		return "", err
+	}
+	if _, ok := e.containers[id]; !ok {
+		return "", ErrNotFound
+	}
+	return e.ExecOutput[joined], nil
+}
+
+// SetState forces a container's state, so a test can stage "the workload
+// exited" without waiting for anything.
+func (e *RecordingEngine) SetState(id, state string, exitCode int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if c, ok := e.containers[id]; ok {
+		c.State = state
+		c.ExitCode = exitCode
+	}
+}
+
+func copyMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// hasLabel matches the "key=value" or bare "key" filter Docker accepts.
+func hasLabel(labels map[string]string, filter string) bool {
+	if filter == "" {
+		return true
+	}
+	k, v, hasValue := strings.Cut(filter, "=")
+	got, ok := labels[k]
+	if !ok {
+		return false
+	}
+	return !hasValue || got == v
+}

@@ -41,8 +41,8 @@ COVERPROFILE := coverage.out
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/node=100,internal/loopback=100,internal/cli=100,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97
-COVER_EXCLUDE := cmd/ember,cmd/emberwl,cmd/check-coverage
+COVER_PKGS := internal/node=100,internal/loopback=100,internal/cli=100,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100
+COVER_EXCLUDE := cmd/ember,cmd/emberwl,cmd/check-coverage,internal/dockerengine/dockerclient
 # Overall across the gated set. Below 100 only because internal/keys and
 # internal/hostkey carry the documented stdlib-error gaps above.
 COVER_OVERALL := 95
