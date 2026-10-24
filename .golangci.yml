@@ -22,6 +22,15 @@ linters:
     - errorlint
   exclusions:
     generated: lax
+    rules:
+      # gosec's filesystem rules (G301/G302/G304) are about shipped code. The
+      # tests here deliberately create group-readable keys and world-writable
+      # directories, because the behaviour under test is ember *refusing*
+      # them: suppressing line by line would mean a nolint on every assertion
+      # that matters.
+      - path: _test\.go
+        linters:
+          - gosec
 
 formatters:
   enable:
