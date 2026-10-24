@@ -52,6 +52,20 @@ type Config struct {
 	// Dirs, resolved from the environment when empty.
 	ConfigDir string `yaml:"config_dir"`
 	StateDir  string `yaml:"state_dir"`
+
+	// RunPodCloud is SECURE or COMMUNITY. Empty means RunPod's own default,
+	// SECURE. COMMUNITY is cheaper and runs on hardware somebody else owns
+	// and can see, which is a choice to make deliberately.
+	RunPodCloud string `yaml:"runpod_cloud"`
+
+	// DataCenters restricts where a node may be placed. Empty lets the
+	// provider choose.
+	DataCenters []string `yaml:"data_centers"`
+
+	// DiskGiB is the node's container disk. Model weights are the reason
+	// this is tunable: one video checkpoint is tens of gigabytes, and a pod
+	// that runs out of disk mid-pull fails after it has started billing.
+	DiskGiB int `yaml:"disk_gib"`
 }
 
 // Default is what ember uses with no file and no flags.

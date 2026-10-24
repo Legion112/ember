@@ -134,7 +134,15 @@ func runOffers(args []string, out io.Writer, d deps) error {
 	if err != nil {
 		return usageError{err}
 	}
-	reg, err := buildRegistry(d)
+	ps, err := resolvePaths(cfg, d)
+	if err != nil {
+		return err
+	}
+	creds, err := d.credentials(ps.config)
+	if err != nil {
+		return err
+	}
+	reg, err := buildRegistry(d, creds, cfg)
 	if err != nil {
 		return err
 	}

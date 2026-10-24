@@ -1,0 +1,23 @@
+{
+  "id": "leaky77",
+  "name": "ember-0123456789abcdef-1792900000",
+  "status": "RUNNING",
+  "image": "ghcr.io/example/comfyui:v0.3.1",
+  "gpu": { "id": "NVIDIA GeForce RTX 4090", "count": 1 },
+  "cloud": "SECURE",
+  "dataCenterId": "US-TX-3",
+  "ssh": {
+    "proxy": null,
+    "direct": { "host": "213.173.98.7", "port": 40022, "username": "root", "command": "ssh root@213.173.98.7 -p 40022" }
+  },
+  "cost": 0.69,
+  "runtime": {
+    "uptime": 60,
+    "ports": [
+      { "private": 22, "public": 40022, "type": "tcp", "ip": "213.173.98.7" },
+      { "private": 8188, "public": 8188, "type": "http", "ip": "213.173.98.7" }
+    ]
+  },
+  "createdAt": "2026-10-24T18:00:00.000Z",
+  "startedAt": "2026-10-24T18:00:42.000Z"
+}

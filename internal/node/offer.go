@@ -34,8 +34,18 @@ type GPUModel string
 // provider having no capacity.
 var noiseWords = map[string]bool{
 	"nvidia": true, "geforce": true, "tesla": true, "amd": true,
+	// AMD's marketing line, the counterpart of GeForce. Without it
+	// "AMD Instinct MI300X" normalises to "instinctmi300x" and no operator
+	// types that.
+	"instinct": true, "radeon": true, "quadro": true,
 	"pcie": true, "sxm": true, "sxm2": true, "sxm3": true, "sxm4": true, "sxm5": true,
 	"nvl": true, "oam": true,
+	// Memory *type*, which is not memory *capacity* and does not change
+	// which card you get. RunPod spells the card "NVIDIA H100 80GB HBM3",
+	// and leaving this in welded it onto the capacity suffix as
+	// "h100-80ghbm3" -- a spelling no filter would ever match.
+	"hbm": true, "hbm2": true, "hbm2e": true, "hbm3": true, "hbm3e": true,
+	"gddr6": true, "gddr6x": true, "gddr7": true,
 	"blackwell": true, "hopper": true, "ampere": true, "ada": true,
 	"lovelace": true, "turing": true, "volta": true,
 	"workstation": true, "server": true, "edition": true, "gpu": true,
@@ -69,6 +79,30 @@ func NormalizeGPU(s string) GPUModel {
 	joined = strings.ReplaceAll(joined, "141gb", "-141g")
 	joined = strings.ReplaceAll(joined, "188gb", "-188g")
 	return GPUModel(joined)
+}
+
+// Accepts reports whether an offer of model m satisfies a filter asking for
+// want.
+//
+// Exact equality is not the right comparison, because the capacity suffix
+// makes a model name *more specific*: NormalizeGPU deliberately keeps it, so
+// "NVIDIA H100 80GB" becomes "h100-80g" while an operator types "--gpu h100".
+// Comparing those as strings meant a filter for an H100 matched nothing on a
+// provider whose catalogue is full of them, which looks exactly like a
+// provider having no capacity -- the same failure mode as the substring bug
+// noiseWords exists to prevent, arrived at from the other direction.
+//
+// So a filter matches a model it is a prefix of, but only at the capacity
+// boundary. "a100" accepts "a100-40g" and "a100-80g"; "a100-80g" accepts only
+// the 80G. A hypothetical "a1000" is not accepted by "a100", because the next
+// character is a digit rather than the boundary -- which is what keeps this a
+// parse of the structure rather than a substring search.
+func (m GPUModel) Accepts(want GPUModel) bool {
+	if want == "" || m == want {
+		return true
+	}
+	rest, ok := strings.CutPrefix(string(m), string(want))
+	return ok && strings.HasPrefix(rest, "-")
 }
 
 // Offer is one rentable configuration at one provider.

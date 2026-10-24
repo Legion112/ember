@@ -1,0 +1,170 @@
+// Package runpod rents pods from RunPod.
+//
+// Split three ways on purpose. types.go is wire structs with no logic. map.go
+// is pure total functions from those structs to ember's domain, tested at 100%
+// from committed fixtures. runpod.go is thin: build a path, call httpx, map
+// the result. A provider client that mixes the three is one where a status
+// string nobody anticipated is handled in the middle of an HTTP call.
+//
+// The shapes here follow RunPod's published OpenAPI schema for
+// https://api.runpod.io/v2 (the v2 API; v1 at rest.runpod.io used flat
+// gpuTypeIds/imageName fields and a different pod body).
+package runpod
+
+// BaseURL is RunPod's v2 API.
+const BaseURL = "https://api.runpod.io/v2"
+
+// createPodRequest is POST /v2/pods.
+//
+// Exactly one of Gpu or Cpu may be set; ember always sets Gpu, since a CPU pod
+// is not what anybody rents this for.
+type createPodRequest struct {
+	Name  string `json:"name"`
+	Image string `json:"image"`
+
+	Gpu gpuConfig `json:"gpu"`
+
+	// Env carries everything the node needs to configure itself, including
+	// the minted host key. It goes in the JSON body and never in Args or
+	// Entrypoint: /proc/<pid>/cmdline is world-readable, and on a rented
+	// machine the other tenants of that host are strangers.
+	Env map[string]string `json:"env,omitempty"`
+
+	// Ports is RunPod's "port/protocol" spelling, for example "22/tcp".
+	//
+	// This is the single most dangerous field in the API ember touches. A
+	// port declared "/http" is published at
+	// https://{id}-{port}.proxy.runpod.net with no authentication of any
+	// kind. Nothing in ember may construct an entry here except through
+	// exposure.PortRequest, which cannot spell a public non-SSH port.
+	Ports []string `json:"ports,omitempty"`
+
+	// Disk is the container disk in GiB.
+	Disk int `json:"disk,omitempty"`
+
+	// Cloud is SECURE or COMMUNITY. Empty means RunPod's default, SECURE.
+	Cloud string `json:"cloud,omitempty"`
+
+	// DataCenterIds restricts placement. Empty lets RunPod choose.
+	DataCenterIds []string `json:"dataCenterIds,omitempty"`
+
+	// StartSsh asks RunPod to run its own sshd.
+	//
+	// ember sets this false and runs its own, because RunPod's sshd uses a
+	// host key ember did not mint and cannot predict, which would force
+	// trust-on-first-use against a brand-new IP -- the one case TOFU cannot
+	// defend.
+	StartSsh bool `json:"startSsh"`
+
+	// TemplateId is unused by ember: a template carries ports and env from
+	// somebody else's defaults, and a template that gains an http port
+	// upstream would reintroduce public exposure with no change here. The
+	// field is named so its absence is a decision rather than an oversight.
+	TemplateId string `json:"templateId,omitempty"`
+}
+
+type gpuConfig struct {
+	ID    string `json:"id"`
+	Count int    `json:"count"`
+}
+
+// pod is the Pod schema, trimmed to what ember reads.
+type pod struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Image  string `json:"image"`
+
+	Gpu          *podGpu `json:"gpu,omitempty"`
+	Cloud        string  `json:"cloud,omitempty"`
+	DataCenterID *string `json:"dataCenterId,omitempty"`
+	// Ssh and Runtime are both null when listing pods, and RunPod documents
+	// that a single fetch by id is the only way to get the live mapping.
+	// That is why Inspect fetches one pod and List does not pretend to
+	// produce endpoints: a List entry carries a handle and a state, which is
+	// all reconcile needs, and WaitReady goes through Inspect.
+	Ssh     *podSsh     `json:"ssh,omitempty"`
+	Runtime *podRuntime `json:"runtime,omitempty"`
+
+	// Cost is the hourly rate RunPod says it is billing for this pod. It is
+	// read back rather than assumed from the catalogue price: the catalogue
+	// is a list price and this is the bill.
+	Cost float64 `json:"cost"`
+
+	CreatedAt string `json:"createdAt"`
+	StartedAt string `json:"startedAt,omitempty"`
+}
+
+type podGpu struct {
+	ID    string `json:"id"`
+	Count int    `json:"count"`
+}
+
+type podSsh struct {
+	// Direct is a real TCP endpoint on the machine. ember uses this.
+	Direct *sshEndpoint `json:"direct,omitempty"`
+
+	// Proxy is RunPod's SSH gateway, and ember cannot use it for two
+	// independent reasons. RunPod documents it as carrying an interactive
+	// shell only -- no port forwarding -- which is the entire mechanism
+	// ember is built on. And the proxy terminates and re-establishes the
+	// connection, so the host key a client verifies there is RunPod's rather
+	// than the one ember minted and injected.
+	Proxy *sshEndpoint `json:"proxy,omitempty"`
+}
+
+type sshEndpoint struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+}
+
+type podRuntime struct {
+	Uptime int `json:"uptime"`
+
+	// Ports is what RunPod says it published. It is the input to the exposure
+	// assertion, and the reason that assertion can catch a provider doing
+	// something ember never asked for.
+	Ports []runtimePort `json:"ports,omitempty"`
+}
+
+type runtimePort struct {
+	Private int     `json:"private"`
+	Public  *int    `json:"public,omitempty"`
+	Type    string  `json:"type"`
+	IP      *string `json:"ip,omitempty"`
+}
+
+// listPodsResponse is GET /v2/pods.
+type listPodsResponse struct {
+	Pods []pod `json:"pods"`
+}
+
+// gpuType is one entry of GET /v2/catalog/gpus.
+type gpuType struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Manufacturer string   `json:"manufacturer"`
+	Memory       int      `json:"memory"`
+	Secure       bool     `json:"secure"`
+	Community    bool     `json:"community"`
+	Price        gpuPrice `json:"price"`
+	MaxCount     gpuCount `json:"maxCount"`
+	Availability string   `json:"availability"`
+	DataCenters  []string `json:"dataCenters,omitempty"`
+}
+
+// gpuPrice is the list price per hour for a single GPU, per cloud tier.
+type gpuPrice struct {
+	Secure    float64 `json:"secure"`
+	Community float64 `json:"community"`
+}
+
+type gpuCount struct {
+	Secure    int `json:"secure"`
+	Community int `json:"community"`
+}
+
+type listGpuTypesResponse struct {
+	Gpus []gpuType `json:"gpus"`
+}

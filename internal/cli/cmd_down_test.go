@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider/local"
 	"github.com/Legion112/ember/internal/statestore"
 )
@@ -268,5 +270,50 @@ func TestDown_LeavesAnUnrelatedRecordAlone(t *testing.T) {
 	}
 	if len(recs) != 1 || recs[0].RunID != other.RunID {
 		t.Errorf("an unrelated record was cleared: %+v", recs)
+	}
+}
+
+// TestOffers_RunPodIsAbsentWithoutACredential. A provider with no token is
+// left out of the registry rather than registered and left to fail: `ember ls`
+// reports an unreachable provider as a finding and exits 2, so registering
+// RunPod on a machine that has never had a token would make every clean run
+// look like a problem.
+func TestOffers_RunPodIsAbsentWithoutACredential(t *testing.T) {
+	var out bytes.Buffer
+	if err := runOffers(nil, &out, labDeps(t)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "runpod") {
+		t.Errorf("runpod was asked without a credential:\n%s", out.String())
+	}
+
+	// And naming it explicitly is a usage error, which is where the absence
+	// is actionable.
+	out.Reset()
+	if err := runOffers([]string{"--provider", "runpod"}, &out, labDeps(t)); ExitCode(err) != ExitUsage {
+		t.Errorf("got %v, want a usage error naming the missing provider", err)
+	}
+}
+
+// TestOffers_RunPodIsRegisteredWithACredential, and is then asked like any
+// other provider -- including being reported as a finding when it cannot be
+// reached, which is what an unroutable base URL stands in for here.
+func TestOffers_RunPodIsRegisteredWithACredential(t *testing.T) {
+	d := labDeps(t)
+	d.Creds = &config.Credentials{RunPod: node.NewSecret([]byte("rp-token"))}
+	// Pointed at a port nothing is listening on, so the call fails locally
+	// and instantly. Without this the test reaches api.runpod.io for real.
+	d.CloudBaseURL = "http://127.0.0.1:1"
+
+	var out bytes.Buffer
+	err := runOffers(nil, &out, d)
+
+	// The local provider still answers, so the output names both: one offer
+	// and one provider that could not be asked.
+	if !strings.Contains(out.String(), "runpod") {
+		t.Errorf("runpod was not asked despite a credential:\n%s", out.String())
+	}
+	if ExitCode(err) != ExitFindings {
+		t.Errorf("exit = %d, want %d: a provider that could not be asked is a finding (%v)", ExitCode(err), ExitFindings, err)
 	}
 }

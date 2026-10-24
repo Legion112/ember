@@ -1,0 +1,24 @@
+{
+  "id": "abc123def456",
+  "name": "ember-0123456789abcdef-1792900000",
+  "status": "RUNNING",
+  "image": "ghcr.io/example/comfyui:v0.3.1",
+  "gpu": { "id": "NVIDIA GeForce RTX 4090", "count": 1 },
+  "cloud": "SECURE",
+  "dataCenterId": "US-TX-3",
+  "cudaVersion": "12.4",
+  "ssh": {
+    "proxy": { "host": "ssh.runpod.io", "port": 22, "username": "abc123def456-64410e1c", "command": "ssh abc123def456-64410e1c@ssh.runpod.io" },
+    "direct": { "host": "213.173.98.7", "port": 40022, "username": "root", "command": "ssh root@213.173.98.7 -p 40022" }
+  },
+  "cost": 0.69,
+  "locked": false,
+  "runtime": {
+    "uptime": 412,
+    "ports": [
+      { "private": 22, "public": 40022, "type": "tcp", "ip": "213.173.98.7" }
+    ]
+  },
+  "createdAt": "2026-10-24T18:00:00.000Z",
+  "startedAt": "2026-10-24T18:00:42.000Z"
+}

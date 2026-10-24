@@ -1,0 +1,275 @@
+package runpod
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/Legion112/ember/internal/exposure"
+	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/provider"
+)
+
+// Name is this provider's id.
+const Name node.ProviderID = "runpod"
+
+// statusTable maps RunPod's lifecycle status onto ember's.
+//
+// A table with an error on anything unlisted, not a switch with a default. An
+// unrecognised status means ember does not know whether money is burning, and
+// the safe reading of that is "fail and say so", not "assume it is fine".
+var statusTable = map[string]node.State{
+	"PROVISIONING": node.StateProvisioning,
+	"STARTING":     node.StateProvisioning,
+	"RUNNING":      node.StateReady,
+	"EXITED":       node.StateFailed,
+	"ERROR":        node.StateFailed,
+	"TERMINATED":   node.StateDestroyed,
+}
+
+// mapStatus is total over the strings RunPod documents and an error on
+// anything else.
+func mapStatus(s string) (node.State, error) {
+	if st, ok := statusTable[s]; ok {
+		return st, nil
+	}
+	return node.StateInvalid, fmt.Errorf("runpod reported pod status %q, which ember does not recognise; it cannot tell whether that pod is costing money, so it refuses to guess", s)
+}
+
+// mapProto maps RunPod's port protocol.
+//
+// "http" is kept distinct from "tcp" rather than folded into it, because an
+// http port on RunPod is served at {id}-{port}.proxy.runpod.net with no
+// authentication at all. Collapsing the two would make the exposure assertion
+// unable to tell a forwarded SSH port from a public web shell.
+func mapProto(s string) (node.Proto, error) { return node.ParseProto(s) }
+
+// mapExposure turns a pod's runtime ports into what ember checks.
+//
+// Only a port RunPod has assigned a public mapping to counts. The second
+// return says whether RunPod reported its runtime at all: it is null while the
+// pod is provisioning and on every entry of a list response, and "RunPod did
+// not say" must not be read as "RunPod published nothing". See
+// node.Node.Exposure.
+func mapExposure(p pod) ([]node.Exposed, bool, error) {
+	if p.Runtime == nil {
+		return nil, false, nil
+	}
+
+	out := []node.Exposed{}
+	for _, rp := range p.Runtime.Ports {
+		if rp.Public == nil {
+			// Reachable only from inside the pod's own network. That is what
+			// ember asks for for every workload port.
+			continue
+		}
+		proto, err := mapProto(rp.Type)
+		if err != nil {
+			return nil, true, fmt.Errorf("pod %s port %d: %w", p.ID, rp.Private, err)
+		}
+		port, err := port16(rp.Private)
+		if err != nil {
+			return nil, true, fmt.Errorf("pod %s: public port: %w", p.ID, err)
+		}
+		e := node.Exposed{Port: port, Proto: proto}
+		if rp.IP != nil && *rp.IP != "" {
+			e.URL = fmt.Sprintf("%s:%d", *rp.IP, *rp.Public)
+		}
+		out = append(out, e)
+	}
+	return out, true, nil
+}
+
+// mapPod turns a RunPod pod into an ember node.
+//
+// Pure and total: every failure is a returned error, and nothing here calls
+// out to the network or the clock. This is the function a table test over
+// committed fixtures can exercise exhaustively, which matters because it is
+// the code deciding whether a machine is ready to be trusted and billed.
+func mapPod(p pod) (node.Node, error) {
+	state, err := mapStatus(p.Status)
+	if err != nil {
+		return node.Node{}, err
+	}
+
+	n := node.Node{
+		Handle: node.Handle{Provider: Name, ID: p.ID},
+		State:  state,
+	}
+
+	// The run id and deadline come from the pod's name, which is where
+	// ember's label lives on this provider. Parsed strictly: a name that
+	// does not match is somebody else's pod, and ember must not claim it.
+	if runID, deadline, err := provider.ParseLabel(p.Name); err == nil {
+		n.RunID = runID
+		n.Deadline = deadline
+	}
+
+	region := ""
+	if p.DataCenterID != nil {
+		region = *p.DataCenterID
+	}
+	gpuID, gpuCount := "", 1
+	if p.Gpu != nil {
+		gpuID = p.Gpu.ID
+		if p.Gpu.Count > 0 {
+			gpuCount = p.Gpu.Count
+		}
+	}
+	n.Offer = node.Offer{
+		Provider: Name,
+		Token:    node.OfferToken(gpuID),
+		GPU:      node.NormalizeGPU(gpuID),
+		GPUCount: gpuCount,
+		Region:   region,
+		// The rate RunPod says it is billing, not the catalogue list price.
+		Price: node.RateFromUSD(p.Cost),
+	}
+
+	exposed, reported, err := mapExposure(p)
+	if err != nil {
+		return node.Node{}, err
+	}
+	if reported {
+		n = n.WithExposed(exposed)
+	}
+
+	if state != node.StateReady {
+		return n, nil
+	}
+
+	// Ready, so an endpoint is expected -- but RunPod leaves ssh.direct null
+	// until the public 22/tcp mapping is assigned, which lags RUNNING. That
+	// is reported as still provisioning rather than as a failure: it is a
+	// state the pod passes through, and WaitReady is built to poll.
+	if p.Ssh == nil || p.Ssh.Direct == nil || p.Ssh.Direct.Host == "" || p.Ssh.Direct.Port == 0 {
+		n.State = node.StateProvisioning
+		n.Message = "running, but RunPod has not yet assigned the public 22/tcp mapping that ssh.direct needs"
+		return n, nil
+	}
+
+	user := p.Ssh.Direct.Username
+	if user == "" {
+		user = "root"
+	}
+	sshPort, err := port16(p.Ssh.Direct.Port)
+	if err != nil {
+		return node.Node{}, fmt.Errorf("pod %s: ssh.direct port: %w", p.ID, err)
+	}
+	return n.WithEndpoint(node.Endpoint{
+		Host: p.Ssh.Direct.Host,
+		Port: sshPort,
+		User: user,
+	}), nil
+}
+
+// port16 narrows a provider's int port, refusing anything out of range.
+//
+// Checked rather than converted, because a silent wrap is worse than either a
+// refusal or a crash here. uint16(70000) is 4464: on the endpoint path ember
+// would dial a port the node is not listening on and report a timeout that
+// blames the node, and on the exposure path a public port outside the range
+// would be *reported as a different port* -- so an assertion about what is
+// reachable would be made about the wrong number.
+func port16(n int) (uint16, error) {
+	if n < 1 || n > 65535 {
+		return 0, fmt.Errorf("runpod reported port %d, which is outside 1..65535; ember will not narrow it to something else", n)
+	}
+	return uint16(n), nil
+}
+
+// mapOffers turns the GPU catalogue into ember offers.
+//
+// cloud selects which of the two quoted prices applies. Both are list prices;
+// what a pod actually costs is read back from the pod itself.
+func mapOffers(gpus []gpuType, cloud string) []node.Offer {
+	community := strings.EqualFold(cloud, cloudCommunity)
+
+	out := make([]node.Offer, 0, len(gpus))
+	for _, g := range gpus {
+		price, maxCount, available := g.Price.Secure, g.MaxCount.Secure, g.Secure
+		if community {
+			price, maxCount, available = g.Price.Community, g.MaxCount.Community, g.Community
+		}
+		// A GPU this cloud tier does not offer is not an offer. Listing it
+		// would mean every `ember offers` shows hardware that cannot be
+		// rented, and `ember up` would pick it and fail at create.
+		if !available {
+			continue
+		}
+		// A zero price is not free here: it is RunPod declining to quote, and
+		// a budget check against zero would wave through whatever it really
+		// costs.
+		if price <= 0 {
+			continue
+		}
+		if g.Availability == availabilityNone {
+			continue
+		}
+		if maxCount < 1 {
+			maxCount = 1
+		}
+		out = append(out, node.Offer{
+			Provider: Name,
+			Token:    node.OfferToken(g.ID),
+			GPU:      node.NormalizeGPU(g.ID),
+			GPUCount: 1,
+			// RunPod quotes GB; ember's Offer carries MiB.
+			VRAM:   node.GiB(g.Memory),
+			Price:  node.RateFromUSD(price),
+			Region: firstOrEmpty(g.DataCenters),
+			Label:  fmt.Sprintf("%s, %d GiB, up to %d per pod, availability %s", g.Name, g.Memory, maxCount, strings.ToLower(g.Availability)),
+		})
+	}
+	return out
+}
+
+const (
+	cloudSecure      = "SECURE"
+	cloudCommunity   = "COMMUNITY"
+	availabilityNone = "NONE"
+)
+
+func firstOrEmpty(ss []string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	return ss[0]
+}
+
+// mapPorts turns ember's port requests into RunPod's "port/protocol" strings.
+//
+// It refuses any public request that is not SSH. exposure.PortRequest already
+// makes that unrepresentable -- only SSHPort can produce a public one -- so
+// this is the second lock on the same door, at the exact point where a wrong
+// value would become an unauthenticated public URL.
+//
+// That refusal is therefore unreachable, and deliberately left uncovered. The
+// first version of this file reached it by exporting a helper from the
+// exposure package that minted a public non-SSH request, which put a hole in
+// the wall the seal exists to be: an escape hatch for tests is an escape
+// hatch. The branch stays untested, because a narrowing that is only safe by
+// construction is one nobody re-checks when the construction changes -- and
+// if exposure ever grows a second public constructor, this is what catches it.
+func mapPorts(reqs []exposure.PortRequest) ([]string, error) {
+	out := make([]string, 0, len(reqs))
+	for _, r := range reqs {
+		if r.IsZero() {
+			return nil, fmt.Errorf("a zero port request reached the runpod mapper; it names port 0, which is not a port")
+		}
+		if !r.IsPublic() {
+			// Internal ports are simply not declared. RunPod only publishes
+			// what is listed, so the safest way to keep a workload port
+			// private is to say nothing about it: it is reached by
+			// forwarding over the SSH connection.
+			continue
+		}
+		if r.Port() != 22 || r.Proto() != node.ProtoTCP {
+			return nil, fmt.Errorf("refusing to declare %s publicly on runpod: only 22/tcp may be public, and a port declared any other way is served at {id}-{port}.proxy.runpod.net with no authentication", r)
+		}
+		out = append(out, "22/tcp")
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no public SSH port was requested; RunPod leaves ssh.direct null without 22/tcp in ports, and ember would have no way to reach the pod")
+	}
+	return out, nil
+}

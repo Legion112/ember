@@ -130,6 +130,34 @@ that sentence made unrepresentable rather than merely tested.
   harness. They drifted, the harness read the wrong directory and found
   nothing, and a lab asserting "a clean run leaves no records" passed without
   checking anything. The harness now reads through `statestore` itself.
+- **A provider API's int port is range-checked, never narrowed.**
+  `uint16(70000)` is 4464. On the endpoint path ember would dial a port the
+  node is not listening on and blame the node for the timeout; on the exposure
+  path a public port would be reported as a *different* port, making an
+  assertion about what is reachable an assertion about the wrong number.
+- **A filter matches a model name it is a prefix of, at the capacity boundary
+  only.** `NormalizeGPU` deliberately keeps the capacity suffix, because an
+  A100 40G and an A100 80G are not substitutes -- so `--gpu h100` has to
+  accept `h100-80g`, and string equality meant it accepted neither. `a100`
+  accepts `a100-40g` and `a100-80g` but not `a1000`, because the next
+  character must be the separator. Same failure as the substring bug
+  `noiseWords` exists to prevent, reached from the other direction: the card
+  was rentable, the filter matched nothing, and the output was identical to a
+  provider with no capacity.
+- **Memory type is not memory capacity.** `HBM3` and `GDDR6X` are noise words;
+  `80GB` is not. RunPod spells a card "NVIDIA H100 80GB HBM3", and leaving the
+  memory type in welded it onto the capacity suffix as `h100-80ghbm3`.
+- **No escape hatch for a seal, not even for a test.** The RunPod mapper's
+  refusal of a public non-SSH port is unreachable, because only
+  `exposure.SSHPort` can mint a public request. The first attempt to cover it
+  exported a helper from `exposure` that built one -- a hole in the wall the
+  seal exists to be. The branch stays uncovered; an escape hatch for tests is
+  an escape hatch.
+- **Tests inject credentials rather than resolving them.** Left to read the
+  environment, every CLI test picks up the developer's own `RUNPOD_API_KEY`,
+  registers the real provider and makes live API calls -- behaving differently
+  from one machine to the next. `deps.CloudBaseURL` exists for the same
+  reason: a test that registers a cloud provider must not be able to reach it.
 - **No ember function takes an `ssh.HostKeyCallback`.** `hostkey.Trust` has one
   unexported method and that package holds no permissive implementation, so
   `ssh.InsecureIgnoreHostKey()` cannot be typed into the program — not behind a

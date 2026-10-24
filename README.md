@@ -60,6 +60,8 @@ ember up --provider local --image ghcr.io/example/wl:v1 --port demo:8188 --ttl 3
 | `internal/keys` | the operator's SSH identity, agent fallback |
 | `internal/tunnel` + `sshdial` | the forward and the one place a host-key callback is set |
 | `internal/provider` + `local` | provider seam and the free Docker-backed one |
+| `internal/provider/runpod` | RunPod: wire types, pure mapping, thin client |
+| `internal/httpx` | one place for timeouts, body closing and readable API errors |
 | `internal/provision` | rent, wait, hold, destroy — with the money discipline |
 | `internal/statestore` | the journal that makes an orphan findable |
 | `internal/reconcile` | pure scan over providers and records — what `ls` and `reap` act on |
@@ -69,8 +71,13 @@ Every verb is implemented: `up`, `down`, `ls`, `reap`, `offers`, `version`.
 `ls` asks every provider rather than trusting the local records, and exits 2
 when anything needs attention — including a provider it could not reach.
 
-Next: RunPod, then Vast.ai. See `AGENTS.md` for the rules all of it is
-written against.
+The RunPod provider is written and tested against committed fixtures and an
+`httptest` server, but has never spoken to the live API — see
+`internal/provider/runpod/testdata/README.md` for exactly what that does and
+does not prove.
+
+Next: a first real-money smoke test against RunPod, then Vast.ai. See
+`AGENTS.md` for the rules all of it is written against.
 
 ## Two properties that outrank features
 
@@ -117,9 +124,20 @@ cannot drift from what `go.mod` declares.
 
 `ember.yaml` holds image names, GPU filters, ports and budgets, and is safe to
 commit. Credentials are not in it: they come from the environment
-(`RUNPOD_API_KEY`, `VAST_API_KEY`) or from `~/.config/ember/credentials.yaml`
-with mode 0600. Nothing secret is ever passed as a command-line flag, because
-`/proc/<pid>/cmdline` is world-readable.
+(`RUNPOD_API_KEY`, `VAST_API_KEY`) or from `~/.config/ember/credentials.yaml`,
+which ember refuses to read unless it is mode 0600 — checked on every load,
+because a file created correctly once and chmodded later is the common case.
+The environment wins over the file, so a one-off run can use another account
+and CI needs nothing on disk.
+
+A provider with no credential is left out of the registry rather than
+registered and left to fail. `ember ls` exits 2 on a provider it could not
+reach, so registering RunPod on a machine that has never had a token would
+make every clean run look like a problem.
+
+Nothing secret is ever passed as a command-line flag, because
+`/proc/<pid>/cmdline` is world-readable — on a rented machine, readable by
+whoever else is on that host.
 
 ## Licence
 

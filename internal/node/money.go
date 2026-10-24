@@ -25,6 +25,18 @@ type Rate MicroUSD
 // units; everything is normalised to this one at the mapping edge.
 type MiB int64
 
+// MiBPerGiB converts between the two units providers quote VRAM in.
+//
+// Named rather than written as 1024 at each call site, because the bug it
+// prevents is silent: RunPod reports VRAM as "24" meaning GB, ember's Offer
+// carries MiB, and a straight assignment makes a 24 GB card report 24 MiB.
+// Nothing errors -- every --min-vram filter simply rejects all real hardware,
+// and `ember offers` looks like a provider with no capacity.
+const MiBPerGiB = 1024
+
+// GiB converts a provider's whole-GiB VRAM figure to MiB.
+func GiB(n int) MiB { return MiB(n) * MiBPerGiB }
+
 const (
 	micros = 1_000_000
 
@@ -54,6 +66,29 @@ func (r Rate) Cost(d time.Duration) MicroUSD {
 		q++
 	}
 	return MicroUSD(q)
+}
+
+// RateFromUSD converts a provider's float price per hour into an exact rate.
+//
+// This is the only place a float is allowed to become money, and it exists
+// because provider APIs quote prices as JSON numbers. Everything above it is
+// integer microdollars, so a budget ceiling is an exact comparison and
+// 0.1+0.2 > 0.3 cannot bypass it.
+//
+// Rounded, not truncated. int64(0.44 * 1e6) is 439999 on this hardware,
+// because 0.44 has no exact binary representation -- so truncation would
+// quietly under-report every price ending in a hundredth of a cent, and a
+// budget check would pass on a node a hair over the ceiling.
+//
+// A negative or non-finite price becomes zero rather than nonsense. A
+// provider quoting NaN is a provider ember should not rent from, and the
+// caller checks for a zero price separately: "declined to quote" and "free"
+// are different, and only the local provider is the second one.
+func RateFromUSD(usd float64) Rate {
+	if math.IsNaN(usd) || math.IsInf(usd, 0) || usd <= 0 {
+		return 0
+	}
+	return Rate(math.Round(usd * micros))
 }
 
 // ParseUSD reads a decimal dollar amount such as "0.34" or "1" into MicroUSD

@@ -21,6 +21,7 @@ import (
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provider/local"
+	"github.com/Legion112/ember/internal/provider/runpod"
 	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/session"
 	"github.com/Legion112/ember/internal/statestore"
@@ -34,6 +35,28 @@ type deps struct {
 	ConfigIn string
 	HomeDir  string
 	Signals  []int
+
+	// Creds overrides what is read from the environment and from disk, so a
+	// test can register a cloud provider without a real token and without
+	// touching the operator's credentials file.
+	Creds *config.Credentials
+
+	// CloudBaseURL redirects every cloud provider's API.
+	//
+	// Without it a test that registers RunPod with a fake token talks to
+	// api.runpod.io for real: slow, dependent on somebody's network, and in
+	// CI a stream of authentication failures against a live service. The
+	// first version of the test below did exactly that, and the comment
+	// claiming otherwise was the only thing standing in for this field.
+	CloudBaseURL string
+}
+
+// credentials resolves this run's provider tokens.
+func (d deps) credentials(configDir string) (config.Credentials, error) {
+	if d.Creds != nil {
+		return *d.Creds, nil
+	}
+	return config.LoadCredentials(configDir)
 }
 
 func cmdUp(args []string, out io.Writer) error { return runUp(args, out, deps{}) }
@@ -80,7 +103,11 @@ func runUp(args []string, out io.Writer, d deps) error {
 		return err
 	}
 
-	reg, err := buildRegistry(d)
+	creds, err := d.credentials(paths.config)
+	if err != nil {
+		return err
+	}
+	reg, err := buildRegistry(d, creds, cfg)
 	if err != nil {
 		return err
 	}
@@ -160,7 +187,14 @@ func resolvePaths(cfg config.Config, d deps) (paths, error) {
 	return paths{config: c, state: s}, nil
 }
 
-func buildRegistry(d deps) (*provider.Registry, error) {
+// buildRegistry registers every provider this run can reach.
+//
+// A provider with no credential is left out rather than registered and left
+// to fail: `ember ls` reports an unreachable provider as a finding and exits
+// 2, so registering RunPod on a machine that has never had a token would make
+// every clean run look like a problem. The absence is reported by `ember
+// offers` and by a named-provider lookup instead, where it is actionable.
+func buildRegistry(d deps, creds config.Credentials, cfg config.Config) (*provider.Registry, error) {
 	engine := d.Engine
 	if engine == nil {
 		c, err := dockerclient.NewClient()
@@ -172,6 +206,19 @@ func buildRegistry(d deps) (*provider.Registry, error) {
 	reg := provider.NewRegistry()
 	if err := reg.Add(local.New(engine)); err != nil {
 		return nil, err
+	}
+
+	if !creds.RunPod.IsZero() {
+		rp := runpod.New(creds.RunPod)
+		if d.CloudBaseURL != "" {
+			rp.HTTP.BaseURL = d.CloudBaseURL
+		}
+		rp.Cloud = cfg.RunPodCloud
+		rp.DataCenters = cfg.DataCenters
+		rp.DiskGiB = cfg.DiskGiB
+		if err := reg.Add(rp); err != nil {
+			return nil, err
+		}
 	}
 	return reg, nil
 }

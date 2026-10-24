@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
 	"github.com/Legion112/ember/internal/provider/local"
 )
@@ -15,7 +16,12 @@ func labDeps(t *testing.T) deps {
 	t.Helper()
 	e := dockerengine.NewRecordingEngine()
 	e.AddImage(local.DefaultImage)
-	return deps{Engine: e, HomeDir: t.TempDir()}
+	// Credentials are injected empty rather than left to be resolved. Without
+	// this, every test here reads RUNPOD_API_KEY from the developer's own
+	// environment: a machine that has one would register the real provider,
+	// and the tests would make live API calls and behave differently from
+	// one machine to the next.
+	return deps{Engine: e, HomeDir: t.TempDir(), Creds: &config.Credentials{}}
 }
 
 func TestUp_RefusesWithoutAnImage(t *testing.T) {

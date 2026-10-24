@@ -73,3 +73,73 @@ func TestOffer_String(t *testing.T) {
 		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
+
+// TestNormalizeGPU_ProviderSpellingsReduceToTheModel covers the real strings
+// providers use. Each of the last three was a silent filter miss: the card was
+// rentable, the filter matched nothing, and the output was identical to a
+// provider with no capacity.
+func TestNormalizeGPU_ProviderSpellingsReduceToTheModel(t *testing.T) {
+	for in, want := range map[string]GPUModel{
+		"NVIDIA GeForce RTX 4090": "rtx4090",
+		"rtx4090":                 "rtx4090",
+		"RTX 4090":                "rtx4090",
+		"NVIDIA A40":              "a40",
+		"NVIDIA L40S":             "l40s",
+		"NVIDIA H200":             "h200",
+
+		// Memory type is not memory capacity. RunPod spells the card this
+		// way, and leaving HBM3 in welded it onto the capacity suffix as
+		// "h100-80ghbm3", which nothing would ever match.
+		"NVIDIA H100 80GB HBM3": "h100-80g",
+		"NVIDIA H100 PCIe 80GB": "h100-80g",
+
+		// AMD's marketing line, the counterpart of GeForce.
+		"AMD Instinct MI300X": "mi300x",
+
+		// The bug noiseWords was written for, still fixed.
+		"A100 SXM4 80GB": "a100-80g",
+		"A100 PCIe 40GB": "a100-40g",
+	} {
+		if got := NormalizeGPU(in); got != want {
+			t.Errorf("NormalizeGPU(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestGPUModelAccepts_ACapacitySuffixIsMoreSpecific is the other half of that
+// fix. NormalizeGPU deliberately keeps the capacity, because an A100 40G and
+// an A100 80G are not substitutes -- so an operator typing the plain model
+// name has to match both, and string equality made it match neither.
+func TestGPUModelAccepts_ACapacitySuffixIsMoreSpecific(t *testing.T) {
+	for _, tc := range []struct {
+		offer, want GPUModel
+		accept      bool
+	}{
+		// An empty filter accepts anything.
+		{"h100-80g", "", true},
+		{"h100-80g", "h100", true},
+		{"a100-40g", "a100", true},
+		{"a100-80g", "a100", true},
+		{"a100-80g", "a100-80g", true},
+		{"rtx4090", "rtx4090", true},
+
+		// A more specific filter than the offer is not satisfied: asking for
+		// an 80G and getting a 40G is how half a pool cannot hold the model.
+		{"a100-40g", "a100-80g", false},
+		{"a100", "a100-80g", false},
+
+		// Different cards.
+		{"rtx4090", "rtx4080", false},
+		{"h100-80g", "h200", false},
+
+		// The boundary that keeps this a parse rather than a substring
+		// search: the next character after the filter must be the capacity
+		// separator, so a1000 is not an a100.
+		{"a1000", "a100", false},
+		{"h1000-80g", "h100", false},
+	} {
+		if got := tc.offer.Accepts(tc.want); got != tc.accept {
+			t.Errorf("%q.Accepts(%q) = %v, want %v", tc.offer, tc.want, got, tc.accept)
+		}
+	}
+}

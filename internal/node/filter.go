@@ -41,7 +41,9 @@ func (f Filter) Validate() error {
 
 // Match reports whether o satisfies f.
 func (f Filter) Match(o Offer) bool {
-	if f.GPU != "" && o.GPU != f.GPU {
+	// Accepts, not equality: the capacity suffix makes an offer's model name
+	// more specific than what an operator types. See GPUModel.Accepts.
+	if !o.GPU.Accepts(f.GPU) {
 		return false
 	}
 	if f.MinVRAM > 0 && o.VRAM < f.MinVRAM {

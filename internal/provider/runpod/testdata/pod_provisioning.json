@@ -1,0 +1,14 @@
+{
+  "id": "prov999",
+  "name": "ember-0123456789abcdef-1792900000",
+  "status": "PROVISIONING",
+  "image": "ghcr.io/example/comfyui:v0.3.1",
+  "gpu": { "id": "NVIDIA GeForce RTX 4090", "count": 1 },
+  "cloud": "SECURE",
+  "dataCenterId": null,
+  "ssh": { "proxy": null, "direct": null },
+  "cost": 0.69,
+  "runtime": null,
+  "createdAt": "2026-10-24T18:00:00.000Z",
+  "startedAt": null
+}

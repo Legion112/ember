@@ -130,7 +130,11 @@ func registryAndStore(cfgPath string, d deps) (*provider.Registry, *statestore.S
 	if err != nil {
 		return nil, nil, err
 	}
-	reg, err := buildRegistry(d)
+	creds, err := d.credentials(ps.config)
+	if err != nil {
+		return nil, nil, err
+	}
+	reg, err := buildRegistry(d, creds, cfg)
 	if err != nil {
 		return nil, nil, err
 	}

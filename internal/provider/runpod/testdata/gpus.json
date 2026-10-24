@@ -1,0 +1,57 @@
+{
+  "gpus": [
+    {
+      "id": "NVIDIA GeForce RTX 4090",
+      "name": "RTX 4090",
+      "manufacturer": "NVIDIA",
+      "memory": 24,
+      "secure": true,
+      "community": true,
+      "price": { "secure": 0.69, "community": 0.44 },
+      "maxCount": { "secure": 8, "community": 4 },
+      "availability": "HIGH",
+      "cudaVersions": ["12.4", "12.6"],
+      "dataCenters": ["US-TX-3", "EU-SE-1"]
+    },
+    {
+      "id": "NVIDIA H100 80GB HBM3",
+      "name": "H100 SXM",
+      "manufacturer": "NVIDIA",
+      "memory": 80,
+      "secure": true,
+      "community": false,
+      "price": { "secure": 2.69, "community": 0 },
+      "maxCount": { "secure": 8, "community": 0 },
+      "availability": "MEDIUM",
+      "cudaVersions": ["12.4"],
+      "dataCenters": ["US-KS-2"]
+    },
+    {
+      "id": "NVIDIA A40",
+      "name": "A40",
+      "manufacturer": "NVIDIA",
+      "memory": 48,
+      "secure": true,
+      "community": true,
+      "price": { "secure": 0.39, "community": 0.28 },
+      "maxCount": { "secure": 8, "community": 2 },
+      "availability": "NONE",
+      "cudaVersions": ["12.4"],
+      "dataCenters": []
+    },
+    {
+      "id": "AMD Instinct MI300X",
+      "name": "MI300X",
+      "manufacturer": "AMD",
+      "memory": 192,
+      "secure": true,
+      "community": false,
+      "price": { "secure": 0, "community": 0 },
+      "maxCount": { "secure": 8, "community": 0 },
+      "availability": "HIGH",
+      "cudaVersions": [],
+      "dataCenters": ["US-TX-3"]
+    }
+  ],
+  "pagination": { "nextCursor": null }
+}
