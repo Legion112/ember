@@ -31,6 +31,15 @@ func main() {
 	)
 	flag.Parse()
 
+	// A stray positional argument means the flags after it were never parsed.
+	// That happened once: a wrapped make variable split into two shell words,
+	// and the gate reported success while checking four packages out of nine
+	// with no overall floor and no -strict.
+	if flag.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "check-coverage: unexpected argument %q; every flag after it was ignored\n", flag.Arg(0))
+		os.Exit(2)
+	}
+
 	if err := run(*profile, *module, *packages, *exclude, *overall, *strict, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "check-coverage: %v\n", err)
 		os.Exit(1)

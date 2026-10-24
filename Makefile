@@ -14,28 +14,38 @@ export GOTOOLCHAIN ?= go1.27.0
 BIN := bin
 COVERPROFILE := coverage.out
 
-# Packages whose statements must all be covered, and the floor for each. A
-# package in neither this list nor COVER_EXCLUDE fails the gate; see -strict.
+# Packages whose statements must be covered, and the floor for each. A package
+# in neither this list nor COVER_EXCLUDE fails the gate; see -strict.
 #
-# internal/keys sits at 85 rather than 100, and the gap is named here so the
-# number is a decision and not a drift: what is uncovered in EnsureIdentity is
-# the error return of ed25519.GenerateKey and ssh.MarshalPrivateKey — neither
-# can fail with crypto/rand.Reader and a valid key — plus the write and close
-# failures of a freshly created file, which need a full disk. Reaching them
-# means a filesystem seam, which is more code and more surface than the
-# branches are worth. internal/hostkey is at 90 for the same reason: what is
-# uncovered there is Mint's three stdlib error returns, none of which can fire
-# with crypto/rand.Reader and a valid ed25519 key, and the write/close/rename
-# failures of the pin file. Everything that *decides* anything -- every trust
-# check, every refusal, every parse -- is covered. internal/tunnel is at 96:
-# the gap is a listener failing mid-flight while the context is still alive,
-# which needs a seam in net.Listen to provoke. sshdial is at 97 for one
-# keepalive branch.
-COVER_PKGS := internal/node=100,internal/loopback=100,internal/cli=100,internal/keys=85,internal/hostkey=90,internal/tunnel=96,internal/tunnel/sshdial=97
+# Pure packages are at 100 and stay there. The ones below it are all the same
+# shape, and the floor is a decision rather than a drift: what is uncovered is
+# (a) stdlib error returns that cannot fire -- crypto/rand never fails, and
+# neither does marshalling a valid ed25519 key -- and (b) write, close, chmod
+# and rename failures on a file that was just created, which need a full disk
+# or an injected filesystem to provoke. Reaching them means a seam in every
+# os call, which is more code and more surface than the branches are worth.
+#
+# Everything that *decides* anything -- every refusal, every parse, every
+# trust check, every price comparison -- is covered. If a floor needs lowering
+# to land a change, that is the signal to split the logic out of the I/O
+# rather than to edit this line.
+#
+# internal/tunnel is the one exception to that rule and is at 94 rather than
+# its isolated 96.6: when the forwarder is torn down, pipe's select has both
+# its channels ready at once -- the copy finishes because the connection is
+# closing, and the context is cancelled -- so which arm runs is up to the
+# scheduler. Pinning the floor to the lucky number would make the gate flake.
+# Kept on one line on purpose: a make line continuation joins with a space,
+# the shell then splits the result into two words, and Go's flag package stops
+# parsing at the first non-flag argument -- so a wrapped list silently drops
+# every package after the break *and* -overall and -strict with it. The gate
+# reported success while checking almost nothing. check-coverage now refuses
+# stray arguments so this cannot happen quietly again.
+COVER_PKGS := internal/node=100,internal/loopback=100,internal/cli=100,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97
 COVER_EXCLUDE := cmd/ember,cmd/emberwl,cmd/check-coverage
 # Overall across the gated set. Below 100 only because internal/keys and
 # internal/hostkey carry the documented stdlib-error gaps above.
-COVER_OVERALL := 96
+COVER_OVERALL := 95
 
 LAB_IMAGE := ember:lab
 
