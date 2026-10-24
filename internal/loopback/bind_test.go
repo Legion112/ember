@@ -97,14 +97,14 @@ func TestListen_BindsOnlyLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	port := ln.Addr().(*net.TCPAddr).Port
 	for _, addr := range nonLoopbackAddrs(t) {
 		target := net.JoinHostPort(addr, itoa(port))
 		c, err := net.DialTimeout("tcp", target, dialTimeout)
 		if err == nil {
-			c.Close()
+			_ = c.Close()
 			t.Errorf("a listener created through loopback.Listen accepted a connection on %s", target)
 		}
 	}
@@ -115,9 +115,13 @@ func TestListen_ReportsTheUnderlyingFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 
-	taken := uint16(first.Addr().(*net.TCPAddr).Port)
+	// AddrPort().Port() is already a uint16, so there is no conversion to get
+	// wrong. TCPAddr.Port is an int and converting it needs either a range
+	// check or a lint suppression, both of which are work to avoid a
+	// narrowing that did not have to exist.
+	taken := first.Addr().(*net.TCPAddr).AddrPort().Port()
 	if _, err := Listen(t.Context(), Port(taken)); err == nil {
 		t.Fatal("Listen succeeded on an address already in use")
 	} else if !strings.Contains(err.Error(), "127.0.0.1") {
@@ -132,6 +136,6 @@ func TestListen_HonoursContext(t *testing.T) {
 	// platform; what must not happen is a listener that outlives it silently.
 	ln, err := Listen(ctx, Port(0))
 	if err == nil {
-		ln.Close()
+		_ = ln.Close()
 	}
 }

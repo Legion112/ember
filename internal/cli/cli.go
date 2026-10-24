@@ -19,6 +19,15 @@ import (
 // Version is overwritten at build time with -ldflags.
 var Version = "dev"
 
+// outf writes to the command's output stream.
+//
+// The error is discarded deliberately: a failed write to stdout means the pipe
+// is gone — `ember ls | head` is the ordinary way that happens — and the exit
+// status is about to be the only thing anyone sees. Returning the error would
+// turn a closed pager into a non-zero exit, which in this program means
+// "there are findings".
+func outf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
+
 // ExitCodes. These are part of ember's contract with cron and CI, not
 // decoration: `ember ls` is meant to be run from a timer, and "there are
 // findings" has to be distinguishable from "ember itself broke" without
@@ -102,13 +111,13 @@ func run(args []string, out io.Writer) error {
 }
 
 func usage(out io.Writer) {
-	fmt.Fprintf(out, "ember rents a GPU node, runs a container on it, and destroys it.\n\nusage: ember <subcommand> [flags]\n\n")
+	outf(out, "ember rents a GPU node, runs a container on it, and destroys it.\n\nusage: ember <subcommand> [flags]\n\n")
 	cs := commands()
 	sort.Slice(cs, func(i, j int) bool { return cs[i].name < cs[j].name })
 	for _, c := range cs {
-		fmt.Fprintf(out, "  %-8s %s\n", c.name, c.summary)
+		outf(out, "  %-8s %s\n", c.name, c.summary)
 	}
-	fmt.Fprintf(out, "\nRun ember <subcommand> -h for the flags of one subcommand.\n")
+	outf(out, "\nRun ember <subcommand> -h for the flags of one subcommand.\n")
 }
 
 func cmdVersion(args []string, out io.Writer) error {
@@ -117,7 +126,7 @@ func cmdVersion(args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
-	fmt.Fprintln(out, Version)
+	outf(out, "%s\n", Version)
 	return nil
 }
 
@@ -127,7 +136,7 @@ func cmdVersion(args []string, out io.Writer) error {
 func notYet(name string) func([]string, io.Writer) error {
 	return func(args []string, out io.Writer) error {
 		if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-			fmt.Fprintf(out, "ember %s is not implemented yet\n", name)
+			outf(out, "ember %s is not implemented yet\n", name)
 			return nil
 		}
 		return fmt.Errorf("subcommand %q is not implemented yet", name)

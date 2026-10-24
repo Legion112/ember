@@ -11,6 +11,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -48,7 +49,12 @@ func (s stats) percent() float64 {
 	return 100 * float64(s.covered) / float64(s.stmts)
 }
 
-func run(profilePath, module, packagesSpec, excludeSpec string, overallMin float64, strict bool, out *os.File) error {
+func run(profilePath, module, packagesSpec, excludeSpec string, overallMin float64, strict bool, w io.Writer) error {
+	// A failed write to the report stream means the pipe is gone and the exit
+	// status is about to be the only thing anyone sees, so there is nothing
+	// useful to do with the error.
+	out := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
+
 	if module == "" {
 		return fmt.Errorf("-module is required")
 	}
@@ -124,7 +130,7 @@ func run(profilePath, module, packagesSpec, excludeSpec string, overallMin float
 			continue
 		}
 		pct := st.percent()
-		fmt.Fprintf(out, "%-40s %6.1f%%  (min %.0f%%)\n", rel, pct, floors[rel])
+		out("%-40s %6.1f%%  (min %.0f%%)\n", rel, pct, floors[rel])
 		if pct+1e-9 < floors[rel] {
 			fmt.Fprintf(os.Stderr, "FAIL: %s coverage %.1f%% < %.0f%%\n", rel, pct, floors[rel])
 			fail = true
@@ -141,11 +147,11 @@ func run(profilePath, module, packagesSpec, excludeSpec string, overallMin float
 			ex = append(ex, p)
 		}
 		sort.Strings(ex)
-		fmt.Fprintf(out, "not gated: %s\n", strings.Join(ex, " "))
+		out("not gated: %s\n", strings.Join(ex, " "))
 	}
 
 	pct := gated.percent()
-	fmt.Fprintf(out, "%-40s %6.1f%%  (min %.0f%%)\n", "overall(gated)", pct, overallMin)
+	out("%-40s %6.1f%%  (min %.0f%%)\n", "overall(gated)", pct, overallMin)
 	if pct+1e-9 < overallMin {
 		fmt.Fprintf(os.Stderr, "FAIL: overall coverage %.1f%% < %.0f%%\n", pct, overallMin)
 		fail = true
