@@ -77,6 +77,12 @@ type Finding struct {
 	Node     node.Node
 	Record   *statestore.Record
 	Reason   string
+
+	// Accrued is what this node has cost so far, where ember knows enough to
+	// say. Nil when it does not: an untracked node has no record, so ember
+	// has the provider's rate only if the listing carried one, and no idea
+	// when it started unless the label's deadline implies it.
+	Accrued *node.Billing
 }
 
 func (f Finding) String() string {
@@ -86,7 +92,15 @@ func (f Finding) String() string {
 	} else if f.Record != nil {
 		id = string(f.Provider) + "/" + string(f.Record.RunID)
 	}
-	return fmt.Sprintf("%-14s %-28s %s", f.Kind, id, f.Reason)
+	s := fmt.Sprintf("%-14s %-28s %s", f.Kind, id, f.Reason)
+	if f.Accrued != nil && !f.Accrued.Free() {
+		// What it has cost so far, on the same line. "An orphaned H100 burns
+		// 175 roubles an hour in silence" is the whole reason this command
+		// exists, and a number is what turns that from a sentence in a
+		// README into something an operator acts on this afternoon.
+		s += fmt.Sprintf(" [%s so far]", f.Accrued.Cost)
+	}
+	return s
 }
 
 // Scan classifies everything known about every provider.
@@ -101,6 +115,14 @@ func Scan(
 	now time.Time,
 ) []Finding {
 	var out []Finding
+	defer func() {
+		// Accrued cost is filled in once, here, rather than at each of the
+		// several places a Finding is built: one place to be right, and a
+		// kind added later cannot forget it.
+		for i := range out {
+			out[i].Accrued = accrued(out[i], now)
+		}
+	}()
 
 	for prov, err := range errs {
 		if err == nil {
@@ -247,6 +269,21 @@ func classify(n node.Node, rec *statestore.Record, r statestore.Record, now time
 		f.Reason = fmt.Sprintf("%s until %s, but no ember process is holding it; %s", n.State, r.Deadline.Format(time.RFC3339), found)
 	}
 	return f
+}
+
+// accrued estimates what a finding's node has cost so far.
+//
+// Only where ember wrote a record, because that is the only place the quoted
+// rate and the start time are both known. The provider's minimum is not
+// applied: this is a running total for a node that has not been destroyed, and
+// a minimum describes the floor on a completed charge rather than something
+// already accrued.
+func accrued(f Finding, now time.Time) *node.Billing {
+	if f.Record == nil || f.Record.Price == 0 {
+		return nil
+	}
+	b := node.Estimate(f.Record.Price, f.Record.Created, now, 0)
+	return &b
 }
 
 // Attention counts the findings that are not KindOK.

@@ -573,3 +573,74 @@ func TestScan_AnExpiredNodeIsExpiredRegardlessOfItsHolder(t *testing.T) {
 		t.Fatalf("got %v, want expired", fs)
 	}
 }
+
+// TestScan_ReportsWhatANodeHasCostSoFar. "An orphaned H100 burns 175 roubles
+// an hour in silence" is the reason this command exists, and a number is what
+// turns that from a sentence in a README into something an operator acts on
+// this afternoon.
+func TestScan_ReportsWhatANodeHasCostSoFar(t *testing.T) {
+	deadline := now.Add(time.Hour)
+	rec := record("run1", "n1", statestore.PhaseReady, deadline)
+	rec.Price = node.Rate(2_690_000) // an H100, $2.69/hr
+	rec.Created = now.Add(-90 * time.Minute)
+
+	fs := Scan(
+		map[node.ProviderID][]node.Node{"test": {liveNode("n1", node.StateReady, deadline)}},
+		nil,
+		[]statestore.Record{rec},
+		now,
+	)
+	if len(fs) != 1 {
+		t.Fatalf("got %v", fs)
+	}
+	if fs[0].Accrued == nil {
+		t.Fatal("a recorded node reported no accrued cost")
+	}
+	// 90 minutes at $2.69/hr.
+	if want := node.MicroUSD(4_035_000); fs[0].Accrued.Cost != want {
+		t.Errorf("cost = %v (%d micro), want %v", fs[0].Accrued.Cost, int64(fs[0].Accrued.Cost), want)
+	}
+	if !strings.Contains(fs[0].String(), "so far") {
+		t.Errorf("the line does not carry the cost: %q", fs[0].String())
+	}
+}
+
+// TestScan_NoCostWhereEmberCannotKnowOne. An untracked node has no record, so
+// ember has no quoted rate and no start time; inventing one would be worse
+// than saying nothing, because a wrong number is acted on with the same
+// confidence as a right one.
+func TestScan_NoCostWhereEmberCannotKnowOne(t *testing.T) {
+	deadline := now.Add(time.Hour)
+	fs := Scan(
+		map[node.ProviderID][]node.Node{"test": {liveNode("n1", node.StateReady, deadline)}},
+		nil, nil, now,
+	)
+	if len(fs) != 1 || fs[0].Kind != KindUntracked {
+		t.Fatalf("got %v", fs)
+	}
+	if fs[0].Accrued != nil {
+		t.Errorf("a cost was reported for a node ember knows nothing about: %v", fs[0].Accrued)
+	}
+	if strings.Contains(fs[0].String(), "so far") {
+		t.Errorf("the line claims a cost: %q", fs[0].String())
+	}
+}
+
+// TestScan_AFreeProviderPrintsNoCostLine. A local run reporting "~$0 so far"
+// invites the reader to wonder whether the accounting is broken.
+func TestScan_AFreeProviderPrintsNoCostLine(t *testing.T) {
+	deadline := now.Add(time.Hour)
+	rec := record("run1", "n1", statestore.PhaseReady, deadline)
+	rec.Price = 0
+
+	fs := Scan(
+		map[node.ProviderID][]node.Node{"test": {liveNode("n1", node.StateReady, deadline)}},
+		nil, []statestore.Record{rec}, now,
+	)
+	if len(fs) != 1 {
+		t.Fatalf("got %v", fs)
+	}
+	if strings.Contains(fs[0].String(), "so far") {
+		t.Errorf("a free run reported a cost: %q", fs[0].String())
+	}
+}

@@ -30,6 +30,12 @@ That rents a node, waits for it, forwards `8188` to `127.0.0.1:8188` over SSH,
 waits for you to finish, fetches the outputs and destroys the node — including
 when you interrupt it.
 
+Every run reports what it cost, and `ember ls` reports what each node has cost
+so far — the figure that turns "an orphaned H100 burns about 175 ₽/hour in
+silence" from a sentence in a README into something to act on this afternoon.
+The estimate says the provider's minimum billing unit out loud when it applies,
+because "it ran for four seconds and cost a minute" is surprising exactly once.
+
 Outputs come back as a tar stream over the same SSH connection and are
 extracted through an `os.Root`, so nothing a rented machine puts in an archive
 can land outside the run's own directory. Symlinks, hard links and device nodes

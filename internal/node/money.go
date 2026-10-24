@@ -3,6 +3,7 @@ package node
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"strings"
 	"time"
 )
@@ -51,21 +52,74 @@ const (
 func (m MicroUSD) String() string { return fmt.Sprintf("$%.6g", float64(m)/micros) }
 func (r Rate) String() string     { return MicroUSD(r).String() + "/hr" }
 
+// MaxMicroUSD saturates a cost that cannot be represented.
+//
+// Reaching it means the inputs were nonsense; the value is deliberately
+// enormous so that any budget comparison against it refuses, which is the safe
+// direction for a figure ember could not compute.
+const MaxMicroUSD = MicroUSD(math.MaxInt64)
+
 // Cost is what r comes to over d, rounded up to the next microdollar.
 //
 // Rounding up rather than to nearest: an estimate that reads low is an
 // estimate that lets a run start which the budget would have refused.
+//
+// The arithmetic is split because the obvious spelling overflows, and it
+// overflowed in production code here for weeks. `int64(r) * int64(d)` with d
+// in nanoseconds exceeds int64 for any rate above about $2.56/hour over an
+// hour: an H100 at $2.69/hour for one hour computed as *negative* $2.43, and
+// an 8-GPU node at $15.92/hour for one hour computed as a cheerful $0.55.
+//
+// That is not a cosmetic bug. provision.Budget.Allow calls this to decide
+// whether a run is within its ceiling, so the budget silently waved through
+// exactly the expensive hardware it exists to guard against -- while working
+// correctly for every cheap card, which is why nothing noticed.
+//
+// So: whole hours are multiplied directly, where the product is bounded by the
+// rate times a few million hours; the sub-hour remainder goes through a
+// 128-bit intermediate, because r times a sub-hour nanosecond count genuinely
+// needs more than 64 bits.
 func (r Rate) Cost(d time.Duration) MicroUSD {
-	if d <= 0 {
+	if d <= 0 || r <= 0 {
 		return 0
 	}
-	num := int64(r) * int64(d)
-	den := int64(time.Hour)
-	q := num / den
-	if num%den != 0 {
+
+	hours := int64(d / time.Hour)
+	rem := int64(d % time.Hour)
+
+	whole := int64(r) * hours
+	if hours != 0 && whole/hours != int64(r) {
+		// The division check is the standard overflow test for a product
+		// that has already been computed. Saturating rather than wrapping:
+		// a wrapped total is a number a budget check will happily accept.
+		return MaxMicroUSD
+	}
+
+	// (r * rem) / hour, with the product allowed to exceed 64 bits.
+	//
+	// bits.Div64 panics when the high word is at least the divisor, and that
+	// cannot happen here: r is at most 2^63-1 and rem is below one hour in
+	// nanoseconds, which is under 2^42, so the product is under 2^105 and the
+	// high word is under 2^41 -- comfortably below time.Hour's 3.6e12. The
+	// bound is written out rather than guarded by an unreachable branch,
+	// because a branch that can never be taken is a branch nobody can show
+	// is right.
+	// Both operands are non-negative: r is positive by the guard at the top,
+	// and rem is a remainder of a positive duration.
+	hi, lo := bits.Mul64(uint64(r), uint64(rem)) //nolint:gosec // r > 0 and rem >= 0, checked above
+	q, rr := bits.Div64(hi, lo, uint64(time.Hour))
+	if rr != 0 {
 		q++
 	}
-	return MicroUSD(q)
+
+	// q is at most r: it is (r * rem) / hour with rem below one hour, so the
+	// quotient cannot exceed r, which is already an int64. The sum is still
+	// checked, because that is the one step the bound above does not cover.
+	total := whole + int64(q) //nolint:gosec // q <= r <= MaxInt64, see above
+	if total < whole {
+		return MaxMicroUSD
+	}
+	return MicroUSD(total)
 }
 
 // RateFromUSD converts a provider's float price per hour into an exact rate.

@@ -368,9 +368,35 @@ func destroy(ctx context.Context, p provider.Provider, o Options, runID node.Run
 	if uerr := o.Store.Update(runID, func(r *statestore.Record) { r.Phase = statestore.PhaseDestroyed }); uerr != nil {
 		return fmt.Errorf("record the destruction of %s: %w", h, uerr)
 	}
+	// The estimate is read from the record *before* it is forgotten, which
+	// is the only moment both the rate and the elapsed time are in one place.
+	bill := billFor(o, runID, p.Caps().MinBilling)
+
 	if ferr := o.Store.Forget(runID); ferr != nil {
 		return fmt.Errorf("forget record %s: %w", runID, ferr)
 	}
-	o.log().Info("node destroyed", "handle", h.String())
+	if bill.Free() {
+		o.log().Info("node destroyed", "handle", h.String())
+	} else {
+		o.log().Info("node destroyed", "handle", h.String(), "cost", bill.String())
+	}
 	return nil
+}
+
+// billFor estimates what the run cost, from the record ember wrote itself.
+//
+// A failure to read the record is not a failure to destroy: the node is gone,
+// which is the thing that mattered, and a missing cost line is worth far less
+// than the teardown it would otherwise abort. It is logged rather than
+// returned for exactly that reason.
+func billFor(o Options, runID node.RunID, min time.Duration) node.Billing {
+	if o.Store == nil {
+		return node.Billing{}
+	}
+	rec, err := o.Store.Get(runID)
+	if err != nil {
+		o.log().Debug("could not read the record to estimate the cost", "run", runID, "err", err)
+		return node.Billing{}
+	}
+	return node.Estimate(rec.Price, rec.Created, o.now(), min)
 }

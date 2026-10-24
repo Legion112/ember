@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -665,5 +666,80 @@ func TestWithNode_RefusesAPublicSSHProviderThatPublishesNothing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no public SSH port") {
 		t.Errorf("got %v", err)
+	}
+}
+
+// TestBillFor_SurvivesAStoreItCannotRead. A failure to estimate the cost is
+// not a failure to destroy: the node is gone, which is the thing that
+// mattered, and a missing cost line is worth far less than the teardown it
+// would otherwise abort.
+func TestBillFor_SurvivesAStoreItCannotRead(t *testing.T) {
+	o := opts(t)
+
+	// A run id the store has never heard of.
+	if got := billFor(o, "ffffffffffffffff", time.Minute); got.Cost != 0 {
+		t.Errorf("an unreadable record produced a cost: %v", got)
+	}
+
+	// And no store at all, which is how the dry-run and test paths arrive.
+	if got := billFor(Options{}, "0123456789abcdef", time.Minute); got.Cost != 0 {
+		t.Errorf("a missing store produced a cost: %v", got)
+	}
+}
+
+// TestBillFor_EstimatesFromTheRecordEmberWrote, which is the only place the
+// quoted rate and the start time are both known.
+func TestBillFor_EstimatesFromTheRecordEmberWrote(t *testing.T) {
+	o := opts(t)
+	rec := statestore.Record{
+		RunID: "0123456789abcdef", Provider: "test", Phase: statestore.PhaseReady,
+		Label: "ember-0123456789abcdef-1", Price: node.Rate(2_690_000),
+		Created: time.Now().Add(-30 * time.Minute),
+	}
+	if err := o.Store.Create(rec); err != nil {
+		t.Fatal(err)
+	}
+
+	got := billFor(o, rec.RunID, time.Minute)
+	if got.Free() {
+		t.Fatal("a priced record estimated as free")
+	}
+	// 30 minutes at $2.69/hr, give or take the test's own elapsed time.
+	if got.Cost < node.MicroUSD(1_300_000) || got.Cost > node.MicroUSD(1_400_000) {
+		t.Errorf("cost = %v, want about $1.345", got.Cost)
+	}
+}
+
+// TestWithNode_ReportsTheCostOnTeardown. The figure is read from the record
+// before it is forgotten, which is the one moment both halves are in one
+// place.
+func TestWithNode_ReportsTheCostOnTeardown(t *testing.T) {
+	p := providertest.NewRecordingProvider("test")
+	p.Capabilities = provider.Caps{HostKeyFromAPI: true, PublicSSH: true, MinBilling: time.Minute}
+	p.HostKey = mintedKey(t)
+	p.OfferList = []node.Offer{{
+		Provider: "test", Token: "h100", GPU: node.NormalizeGPU("h100"),
+		GPUCount: 1, Price: node.Rate(2_690_000),
+	}}
+
+	var logged bytes.Buffer
+	o := opts(t)
+	o.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	o.Budget = Budget{}
+
+	if err := WithNode(t.Context(), p, spec(t), o, func(context.Context, Session) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out := logged.String()
+	if !strings.Contains(out, "node destroyed") {
+		t.Fatalf("the teardown was not logged:\n%s", out)
+	}
+	// The cost is on the destroy line, because that is the line an operator
+	// reads after a run and the only place the total exists.
+	if !strings.Contains(out, "cost=") {
+		t.Errorf("the destroy line carries no cost:\n%s", out)
 	}
 }
