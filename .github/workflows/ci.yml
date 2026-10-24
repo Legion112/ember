@@ -40,7 +40,14 @@ jobs:
       - name: vet
         run: |
           go vet ./...
-          if [ -d test/integration ]; then go vet -tags=integration ./test/...; fi
+          # The directory exists before the labs do -- it holds the
+          # Dockerfile -- and `go vet` exits 1 on "matched no packages", so
+          # the condition is "is there Go here", not "is there a directory".
+          if ls test/integration/*.go >/dev/null 2>&1; then
+            go vet -tags=integration ./test/...
+          else
+            echo "no lab sources yet; skipping the tagged vet"
+          fi
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8

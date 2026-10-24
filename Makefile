@@ -84,7 +84,11 @@ cover-check: cover
 # the machine that happens to run it.
 vet:
 	$(GO) vet ./...
-	$(GO) vet -tags=integration ./test/... 2>/dev/null || true
+	@if ls test/integration/*.go >/dev/null 2>&1; then \
+		$(GO) vet -tags=integration ./test/...; \
+	else \
+		echo "no lab sources yet; skipping the tagged vet"; \
+	fi
 
 fmt:
 	$(GO) fmt ./...
