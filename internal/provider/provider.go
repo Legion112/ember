@@ -72,6 +72,16 @@ type Caps struct {
 
 	// MinBilling is the smallest unit the provider charges for.
 	MinBilling time.Duration
+
+	// PublicSSH means nodes are reached over a public SSH port, so exactly
+	// one public mapping is expected and anything else is a violation.
+	//
+	// False -- the zero value -- means the provider publishes nothing at all
+	// and is held to the stricter assertion. That direction is deliberate: a
+	// provider author who forgets this field gets the strict check, and the
+	// failure is a destroyed node with a loud message rather than a public
+	// port nobody looks at. See exposure.AssertSSHOnly.
+	PublicSSH bool
 }
 
 // Registry holds the providers this run knows about.

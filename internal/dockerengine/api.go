@@ -14,6 +14,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
+	"strconv"
 )
 
 // LabelRunID is the container and network label carrying ember's run id.
@@ -25,6 +28,31 @@ const LabelRunID = "ember.run-id"
 // success.
 var ErrNotFound = errors.New("docker: no such object")
 
+// Binding is where the daemon published one container port.
+type Binding struct {
+	// IP is the host address the port is bound to. Docker's own default is
+	// 0.0.0.0 -- every interface -- so this being loopback is a fact to read
+	// back and check, never one to take for granted.
+	IP   string
+	Port uint16
+}
+
+// IsLoopback reports whether only this machine can reach the binding.
+//
+// It parses rather than comparing against "127.0.0.1": 127.0.0.1, ::1 and
+// 127.0.0.53 are all loopback and only one of them is the obvious spelling.
+// An unparseable or empty IP is treated as not loopback, because the safe
+// reading of "I cannot tell where this is bound" is "somewhere public".
+func (b Binding) IsLoopback() bool {
+	addr, err := netip.ParseAddr(b.IP)
+	if err != nil {
+		return false
+	}
+	return addr.IsLoopback()
+}
+
+func (b Binding) String() string { return net.JoinHostPort(b.IP, strconv.Itoa(int(b.Port))) }
+
 // Container is what ember needs to know about one container.
 type Container struct {
 	ID     string
@@ -33,11 +61,16 @@ type Container struct {
 	State  string // "created" | "running" | "exited" | "paused" | "dead"
 	Labels map[string]string
 
-	// Ports maps a container port to the host port the daemon published it
-	// on, read back from the daemon rather than guessed. Asking for host port
-	// 0 and then assuming you know which port you got is how a forward
-	// silently points at somebody else's service.
-	Ports map[uint16]uint16
+	// Ports maps a container port to where the daemon published it, read back
+	// from the daemon rather than guessed. Asking for host port 0 and then
+	// assuming you know which port you got is how a forward silently points
+	// at somebody else's service.
+	//
+	// The host IP is part of the value and not dropped, because it is the
+	// difference between a port only this machine can reach and one the whole
+	// LAN can. An exposure assertion that has to assume which of those
+	// happened is not an assertion.
+	Ports map[uint16]Binding
 
 	// IPs maps network name to the container's address on it.
 	IPs      map[string]string

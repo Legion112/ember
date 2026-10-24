@@ -34,6 +34,12 @@ type RecordingEngine struct {
 	// still gets a plausible one.
 	PortMap map[uint16]uint16
 
+	// BindIP is the host address the fake daemon binds published ports to.
+	// Empty means 127.0.0.1, which is what the real client asks for. A test
+	// sets it to "0.0.0.0" to reproduce Docker's own default, where a
+	// published port is reachable from the whole LAN.
+	BindIP string
+
 	containers map[string]*Container
 	networks   map[string]*Network
 	images     map[string]bool
@@ -159,6 +165,16 @@ func (e *RecordingEngine) NetworkList(_ context.Context, label string) ([]Networ
 	return out, nil
 }
 
+// bindIP mirrors what the real client asks the daemon for. A test sets BindIP
+// to 0.0.0.0 to reproduce Docker's own default -- the dangerous one -- without
+// needing a daemon.
+func (e *RecordingEngine) bindIP() string {
+	if e.BindIP != "" {
+		return e.BindIP
+	}
+	return "127.0.0.1"
+}
+
 func (e *RecordingEngine) ContainerCreate(_ context.Context, spec ContainerSpec) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -171,14 +187,14 @@ func (e *RecordingEngine) ContainerCreate(_ context.Context, spec ContainerSpec)
 	e.nextID++
 	id := fmt.Sprintf("c%d", e.nextID)
 
-	ports := map[uint16]uint16{}
+	ports := map[uint16]Binding{}
 	for _, p := range spec.PublishTCP {
-		if host, ok := e.PortMap[p]; ok {
-			ports[p] = host
-			continue
+		host, ok := e.PortMap[p]
+		if !ok {
+			e.nextPort++
+			host = e.nextPort
 		}
-		e.nextPort++
-		ports[p] = e.nextPort
+		ports[p] = Binding{IP: e.bindIP(), Port: host}
 	}
 	e.containers[id] = &Container{
 		ID: id, Name: spec.Name, Image: spec.Image, State: "created",

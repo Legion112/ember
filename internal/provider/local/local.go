@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -264,6 +265,10 @@ func mapContainer(c dockerengine.Container, prov node.ProviderID) (node.Node, er
 		Handle: node.Handle{Provider: prov, ID: c.ID},
 		Offer:  node.Offer{Provider: prov, Token: "local", GPU: "none", GPUCount: 1},
 	}
+	// Reported unconditionally, including for a container that publishes
+	// nothing. An unreported node fails every exposure assertion, which is
+	// the right default, but it must not be where a correct node lands.
+	n = n.WithExposed(publicPorts(c))
 
 	if lbl, ok := c.Labels[LabelLabel]; ok {
 		if _, deadline, err := provider.ParseLabel(lbl); err == nil {
@@ -290,8 +295,8 @@ func mapContainer(c dockerengine.Container, prov node.ProviderID) (node.Node, er
 		return n, nil
 	}
 
-	host, ok := c.Ports[sshPort]
-	if !ok || host == 0 {
+	b, ok := c.Ports[sshPort]
+	if !ok || b.Port == 0 {
 		// Running, but the daemon has not published 22 yet.
 		n.State = node.StateProvisioning
 		return n, nil
@@ -300,7 +305,29 @@ func mapContainer(c dockerengine.Container, prov node.ProviderID) (node.Node, er
 	if user == "" {
 		user = "root"
 	}
-	return n.WithEndpoint(node.Endpoint{Host: "127.0.0.1", Port: host, User: user}), nil
+	return n.WithEndpoint(node.Endpoint{Host: "127.0.0.1", Port: b.Port, User: user}), nil
+}
+
+// publicPorts reports which of the container's published ports are reachable
+// from beyond this machine.
+//
+// It is derived from the host IP the daemon reports back, not from the IP the
+// create call asked for. Those are the same today -- client.go asks for
+// 127.0.0.1 -- and reading back the daemon's answer is the only version that
+// stays true if that ever changes, or if the daemon is configured to ignore
+// the request. A loopback binding is not exposure: nothing outside this
+// machine can reach it, which is why the local provider is held to
+// exposure.AssertNoPublishedPorts.
+func publicPorts(c dockerengine.Container) []node.Exposed {
+	es := []node.Exposed{}
+	for port, b := range c.Ports {
+		if b.IsLoopback() {
+			continue
+		}
+		es = append(es, node.Exposed{Port: port, Proto: node.ProtoTCP, URL: b.String()})
+	}
+	sort.Slice(es, func(i, j int) bool { return es[i].Port < es[j].Port })
+	return es
 }
 
 // parseState maps Docker's vocabulary, and errors on anything it does not

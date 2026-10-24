@@ -83,7 +83,31 @@ that sentence made unrepresentable rather than merely tested.
   changing a default reintroduces public exposure that the request shape cannot
   see. A warning is useless here: the node is already wrong.
 - **The outside-in probe is evidence, not proof, and says so.** A firewall that
-  DROPs looks exactly like a closed port from here.
+  DROPs looks exactly like a closed port from here. Each port gets its own
+  timeout, not a share of one budget: a run of dropped ports would otherwise
+  eat the budget between them and the rest would report "closed" because the
+  clock ran out, which is a false pass on the only answer that matters.
+- **"Published nothing" and "never reported" are different answers.**
+  `node.Exposure()` returns `([]Exposed, bool)` and an unreported node fails
+  every assertion. They are the same empty slice, and treating the second as
+  the first means a provider whose mapping code forgets to populate exposure
+  gets waved through — the check still runs, still passes, and verifies
+  nothing. `WithExposed` stores an empty report as an empty slice and never as
+  nil for the same reason: `append([]Exposed(nil), es...)` returns nil for
+  empty input, which turned the safest possible answer into a failed assertion.
+- **`Caps.PublicSSH` defaults to the stricter check.** False — the zero value —
+  means the provider publishes nothing at all. A provider author who forgets
+  the field gets `AssertNoPublishedPorts`, and the failure is a destroyed node
+  with a loud message rather than a public port nobody looks at.
+- **Exposure is derived from what the daemon or API reports back, never from
+  what the create call asked for.** `dockerengine.Binding` carries the host IP
+  and not just the port, because Docker's own default is to publish on
+  `0.0.0.0` and the difference between that and `127.0.0.1` is the difference
+  between a port only this machine can reach and one the whole LAN can. A
+  check that reads ember's own request cannot catch a provider doing something
+  else, which is the entire thing it is for.
+- **The exposure assertion lives above the providers, not inside them.** A
+  provider checking its own exposure is a provider grading its own homework.
 - **No ember function takes an `ssh.HostKeyCallback`.** `hostkey.Trust` has one
   unexported method and that package holds no permissive implementation, so
   `ssh.InsecureIgnoreHostKey()` cannot be typed into the program — not behind a

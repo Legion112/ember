@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Legion112/ember/internal/dockerengine"
+	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
 )
@@ -422,3 +423,92 @@ func TestProvider_Defaults(t *testing.T) {
 
 // TestProviderSatisfiesTheInterface keeps the seam honest at compile time.
 var _ provider.Provider = (*Provider)(nil)
+
+// TestInspect_LoopbackPublishingIsNotExposure. The local provider binds
+// published ports to 127.0.0.1, so nothing beyond this machine can reach the
+// node and it has no public surface to report.
+func TestInspect_LoopbackPublishingIsNotExposure(t *testing.T) {
+	p, _ := newProvider(t)
+
+	h, err := p.Create(t.Context(), request(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := p.Inspect(t.Context(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	es, reported := n.Exposure()
+	if !reported {
+		t.Fatal("the local provider did not report its exposure, so every assertion over it fails")
+	}
+	if len(es) != 0 {
+		t.Errorf("a loopback-published port was reported as public: %v", es)
+	}
+	if err := exposure.AssertNoPublishedPorts(n); err != nil {
+		t.Errorf("a correctly bound local node failed the assertion: %v", err)
+	}
+}
+
+// TestInspect_AWideBindIsReportedAsExposure is the bug this plumbing exists to
+// catch. Docker's own default is to publish on 0.0.0.0, and a node whose sshd
+// is reachable from the whole LAN must not pass an exposure assertion just
+// because ember's create call asked for loopback. The report is derived from
+// the IP the daemon gives back, so it tracks what actually happened.
+func TestInspect_AWideBindIsReportedAsExposure(t *testing.T) {
+	p, e := newProvider(t)
+	e.BindIP = "0.0.0.0"
+
+	h, err := p.Create(t.Context(), request(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := p.Inspect(t.Context(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	es, reported := n.Exposure()
+	if !reported {
+		t.Fatal("exposure was not reported")
+	}
+	if len(es) != 1 || es[0].Port != 22 {
+		t.Fatalf("a 0.0.0.0 binding was not reported as public: %v", es)
+	}
+	if err := exposure.AssertNoPublishedPorts(n); err == nil {
+		t.Fatal("a LAN-reachable node passed the assertion")
+	}
+}
+
+// TestPublicPorts_IsOrderedAndFiltered. The ordering is not cosmetic: the
+// bindings come out of a map, so without the sort the violation message would
+// list ports in a different order on each run, and an operator comparing two
+// runs could not tell whether anything had changed.
+func TestPublicPorts_IsOrderedAndFiltered(t *testing.T) {
+	es := publicPorts(dockerengine.Container{Ports: map[uint16]dockerengine.Binding{
+		8188: {IP: "0.0.0.0", Port: 48188},
+		22:   {IP: "0.0.0.0", Port: 40022},
+		9090: {IP: "127.0.0.1", Port: 49090}, // loopback: not exposure
+		7000: {IP: "::1", Port: 47000},       // loopback in its other spelling
+	}})
+
+	if len(es) != 2 {
+		t.Fatalf("got %v, want the two 0.0.0.0 bindings", es)
+	}
+	if es[0].Port != 22 || es[1].Port != 8188 {
+		t.Errorf("not ordered by port: %v", es)
+	}
+	if es[0].URL != "0.0.0.0:40022" {
+		t.Errorf("the host binding is missing from the report: %v", es[0])
+	}
+}
+
+// TestPublicPorts_ReportsNoneRatherThanNil, so a container publishing nothing
+// is distinguishable from one that was never asked.
+func TestPublicPorts_ReportsNoneRatherThanNil(t *testing.T) {
+	n := node.Node{}.WithExposed(publicPorts(dockerengine.Container{}))
+	if _, reported := n.Exposure(); !reported {
+		t.Fatal("a container with no ports reads as unreported")
+	}
+}

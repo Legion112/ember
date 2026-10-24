@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/keys"
 	"github.com/Legion112/ember/internal/node"
@@ -200,6 +201,17 @@ func WithNode(
 		return err
 	}
 
+	// Checked before anything connects or runs. A node that is exposed more
+	// widely than ember asked for is already wrong, and the window being
+	// closed here is the one between "the provider created it" and "the
+	// operator reads a warning in their terminal".
+	//
+	// WithNode's deferred destroy handles the teardown, so returning is
+	// enough to make the node go away.
+	if err := assertExposure(p, ready.Node()); err != nil {
+		return err
+	}
+
 	trust, err := trustFor(ready, o)
 	if err != nil {
 		return err
@@ -220,6 +232,19 @@ func WithNode(
 	defer cancel()
 
 	return fn(runCtx, Session{Node: ready, Trust: trust, RunID: runID})
+}
+
+// assertExposure applies the assertion the provider's capabilities call for.
+//
+// The choice lives here rather than in each provider because a provider
+// checking its own exposure is a provider grading its own homework: the point
+// of the check is to catch the provider doing something other than what it
+// said it would.
+func assertExposure(p provider.Provider, n node.Node) error {
+	if p.Caps().PublicSSH {
+		return exposure.AssertSSHOnly(n)
+	}
+	return exposure.AssertNoPublishedPorts(n)
 }
 
 // PickOffer chooses what to rent.

@@ -48,6 +48,20 @@ type RecordingProvider struct {
 	// usable one.
 	Endpoint node.Endpoint
 
+	// Exposed overrides what Inspect reports as publicly reachable. A test
+	// sets it to reproduce a provider that published something ember never
+	// asked for -- RunPod's unauthenticated 8188/http proxy being the case
+	// worth reproducing. Leaving it nil reports what a correct provider with
+	// these Caps would.
+	Exposed []node.Exposed
+
+	// SuppressExposure makes Inspect return a node that never had WithExposed
+	// called on it, reproducing a provider whose mapping code forgets to
+	// report. It exists because "reported nothing" and "never reported" are
+	// different answers that an exposure assertion must treat differently,
+	// and only a fake can produce the second one deliberately.
+	SuppressExposure bool
+
 	// Existing is what List returns.
 	Existing []node.Node
 
@@ -152,6 +166,16 @@ func (p *RecordingProvider) Inspect(_ context.Context, h node.Handle) (node.Node
 	p.inspects++
 
 	n := node.Node{Handle: h, State: state, HostKey: p.HostKey}
+	// Reported on every node, ready or not, and defaulting to what the
+	// fake's own Caps imply. A fake that leaves exposure unreported fails
+	// every assertion over it, which would make the fake itself the thing
+	// under test; a fake that reports something safer than a real provider
+	// would hides the bug the assertion exists to catch -- so the default
+	// here is what a correct provider of this shape reports, and Exposed is
+	// the field a test sets to reproduce a misbehaving one.
+	if !p.SuppressExposure {
+		n = n.WithExposed(p.exposure())
+	}
 	if state != node.StateReady {
 		return n, nil
 	}
@@ -160,6 +184,17 @@ func (p *RecordingProvider) Inspect(_ context.Context, h node.Handle) (node.Node
 		ep = node.Endpoint{Host: "127.0.0.1", Port: 2222, User: "root"}
 	}
 	return n.WithEndpoint(ep), nil
+}
+
+// exposure is what this fake says it published.
+func (p *RecordingProvider) exposure() []node.Exposed {
+	if p.Exposed != nil {
+		return p.Exposed
+	}
+	if p.Capabilities.PublicSSH {
+		return []node.Exposed{{Port: 22, Proto: node.ProtoTCP, URL: "203.0.113.7:40022"}}
+	}
+	return []node.Exposed{}
 }
 
 func (p *RecordingProvider) Destroy(_ context.Context, h node.Handle) error {

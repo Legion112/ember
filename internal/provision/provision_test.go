@@ -11,9 +11,11 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/keys"
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provider/providertest"
 	"github.com/Legion112/ember/internal/statestore"
 )
@@ -559,5 +561,109 @@ func TestWithNode_SurvivesAStoreThatCannotRecordReadiness(t *testing.T) {
 	// The machine itself must still be gone.
 	if live := p.Live(); len(live) != 0 {
 		t.Errorf("the node leaked because the state file was unwritable")
+	}
+}
+
+// TestWithNode_DestroysANodeExposedMoreWidelyThanAsked is the test the whole
+// exposure package exists for. A provider that publishes an unauthenticated
+// 8188/http proxy -- RunPod's real behaviour for any port declared http, in
+// front of a ComfyUI that has arbitrary code execution -- must have its node
+// destroyed before the workload ever starts. Warning and continuing would
+// leave a public shell up for as long as the operator takes to read their
+// terminal.
+func TestWithNode_DestroysANodeExposedMoreWidelyThanAsked(t *testing.T) {
+	p := providertest.NewRecordingProvider("test")
+	p.Capabilities = provider.Caps{HostKeyFromAPI: true, PublicSSH: true, Free: true}
+	p.HostKey = mintedKey(t)
+	p.Exposed = []node.Exposed{
+		{Port: 22, Proto: node.ProtoTCP, URL: "203.0.113.7:40022"},
+		{Port: 8188, Proto: node.ProtoHTTP, URL: "https://abc-8188.proxy.runpod.net"},
+	}
+
+	ran := false
+	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+		ran = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("a node with a public HTTP proxy port was handed to the workload")
+	}
+	if ran {
+		t.Error("the workload ran on a node that was publicly reachable")
+	}
+
+	var v *exposure.Violation
+	if !errors.As(err, &v) {
+		t.Fatalf("got %T (%v), want *exposure.Violation", err, err)
+	}
+	if !strings.Contains(err.Error(), "abc-8188.proxy.runpod.net") {
+		t.Errorf("the error does not name the public address: %v", err)
+	}
+	if live := p.Live(); len(live) != 0 {
+		t.Fatalf("%d publicly exposed node(s) survived", len(live))
+	}
+}
+
+// TestWithNode_DestroysANodeWithNoExposureReport. A provider whose Inspect
+// does not populate exposure cannot be verified, and an unverifiable node is
+// treated as a wrong one. The alternative -- assuming the provider is fine
+// because it said nothing -- is how the check would come to mean nothing.
+func TestWithNode_DestroysANodeWithNoExposureReport(t *testing.T) {
+	p := providertest.NewRecordingProvider("test")
+	p.HostKey = mintedKey(t)
+	p.Exposed = []node.Exposed{} // reported, but see below
+
+	// Force the unreported case: a node built without WithExposed at all.
+	p.SuppressExposure = true
+
+	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+		t.Error("the workload ran on an unverifiable node")
+		return nil
+	})
+	if !errors.Is(err, exposure.ErrUnreported) {
+		t.Fatalf("got %v, want ErrUnreported", err)
+	}
+	if live := p.Live(); len(live) != 0 {
+		t.Fatalf("%d unverified node(s) survived", len(live))
+	}
+}
+
+// TestWithNode_AProviderThatPublishesNothingPassesTheStrictCheck, which is the
+// local provider's shape and the default for any provider that forgets to
+// declare PublicSSH.
+func TestWithNode_AProviderThatPublishesNothingPassesTheStrictCheck(t *testing.T) {
+	p := providertest.NewRecordingProvider("test")
+	p.HostKey = mintedKey(t)
+
+	ran := false
+	if err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+		ran = true
+		return nil
+	}); err != nil {
+		t.Fatalf("a node publishing nothing was refused: %v", err)
+	}
+	if !ran {
+		t.Error("the closure never ran")
+	}
+}
+
+// TestWithNode_RefusesAPublicSSHProviderThatPublishesNothing. Not a security
+// failure, but the node is unreachable and the next error the operator would
+// see is an unexplained dial timeout.
+func TestWithNode_RefusesAPublicSSHProviderThatPublishesNothing(t *testing.T) {
+	p := providertest.NewRecordingProvider("test")
+	p.Capabilities = provider.Caps{HostKeyFromAPI: true, PublicSSH: true, Free: true}
+	p.HostKey = mintedKey(t)
+	p.Exposed = []node.Exposed{}
+
+	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+		t.Error("the workload ran on an unreachable node")
+		return nil
+	})
+	if err == nil {
+		t.Fatal("a provider claiming public SSH published nothing and was accepted")
+	}
+	if !strings.Contains(err.Error(), "no public SSH port") {
+		t.Errorf("got %v", err)
 	}
 }

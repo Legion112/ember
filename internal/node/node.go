@@ -40,6 +40,7 @@ type Node struct {
 	Message  string // the provider's own status detail, kept for failure reports
 
 	endpoint *Endpoint
+	exposed  []Exposed
 }
 
 // WithEndpoint returns a copy of n carrying ep.

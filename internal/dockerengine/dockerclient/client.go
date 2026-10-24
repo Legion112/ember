@@ -178,7 +178,7 @@ func (d *Client) ContainerInspect(ctx context.Context, id string) (dockerengine.
 		return dockerengine.Container{}, fmt.Errorf("inspect container %s: %w", id, err)
 	}
 
-	ports := map[uint16]uint16{}
+	ports := map[uint16]dockerengine.Binding{}
 	for p, bs := range j.NetworkSettings.Ports {
 		for _, b := range bs {
 			host, err := strconv.ParseUint(b.HostPort, 10, 16)
@@ -193,7 +193,7 @@ func (d *Client) ContainerInspect(ctx context.Context, id string) (dockerengine.
 			if cp < 1 || cp > 65535 {
 				continue
 			}
-			ports[uint16(cp)] = uint16(host)
+			ports[uint16(cp)] = dockerengine.Binding{IP: b.HostIP, Port: uint16(host)}
 		}
 	}
 	ips := map[string]string{}

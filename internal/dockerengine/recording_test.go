@@ -48,7 +48,7 @@ func TestRecordingEngine_LifecycleMirrorsARealDaemon(t *testing.T) {
 	if c.State != "created" {
 		t.Errorf("a created container should not be running, got %q", c.State)
 	}
-	if c.Ports[22] == 0 {
+	if c.Ports[22].Port == 0 {
 		t.Error("the fake must publish a plausible host port, or nothing downstream can read one back")
 	}
 
@@ -270,10 +270,73 @@ func TestRecordingEngine_PortMapOverridesTheGeneratedPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Ports[22] != 49999 {
+	if c.Ports[22].Port != 49999 {
 		t.Errorf("PortMap ignored: %v", c.Ports)
 	}
-	if c.Ports[8188] == 0 {
+	if c.Ports[8188].Port == 0 {
 		t.Error("an unmapped port should still get a plausible number")
+	}
+}
+
+func TestBinding_IsLoopback(t *testing.T) {
+	for _, tc := range []struct {
+		ip   string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"127.0.0.53", true}, // loopback without the obvious spelling
+		{"::1", true},
+		{"0.0.0.0", false}, // Docker's own default: every interface
+		{"::", false},
+		{"192.168.1.10", false},
+		{"", false},        // cannot tell, so assume public
+		{"garbage", false}, // same
+	} {
+		if got := (Binding{IP: tc.ip, Port: 22}).IsLoopback(); got != tc.want {
+			t.Errorf("Binding{%q}.IsLoopback() = %v, want %v", tc.ip, got, tc.want)
+		}
+	}
+}
+
+func TestBinding_String(t *testing.T) {
+	if got := (Binding{IP: "127.0.0.1", Port: 40022}).String(); got != "127.0.0.1:40022" {
+		t.Errorf("got %q", got)
+	}
+	if got := (Binding{IP: "::1", Port: 22}).String(); got != "[::1]:22" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestRecordingEngine_BindsToLoopbackByDefault, matching what client.go asks
+// the real daemon for. A fake that binds somewhere safer than production is a
+// fake that hides the bug it exists to catch.
+func TestRecordingEngine_BindsToLoopbackByDefault(t *testing.T) {
+	e := NewRecordingEngine()
+	id, err := e.ContainerCreate(t.Context(), ContainerSpec{Name: "c", PublishTCP: []uint16{22}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := e.ContainerInspect(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Ports[22].IsLoopback() {
+		t.Fatalf("the fake published 22 on %s", c.Ports[22])
+	}
+}
+
+func TestRecordingEngine_BindIPCanReproduceDockersDefault(t *testing.T) {
+	e := NewRecordingEngine()
+	e.BindIP = "0.0.0.0"
+	id, err := e.ContainerCreate(t.Context(), ContainerSpec{Name: "c", PublishTCP: []uint16{22}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := e.ContainerInspect(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Ports[22].IsLoopback() {
+		t.Fatal("BindIP was ignored, so no test can reproduce a LAN-reachable node")
 	}
 }

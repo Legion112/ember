@@ -56,15 +56,21 @@ ember up --provider local --image ghcr.io/example/wl:v1 --port demo:8188 --ttl 3
 | `internal/node` | domain core — nodes, offers, specs, integer money, states |
 | `internal/loopback` | the only listener in the program, provably loopback |
 | `internal/hostkey` | sealed trust — `InsecureIgnoreHostKey` cannot be typed in |
+| `internal/exposure` | what may face the internet — a public port cannot be spelled |
 | `internal/keys` | the operator's SSH identity, agent fallback |
 | `internal/tunnel` + `sshdial` | the forward and the one place a host-key callback is set |
 | `internal/provider` + `local` | provider seam and the free Docker-backed one |
 | `internal/provision` | rent, wait, hold, destroy — with the money discipline |
 | `internal/statestore` | the journal that makes an orphan findable |
+| `internal/reconcile` | pure scan over providers and records — what `ls` and `reap` act on |
 | `internal/session`, `internal/config`, `internal/cli` | wiring |
 
-Next: `ember ls --all` and `ember reap`, the Docker lab, then RunPod and
-Vast.ai. See `AGENTS.md` for the rules all of it is written against.
+`ember ls` and `ember reap` work too: `ls` asks every provider rather than
+trusting the local records, and exits 2 when anything needs attention —
+including a provider it could not reach.
+
+Next: the Docker lab, then RunPod and Vast.ai. See `AGENTS.md` for the rules
+all of it is written against.
 
 ## Two properties that outrank features
 
@@ -72,7 +78,12 @@ Vast.ai. See `AGENTS.md` for the rules all of it is written against.
 loopback on your machine; the only thing a provider exposes publicly is sshd,
 key-only, verified against a host key ember generated and injected itself.
 `net.Listen` appears in exactly one package and a test fails the build if that
-changes.
+changes. A public port cannot be *spelled*: the type carrying one has no
+exported field, so `exposure.SSHPort()` is the only thing in the program that
+can produce one. After create, ember reads back what the provider says it
+published and destroys the node if that is anything but sshd — on RunPod a port
+declared `8188/http` is served at `{id}-8188.proxy.runpod.net` with no
+authentication at all.
 
 **A leaked node costs real money.** An orphaned H100 burns about 175 ₽/hour in
 silence. Every node carries a deadline enforced in several independent places,
