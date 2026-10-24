@@ -64,7 +64,67 @@ type Record struct {
 	Offer    string          `json:"offer,omitempty"`
 	Price    node.Rate       `json:"price_micro_usd_per_hour,omitempty"`
 	LastErr  string          `json:"last_error,omitempty"`
+
+	// Holder is the ember process that created the node and is responsible
+	// for destroying it.
+	//
+	// It is recorded so that "a node somebody is using" and "a node whose
+	// owner died" stop being the same thing. Without it, a run killed with
+	// SIGKILL leaves a node that is running, recorded and inside its
+	// deadline -- indistinguishable from a healthy long-running session --
+	// and `ember ls` reports health over a GPU that is billing with nobody
+	// watching. The TTL still bounds the loss; this makes the loss visible
+	// while it is happening.
+	Holder Holder `json:"holder,omitempty"`
 }
+
+// ThisProcess is the holder to record for a node this process creates.
+func ThisProcess() Holder {
+	// The error is deliberately dropped rather than branched on. A failure
+	// leaves host empty, and an empty host already means "do not pid-check
+	// this record" everywhere downstream -- so a branch here would be an
+	// untestable line reproducing a decision IsZero and Abandoned already
+	// make. A machine with no resolvable hostname still gets a usable
+	// record; it simply is never reported as abandoned, which is the safe
+	// direction.
+	host, _ := os.Hostname()
+	return Holder{Host: host, PID: os.Getpid()}
+}
+
+// Abandoned reports whether the process that was holding this node is gone.
+//
+// It answers false for anything it cannot be sure about: a record with no
+// holder (written before the field existed), one from another machine, or one
+// on a platform where process liveness cannot be checked. A false "abandoned"
+// would tell an operator their running session is dead, which is the one
+// mistake that would make this not worth having.
+func (h Holder) Abandoned() bool {
+	if h.IsZero() {
+		return false
+	}
+	// Same dropped error, same reason: a failure leaves self empty, which
+	// fails the comparison below and answers "not abandoned".
+	self, _ := os.Hostname()
+	if self == "" || self != h.Host {
+		return false
+	}
+	return !alive(h.PID)
+}
+
+// Holder names the process responsible for a node.
+type Holder struct {
+	// Host is where that process ran. A record written on another machine is
+	// never pid-checked: pids are only meaningful locally, and testing one
+	// against this machine's process table would be a coin flip.
+	Host string `json:"host,omitempty"`
+
+	// PID is the ember process id.
+	PID int `json:"pid,omitempty"`
+}
+
+// IsZero reports whether no holder was recorded, which is what every record
+// written before this field existed looks like.
+func (h Holder) IsZero() bool { return h.Host == "" || h.PID == 0 }
 
 // Handle reports the provider handle this record names, if it has one yet.
 func (r Record) Handle() (node.Handle, bool) {
@@ -73,6 +133,15 @@ func (r Record) Handle() (node.Handle, bool) {
 	}
 	return node.Handle{Provider: r.Provider, ID: r.NodeID}, true
 }
+
+// DirName is the subdirectory of the state directory holding node records.
+//
+// Named here rather than spelled at each call site. It was a literal in the
+// CLI and a second literal in the lab harness, and the two drifted: the
+// harness read the wrong directory, found nothing, and reported an empty
+// journal while ember was writing records perfectly well -- which made a lab
+// assertion about a clean journal pass without checking anything.
+const DirName = "nodes"
 
 // Store is a directory of records, one JSON file per run.
 type Store struct {

@@ -65,9 +65,9 @@ ember up --provider local --image ghcr.io/example/wl:v1 --port demo:8188 --ttl 3
 | `internal/reconcile` | pure scan over providers and records — what `ls` and `reap` act on |
 | `internal/session`, `internal/config`, `internal/cli` | wiring |
 
-`ember ls` and `ember reap` work too: `ls` asks every provider rather than
-trusting the local records, and exits 2 when anything needs attention —
-including a provider it could not reach.
+Every verb is implemented: `up`, `down`, `ls`, `reap`, `offers`, `version`.
+`ls` asks every provider rather than trusting the local records, and exits 2
+when anything needs attention — including a provider it could not reach.
 
 Next: RunPod, then Vast.ai. See `AGENTS.md` for the rules all of it is
 written against.
@@ -87,9 +87,11 @@ authentication at all.
 
 **A leaked node costs real money.** An orphaned H100 burns about 175 ₽/hour in
 silence. Every node carries a deadline enforced in several independent places,
-destroy runs on a context that survives Ctrl-C, and `ember ls --all` exits
-non-zero when any provider could not be reached — because "I could not check"
-must never look like "nothing is running".
+destroy runs on a context that survives Ctrl-C, and `ember ls` exits non-zero
+when any provider could not be reached — because "I could not check" must
+never look like "nothing is running". Each record also names the process
+holding its node, so a run killed with `SIGKILL` is reported as billing with
+nobody watching instead of printing `ok`.
 
 ## Build
 

@@ -70,27 +70,6 @@ func TestUsage_ListsEveryCommand(t *testing.T) {
 	}
 }
 
-func TestNotYet_FailsButNamesTheSubcommand(t *testing.T) {
-	for _, c := range commands() {
-		if !c.stub {
-			continue
-		}
-		var out bytes.Buffer
-		err := run([]string{c.name}, &out)
-		if err == nil || !strings.Contains(err.Error(), c.name) {
-			t.Errorf("%s: got %v, want an error naming the subcommand", c.name, err)
-		}
-		if ExitCode(err) != ExitError {
-			t.Errorf("%s: an unimplemented subcommand is an ordinary error, not a usage error", c.name)
-		}
-
-		out.Reset()
-		if err := run([]string{c.name, "-h"}, &out); err != nil {
-			t.Errorf("%s: -h on an unimplemented subcommand should not fail: %v", c.name, err)
-		}
-	}
-}
-
 // TestExitCode_DistinguishesFindingsFromFailure is the contract with cron:
 // "there are orphaned nodes" and "ember itself broke" must not look the same.
 func TestExitCode_DistinguishesFindingsFromFailure(t *testing.T) {

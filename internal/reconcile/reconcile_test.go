@@ -2,6 +2,8 @@ package reconcile
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -457,5 +459,117 @@ func TestScan_ANodeWithNoRunIDIsStillUntracked(t *testing.T) {
 	got := kinds(fs)
 	if got[KindUntracked] != 1 || got[KindOrphan] != 1 {
 		t.Fatalf("got %v, want one untracked node and one unanswerable record", got)
+	}
+}
+
+// deadHolder is a holder on this machine whose process has certainly exited.
+func deadHolder(t *testing.T) statestore.Holder {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Wait()
+
+	h := statestore.ThisProcess()
+	h.PID = pid
+	if !h.Abandoned() {
+		t.Fatalf("pid %d is still alive, so this test would prove nothing", pid)
+	}
+	return h
+}
+
+// TestScan_ANodeWhoseHolderIsGoneIsNotOK is the gap the SIGKILL lab found on
+// CI. The node is running, recorded, and inside its deadline, so every signal
+// reconcile had said "ok" -- and ls exited 0 over a GPU that was billing with
+// nobody watching, which is the exact failure the whole cost-safety design
+// exists to prevent.
+func TestScan_ANodeWhoseHolderIsGoneIsNotOK(t *testing.T) {
+	deadline := now.Add(time.Hour)
+	rec := record("run1", "n1", statestore.PhaseReady, deadline)
+	rec.Holder = deadHolder(t)
+
+	fs := Scan(
+		map[node.ProviderID][]node.Node{"test": {liveNode("n1", node.StateReady, deadline)}},
+		nil,
+		[]statestore.Record{rec},
+		now,
+	)
+
+	if len(fs) != 1 {
+		t.Fatalf("got %v", fs)
+	}
+	if fs[0].Kind != KindOrphan {
+		t.Errorf("kind = %v, want orphan", fs[0].Kind)
+	}
+	// The operator needs the command that fixes it, not just the diagnosis:
+	// reap deliberately will not touch a node inside its deadline.
+	if !strings.Contains(fs[0].Reason, "ember down test/n1") {
+		t.Errorf("the reason does not name the remedy: %q", fs[0].Reason)
+	}
+	if !strings.Contains(fs[0].Reason, "nobody watching") {
+		t.Errorf("the reason does not say what is wrong: %q", fs[0].Reason)
+	}
+}
+
+// TestScan_AnAbandonedHolderIsAlsoSeenOnTheLabelMatchedPath, which is the
+// crash-before-the-id-was-recorded case. Both paths lead to a live node and a
+// record, so both have to make the same judgement.
+func TestScan_AnAbandonedHolderIsAlsoSeenOnTheLabelMatchedPath(t *testing.T) {
+	deadline := now.Add(time.Hour)
+	rec := record("run1", "", statestore.PhaseIntent, deadline)
+	rec.Holder = deadHolder(t)
+
+	fs := Scan(
+		map[node.ProviderID][]node.Node{"test": {labelled("n1", "run1", node.StateReady, deadline)}},
+		nil,
+		[]statestore.Record{rec},
+		now,
+	)
+
+	if len(fs) != 1 || fs[0].Kind != KindOrphan {
+		t.Fatalf("got %v", fs)
+	}
+	if !strings.Contains(fs[0].Reason, "nobody watching") {
+		t.Errorf("the label-matched path does not check the holder: %q", fs[0].Reason)
+	}
+}
+
+// TestScan_ALiveHolderIsStillOK. The baseline that keeps the feature worth
+// having: a healthy long-running session must not become a finding, or the
+// operator learns to ignore ls.
+func TestScan_ALiveHolderIsStillOK(t *testing.T) {
+	deadline := now.Add(time.Hour)
+	rec := record("run1", "n1", statestore.PhaseReady, deadline)
+	rec.Holder = statestore.ThisProcess()
+
+	fs := Scan(
+		map[node.ProviderID][]node.Node{"test": {liveNode("n1", node.StateReady, deadline)}},
+		nil,
+		[]statestore.Record{rec},
+		now,
+	)
+	if len(fs) != 1 || fs[0].Kind != KindOK {
+		t.Fatalf("got %v, want one ok finding", fs)
+	}
+}
+
+// TestScan_AnExpiredNodeIsExpiredRegardlessOfItsHolder. Past the deadline is
+// reap's business whether or not anybody is holding it; reporting it as merely
+// abandoned would leave it to a human.
+func TestScan_AnExpiredNodeIsExpiredRegardlessOfItsHolder(t *testing.T) {
+	past := now.Add(-time.Hour)
+	rec := record("run1", "n1", statestore.PhaseReady, past)
+	rec.Holder = deadHolder(t)
+
+	fs := Scan(
+		map[node.ProviderID][]node.Node{"test": {liveNode("n1", node.StateReady, past)}},
+		nil,
+		[]statestore.Record{rec},
+		now,
+	)
+	if len(fs) != 1 || fs[0].Kind != KindExpired {
+		t.Fatalf("got %v, want expired", fs)
 	}
 }

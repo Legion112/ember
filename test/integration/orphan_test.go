@@ -29,8 +29,16 @@ import (
 // "labels are the source of truth, the store is a cache" has to mean in
 // practice.
 //
-// ls must also exit 2 rather than 0: an ls that exited 0 here would mean an
-// operator's timer reporting health over a GPU that is still billing.
+// Running it on CI found a second one. There, the kill landed *after* the id
+// was recorded, so the record was complete, the node was running and inside
+// its deadline, and ls exited 0 -- reporting health over a GPU billing with
+// nobody watching. ember had no way to tell a node somebody is using from one
+// whose owner died, so the record now carries the holding process and
+// reconcile reports a dead holder. The TTL still bounds the loss; this makes
+// the loss visible while it is happening.
+//
+// So this lab passes on both timings, which is the point: whether the kill
+// lands before or after the id is written, exactly one finding comes out.
 func TestOrphan_SigkillLeavesExactlyOneFindableNode(t *testing.T) {
 	l := harness.New(t)
 	port := harness.FreePort(t)
@@ -40,6 +48,13 @@ func TestOrphan_SigkillLeavesExactlyOneFindableNode(t *testing.T) {
 		"--port", fmt.Sprintf("sshd:22:%d", port),
 	)
 	l.WaitNode(t.Context(), 90*time.Second)
+	// Waiting for the id to reach the journal makes this lab test one thing
+	// rather than whichever thing the machine's speed picked: this is the
+	// complete-record case, where every signal reconcile has says the node
+	// is healthy and only the dead holder gives it away. The other side of
+	// that window -- a record with no id, joined back to its node by the
+	// label -- is unit-tested in internal/reconcile.
+	l.WaitRecorded(30 * time.Second)
 
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatalf("kill ember: %v", err)
@@ -55,6 +70,11 @@ func TestOrphan_SigkillLeavesExactlyOneFindableNode(t *testing.T) {
 	if ls.ExitCode != 2 {
 		t.Errorf("ls exited %d after a SIGKILL, want 2; a timer would read this as healthy\n%s",
 			ls.ExitCode, ls.Combined())
+	}
+	// Whichever side of the record-the-id window the kill landed on, the
+	// holder is gone, and ls must name the command that ends it.
+	if !strings.Contains(ls.Combined(), "ember down") {
+		t.Errorf("ls does not tell the operator how to end it:\n%s", ls.Combined())
 	}
 
 	// One node, so one finding. Two means the record and its node were not
@@ -101,6 +121,7 @@ func TestOrphan_DryRunReapDestroysNothing(t *testing.T) {
 		"--port", fmt.Sprintf("sshd:22:%d", port),
 	)
 	l.WaitNode(t.Context(), 90*time.Second)
+	l.WaitRecorded(30 * time.Second)
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatalf("kill ember: %v", err)
 	}
@@ -136,8 +157,8 @@ func TestUp_DryRunCreatesNothing(t *testing.T) {
 	if n := len(l.Nodes(t.Context())); n != 0 {
 		t.Errorf("a dry run created %d node(s)", n)
 	}
-	if recs := l.Records(); strings.Contains(recs, "\"phase\"") {
-		t.Errorf("a dry run wrote a journal record:\n%s", recs)
+	if recs := l.Records(); len(recs) != 0 {
+		t.Errorf("a dry run wrote %d journal record(s): %+v", len(recs), recs)
 	}
 }
 

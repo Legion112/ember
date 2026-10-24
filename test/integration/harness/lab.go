@@ -41,6 +41,7 @@ import (
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provider/local"
+	"github.com/Legion112/ember/internal/statestore"
 )
 
 // LabImage is what ember's local provider starts as a node.
@@ -326,34 +327,58 @@ func (l *Lab) Reap() {
 // StateDir is where the journal lives.
 func (l *Lab) StateDir() string { return filepath.Join(l.Dir, "state") }
 
-// Records returns the journal's raw bytes, for labs asserting that a crash
-// left something findable behind.
-func (l *Lab) Records() string {
+// Records returns the journal, read through statestore itself.
+//
+// Going through the real package rather than globbing a hand-spelled path is
+// what keeps this honest. Two earlier versions got it wrong: one read a single
+// nodes.json, the other read the state directory while records live in a
+// "nodes" subdirectory of it. Both returned nothing, both reported an empty
+// journal while ember was writing records perfectly well, and a lab asserting
+// "a clean run leaves no records" passed without checking anything.
+func (l *Lab) Records() []statestore.Record {
 	l.t.Helper()
-	// One file per run id, so the whole journal is the concatenation. An
-	// earlier version read a single nodes.json, found nothing, and reported
-	// an empty journal while ls was reading records perfectly well -- a
-	// harness bug that would have made a real leak look like a clean run.
-	entries, err := os.ReadDir(l.StateDir())
+	store, err := statestore.Open(filepath.Join(l.StateDir(), statestore.DirName))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return ""
-		}
-		l.t.Fatalf("read state dir: %v", err)
+		l.t.Fatalf("open the journal: %v", err)
 	}
+	recs, err := store.List()
+	if err != nil {
+		l.t.Fatalf("read the journal: %v", err)
+	}
+	return recs
+}
 
-	var b strings.Builder
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
+// RecordedNodeIDs are the provider node ids the journal knows about.
+func (l *Lab) RecordedNodeIDs() []string {
+	l.t.Helper()
+	var out []string
+	for _, r := range l.Records() {
+		if h, ok := r.Handle(); ok {
+			out = append(out, h.ID)
 		}
-		raw, err := os.ReadFile(filepath.Join(l.StateDir(), e.Name()))
-		if err != nil {
-			l.t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		b.WriteString(e.Name() + ":\n" + string(raw) + "\n")
 	}
-	return b.String()
+	return out
+}
+
+// WaitRecorded blocks until the journal holds a node id for some run.
+//
+// The labs that interrupt ember need this, or whether the record is complete
+// depends on how fast the machine is and the lab asserts a different thing on
+// a loaded CI runner than on a laptop. That is exactly what happened: the
+// SIGKILL lab passed locally, where the kill landed before the id was
+// written, and failed on CI, where it landed after.
+func (l *Lab) WaitRecorded(within time.Duration) {
+	l.t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if len(l.RecordedNodeIDs()) > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			l.t.Fatalf("no node id reached the journal within %v; it holds %d record(s)", within, len(l.Records()))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // FreePort asks the kernel for a port nothing is using.

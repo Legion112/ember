@@ -162,6 +162,10 @@ func WithNode(
 		Deadline: req.Deadline,
 		Offer:    string(offer.Token),
 		Price:    offer.Price,
+		// Recorded with the intent, before the create call, so a node whose
+		// creator is later killed can be told apart from one somebody is
+		// still using.
+		Holder: statestore.ThisProcess(),
 	}
 	if err := o.Store.Create(rec); err != nil {
 		return err

@@ -2,6 +2,7 @@ package statestore
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -247,5 +248,110 @@ func TestStore_UpdateReportsAnUnwritableDirectory(t *testing.T) {
 
 	if err := s.Update(id, func(r *Record) { r.Phase = PhaseReady }); err == nil {
 		t.Fatal("an update that could not be written reported success")
+	}
+}
+
+// TestHolder_ThisProcessIsAlive. The baseline: a record written by a running
+// ember must never read as abandoned, or every healthy session becomes a
+// finding and the operator learns to ignore `ls`.
+func TestHolder_ThisProcessIsAlive(t *testing.T) {
+	h := ThisProcess()
+	if h.IsZero() {
+		t.Fatalf("ThisProcess() is zero: %+v", h)
+	}
+	if h.PID != os.Getpid() {
+		t.Errorf("pid = %d, want %d", h.PID, os.Getpid())
+	}
+	if h.Abandoned() {
+		t.Error("the running test process reads as abandoned")
+	}
+}
+
+// TestHolder_ADeadPidIsAbandoned, which is the whole point: a run killed with
+// SIGKILL leaves a node that is running, recorded and inside its deadline, and
+// without this it is indistinguishable from a session somebody is using.
+func TestHolder_ADeadPidIsAbandoned(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		// Not a skip. A machine with no hostname is a real environment
+		// problem, and a test that skips itself reports success for
+		// something that never ran.
+		t.Fatalf("no hostname on this machine: %v", err)
+	}
+
+	// A process that has certainly exited: this test binary told to run no
+	// tests at all, so it starts, matches nothing and returns immediately.
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Wait()
+
+	h := Holder{Host: host, PID: pid}
+	if !h.Abandoned() {
+		t.Errorf("pid %d has exited but does not read as abandoned", pid)
+	}
+}
+
+// TestHolder_UnknownsAreNeverAbandoned. Each of these is a case ember cannot
+// be sure about, and a false "abandoned" would tell an operator their running
+// session is dead -- the one mistake that would make this not worth having.
+func TestHolder_UnknownsAreNeverAbandoned(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("no hostname on this machine: %v", err)
+	}
+
+	for name, h := range map[string]Holder{
+		"no holder recorded at all": {},
+		"holder with no pid":        {Host: host},
+		"holder with no host":       {PID: os.Getpid()},
+		// Pids are only meaningful locally; testing one from another machine
+		// against this process table would be a coin flip.
+		"another machine": {Host: host + "-elsewhere", PID: 999999},
+	} {
+		if h.Abandoned() {
+			t.Errorf("%s: read as abandoned (%+v)", name, h)
+		}
+	}
+}
+
+func TestHolder_IsZero(t *testing.T) {
+	if !(Holder{}).IsZero() {
+		t.Error("the zero holder does not report itself as one")
+	}
+	if (Holder{Host: "h", PID: 1}).IsZero() {
+		t.Error("a complete holder reports itself as zero")
+	}
+	// Half a holder is not a holder: neither half alone can be checked.
+	if !(Holder{Host: "h"}).IsZero() || !(Holder{PID: 1}).IsZero() {
+		t.Error("a half-filled holder should count as zero")
+	}
+}
+
+// TestHolder_SurvivesARoundTrip, including through a record written before the
+// field existed -- which is every record already on disk.
+func TestHolder_SurvivesARoundTrip(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := Record{
+		RunID: "0123456789abcdef", Provider: "local", Phase: PhaseIntent,
+		Label: "ember-0123456789abcdef-1", Holder: ThisProcess(),
+	}
+	if err := s.Create(rec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d records", len(got))
+	}
+	if got[0].Holder != rec.Holder {
+		t.Errorf("holder = %+v, want %+v", got[0].Holder, rec.Holder)
 	}
 }

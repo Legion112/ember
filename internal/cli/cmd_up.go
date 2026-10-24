@@ -251,5 +251,5 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 // openStore is a thin wrapper so cmd_up does not import statestore twice.
 func openStore(dir string) (*statestore.Store, error) {
-	return statestore.Open(filepath.Join(dir, "nodes"))
+	return statestore.Open(filepath.Join(dir, statestore.DirName))
 }

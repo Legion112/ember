@@ -70,24 +70,18 @@ type command struct {
 	name    string
 	summary string
 	run     func(args []string, out io.Writer) error
-
-	// stub marks a verb that is listed but not implemented. The flag exists
-	// so the test for that behaviour can find them itself: hardcoding one
-	// meant the test broke every time a verb was finished, which trains
-	// people to edit tests to make them pass.
-	stub bool
 }
 
 // commands is the dispatch table. Output goes through an injected io.Writer so
 // that every subcommand is testable without capturing os.Stdout.
 func commands() []command {
 	return []command{
-		{"version", "print the ember version", cmdVersion, false},
-		{"up", "rent a node, forward its ports to loopback, destroy it", cmdUp, false},
-		{"down", "destroy a node by handle", notYet("down"), true},
-		{"ls", "list nodes ember created, across every configured provider", cmdLs, false},
-		{"reap", "destroy every node past its deadline", cmdReap, false},
-		{"offers", "list rentable offers matching a filter", notYet("offers"), true},
+		{"version", "print the ember version", cmdVersion},
+		{"up", "rent a node, forward its ports to loopback, destroy it", cmdUp},
+		{"down", "destroy a node by handle", cmdDown},
+		{"ls", "list nodes ember created, across every configured provider", cmdLs},
+		{"reap", "destroy every node past its deadline", cmdReap},
+		{"offers", "list rentable offers matching a filter", cmdOffers},
 	}
 }
 
@@ -134,19 +128,6 @@ func cmdVersion(args []string, out io.Writer) error {
 	}
 	outf(out, "%s\n", Version)
 	return nil
-}
-
-// notYet is a placeholder that names the subcommand rather than failing
-// vaguely. It exists so the dispatch table is the real one from the first
-// commit: a table that grows a verb at a time hides which verbs are planned.
-func notYet(name string) func([]string, io.Writer) error {
-	return func(args []string, out io.Writer) error {
-		if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-			outf(out, "ember %s is not implemented yet\n", name)
-			return nil
-		}
-		return fmt.Errorf("subcommand %q is not implemented yet", name)
-	}
 }
 
 // Quote is a small helper for error messages that embed user input.

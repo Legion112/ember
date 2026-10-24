@@ -184,6 +184,17 @@ func Scan(
 				Kind: KindExpired, Provider: rec.Provider, Node: n, Record: &records[i],
 				Reason: fmt.Sprintf("past its deadline (%s) and still %s", rec.Deadline.Format(time.RFC3339), n.State),
 			})
+		case rec.Holder.Abandoned():
+			// Inside its deadline, so reap still will not touch it -- the
+			// deadline is the authority on destruction, and `ember down`
+			// exists for the operator who has decided. But it is billing
+			// with nobody watching, and that is worth saying out loud
+			// rather than printing "ok".
+			out = append(out, Finding{
+				Kind: KindOrphan, Provider: rec.Provider, Node: n, Record: &records[i],
+				Reason: fmt.Sprintf("%s until %s, but the ember process holding it (pid %d) is gone; it is billing with nobody watching. Destroy it with: ember down %s",
+					n.State, rec.Deadline.Format(time.RFC3339), rec.Holder.PID, n.Handle),
+			})
 		default:
 			out = append(out, Finding{
 				Kind: KindOK, Provider: rec.Provider, Node: n, Record: &records[i],
@@ -224,6 +235,10 @@ func classify(n node.Node, rec *statestore.Record, r statestore.Record, now time
 	case n.Expired(now):
 		f.Kind = KindExpired
 		f.Reason = fmt.Sprintf("past its deadline (%s) and still %s; %s", r.Deadline.Format(time.RFC3339), n.State, found)
+	case r.Holder.Abandoned():
+		f.Kind = KindOrphan
+		f.Reason = fmt.Sprintf("%s until %s, but the ember process holding it (pid %d) is gone; it is billing with nobody watching. Destroy it with: ember down %s",
+			n.State, r.Deadline.Format(time.RFC3339), r.Holder.PID, n.Handle)
 	default:
 		f.Kind = KindOrphan
 		// Not expired, so reap deliberately leaves it: the deadline is the

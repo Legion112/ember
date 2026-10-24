@@ -116,6 +116,20 @@ that sentence made unrepresentable rather than merely tested.
   mentioned -- and `reap` could act on neither, although both carried the same
   run id the whole time. That defeats the entire reason the record is written
   before the create call.
+- **Each record names the process holding its node.** Without it, a run killed
+  with SIGKILL leaves a node that is running, recorded and inside its deadline
+  -- indistinguishable from a healthy long-running session -- and `ls` prints
+  `ok` over a GPU billing with nobody watching. The TTL still bounds the loss;
+  the holder makes it visible while it is happening. It answers "not
+  abandoned" for everything it cannot be sure of: no holder recorded, a record
+  from another machine, a platform where liveness cannot be checked. A false
+  "abandoned" would tell an operator their running session is dead, which is
+  the one mistake that would make the check not worth having.
+- **One name for a path, not one per call site.** The journal's "nodes"
+  subdirectory was a literal in the CLI and a second literal in the lab
+  harness. They drifted, the harness read the wrong directory and found
+  nothing, and a lab asserting "a clean run leaves no records" passed without
+  checking anything. The harness now reads through `statestore` itself.
 - **No ember function takes an `ssh.HostKeyCallback`.** `hostkey.Trust` has one
   unexported method and that package holds no permissive implementation, so
   `ssh.InsecureIgnoreHostKey()` cannot be typed into the program — not behind a
