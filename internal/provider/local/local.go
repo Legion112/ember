@@ -70,6 +70,25 @@ func (p *Provider) Caps() provider.Caps {
 	}
 }
 
+// imageFor picks the image a node runs.
+//
+// The spec's image wins, so `--image` means the same thing on every provider.
+// It did not before: this provider ignored the spec entirely and always ran
+// its own, so an operator who passed `--image` to the local provider had it
+// silently dropped while the identical flag on RunPod chose the node image.
+// A flag that works on one provider and is quietly discarded on another is
+// worse than one that fails.
+//
+// ember runs one container that is both the node and the workload, so that
+// image has to carry sshd and embernode. DefaultImage is the fallback for a
+// spec with no image at all, which is the shape the provider's own tests use.
+func (p *Provider) imageFor(spec node.Spec) string {
+	if spec.Image != "" {
+		return spec.Image
+	}
+	return p.image()
+}
+
 func (p *Provider) image() string {
 	if p.Image != "" {
 		return p.Image
@@ -119,14 +138,15 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 	if req.Offer.Provider != Name {
 		return node.Handle{}, fmt.Errorf("offer belongs to %q, not %q", req.Offer.Provider, Name)
 	}
-	ok, err := p.Engine.ImageExists(ctx, p.image())
+	img := p.imageFor(req.Spec)
+	ok, err := p.Engine.ImageExists(ctx, img)
 	if err != nil {
-		return node.Handle{}, fmt.Errorf("check for image %s: %w", p.image(), err)
+		return node.Handle{}, fmt.Errorf("check for image %s: %w", img, err)
 	}
 	if !ok {
-		// A hard failure naming the fix, not a pull: the image is built from
-		// this repository and a silent pull would fetch somebody else's.
-		return node.Handle{}, fmt.Errorf("image %s is missing; run `make docker-build`", p.image())
+		// A hard failure naming the fix, not a pull: the node image is built
+		// from this repository and a silent pull would fetch somebody else's.
+		return node.Handle{}, fmt.Errorf("image %s is not on this docker daemon; build it with `make docker-build` or pull it first", img)
 	}
 
 	label := provider.Label(req.RunID, req.Deadline)
@@ -147,7 +167,7 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 
 	spec := dockerengine.ContainerSpec{
 		Name:    "ember-node-" + string(req.RunID),
-		Image:   p.image(),
+		Image:   img,
 		Labels:  labels,
 		Network: netName,
 		Env: map[string]string{

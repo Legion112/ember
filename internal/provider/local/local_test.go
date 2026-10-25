@@ -12,17 +12,22 @@ import (
 	"github.com/Legion112/ember/internal/provider"
 )
 
+// specImage is what request() asks for. The provider runs the spec's image
+// now rather than its own default, so the fake has to know about it.
+const specImage = "ghcr.io/example/comfyui:v1"
+
 func newProvider(t *testing.T) (*Provider, *dockerengine.RecordingEngine) {
 	t.Helper()
 	e := dockerengine.NewRecordingEngine()
 	e.AddImage(DefaultImage)
+	e.AddImage(specImage)
 	return New(e), e
 }
 
 func request(t *testing.T) node.CreateRequest {
 	t.Helper()
 	spec, err := node.NewSpec(node.SpecOptions{
-		Image: "ghcr.io/example/comfyui:v1",
+		Image: specImage,
 		TTL:   time.Hour,
 	})
 	if err != nil {
@@ -177,7 +182,8 @@ func TestCreate_LeavesNothingBehindWhenItFails(t *testing.T) {
 
 func TestCreate_ReportsAFailedImageCheck(t *testing.T) {
 	p, e := newProvider(t)
-	e.Errors["ImageExists "+DefaultImage] = errors.New("daemon broke")
+	// Keyed on the spec's image, which is the one the provider now checks.
+	e.Errors["ImageExists "+specImage] = errors.New("daemon broke")
 	if _, err := p.Create(t.Context(), request(t)); err == nil {
 		t.Fatal("Create continued after it could not check for the image")
 	}
@@ -510,5 +516,60 @@ func TestPublicPorts_ReportsNoneRatherThanNil(t *testing.T) {
 	n := node.Node{}.WithExposed(publicPorts(dockerengine.Container{}))
 	if _, reported := n.Exposure(); !reported {
 		t.Fatal("a container with no ports reads as unreported")
+	}
+}
+
+// TestCreate_RunsTheSpecsImage. The flag means the same thing on every
+// provider now. It did not before: this provider ignored the spec and always
+// ran its own image, so `--image` was silently dropped here while the
+// identical flag on RunPod chose the node image. A flag that works on one
+// provider and is quietly discarded on another is worse than one that fails.
+func TestCreate_RunsTheSpecsImage(t *testing.T) {
+	p, e := newProvider(t)
+
+	if _, err := p.Create(t.Context(), request(t)); err != nil {
+		t.Fatal(err)
+	}
+	cs := e.Containers()
+	if len(cs) != 1 {
+		t.Fatalf("got %d containers", len(cs))
+	}
+	if cs[0].Image != specImage {
+		t.Errorf("ran %q, want the spec's image %q", cs[0].Image, specImage)
+	}
+}
+
+// TestCreate_FallsBackToTheNodeImageWithoutASpecImage, which is the shape the
+// provider's own construction uses when nothing named one.
+func TestCreate_FallsBackToTheNodeImageWithoutASpecImage(t *testing.T) {
+	p, e := newProvider(t)
+	req := request(t)
+	req.Spec.Image = ""
+
+	if _, err := p.Create(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	cs := e.Containers()
+	if len(cs) != 1 || cs[0].Image != DefaultImage {
+		t.Fatalf("got %+v, want the default node image", cs)
+	}
+}
+
+// TestCreate_NamesTheMissingImageAndHowToGetIt. A pull would fetch somebody
+// else's image under the same name; a failure that says which image and what
+// to run is the honest alternative.
+func TestCreate_NamesTheMissingImageAndHowToGetIt(t *testing.T) {
+	e := dockerengine.NewRecordingEngine() // no images at all
+	p := New(e)
+
+	_, err := p.Create(t.Context(), request(t))
+	if err == nil {
+		t.Fatal("Create ran with no image on the daemon")
+	}
+	if !strings.Contains(err.Error(), specImage) {
+		t.Errorf("the error does not name the image: %v", err)
+	}
+	if !strings.Contains(err.Error(), "make docker-build") {
+		t.Errorf("the error does not say how to fix it: %v", err)
 	}
 }

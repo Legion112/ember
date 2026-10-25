@@ -54,6 +54,9 @@ COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/c
 # internal/hostkey carry the documented stdlib-error gaps above.
 COVER_OVERALL := 94
 
+# LAB_IMAGE is the local tag for the node image. The published one is built
+# from the same node.Dockerfile by .github/workflows/node-image.yml, so the
+# labs and a rented pod run the same bytes.
 LAB_IMAGE := ember:lab
 
 .PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration clean
@@ -102,7 +105,7 @@ lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { 		echo "golangci-lint is not installed. Install it with:"; 		echo "  $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0"; 		exit 1; 	}; 	golangci-lint run
 
 docker-build:
-	docker build -t $(LAB_IMAGE) -f test/integration/Dockerfile .
+	docker build -t $(LAB_IMAGE) -f node.Dockerfile .
 
 # The labs refuse to skip themselves: a missing image is a hard failure with
 # the command to fix it, never a t.Skip. A silently skipped lab is worse than

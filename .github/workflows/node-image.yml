@@ -1,0 +1,67 @@
+# Publishes the node image a rented pod runs.
+#
+# CI pushes it rather than a laptop: the GITHUB_TOKEN already has the scope,
+# so nobody has to hold a registry credential locally, and the image is built
+# from a commit rather than from whatever happened to be in a working tree.
+name: node image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      # Only when something that lands in the image changes. The image is
+      # sshd plus two static binaries, so a change to internal/cli cannot
+      # alter it and a rebuild would only churn the tag.
+      - node.Dockerfile
+      - cmd/embernode/**
+      - cmd/emberwl/**
+      - go.mod
+      - go.sum
+      - .github/workflows/node-image.yml
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/ember-node
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Tagged by commit sha as well as by a moving tag. The sha tag is what
+      # ember.yaml should name: `:latest` on a node image means a pod that
+      # provisioned yesterday and one that provisions today are not the same
+      # machine, and node.Spec already refuses a `:latest` workload image for
+      # the same reason.
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          file: node.Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The digest is the only thing worth quoting in a config: a tag can be
+      # moved, a digest cannot.
+      - name: report what to put in ember.yaml
+        run: |
+          echo "### node image published" >> "$GITHUB_STEP_SUMMARY"
+          echo '```yaml' >> "$GITHUB_STEP_SUMMARY"
+          echo "node_image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

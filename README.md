@@ -61,8 +61,15 @@ destroys the node — including after Ctrl-C.
 
 ```
 make docker-build
-ember up --provider local --image ghcr.io/example/wl:v1 --port demo:8188 --ttl 30m
+ember up --provider local --image ember:lab --port demo:22 --ttl 30m
 ```
+
+ember runs **one container that is both the node and the workload**, so the
+image has to carry sshd and `embernode` alongside whatever you came to run.
+`node.Dockerfile` builds that base: locally as `ember:lab` for the labs, and
+published by CI to `ghcr.io/legion112/ember-node` for a rented pod. The labs
+and a rented pod run the same bytes, which is the point — a lab that tested a
+different image would prove nothing about what the provider pulls.
 
 | | |
 |---|---|

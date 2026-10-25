@@ -1,13 +1,18 @@
-# ember:lab — the node image.
+# The ember node image.
 #
-# This is what ember starts when the local provider rents a "machine". It runs
-# sshd and nothing else that matters, so every layer above the provider — the
-# handshake, the host-key pin, the forward, the teardown — exercises its real
-# production code path against a real sshd, for no money.
+# One image, two uses, on purpose. Locally it is built as `ember:lab` and the
+# local provider starts it as a "machine", so the handshake, the host-key pin,
+# the forward and the teardown all exercise their production code path against
+# a real sshd for no money. Published to a registry, it is what a rented pod
+# actually runs -- the same bytes, which is the point: a lab that tested a
+# different image would prove nothing about what RunPod pulls.
 #
-# Pinned by digest, not by tag. A tag is mutable upstream, and a lab whose base
-# image changed under it reports a failure in ember for a change nobody here
-# made.
+# It runs sshd and nothing else that matters. The workload is a separate
+# container image; this one exists so ember can reach a node at all.
+#
+# Pinned by digest, not by tag. A tag is mutable upstream, and a node whose
+# base image changed under it reports a failure in ember for a change nobody
+# here made.
 FROM golang:1.27-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS build
 WORKDIR /src
 # Modules first, so a source-only change does not re-download the world.
