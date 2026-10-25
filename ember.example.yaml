@@ -1,0 +1,41 @@
+# ember configuration. Safe to commit: no credentials live here.
+#
+# Tokens come from the environment (RUNPOD_API_KEY, VAST_API_KEY) or from
+# ~/.config/ember/credentials.yaml with mode 0600, which ember refuses to read
+# if it is any looser. The environment wins, so a one-off run can use another
+# account without editing a file.
+
+provider: runpod
+
+# ember runs one container that is both the node and the workload, so the
+# image has to carry sshd and embernode. node.Dockerfile in this repository
+# builds that base; CI publishes it and prints the digest.
+#
+# Pinned by digest, not by tag. A tag can be moved, so `:latest` means a pod
+# that provisioned yesterday and one that provisions today are not the same
+# machine -- which is why ember refuses a `:latest` image outright.
+image: ghcr.io/legion112/ember-node@sha256:cf62de1920ed868fbe567b8bd127ed693d2ced3d163de49a0816534906179f3f
+
+# The node destroys itself after this even if ember never gets to, which is
+# what stops the bill when the laptop dies mid-run.
+ttl: 15m
+
+gpu: rtx4090
+
+# Refuse any offer dearer than this. Integer microdollars underneath, so the
+# comparison is exact.
+max_hourly_usd: "1.00"
+max_run_usd: "0.50"
+
+# name:remote or name:remote:local. Every local port binds to 127.0.0.1 and is
+# reached over SSH; nothing is published to the internet.
+ports:
+  - sshd:22:18022
+
+# Paths to retrieve from the node before it dies, as remote or remote:local.
+outputs:
+  - /etc/hostname:host
+
+# SECURE is RunPod's own hardware and the default. COMMUNITY is cheaper and
+# runs on a machine somebody else owns and can see.
+runpod_cloud: SECURE
