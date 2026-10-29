@@ -4,6 +4,7 @@ package integration
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,4 +203,85 @@ func TestTransfer_SurvivesALargePayload(t *testing.T) {
 		t.Errorf("the file on disk is %d bytes, want %d", fi.Size(), want)
 	}
 	t.Logf("16 MiB in %v", time.Since(start).Round(time.Millisecond))
+}
+
+// TestSSHX_QuotingSurvivesARealShell is the half a unit test cannot do.
+//
+// sshx.Quote claims that inside single quotes a POSIX shell treats every
+// character literally. A unit test can only check that the string ember built
+// looks right; whether the remote shell agrees is a question for a remote
+// shell. So these go over a real SSH connection to a real sshd, which hands
+// the line to a real /bin/sh, and the arguments are printed back one per line
+// for comparison.
+//
+// Each input would do something if it escaped quoting: run a command, expand
+// a variable, split into two words, or truncate the argument list.
+func TestSSHX_QuotingSurvivesARealShell(t *testing.T) {
+	l := harness.New(t)
+	n := mintAndStart(t, l, "quoting")
+
+	trust, err := hostkey.Pinned(fingerprintOf(t, n.Pair))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := dial(t, l, n, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	runner := sshexec.New(client.SSH())
+
+	hostile := []string{
+		"a lovely cat",
+		"$(touch /tmp/pwned)",
+		"`touch /tmp/pwned2`",
+		"a;touch /tmp/pwned3",
+		"$HOME",
+		"${PATH}",
+		"a|b",
+		"a&b",
+		"a>/tmp/pwned4",
+		"it's a cat",
+		`a"b`,
+		"*",
+		"~",
+		"back\\slash",
+		"a\tb",
+	}
+
+	// printf '%s\n' prints each argument on its own line, so the comparison
+	// is exact and a dropped or split argument shows up immediately.
+	stdout, wait, err := runner.Run(t.Context(), sshx.Cmd("printf", append([]string{"%s\n"}, hostile...)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, rerr := io.ReadAll(stdout)
+	_ = stdout.Close()
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if err := wait(); err != nil {
+		t.Fatalf("printf: %v", err)
+	}
+
+	got := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(got) != len(hostile) {
+		t.Fatalf("got %d arguments back, sent %d: %q", len(got), len(hostile), got)
+	}
+	for i, want := range hostile {
+		if got[i] != want {
+			t.Errorf("argument %d came back changed:\n  sent %q\n  got  %q", i, want, got[i])
+		}
+	}
+
+	// And nothing ran: every substitution above would have left a file.
+	for _, marker := range []string{"/tmp/pwned", "/tmp/pwned2", "/tmp/pwned3", "/tmp/pwned4"} {
+		_, w, lerr := runner.Run(t.Context(), sshx.Cmd("test", "-e", marker))
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		if w() == nil {
+			t.Errorf("%s exists: an argument escaped quoting and ran", marker)
+		}
+	}
 }

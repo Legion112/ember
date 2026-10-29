@@ -23,34 +23,80 @@ func TestCommand_ValidateAcceptsOrdinaryPathsAndFlags(t *testing.T) {
 	}
 }
 
-// TestCommand_ValidateRefusesShellMetacharacters. An SSH exec request is
-// handed to the remote shell, so these are refused rather than quoted: a
-// quoting routine never exercised on a hostile input is one nobody knows is
-// wrong, and the input here is the operator's own config, which is exactly the
-// kind of thing that ends up holding a path with a space in it.
-func TestCommand_ValidateRefusesShellMetacharacters(t *testing.T) {
-	for _, arg := range []string{
-		"", "a b", "a;b", "a&b", "a|b", "a>b", "a<b", "$(id)", "`id`",
-		"a'b", `a"b`, "a\nb", "a\tb", "a*b", "a?b", "a(b", "a{b", "a~b",
-		"a#b", "a!b", "a\\b", "a$b",
+// TestQuote_NeutralisesHostileArguments.
+//
+// An SSH exec request is handed to the remote shell, so every one of these
+// would run something if it reached the command line bare. Inside single
+// quotes every character except the single quote itself is literal: no
+// expansion, no substitution, no word splitting, no backslash escapes.
+//
+// ember used to refuse these instead, which was fine while every remote
+// command was tar over config-file paths. A workload command cannot work that
+// way -- a prompt is arbitrary text -- so the quoting exists now and this is
+// where it is exercised. The lab in test/integration round-trips the same
+// inputs through a real sshd and compares what arrived, which is the half a
+// unit test cannot do.
+func TestQuote_NeutralisesHostileArguments(t *testing.T) {
+	for in, want := range map[string]string{
+		// Nothing special: left bare, so ordinary commands stay readable.
+		"tar":          "tar",
+		"-czf":         "-czf",
+		"/workspace/a": "/workspace/a",
+
+		// Everything else is wrapped.
+		"a b":            "'a b'",
+		"$(touch pwned)": "'$(touch pwned)'",
+		"`id`":           "'`id`'",
+		"a;rm -rf /":     "'a;rm -rf /'",
+		"a|b":            "'a|b'",
+		"a&b":            "'a&b'",
+		"a>b":            "'a>b'",
+		"$HOME":          "'$HOME'",
+		"a\nb":           "'a\nb'",
+		"a*b":            "'a*b'",
+		`a"b`:            `'a"b'`,
+		"~/secrets":      "'~/secrets'",
+		"":               "''",
+
+		// The one character single quotes cannot contain: end the quote,
+		// escape it, reopen.
+		"a'b":    `'a'\''b'`,
+		"'":      `''\'''`,
+		"it's a": `'it'\''s a'`,
 	} {
-		if err := Cmd("tar", arg).Validate(); err == nil {
-			t.Errorf("argument %q was accepted", arg)
-		}
-	}
-	for _, path := range []string{"", "ta r", "tar;id", "/bin/$SHELL"} {
-		if err := Cmd(path).Validate(); err == nil {
-			t.Errorf("path %q was accepted", path)
+		if got := Quote(in); got != want {
+			t.Errorf("Quote(%q) = %s, want %s", in, got, want)
 		}
 	}
 }
 
-func TestCommand_String(t *testing.T) {
-	if got := Cmd("tar", "-czf", "-").String(); got != "tar -czf -" {
-		t.Errorf("got %q", got)
+// TestCommand_StringQuotesEveryPart, so an argument cannot escape into being
+// a second command.
+func TestCommand_StringQuotesEveryPart(t *testing.T) {
+	got := Cmd("sd-cli", "-p", "a lovely cat; rm -rf /", "-o", "/workspace/out/cat.png").String()
+	want := `sd-cli -p 'a lovely cat; rm -rf /' -o /workspace/out/cat.png`
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
 	}
-	if got := Cmd("true").String(); got != "true" {
-		t.Errorf("got %q", got)
+}
+
+// TestCommand_ValidateRefusesOnlyWhatCannotBeSent. A NUL byte cannot appear
+// in an argument at all; everything else survives quoting, including a
+// newline, which inside single quotes is a literal newline.
+func TestCommand_ValidateRefusesOnlyWhatCannotBeSent(t *testing.T) {
+	if err := Cmd("").Validate(); err == nil {
+		t.Error("a command with no program was accepted")
+	}
+	if err := Cmd("tar\x00evil").Validate(); err == nil {
+		t.Error("a NUL in the path was accepted")
+	}
+	if err := Cmd("tar", "a\x00b").Validate(); err == nil {
+		t.Error("a NUL in an argument was accepted")
+	}
+	for _, ok := range []string{"a b", "a;b", "$(id)", "a\nb", "a'b"} {
+		if err := Cmd("tar", ok).Validate(); err != nil {
+			t.Errorf("Validate rejected %q, which quoting handles: %v", ok, err)
+		}
 	}
 }
 
@@ -97,7 +143,7 @@ func TestRecordingRunner_ReturnsScriptedOutput(t *testing.T) {
 // than the real thing is a fake that hides the bug.
 func TestRecordingRunner_RefusesWhatProductionWouldRefuse(t *testing.T) {
 	r := NewRecordingRunner()
-	if _, _, err := r.Run(t.Context(), Cmd("tar", "a;rm -rf /")); err == nil {
+	if _, _, err := r.Run(t.Context(), Cmd("tar\x00evil")); err == nil {
 		t.Fatal("the fake accepted a command the real runner would refuse")
 	}
 	if len(r.Calls()) != 0 {

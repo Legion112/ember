@@ -75,6 +75,11 @@ type Config struct {
 
 	// Outputs are the paths to retrieve from the node before it dies.
 	Outputs []string `yaml:"outputs"`
+
+	// Cmd is the workload: what the node was rented to run. Empty holds the
+	// node open with its ports forwarded, which is the interactive shape.
+	// Set, ember runs it, brings the outputs home and destroys the node.
+	Cmd []string `yaml:"cmd"`
 }
 
 // Default is what ember uses with no file and no flags.

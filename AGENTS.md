@@ -169,11 +169,25 @@ that sentence made unrepresentable rather than merely tested.
   device node or fifo is skipped and *named* in an error. ember is retrieving
   generated media from a machine it rented, and refusing the kinds outright is
   shorter than reasoning about where each one could point.
-- **A remote command is argv, and anything unquotable is refused.** An SSH
-  exec request is handed to the remote shell, so a command assembled by
-  concatenation is a shell injection with the operator's own config as the
-  input. The allow-list refuses rather than escapes: a quoting routine never
-  exercised on a hostile input is one nobody knows is wrong.
+- **A remote command is argv, and every word is quoted.** An SSH exec request
+  is handed to the remote shell, so a command assembled by concatenation is a
+  shell injection with the operator's own config as the input. ember used to
+  refuse anything unquotable, which was right while every remote command was
+  tar over config-file paths; a workload cannot work that way, because a
+  prompt is arbitrary text. So `sshx.Quote` wraps in single quotes, where
+  every character except the single quote itself is literal, and escapes that
+  one as `'\''`. A unit test checks the string ember builds; a lab
+  round-trips the same hostile inputs through a real sshd and a real `/bin/sh`
+  and compares what arrived, because whether the shell agrees is a question
+  for a shell. Both were checked by breaking the quoting and watching them
+  fail.
+- **A workload runs over the SSH connection, not as the entrypoint.** A node
+  ember cannot reach is a node ember cannot destroy, so there is no value in
+  a workload outliving the connection — and running it here means the output
+  streams live and the exit status is known when it happens rather than
+  polled for through a file.
+- **A node rented to run something stops when it has run it.** Holding
+  afterwards bills for a machine with nothing left to do.
 - **The exit status is read after the stream, and always.** A `tar` that failed
   halfway produces a valid prefix of an archive: the extraction is happy, the
   data is incomplete, and that is exactly how an output fetch loses files

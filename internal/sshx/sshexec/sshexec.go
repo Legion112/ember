@@ -48,12 +48,19 @@ func (r *Runner) Run(ctx context.Context, cmd sshx.Command) (io.ReadCloser, func
 		return nil, nil, fmt.Errorf("attach to stdout: %w", err)
 	}
 
-	// Stderr is buffered, not streamed: it is small, and it is the only thing
-	// that will explain a non-zero exit. An error that says "tar exited 2"
-	// without "No such file or directory" sends the operator looking in the
-	// wrong place.
+	// Buffered by default: stderr is small for the commands ember runs on
+	// its own behalf, and it is the only thing that explains a non-zero
+	// exit. An error saying "tar exited 2" without "No such file or
+	// directory" sends the operator looking in the wrong place.
+	//
+	// A workload sets Stderr and gets it streamed as well, because it runs
+	// for minutes and its progress lives there.
 	var stderr limitedBuffer
-	sess.Stderr = &stderr
+	if cmd.Stderr != nil {
+		sess.Stderr = io.MultiWriter(&stderr, cmd.Stderr)
+	} else {
+		sess.Stderr = &stderr
+	}
 
 	line := cmd.String()
 	if err := sess.Start(line); err != nil {

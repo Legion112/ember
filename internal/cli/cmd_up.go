@@ -29,7 +29,9 @@ import (
 	"github.com/Legion112/ember/internal/sshx/sshexec"
 	"github.com/Legion112/ember/internal/statestore"
 	"github.com/Legion112/ember/internal/transfer"
+	"github.com/Legion112/ember/internal/tunnel"
 	"github.com/Legion112/ember/internal/tunnel/sshdial"
+	"github.com/Legion112/ember/internal/workload"
 )
 
 // deps are the collaborators cmdUp needs, injected so the command is testable
@@ -81,6 +83,8 @@ func runUp(args []string, out io.Writer, d deps) error {
 	)
 	var ports multiFlag
 	fs.Var(&ports, "port", "forward a port, as name:remote or name:remote:local (repeatable)")
+	var cmdArgs multiFlag
+	fs.Var(&cmdArgs, "cmd", "a word of the command to run on the node (repeatable, in order)")
 
 	fs.Usage = func() {
 		outf(out, "ember up rents a node, forwards its ports to loopback, and destroys it.\n\n")
@@ -96,6 +100,9 @@ func runUp(args []string, out io.Writer, d deps) error {
 		return err
 	}
 	applyFlags(&cfg, *providerName, *image, *gpu, *maxHourly, *ttl, ports)
+	if len(cmdArgs) > 0 {
+		cfg.Cmd = cmdArgs
+	}
 
 	spec, err := buildSpec(cfg)
 	if err != nil {
@@ -160,7 +167,15 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 	}
 	defer func() { _ = client.Close() }()
 
-	serveErr := session.Serve(ctx, out, client, session.Forwards(spec.Ports), so)
+	var serveErr error
+	if len(spec.Cmd) > 0 {
+		// A node rented to run something stops when it has run it. Holding
+		// afterwards would bill for a machine with nothing left to do, which
+		// is the whole failure mode ember exists to prevent.
+		serveErr = runWorkload(ctx, out, client, sshexec.New(client.SSH()), spec, so)
+	} else {
+		serveErr = session.Serve(ctx, out, client, session.Forwards(spec.Ports), so)
+	}
 
 	// Outputs are fetched even when the session ended badly, and on a context
 	// that survives the operator's Ctrl-C. The node is about to be destroyed
@@ -177,6 +192,40 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 		return err
 	}
 	return serveErr
+}
+
+// runWorkload holds the forwards open while the command runs.
+//
+// The forwards run alongside rather than instead: a workload may well want to
+// reach a service on the node, and a ComfyUI run is exactly that. They are
+// torn down when the command finishes, because the node is about to be.
+// Both seams are parameters rather than one client, so the decision and the
+// reporting here are testable against a recording dialer and runner instead
+// of needing a node.
+func runWorkload(ctx context.Context, out io.Writer, d tunnel.Dialer, r sshx.Runner, spec node.Spec, so session.Options) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	if fwds := session.Forwards(spec.Ports); len(fwds) > 0 {
+		for _, f := range fwds {
+			outf(out, "  %-12s http://%s\n", f.Name, f.Local[0])
+		}
+		go func() {
+			// A forward that fails while a workload is running is logged and
+			// not fatal: the command may not be using it, and killing a
+			// four-minute generation because a port ember opened on the
+			// operator's behalf went away would be the wrong trade.
+			f := &tunnel.Forwarder{Dialer: d, Log: so.Log}
+			if err := f.Run(ctx, fwds); err != nil && ctx.Err() == nil {
+				so.Log.Warn("a forward stopped while the workload was running", "err", err)
+			}
+		}()
+	}
+
+	outf(out, "running: %s\n", workload.Describe(spec.Cmd))
+	res, err := workload.Run(ctx, r, spec.Cmd, out)
+	outf(out, "workload finished in %s\n", res.Duration.Round(time.Millisecond))
+	return err
 }
 
 // outputTimeout bounds the output fetch.
@@ -232,6 +281,9 @@ func dryRunUp(out io.Writer, p provider.Provider, spec node.Spec, opts provision
 	}
 	outf(out, "dry-run: would rent %s from %s at %v for %v\n", offer.Token, p.Name(), offer.Price, spec.TTL)
 	outf(out, "dry-run: would run %s and forward %d port(s)\n", spec.Image, len(spec.Ports))
+	if len(spec.Cmd) > 0 {
+		outf(out, "dry-run: would execute: %s\n", workload.Describe(spec.Cmd))
+	}
 	outf(out, "dry-run: nothing was created\n")
 	return nil
 }
@@ -360,8 +412,15 @@ func buildSpec(cfg config.Config) (node.Spec, error) {
 	if cfg.Image == "" {
 		return node.Spec{}, fmt.Errorf("no image: pass -image or set it in %s", config.FileName)
 	}
+	// Checked before anything is rented. A command ember cannot send is a
+	// config error, and finding a config error after the create call is
+	// finding it after the billing started.
+	if err := workload.Validate(cfg.Cmd); err != nil {
+		return node.Spec{}, err
+	}
 	return node.NewSpec(node.SpecOptions{
 		Image:   cfg.Image,
+		Cmd:     cfg.Cmd,
 		Ports:   ports,
 		Filter:  filter,
 		TTL:     cfg.TTL,

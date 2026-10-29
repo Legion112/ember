@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -317,24 +318,54 @@ func TestTarCommand(t *testing.T) {
 	}
 }
 
-func TestTarCommand_RefusesPathsItCannotExpress(t *testing.T) {
+func TestTarCommand_RefusesAPathThatIsNotOne(t *testing.T) {
 	for _, bad := range []string{
 		"relative/path",
 		"/not/clean/..",
 		"/",
 		"",
-		// A path with shell metacharacters. The SSH exec request goes to the
-		// remote shell, so this is refused rather than quoted: a quoting
-		// routine never exercised on a hostile input is one nobody knows is
-		// wrong.
-		"/workspace/$(touch pwned)",
-		"/workspace/a;rm -rf /",
-		"/workspace/a b",
-		"/workspace/`id`",
-		"/workspace/a'b",
 	} {
 		if _, err := TarCommand(bad); err == nil {
 			t.Errorf("TarCommand(%q) was accepted", bad)
+		}
+	}
+}
+
+// TestTarCommand_QuotesAPathWithShellMetacharacters rather than refusing it.
+//
+// An earlier version refused anything unquotable, which was defensible while
+// every remote command was tar over config-file paths. It is wrong now that
+// sshx quotes properly: a directory genuinely called "my renders" is a path
+// an operator may legitimately have, and the answer is to send it correctly
+// rather than to decline.
+//
+// The assertion is that the dangerous text ends up inside single quotes,
+// where a POSIX shell treats every character literally. The lab in
+// test/integration round-trips these through a real sshd and compares what
+// arrived, which is the part a unit test cannot do.
+func TestTarCommand_QuotesAPathWithShellMetacharacters(t *testing.T) {
+	for _, p := range []string{
+		"/workspace/$(touch pwned)",
+		"/workspace/a;rm -rf x",
+		"/workspace/my renders",
+		"/workspace/`id`",
+		"/workspace/a'b",
+		"/workspace/a\"b",
+	} {
+		cmd, err := TarCommand(p)
+		if err != nil {
+			t.Errorf("TarCommand(%q): %v", p, err)
+			continue
+		}
+		// The base is the last argument, and it must appear in exactly the
+		// quoted form sshx would produce -- not bare on the command line.
+		line := cmd.String()
+		want := sshx.Quote(path.Base(p))
+		if !strings.HasSuffix(want, "'") {
+			t.Errorf("%q was not quoted at all by sshx.Quote: %s", p, want)
+		}
+		if !strings.Contains(line, want) {
+			t.Errorf("the base of %q is not quoted in the command line:\n  got  %s\n  want it to contain %s", p, line, want)
 		}
 	}
 }
@@ -617,5 +648,13 @@ func TestFetch_HonoursCancellation(t *testing.T) {
 		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, t.TempDir())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// TestTarCommand_RefusesAPathWithANULByte. The one thing quoting cannot
+// carry: a NUL cannot appear in an argument at all.
+func TestTarCommand_RefusesAPathWithANULByte(t *testing.T) {
+	if _, err := TarCommand("/workspace/a\x00b"); err == nil {
+		t.Fatal("a path with a NUL byte was accepted")
 	}
 }

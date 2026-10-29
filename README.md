@@ -20,11 +20,20 @@
 An ember, not a furnace: nodes are meant to live for minutes, and nothing ember
 creates is reachable from the internet.
 
+```yaml
+# ember.yaml
+provider: runpod
+gpu: rtx4090
+image: ghcr.io/you/ember-sd:v1       # sshd + embernode + the model
+ttl: 30m
+cmd: [sd-cli, -m, /opt/models/sd15.gguf, -p, "a lovely orange cat", -o, /workspace/out/cat.png]
+outputs: [/workspace/out:renders]
 ```
-ember up --provider runpod --gpu rtx4090 \
-         --image ghcr.io/example/comfyui:v0.3.1 \
-         --port comfyui:8188 --ttl 30m
-```
+
+That rents a node, waits for it, runs the command with its output streaming to
+your terminal, fetches `/workspace/out` back over SSH, and destroys the node —
+including when you interrupt it. Leave `cmd` out and it forwards the ports
+instead and holds, which is the interactive shape.
 
 That rents a node, waits for it, forwards `8188` to `127.0.0.1:8188` over SSH,
 waits for you to finish, fetches the outputs and destroys the node — including
@@ -86,6 +95,7 @@ different image would prove nothing about what the provider pulls.
 | `internal/statestore` | the journal that makes an orphan findable |
 | `internal/sshx` + `sshexec` | run one command on a node, stream its output |
 | `internal/transfer` | bring the outputs home — tar over SSH, into an `os.Root` |
+| `internal/workload` | run the command the node was rented for, streaming |
 | `internal/reconcile` | pure scan over providers and records — what `ls` and `reap` act on |
 | `internal/session`, `internal/config`, `internal/cli` | wiring |
 

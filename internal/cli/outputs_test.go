@@ -5,15 +5,21 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Legion112/ember/internal/config"
+	"github.com/Legion112/ember/internal/loopback"
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/session"
 	"github.com/Legion112/ember/internal/sshx"
 	"github.com/Legion112/ember/internal/transfer"
+	"github.com/Legion112/ember/internal/tunnel"
+	"github.com/Legion112/ember/internal/workload"
 )
 
 func tarOne(t *testing.T, name, body string) []byte {
@@ -229,4 +235,90 @@ func TestLs_ReportsAnUnresolvableHome(t *testing.T) {
 	if err := runLs(nil, &out, deps{Engine: e, Creds: &config.Credentials{}}); err == nil {
 		t.Fatal("a home that cannot be resolved was accepted")
 	}
+}
+
+// TestRunWorkload_RunsTheCommandAndReportsIt.
+//
+// A node rented to run something stops when it has run it. Holding afterwards
+// would bill for a machine with nothing left to do, which is the failure mode
+// ember exists to prevent.
+func TestRunWorkload_RunsTheCommandAndReportsIt(t *testing.T) {
+	r := sshx.NewRecordingRunner()
+	cmd := []string{"sd-cli", "-p", "a lovely cat", "-o", "/workspace/out/cat.png"}
+	r.Outputs[workload.Describe(cmd)] = []byte("generating\ndone\n")
+
+	spec := node.Spec{Cmd: cmd}
+	var out bytes.Buffer
+	if err := runWorkload(t.Context(), &out, tunnel.NewRecordingDialer(), r, spec, session.Options{Log: discardLog()}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := out.String()
+	// The command is echoed exactly as sent, quoting included, so an operator
+	// whose prompt did not arrive as intended can see what the remote shell
+	// was handed.
+	if !strings.Contains(got, "sd-cli -p 'a lovely cat'") {
+		t.Errorf("the command was not shown as sent: %q", got)
+	}
+	if !strings.Contains(got, "generating") {
+		t.Errorf("the workload output was not streamed: %q", got)
+	}
+	if !strings.Contains(got, "workload finished in") {
+		t.Errorf("the run was not reported: %q", got)
+	}
+	if calls := r.Calls(); len(calls) != 1 {
+		t.Errorf("calls = %v", calls)
+	}
+}
+
+// TestRunWorkload_ForwardsPortsAlongsideTheCommand. A workload may want to
+// reach a service on the node -- a ComfyUI run is exactly that -- so the
+// forwards run beside it rather than instead of it.
+func TestRunWorkload_ForwardsPortsAlongsideTheCommand(t *testing.T) {
+	r := sshx.NewRecordingRunner()
+	cmd := []string{"true"}
+	spec := node.Spec{
+		Cmd:   cmd,
+		Ports: []node.PortMap{{Name: "ui", Remote: 8188, Local: uint16(freePort(t))}},
+	}
+
+	var out bytes.Buffer
+	if err := runWorkload(t.Context(), &out, tunnel.NewRecordingDialer(), r, spec, session.Options{Log: discardLog()}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "ui") {
+		t.Errorf("the forward was not announced: %q", out.String())
+	}
+}
+
+// TestRunWorkload_AFailingCommandIsAnError, carried out of the session so the
+// run's exit code reflects it.
+func TestRunWorkload_AFailingCommandIsAnError(t *testing.T) {
+	r := sshx.NewRecordingRunner()
+	cmd := []string{"sd-cli"}
+	r.Waits[workload.Describe(cmd)] = &sshx.ExitError{Cmd: "sd-cli", Code: 1, Stderr: "no model"}
+
+	var out bytes.Buffer
+	err := runWorkload(t.Context(), &out, tunnel.NewRecordingDialer(), r, node.Spec{Cmd: cmd}, session.Options{Log: discardLog()})
+	if err == nil {
+		t.Fatal("a failing workload was reported as success")
+	}
+	// And the duration is still printed: a run that failed after four
+	// minutes is a different problem from one that failed instantly.
+	if !strings.Contains(out.String(), "workload finished in") {
+		t.Errorf("got %q", out.String())
+	}
+}
+
+func discardLog() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := loopback.Listen(context.Background(), loopback.Port(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return p
 }

@@ -48,7 +48,7 @@ COVERPROFILE := coverage.out
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/loopback=100,internal/cli=83,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98
+COVER_PKGS := internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/loopback=100,internal/cli=83,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98
 COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,internal/dockerengine/dockerclient
 # Overall across the gated set. Below 100 only because internal/keys and
 # internal/hostkey carry the documented stdlib-error gaps above.
@@ -106,6 +106,18 @@ lint:
 
 docker-build:
 	docker build -t $(LAB_IMAGE) -f node.Dockerfile .
+
+# SD_IMAGE is a workload image: the node image plus stable-diffusion.cpp and a
+# model. The model is not in this repository -- it is gigabytes and it is
+# somebody else's weights -- so MODEL has to name a local file.
+SD_IMAGE := ember:sd
+MODEL ?=
+
+workload-sd:
+	@if [ -z "$(MODEL)" ]; then 		echo "MODEL is not set. Point it at a GGUF checkpoint, for example:"; 		echo "  make workload-sd MODEL=/path/to/v1-5-pruned_bf16.gguf"; 		exit 1; 	fi
+	@if [ ! -f "$(MODEL)" ]; then echo "no such model: $(MODEL)"; exit 1; fi
+	cp "$(MODEL)" .model.gguf
+	docker build -t $(SD_IMAGE) -f workload-sd.Dockerfile 		--build-arg NODE_IMAGE=$(LAB_IMAGE) --build-arg MODEL_PATH=.model.gguf . 		; rc=$$?; rm -f .model.gguf; exit $$rc
 
 # The labs refuse to skip themselves: a missing image is a hard failure with
 # the command to fix it, never a t.Skip. A silently skipped lab is worse than
