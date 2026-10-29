@@ -34,6 +34,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
@@ -303,6 +304,16 @@ func (l *Lab) AssertNoStray() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	if ns := l.Networks(ctx); len(ns) > 0 {
+		var names []string
+		for _, n := range ns {
+			names = append(names, n.Name)
+		}
+		l.t.Errorf("%d network(s) wearing ember's label survived the lab: %s"+
+			"\nNothing bills for these, which is why they went unnoticed until Docker ran out of address pools.",
+			len(ns), strings.Join(names, ", "))
+	}
+
 	cs := l.Nodes(ctx)
 	if len(cs) == 0 {
 		return
@@ -325,6 +336,27 @@ func (l *Lab) Reap() {
 	for _, c := range l.Nodes(ctx) {
 		_ = l.cli.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true})
 	}
+	// Networks too. Leaving them out leaked one per SIGKILL lab -- invisible,
+	// because nothing bills for a bridge network and nothing asserted on
+	// them, until Docker had subnetted its whole address pool and every
+	// later run failed with "all predefined address pools have been fully
+	// subnetted". A cleanup that only removes what it thought to look for is
+	// how a developer's daemon quietly stops working.
+	for _, n := range l.Networks(ctx) {
+		_ = l.cli.NetworkRemove(ctx, n.ID)
+	}
+}
+
+// Networks lists the networks wearing ember's run-id label.
+func (l *Lab) Networks(ctx context.Context) []network.Summary {
+	l.t.Helper()
+	ns, err := l.cli.NetworkList(ctx, network.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("label", dockerengine.LabelRunID)),
+	})
+	if err != nil {
+		l.t.Fatalf("list networks: %v", err)
+	}
+	return ns
 }
 
 // StateDir is where the journal lives.
@@ -616,6 +648,18 @@ func (l *Lab) StartNode(ctx context.Context, spec NodeSpec) (id, addr string) {
 		l.t.Fatalf("the daemon published nothing for 22/tcp on %s", id[:12])
 	}
 	return id, net.JoinHostPort("127.0.0.1", bs[0].HostPort)
+}
+
+// Remove destroys one node container.
+//
+// Used by a fake control plane whose delete call has to actually take the
+// machine away: a fake that marked a pod deleted while the container kept
+// running would let a lab assert a clean teardown that never happened.
+func (l *Lab) Remove(ctx context.Context, id string) {
+	l.t.Helper()
+	if err := l.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true}); err != nil {
+		l.t.Errorf("remove node %s: %v", id, err)
+	}
 }
 
 // RotateHostKey replaces the node's host key and restarts sshd.

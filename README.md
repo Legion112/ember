@@ -141,6 +141,14 @@ make cover-check
 make test-integration   # Docker labs; needs a working Docker daemon
 ```
 
+There is also a stateful fake of RunPod's API (`test/integration/runpodfake`)
+whose control plane is pretend and whose data plane is a real container: the
+provider, the exposure check, the SSH handshake against the minted host key,
+the forward and the output fetch all run for real against it. It reproduces
+the behaviours that cost money to discover — no host key reported, `ssh.direct`
+appearing after the status reads RUNNING, and the web terminal port RunPod
+publishes unbidden — so none of them can come back silently.
+
 The labs run the real `ember` binary against a real Docker daemon: a real
 sshd, a real SSH handshake against a pinned host key, a real forward, and a
 `SIGKILL` mid-provision to produce the orphan that `ls` and `reap` exist to

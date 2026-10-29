@@ -188,6 +188,27 @@ that sentence made unrepresentable rather than merely tested.
   *directory* is fine -- two outputs can land in overlapping trees. Over a
   *file* it is not: nothing under it can be written, and treating them alike
   reported success for a directory that was never created.
+- **A fake must reproduce the behaviours that cost money to find, including
+  the unhelpful ones.** `runpodfake` reports no host key, leaves `ssh.direct`
+  null for a while after the status reads RUNNING, nulls `ssh` and `runtime`
+  on every list entry, and publishes a web terminal port nobody asked for --
+  because each of those is a real RunPod behaviour that broke ember once. A
+  fake that is tidier than the service it stands in for tests a service that
+  does not exist. The previous RunPod tests used one-off handlers returning a
+  canned blob, which cannot express the thing that actually breaks: time.
+- **A regression test that has never failed proves nothing.** Each of these
+  was checked by reinstating the bug and watching the lab go red. The
+  trust-on-first-use lab fails with the exact warning the live run printed.
+- **Clean up what you did not think to look for.** The lab harness removed
+  containers and not the networks beside them. Nothing bills for a bridge
+  network and no assertion mentioned one, so a leak stayed invisible until
+  Docker had subnetted its whole address pool and every run failed with "all
+  predefined address pools have been fully subnetted". `AssertNoStray` now
+  covers networks, and a lab asserts `ember up` leaves none.
+- **Known gap:** `local.Destroy` finds the run id by inspecting the container,
+  so a node whose container was already removed by something else leaves its
+  network behind. `reconcile` holds the run id and is the right place to fix
+  it; nothing does yet.
 - **A lab seeds state out-of-band, through Docker, not through the code under
   test.** Widening `sshx.Runner` with stdin support so a test could write a
   file would be a production interface shaped by a test's convenience.

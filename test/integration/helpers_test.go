@@ -3,9 +3,12 @@
 package integration
 
 import (
+	"io"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,9 +17,12 @@ import (
 	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/keys"
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/session"
+	"github.com/Legion112/ember/internal/statestore"
 	"github.com/Legion112/ember/internal/tunnel/sshdial"
 	"github.com/Legion112/ember/test/integration/harness"
+	"github.com/Legion112/ember/test/integration/runpodfake"
 )
 
 // labNode is a node this package started itself, rather than through ember.
@@ -102,4 +108,59 @@ func mintPEM(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(p.Private.Bytes())
+}
+
+// labOptions are provision.Options pointed entirely at the lab.
+func labOptions(t *testing.T, l *harness.Lab) provision.Options {
+	t.Helper()
+	store, err := statestore.Open(filepath.Join(t.TempDir(), statestore.DirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins, err := hostkey.OpenStore(filepath.Join(t.TempDir(), "known_hosts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return provision.Options{
+		Store:    store,
+		Pins:     pins,
+		Identity: identity(t, l),
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+// testLogger writes to w, for labs asserting on what was logged.
+func testLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
+}
+
+// dialSession connects to a provisioned node through the production path.
+func dialSession(t *testing.T, l *harness.Lab, s provision.Session) *sshdial.Client {
+	t.Helper()
+	client, err := session.Dial(t.Context(),
+		sshdial.Target{NodeID: s.Node.Handle().ID, Endpoint: s.Node.Endpoint()},
+		s.Trust,
+		[]ssh.Signer{identity(t, l).Signer},
+		session.Options{SSHReady: 90 * time.Second, RetryEvery: 500 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatalf("dial %s: %v", s.Node.Endpoint(), err)
+	}
+	return client
+}
+
+// allPodIDs is every pod the fake ever created.
+func allPodIDs(f *runpodfake.Fake) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range f.Requests() {
+		if strings.HasPrefix(r.Path, "/v2/pods/") {
+			id := strings.TrimPrefix(r.Path, "/v2/pods/")
+			if id != "" && !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	return out
 }

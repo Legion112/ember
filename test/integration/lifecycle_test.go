@@ -170,3 +170,34 @@ func TestLifecycle_AFailedOutputFetchStillDestroysTheNode(t *testing.T) {
 	}
 	l.WaitNoNodes(t.Context(), 2*time.Minute, res.Combined)
 }
+
+// TestLifecycle_UpLeavesNoNetworkBehind.
+//
+// ember creates a bridge network per run and removes it on teardown. Nothing
+// ever asserted that, because nothing bills for a network and `ls` does not
+// report one -- so a leak here is invisible until Docker has subnetted its
+// entire address pool and every later run fails with "all predefined address
+// pools have been fully subnetted". That is what happened on the machine this
+// was written on, after a day of runs.
+func TestLifecycle_UpLeavesNoNetworkBehind(t *testing.T) {
+	l := harness.New(t)
+	port := harness.FreePort(t)
+
+	before := len(l.Networks(t.Context()))
+
+	res := l.Run(t.Context(), "up",
+		"--hold", "2s",
+		"--port", fmt.Sprintf("sshd:22:%d", port),
+	)
+	if res.ExitCode != 0 {
+		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
+	}
+
+	if after := len(l.Networks(t.Context())); after != before {
+		var names []string
+		for _, n := range l.Networks(t.Context()) {
+			names = append(names, n.Name)
+		}
+		t.Errorf("networks went from %d to %d: %s", before, after, strings.Join(names, ", "))
+	}
+}
