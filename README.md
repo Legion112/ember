@@ -103,8 +103,9 @@ Next: a first real-money smoke test against RunPod, then Vast.ai. See
 
 ## Two properties that outrank features
 
-**Nothing is reachable from the internet.** Every forwarded port binds to
-loopback on your machine; the only thing a provider exposes publicly is sshd,
+**Nothing of yours is reachable from the internet.** Every forwarded port binds
+to loopback on your machine; the only thing ember asks a provider to expose is
+sshd,
 key-only, verified against a host key ember generated and injected itself.
 `net.Listen` appears in exactly one package and a test fails the build if that
 changes. A public port cannot be *spelled*: the type carrying one has no
@@ -112,7 +113,15 @@ exported field, so `exposure.SSHPort()` is the only thing in the program that
 can produce one. After create, ember reads back what the provider says it
 published and destroys the node if that is anything but sshd — on RunPod a port
 declared `8188/http` is served at `{id}-8188.proxy.runpod.net` with no
-authentication at all.
+authentication at all — RunPod's own documentation says so: *"the service
+becomes publicly accessible. While the Pod ID provides some obscurity,
+implement proper authentication in your application."*
+
+That check earns its keep. On ember's first real provision it refused the node
+and destroyed it, because RunPod maps its web terminal port to every pod and
+gives no way to turn it off. A provider may now *declare* such a port, and
+only such a port; ember's node image listens on nothing but 22, which a lab
+asserts, and a workload asking for the proxied port is refused.
 
 **A leaked node costs real money.** An orphaned H100 burns about 175 ₽/hour in
 silence. Every node carries a deadline enforced in several independent places,

@@ -15,6 +15,31 @@ import (
 	"github.com/Legion112/ember/internal/provider"
 )
 
+// WebTerminalPort is the public HTTP mapping RunPod adds to every pod.
+//
+// Found the hard way: ember's first real provision was refused and destroyed
+// because RunPod published 19123/http when ember had asked for 22/tcp and
+// nothing else. There is no way to disable it -- the create API's only
+// toggles are startJupyter and startSsh -- so a provider that is usable at
+// all has to name it.
+//
+// It is not harmless in general. RunPod's own documentation says of an
+// exposed HTTP port that "the service becomes publicly accessible" and that
+// "while the Pod ID provides some obscurity, implement proper authentication
+// in your application". The pod id is obscurity, not a credential.
+//
+// What makes it tolerable here is a property of ember's own node image rather
+// than a promise from the provider: nothing in it listens on this port, so
+// the proxy has nothing to reach. That is asserted in a lab, and
+// RefuseWorkloadPort keeps a workload from binding it later.
+const WebTerminalPort uint16 = 19123
+
+var platformPorts = []exposure.PlatformPort{{
+	Port:  WebTerminalPort,
+	Proto: node.ProtoHTTP,
+	Why:   "RunPod's web terminal, mapped to every pod with no way to disable it; ember's node image listens on nothing there",
+}}
+
 // DefaultDiskGiB is the container disk ember asks for.
 //
 // Model weights are the reason this is not smaller: a single video model
@@ -74,6 +99,8 @@ func (p *Provider) Caps() provider.Caps {
 		// expected and anything else is a violation. See
 		// exposure.AssertSSHOnly.
 		PublicSSH: true,
+
+		PlatformPorts: platformPorts,
 	}
 }
 
@@ -169,6 +196,18 @@ func (p *Provider) env(req node.CreateRequest) map[string]string {
 }
 
 func (p *Provider) ports(workload []node.PortMap) ([]string, error) {
+	// A workload port that collides with the platform's own mapping would be
+	// served through RunPod's unauthenticated proxy. ember tolerates that
+	// port only because nothing listens on it; a workload binding it is
+	// exactly the case that stops being true.
+	for _, w := range workload {
+		if w.Remote == WebTerminalPort {
+			return nil, fmt.Errorf(
+				"workload port %q asks for %d, which RunPod maps to its public proxy on every pod: "+
+					"a service there is reachable at {pod-id}-%d.proxy.runpod.net with no authentication. Move it to another port",
+				w.Name, WebTerminalPort, WebTerminalPort)
+		}
+	}
 	reqs, err := exposure.Requests(workload)
 	if err != nil {
 		return nil, err

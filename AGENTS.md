@@ -202,6 +202,30 @@ that sentence made unrepresentable rather than merely tested.
   flag, not in a test. It is the most common way an SSH client ships with no
   server authentication at all, and "we grep for it in review" has a 100%
   failure rate eventually.
+- **The pin is built from the key ember minted, never from the one the
+  provider reports.** ember generated it and injected it, so it already knows
+  which key the node must present and never has to ask. Reading the
+  provider's answer first was a real bug: the local provider echoes the key
+  back on a container label so it worked there, while RunPod reports nothing,
+  and ember's first real cloud provision fell through to trust-on-first-use
+  against a brand-new IP — the one case TOFU cannot defend, and the exact
+  thing minting the key exists to avoid. It logged a warning, and a warning
+  is not a security control.
+- **A provider reporting a key that differs from the injected one is a
+  refusal.** It has substituted something, and continuing would pin the
+  substitution.
+- **A node with no minted key is refused, not downgraded.** TOFU is
+  unreachable through `WithNode`, which mints for every node; reaching that
+  branch would mean ember had stopped injecting, which is worth a refusal
+  rather than a quiet fallback.
+- **A provider may name public ports it adds unconditionally, and only
+  those.** RunPod maps its web terminal port (19123/http) to every pod with no
+  way to disable it — found when ember's first real provision refused the node
+  and destroyed it. `Caps.PlatformPorts` names it; everything else still
+  destroys the node. The concession is only safe while nothing in the node
+  image listens there, so that is a lab assertion about the image rather than
+  a promise from the provider, and a workload asking for that port is refused
+  outright.
 - **Host keys are minted here and injected, not trusted on first use.** TOFU
   against an IP that has never had a key is a free MITM for anyone on the path.
   Injecting through the provider's API concedes the key to the provider, which

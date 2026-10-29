@@ -4,6 +4,7 @@ package integration
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +108,53 @@ func TestHostKey_AMismatchIsNotRetried(t *testing.T) {
 	// mismatch short-circuited it rather than being retried to exhaustion.
 	if elapsed > 15*time.Second {
 		t.Errorf("a mismatch took %v to report, so it was retried rather than refused outright", elapsed)
+	}
+}
+
+// TestNodeImage_ListensOnNothingButSSH is the evidence the platform-port
+// concession rests on.
+//
+// RunPod maps its web terminal port to every pod, publicly and with no
+// authentication, and offers no way to disable it. ember tolerates that only
+// because nothing in its node image is listening there: probing the live
+// proxy for that port returned 502 "Waiting for service to respond" -- a route
+// to an empty room. That is a property of this image, so it is checked here
+// rather than assumed, and it would stop being true the moment the image
+// gained a service.
+func TestNodeImage_ListensOnNothingButSSH(t *testing.T) {
+	l := harness.New(t)
+	n := mintAndStart(t, l, "listeners")
+
+	// ss over the Docker API rather than over the tunnel: what is being
+	// tested is the image, and the question is what it binds before anything
+	// connects to it.
+	out := l.ExecOut(t.Context(), n.ID, "ss", "-H", "-ltn")
+
+	var ports []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			continue
+		}
+		addr := f[3]
+		i := strings.LastIndex(addr, ":")
+		if i < 0 {
+			continue
+		}
+		ports = append(ports, addr[i+1:])
+	}
+	if len(ports) == 0 {
+		t.Fatalf("no listening sockets found at all; the parse is broken, not the image:\n%s", out)
+	}
+
+	for _, p := range ports {
+		if p != "22" {
+			t.Errorf("the node image listens on %s as well as 22; everything it binds is a candidate for a provider to publish. Listening sockets:\n%s", p, out)
+		}
+	}
+
+	// And specifically not the port RunPod proxies to the world.
+	if strings.Contains(out, "19123") {
+		t.Errorf("the node image listens on RunPod's public proxy port:\n%s", out)
 	}
 }

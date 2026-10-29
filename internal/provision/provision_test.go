@@ -12,6 +12,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/keys"
@@ -65,7 +67,6 @@ func mintedKey(t *testing.T) node.HostKey {
 
 func TestWithNode_RunsTheClosureAndDestroysAfterwards(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
-	p.HostKey = mintedKey(t)
 	o := opts(t)
 
 	var sawEndpoint string
@@ -99,7 +100,6 @@ func TestWithNode_RunsTheClosureAndDestroysAfterwards(t *testing.T) {
 // closure's, not the happy path's.
 func TestWithNode_DestroysEvenWhenTheClosureFails(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
-	p.HostKey = mintedKey(t)
 
 	boom := errors.New("the workload exploded")
 	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
@@ -119,7 +119,6 @@ func TestWithNode_DestroysEvenWhenTheClosureFails(t *testing.T) {
 // runs on context.WithoutCancel precisely so this passes.
 func TestWithNode_DestroysAfterCancellation(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
-	p.HostKey = mintedKey(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	err := WithNode(ctx, p, spec(t), opts(t), func(context.Context, Session) error {
@@ -174,7 +173,6 @@ func TestWithNode_RecordsIntentBeforeCreating(t *testing.T) {
 // only the operator can say otherwise.
 func TestWithNode_DestroyFailureIsSticky(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
-	p.HostKey = mintedKey(t)
 	p.Errors["Destroy n1"] = errors.New("provider unreachable")
 	o := opts(t)
 
@@ -202,7 +200,6 @@ func TestWithNode_DestroyFailureIsSticky(t *testing.T) {
 // the provider already lost is a success, not a sticky failure.
 func TestWithNode_AMissingNodeDestroysCleanly(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
-	p.HostKey = mintedKey(t)
 	p.Errors["Destroy n1"] = node.ErrNotFound
 	o := opts(t)
 
@@ -215,19 +212,33 @@ func TestWithNode_AMissingNodeDestroysCleanly(t *testing.T) {
 	}
 }
 
-func TestWithNode_PinsTheMintedHostKey(t *testing.T) {
+// TestWithNode_PinsTheKeyEmberMintedNotTheOneTheProviderReports.
+//
+// ember generates the host key and injects it through the create call, so it
+// already knows which key the node must present and never has to ask the
+// provider. Reading the provider's answer first was a real bug: the local
+// provider echoes the key back on a container label so it worked there, while
+// RunPod reports nothing, and ember's first real cloud provision fell through
+// to trust-on-first-use against a brand-new IP -- the one case TOFU cannot
+// defend, and the exact thing minting the key exists to avoid.
+func TestWithNode_PinsTheKeyEmberMintedNotTheOneTheProviderReports(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
-	pair, err := hostkey.Mint()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.HostKey = pair.NodeKey()
 
-	err = WithNode(t.Context(), p, spec(t), opts(t), func(_ context.Context, s Session) error {
-		// The trust must accept the key the provider reported and refuse any
-		// other, without ever having connected.
-		if cbErr := hostkey.Callback(s.Trust, "n1")("h", nil, pair.Public); cbErr != nil {
-			t.Errorf("the minted key was refused: %v", cbErr)
+	var sawWarning bytes.Buffer
+	o := opts(t)
+	o.Log = slog.New(slog.NewTextHandler(&sawWarning, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	err := WithNode(t.Context(), p, spec(t), o, func(_ context.Context, s Session) error {
+		injected := p.InjectedKey("n1")
+		if injected.IsZero() {
+			t.Fatal("the fake recorded no injected key")
+		}
+		pub := parseHostKey(t, injected)
+
+		// The trust accepts the injected key and refuses any other, without
+		// ever having connected.
+		if cbErr := hostkey.Callback(s.Trust, "n1")("h", nil, pub); cbErr != nil {
+			t.Errorf("the injected key was refused: %v", cbErr)
 		}
 		other, _ := hostkey.Mint()
 		if cbErr := hostkey.Callback(s.Trust, "n1")("h", nil, other.Public); cbErr == nil {
@@ -238,42 +249,43 @@ func TestWithNode_PinsTheMintedHostKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// And it is a pin, not trust-on-first-use.
+	if strings.Contains(sawWarning.String(), "first use") {
+		t.Errorf("ember fell back to TOFU despite minting a key:\n%s", sawWarning.String())
+	}
 }
 
-// TestWithNode_FallsBackToTOFUWithoutAHostKey, and says so loudly enough that
-// `ember ls` can report which nodes were never authenticated.
-func TestWithNode_FallsBackToTOFUWithoutAHostKey(t *testing.T) {
-	p := providertest.NewRecordingProvider("test") // HostKey left zero
-	o := opts(t)
+// TestWithNode_RefusesAProviderThatSubstitutesTheHostKey. A provider handing
+// back a different key than the one ember supplied has swapped something, and
+// continuing would pin the swap.
+func TestWithNode_RefusesAProviderThatSubstitutesTheHostKey(t *testing.T) {
+	p := providertest.NewRecordingProvider("test")
+	// An unrelated key, reported as though it were the node's.
+	p.HostKey = mintedKey(t)
 
-	err := WithNode(t.Context(), p, spec(t), o, func(_ context.Context, s Session) error {
-		first, _ := hostkey.Mint()
-		if cbErr := hostkey.Callback(s.Trust, "n1")("h", nil, first.Public); cbErr != nil {
-			t.Errorf("the first key should pin: %v", cbErr)
-		}
-		second, _ := hostkey.Mint()
-		if cbErr := hostkey.Callback(s.Trust, "n1")("h", nil, second.Public); cbErr == nil {
-			t.Error("a rotated key was accepted after the pin")
-		}
+	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+		t.Error("the workload ran against a substituted host key")
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("a substituted host key was accepted")
+	}
+	if !strings.Contains(err.Error(), "substituted") {
+		t.Errorf("got %v", err)
+	}
+	if live := p.Live(); len(live) != 0 {
+		t.Errorf("%d node(s) survived", len(live))
 	}
 }
 
-func TestWithNode_RefusesTOFUWithNoPinStore(t *testing.T) {
-	p := providertest.NewRecordingProvider("test")
-	o := opts(t)
-	o.Pins = nil
-
-	err := WithNode(t.Context(), p, spec(t), o, func(context.Context, Session) error { return nil })
-	if err == nil {
-		t.Fatal("WithNode proceeded with nothing to verify the host key against")
+// parseHostKey turns ember's wire form back into something a callback takes.
+func parseHostKey(t *testing.T, k node.HostKey) ssh.PublicKey {
+	t.Helper()
+	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k.Algo + " " + k.Base64))
+	if err != nil {
+		t.Fatalf("parse %s %s: %v", k.Algo, k.Base64, err)
 	}
-	if live := p.Live(); len(live) != 0 {
-		t.Error("the node was not destroyed after the trust decision failed")
-	}
+	return pub
 }
 
 func TestWithNode_RefusesAnUnparseableHostKey(t *testing.T) {
@@ -517,7 +529,6 @@ func TestOptions_InjectedCollaboratorsAreUsed(t *testing.T) {
 func TestWithNode_LogsReadinessAndDestruction(t *testing.T) {
 	var sb strings.Builder
 	p := providertest.NewRecordingProvider("test")
-	p.HostKey = mintedKey(t)
 	o := opts(t)
 	o.Log = slog.New(slog.NewTextHandler(&sb, nil))
 
@@ -540,7 +551,6 @@ func TestWithNode_SurvivesAStoreThatCannotRecordReadiness(t *testing.T) {
 		t.Skip("root ignores directory permissions")
 	}
 	p := providertest.NewRecordingProvider("test")
-	p.HostKey = mintedKey(t)
 	o := opts(t)
 
 	ran := false
@@ -575,7 +585,6 @@ func TestWithNode_SurvivesAStoreThatCannotRecordReadiness(t *testing.T) {
 func TestWithNode_DestroysANodeExposedMoreWidelyThanAsked(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
 	p.Capabilities = provider.Caps{HostKeyFromAPI: true, PublicSSH: true, Free: true}
-	p.HostKey = mintedKey(t)
 	p.Exposed = []node.Exposed{
 		{Port: 22, Proto: node.ProtoTCP, URL: "203.0.113.7:40022"},
 		{Port: 8188, Proto: node.ProtoHTTP, URL: "https://abc-8188.proxy.runpod.net"},
@@ -611,7 +620,6 @@ func TestWithNode_DestroysANodeExposedMoreWidelyThanAsked(t *testing.T) {
 // because it said nothing -- is how the check would come to mean nothing.
 func TestWithNode_DestroysANodeWithNoExposureReport(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
-	p.HostKey = mintedKey(t)
 	p.Exposed = []node.Exposed{} // reported, but see below
 
 	// Force the unreported case: a node built without WithExposed at all.
@@ -634,7 +642,6 @@ func TestWithNode_DestroysANodeWithNoExposureReport(t *testing.T) {
 // declare PublicSSH.
 func TestWithNode_AProviderThatPublishesNothingPassesTheStrictCheck(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
-	p.HostKey = mintedKey(t)
 
 	ran := false
 	if err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
@@ -654,7 +661,6 @@ func TestWithNode_AProviderThatPublishesNothingPassesTheStrictCheck(t *testing.T
 func TestWithNode_RefusesAPublicSSHProviderThatPublishesNothing(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
 	p.Capabilities = provider.Caps{HostKeyFromAPI: true, PublicSSH: true, Free: true}
-	p.HostKey = mintedKey(t)
 	p.Exposed = []node.Exposed{}
 
 	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
@@ -716,7 +722,6 @@ func TestBillFor_EstimatesFromTheRecordEmberWrote(t *testing.T) {
 func TestWithNode_ReportsTheCostOnTeardown(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
 	p.Capabilities = provider.Caps{HostKeyFromAPI: true, PublicSSH: true, MinBilling: time.Minute}
-	p.HostKey = mintedKey(t)
 	p.OfferList = []node.Offer{{
 		Provider: "test", Token: "h100", GPU: node.NormalizeGPU("h100"),
 		GPUCount: 1, Price: node.Rate(2_690_000),
@@ -741,5 +746,70 @@ func TestWithNode_ReportsTheCostOnTeardown(t *testing.T) {
 	// reads after a run and the only place the total exists.
 	if !strings.Contains(out, "cost=") {
 		t.Errorf("the destroy line carries no cost:\n%s", out)
+	}
+}
+
+// readyNode builds a ReadyNode for testing trustFor directly.
+func readyNode(t *testing.T, reported node.HostKey) node.ReadyNode {
+	t.Helper()
+	n := node.Node{
+		Handle:  node.Handle{Provider: "test", ID: "n1"},
+		State:   node.StateReady,
+		HostKey: reported,
+	}.WithEndpoint(node.Endpoint{Host: "127.0.0.1", Port: 22, User: "root"})
+
+	r, err := node.Ready(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// TestTrustFor_RefusesANodeWithNothingToVerifyAgainst.
+//
+// Unreachable through WithNode, which mints a key for every node and cannot
+// build a CreateRequest without one. Tested directly because it is the guard
+// that matters if that ever changes: the alternative to refusing here is
+// trust-on-first-use against an address that has never had a key, which
+// authenticates nothing.
+func TestTrustFor_RefusesANodeWithNothingToVerifyAgainst(t *testing.T) {
+	_, err := trustFor(readyNode(t, node.HostKey{}), opts(t), node.HostKey{})
+	if err == nil {
+		t.Fatal("a node with no host key at all was accepted")
+	}
+	if !strings.Contains(err.Error(), "will not connect") {
+		t.Errorf("got %v", err)
+	}
+}
+
+// TestTrustFor_RefusesAMintedKeyItCannotParse. A key ember cannot read is one
+// it cannot pin, and connecting anyway would verify nothing.
+func TestTrustFor_RefusesAMintedKeyItCannotParse(t *testing.T) {
+	bad := node.HostKey{Source: node.HostKeyMinted, Algo: "ssh-ed25519", Base64: "!!!"}
+	_, err := trustFor(readyNode(t, node.HostKey{}), opts(t), bad)
+	if err == nil {
+		t.Fatal("an unparseable minted key was accepted")
+	}
+	if !strings.Contains(err.Error(), "minted") {
+		t.Errorf("the error does not say which key failed: %v", err)
+	}
+}
+
+// TestTrustFor_PrefersTheMintedKeyOverTheProvidersWhenTheyAgree, which is the
+// ordinary case: a provider supporting injection echoes back what it was
+// given.
+func TestTrustFor_PrefersTheMintedKeyOverTheProvidersWhenTheyAgree(t *testing.T) {
+	pair, err := hostkey.Mint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := pair.NodeKey()
+
+	trust, err := trustFor(readyNode(t, k), opts(t), k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cbErr := hostkey.Callback(trust, "n1")("h", nil, pair.Public); cbErr != nil {
+		t.Errorf("the agreed key was refused: %v", cbErr)
 	}
 }

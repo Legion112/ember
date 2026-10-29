@@ -612,3 +612,42 @@ func TestEveryCallHitsThePathTheSpecDocuments(t *testing.T) {
 		})
 	}
 }
+
+// TestCaps_DeclaresRunPodsWebTerminalPort, which ember's first real provision
+// found by refusing the node and destroying it.
+func TestCaps_DeclaresRunPodsWebTerminalPort(t *testing.T) {
+	ports := New(node.NewSecret([]byte("x"))).Caps().PlatformPorts
+	if len(ports) != 1 {
+		t.Fatalf("got %d platform ports, want exactly the web terminal: %+v", len(ports), ports)
+	}
+	if ports[0].Port != WebTerminalPort || ports[0].Proto != node.ProtoHTTP {
+		t.Errorf("got %+v", ports[0])
+	}
+	// The reason travels with it, because an operator reading an exposure
+	// report deserves to know what ember decided to tolerate and why.
+	if !strings.Contains(ports[0].Why, "web terminal") {
+		t.Errorf("Why = %q", ports[0].Why)
+	}
+}
+
+// TestCreate_RefusesAWorkloadOnThePlatformPort. ember tolerates 19123 only
+// because nothing listens there; a workload binding it is precisely the case
+// that stops being true, and RunPod's proxy would serve it with no
+// authentication at all.
+func TestCreate_RefusesAWorkloadOnThePlatformPort(t *testing.T) {
+	p := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("the create call reached RunPod with a workload on the proxy port")
+		_, _ = w.Write([]byte(`{"id":"x","status":"PROVISIONING"}`))
+	})
+
+	req := request(t)
+	req.Spec.Ports = []node.PortMap{{Name: "comfyui", Remote: WebTerminalPort, Local: 8188}}
+
+	_, err := p.Create(t.Context(), req)
+	if err == nil {
+		t.Fatal("a workload on the public proxy port was accepted")
+	}
+	if !strings.Contains(err.Error(), "proxy.runpod.net") {
+		t.Errorf("the error does not say what makes this dangerous: %v", err)
+	}
+}

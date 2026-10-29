@@ -642,7 +642,18 @@ func (l *Lab) Exec(ctx context.Context, id string, args ...string) {
 	l.exec(ctx, id, args...)
 }
 
+// ExecOut runs a command in a node container and returns its stdout.
+func (l *Lab) ExecOut(ctx context.Context, id string, args ...string) string {
+	l.t.Helper()
+	return l.execOut(ctx, id, args...)
+}
+
 func (l *Lab) exec(ctx context.Context, id string, args ...string) {
+	l.t.Helper()
+	l.execOut(ctx, id, args...)
+}
+
+func (l *Lab) execOut(ctx context.Context, id string, args ...string) string {
 	l.t.Helper()
 	ex, err := l.cli.ContainerExecCreate(ctx, id, container.ExecOptions{
 		Cmd: args, AttachStdout: true, AttachStderr: true,
@@ -650,6 +661,7 @@ func (l *Lab) exec(ctx context.Context, id string, args ...string) {
 	if err != nil {
 		l.t.Fatalf("exec create %v: %v", args, err)
 	}
+	_ = ex
 	att, err := l.cli.ContainerExecAttach(ctx, ex.ID, container.ExecAttachOptions{})
 	if err != nil {
 		l.t.Fatalf("exec attach %v: %v", args, err)
@@ -665,6 +677,7 @@ func (l *Lab) exec(ctx context.Context, id string, args ...string) {
 	if ins.ExitCode != 0 {
 		l.t.Fatalf("exec %v exit %d: %s%s", args, ins.ExitCode, out.String(), errb.String())
 	}
+	return out.String()
 }
 
 // WaitSSH waits for a completed SSH handshake, not merely a TCP accept.

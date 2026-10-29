@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/node"
 )
 
@@ -72,6 +73,12 @@ type Caps struct {
 
 	// MinBilling is the smallest unit the provider charges for.
 	MinBilling time.Duration
+
+	// PlatformPorts are public mappings this provider adds to every node of
+	// its own accord, which no request shape can prevent. Empty is the right
+	// answer for any provider that does not do this, and the zero value
+	// therefore tolerates nothing.
+	PlatformPorts []exposure.PlatformPort
 
 	// PublicSSH means nodes are reached over a public SSH port, so exactly
 	// one public mapping is expected and anything else is a violation.

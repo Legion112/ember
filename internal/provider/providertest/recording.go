@@ -40,6 +40,18 @@ type RecordingProvider struct {
 	// anything sleeping.
 	States []node.State
 
+	// HostKey overrides what Inspect reports on a ready node.
+	//
+	// Left zero, the fake echoes back the public half of the key ember
+	// injected in the create call, which is what a provider that supports
+	// injection actually does. Setting it to an unrelated key reproduces a
+	// provider substituting one -- a case ember refuses outright, so a fake
+	// that did this by default would make every test fail for the wrong
+	// reason.
+	//
+	// The old comment below is kept because it still describes the zero
+	// value's other role.
+	//
 	// HostKey is reported on a ready node. Leave it zero to exercise the
 	// trust-on-first-use fallback.
 	HostKey node.HostKey
@@ -69,6 +81,9 @@ type RecordingProvider struct {
 	created   []node.Handle
 	destroyed []node.Handle
 	nextID    int
+
+	// injected records the host key ember supplied per node.
+	injected map[string]node.HostKey
 }
 
 // NewRecordingProvider returns a provider that creates nodes which become
@@ -145,6 +160,13 @@ func (p *RecordingProvider) Create(_ context.Context, req node.CreateRequest) (n
 	p.nextID++
 	h := node.Handle{Provider: p.ProviderName, ID: fmt.Sprintf("n%d", p.nextID)}
 	p.created = append(p.created, h)
+
+	// The node adopts the key ember injected, which is what a provider
+	// supporting injection does.
+	if p.injected == nil {
+		p.injected = map[string]node.HostKey{}
+	}
+	p.injected[h.ID] = req.HostKeyPublic
 	return h, nil
 }
 
@@ -165,7 +187,7 @@ func (p *RecordingProvider) Inspect(_ context.Context, h node.Handle) (node.Node
 	}
 	p.inspects++
 
-	n := node.Node{Handle: h, State: state, HostKey: p.HostKey}
+	n := node.Node{Handle: h, State: state, HostKey: p.hostKeyFor(h)}
 	// Reported on every node, ready or not, and defaulting to what the
 	// fake's own Caps imply. A fake that leaves exposure unreported fails
 	// every assertion over it, which would make the fake itself the thing
@@ -184,6 +206,27 @@ func (p *RecordingProvider) Inspect(_ context.Context, h node.Handle) (node.Node
 		ep = node.Endpoint{Host: "127.0.0.1", Port: 2222, User: "root"}
 	}
 	return n.WithEndpoint(ep), nil
+}
+
+// InjectedKey is the public half of the host key ember supplied for a node,
+// so a test can assert what the trust was built from without having to
+// control ember's own minting.
+func (p *RecordingProvider) InjectedKey(id string) node.HostKey {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.injected[id]
+}
+
+// hostKeyFor is what the fake reports for a node.
+//
+// The injected key by default, because that is what a provider supporting
+// injection does: ember hands it over in the create call and the node adopts
+// it. An explicit HostKey overrides, for the tests that need a mismatch.
+func (p *RecordingProvider) hostKeyFor(h node.Handle) node.HostKey {
+	if !p.HostKey.IsZero() {
+		return p.HostKey
+	}
+	return p.injected[h.ID]
 }
 
 // exposure is what this fake says it published.

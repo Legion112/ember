@@ -216,7 +216,7 @@ func WithNode(
 		return err
 	}
 
-	trust, err := trustFor(ready, o)
+	trust, err := trustFor(ready, o, req.HostKeyPublic)
 	if err != nil {
 		return err
 	}
@@ -246,7 +246,7 @@ func WithNode(
 // said it would.
 func assertExposure(p provider.Provider, n node.Node) error {
 	if p.Caps().PublicSSH {
-		return exposure.AssertSSHOnly(n)
+		return exposure.AssertSSHOnly(n, p.Caps().PlatformPorts...)
 	}
 	return exposure.AssertNoPublishedPorts(n)
 }
@@ -324,23 +324,54 @@ func WaitReady(ctx context.Context, p provider.Provider, h node.Handle, o Option
 }
 
 // trustFor decides how the node's host key will be judged.
-func trustFor(r node.ReadyNode, o Options) (hostkey.Trust, error) {
-	k := r.Node().HostKey
-	if !k.IsZero() {
-		fp, err := hostkey.FromNodeKey(k)
+// trustFor decides what the dial must verify the node against.
+//
+// minted is the public half of the key ember generated and injected through
+// the create call. It takes precedence over anything the provider reports,
+// and that ordering is the whole point: ember already knows which key the
+// node should present, so it never has to ask the provider to tell it.
+//
+// Reading the provider's answer first was a real bug. The local provider
+// echoes the key back on a container label, so it worked there; RunPod has no
+// label mechanism and reports nothing, so ember's first real cloud provision
+// fell through to trust-on-first-use -- against a brand-new IP, which is the
+// one case TOFU cannot defend and the exact thing minting the key exists to
+// avoid. It warned, and a warning in a log is not a security control.
+func trustFor(r node.ReadyNode, o Options, minted node.HostKey) (hostkey.Trust, error) {
+	reported := r.Node().HostKey
+
+	if !minted.IsZero() {
+		fp, err := hostkey.FromNodeKey(minted)
 		if err != nil {
-			return nil, fmt.Errorf("node %s: %w", r.Handle(), err)
+			return nil, fmt.Errorf("node %s: the host key ember minted: %w", r.Handle(), err)
+		}
+		// If the provider also reports one, the two must agree. A provider
+		// handing back a different key than the one ember supplied has
+		// substituted something, and continuing would pin the substitution.
+		if !reported.IsZero() {
+			rfp, err := hostkey.FromNodeKey(reported)
+			if err != nil {
+				return nil, fmt.Errorf("node %s: the host key the provider reported: %w", r.Handle(), err)
+			}
+			if !fp.Equal(rfp) {
+				return nil, fmt.Errorf(
+					"node %s reports host key %s but ember injected %s; the provider has substituted a key, so ember will not connect",
+					r.Handle(), rfp, fp)
+			}
 		}
 		return hostkey.Pinned(fp)
 	}
-	if o.Pins == nil {
-		return nil, fmt.Errorf("node %s published no host key and there is no pin store to fall back on", r.Handle())
-	}
-	// Nothing can authenticate the first connection to an address that has
-	// never had a key. The node is recorded as pinned rather than minted so
-	// `ember ls` can show which nodes were never properly authenticated.
-	o.log().Warn("no host key from the provider; trusting this one on first use", "handle", r.Handle().String())
-	return o.Pins.TrustOnFirstUse(r.Handle().ID), nil
+
+	// Unreachable through WithNode, which mints a key for every node and
+	// cannot build a CreateRequest without one. It is an error rather than a
+	// fallback to trust-on-first-use on purpose: TOFU against an address
+	// that has never had a key authenticates nothing, and reaching here
+	// would mean ember had stopped injecting -- which is worth a refusal,
+	// not a warning. hostkey.Store.TrustOnFirstUse remains for a provider
+	// that genuinely cannot accept an injected key; nothing is one today.
+	return nil, fmt.Errorf(
+		"node %s: ember did not mint a host key for this node, so there is nothing to verify it against; "+
+			"it will not connect rather than trust whatever answers", r.Handle())
 }
 
 // destroy removes the node and records what happened.
