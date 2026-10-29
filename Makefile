@@ -107,17 +107,42 @@ lint:
 docker-build:
 	docker build -t $(LAB_IMAGE) -f node.Dockerfile .
 
-# SD_IMAGE is a workload image: the node image plus stable-diffusion.cpp and a
-# model. The model is not in this repository -- it is gigabytes and it is
-# somebody else's weights -- so MODEL has to name a local file.
+# A workload image is the node image plus whatever it was rented to run. The
+# model is not in this repository -- it is gigabytes and it is somebody else's
+# weights -- so MODEL has to name a local file.
 SD_IMAGE := ember:sd
+SD_CUDA_IMAGE := ember:sd-cuda
 MODEL ?=
 
-workload-sd:
-	@if [ -z "$(MODEL)" ]; then 		echo "MODEL is not set. Point it at a GGUF checkpoint, for example:"; 		echo "  make workload-sd MODEL=/path/to/v1-5-pruned_bf16.gguf"; 		exit 1; 	fi
+# require-model fails with the command that fixes it rather than a build error
+# three minutes in.
+define require-model
+	@if [ -z "$(MODEL)" ]; then \
+		echo "MODEL is not set. Point it at a GGUF checkpoint, for example:"; \
+		echo "  make $@ MODEL=/path/to/v1-5-pruned_bf16.gguf"; \
+		exit 1; \
+	fi
 	@if [ ! -f "$(MODEL)" ]; then echo "no such model: $(MODEL)"; exit 1; fi
+endef
+
+# The CPU variant, for proving a pipeline locally for nothing. It uses an
+# upstream prebuilt binary, so it builds in seconds.
+workload-sd:
+	$(require-model)
 	cp "$(MODEL)" .model.gguf
-	docker build -t $(SD_IMAGE) -f workload-sd.Dockerfile 		--build-arg NODE_IMAGE=$(LAB_IMAGE) --build-arg MODEL_PATH=.model.gguf . 		; rc=$$?; rm -f .model.gguf; exit $$rc
+	docker build -t $(SD_IMAGE) -f workload-sd.Dockerfile \
+		--build-arg NODE_IMAGE=$(LAB_IMAGE) --build-arg MODEL_PATH=.model.gguf . ; \
+	rc=$$?; rm -f .model.gguf; exit $$rc
+
+# The CUDA variant, for a rented GPU. Upstream publishes no prebuilt Linux
+# CUDA binary, so this compiles stable-diffusion.cpp against the toolkit --
+# minutes, not seconds.
+workload-sd-cuda:
+	$(require-model)
+	cp "$(MODEL)" .model.gguf
+	docker build -t $(SD_CUDA_IMAGE) -f workload-sd-cuda.Dockerfile \
+		--build-arg MODEL_PATH=.model.gguf . ; \
+	rc=$$?; rm -f .model.gguf; exit $$rc
 
 # The labs refuse to skip themselves: a missing image is a hard failure with
 # the command to fix it, never a t.Skip. A silently skipped lab is worse than

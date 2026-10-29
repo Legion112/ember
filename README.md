@@ -141,6 +141,26 @@ never look like "nothing is running". Each record also names the process
 holding its node, so a run killed with `SIGKILL` is reported as billing with
 nobody watching instead of printing `ok`.
 
+## Workload images
+
+ember runs **one container that is both the node and the workload**, so the
+image carries sshd and `embernode` alongside whatever you came to run.
+
+| file | what it builds |
+|---|---|
+| `node.Dockerfile` | the bare node: sshd and `embernode`, nothing else |
+| `workload-sd.Dockerfile` | node + stable-diffusion.cpp (CPU) + a GGUF model |
+| `workload-sd-cuda.Dockerfile` | the same compiled against CUDA, for a rented GPU |
+
+```
+make workload-sd MODEL=/path/to/v1-5-pruned_bf16.gguf
+ember up --config sd.yaml     # provider: local — free, CPU, a few seconds
+```
+
+stable-diffusion.cpp rather than ComfyUI or diffusers, deliberately: no Python
+and no PyTorch anywhere, and 2.45 GB rather than a dozen. On a rented GPU that
+difference is pull time, and pull time is billed at GPU rates.
+
 ## Build
 
 ```
