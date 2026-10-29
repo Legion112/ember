@@ -651,3 +651,33 @@ func TestCreate_RefusesAWorkloadOnThePlatformPort(t *testing.T) {
 		t.Errorf("the error does not say what makes this dangerous: %v", err)
 	}
 }
+
+// TestCaps_BillsPerSecondWithNoMinimum.
+//
+// Measured against a real invoice rather than assumed. Four pods of 37s,
+// 165s, 49s and 67s at $0.89/hour: RunPod charged $0.08, the per-second total
+// is $0.0787, and a one-minute-minimum total would be $0.0870. The first is
+// within the dashboard's rounding and the second is 0.7 cents out -- exactly
+// what a minute's floor adds to the two sub-minute pods.
+//
+// The field said a minute before, carried over from general knowledge about
+// GPU providers and never checked against a bill.
+func TestCaps_BillsPerSecondWithNoMinimum(t *testing.T) {
+	if got := New(node.NewSecret([]byte("x"))).Caps().MinBilling; got != 0 {
+		t.Errorf("MinBilling = %v, want 0: RunPod bills per second", got)
+	}
+
+	// A short pod therefore costs what it ran for, not a minute.
+	start := time.Now()
+	b := node.Estimate(node.Rate(890_000), start, start.Add(37220*time.Millisecond), 0)
+	if b.Billable != b.Elapsed {
+		t.Errorf("billable %v != elapsed %v; a floor was applied", b.Billable, b.Elapsed)
+	}
+	// 37.22s at $0.89/hr.
+	if want := node.MicroUSD(9203); b.Cost < want-5 || b.Cost > want+5 {
+		t.Errorf("cost = %v (%d micro), want about %d", b.Cost, int64(b.Cost), int64(want))
+	}
+	if strings.Contains(b.String(), "minimum") {
+		t.Errorf("a minimum was reported where none applies: %q", b.String())
+	}
+}

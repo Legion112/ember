@@ -90,10 +90,19 @@ func (p *Provider) Caps() provider.Caps {
 
 		Free: false,
 
-		// RunPod bills by the second once a pod is running, but a pod that
-		// is created and destroyed immediately still costs the provisioning
-		// time. One minute is the figure ember budgets against.
-		MinBilling: time.Minute,
+		// Per second, with no minimum. Measured rather than assumed: across
+		// four pods of 37s, 165s, 49s and 67s, RunPod charged $0.08 against
+		// a per-second total of $0.0787 and a one-minute-minimum total of
+		// $0.0870. The first is within the dashboard's rounding; the second
+		// is 0.7 cents out, which is exactly what the assumed minimum added
+		// to the two sub-minute pods.
+		//
+		// It was a minute before, carried over from general knowledge about
+		// GPU providers and never checked. That inflated every short run by
+		// up to a minute's charge -- always upward, so nothing was ever
+		// under-budgeted, but an estimate that is wrong in a safe direction
+		// is still wrong and teaches the operator the wrong shape.
+		MinBilling: 0,
 
 		// Reached over a public 22/tcp mapping, so exactly one public port is
 		// expected and anything else is a violation. See
