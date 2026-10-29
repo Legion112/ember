@@ -1,6 +1,9 @@
 package node
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestNormalizeGPU_EverySpellingOfOneCardAgrees is the property that matters.
 // A filter compares GPUModel with ==, so two spellings of the same card that
@@ -141,5 +144,63 @@ func TestGPUModelAccepts_ACapacitySuffixIsMoreSpecific(t *testing.T) {
 		if got := tc.offer.Accepts(tc.want); got != tc.accept {
 			t.Errorf("%q.Accepts(%q) = %v, want %v", tc.offer, tc.want, got, tc.accept)
 		}
+	}
+}
+
+// TestNormalizeGPU_RealRunPodCatalogueNames are names copied from a live
+// RunPod catalogue response, not from documentation.
+//
+// Each of the last three was a silent filter miss found by running
+// `ember offers` against the real API and reading the output: the card was
+// listed and rentable, and `--gpu <what anyone would type>` matched nothing.
+func TestNormalizeGPU_RealRunPodCatalogueNames(t *testing.T) {
+	for in, want := range map[string]GPUModel{
+		"NVIDIA GeForce RTX 4090":                      "rtx4090",
+		"NVIDIA GeForce RTX 5090":                      "rtx5090",
+		"NVIDIA A100 80GB PCIe":                        "a100-80g",
+		"NVIDIA A100-SXM4-80GB":                        "a100-80g",
+		"NVIDIA H100 80GB HBM3":                        "h100-80g",
+		"NVIDIA H200 NVL":                              "h200",
+		"NVIDIA L40S":                                  "l40s",
+		"NVIDIA RTX A4500":                             "rtxa4500",
+		"NVIDIA RTX PRO 6000 Blackwell Server Edition": "rtxpro6000",
+
+		// Cooling is not silicon.
+		"NVIDIA B300 SXM6 AC": "b300",
+		// "ada" was a noise word and "generation" was not.
+		"NVIDIA RTX 6000 Ada Generation": "rtx6000",
+	} {
+		if got := NormalizeGPU(in); got != want {
+			t.Errorf("NormalizeGPU(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestNormalizeGPU_TwoSpellingsOfOneCardAgree, which is what lets `--gpu
+// a100-80g` rent either a PCIe or an SXM4 board.
+func TestNormalizeGPU_TwoSpellingsOfOneCardAgree(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"},
+		{"NVIDIA RTX PRO 6000 Blackwell Server Edition", "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"},
+	} {
+		a, b := NormalizeGPU(pair[0]), NormalizeGPU(pair[1])
+		if a != b {
+			t.Errorf("%q -> %q and %q -> %q; the same card should normalise alike", pair[0], a, pair[1], b)
+		}
+	}
+}
+
+// TestNormalizeGPU_AMIGSliceStaysDistinct. "RTX PRO 6000 ... MIG 1g.24gb" is a
+// partition of a card, not the card: it has a fraction of the memory, and
+// folding it into the full model would have ember rent a slice for a job
+// sized to the whole thing.
+func TestNormalizeGPU_AMIGSliceStaysDistinct(t *testing.T) {
+	full := NormalizeGPU("NVIDIA RTX PRO 6000 Blackwell Server Edition")
+	slice := NormalizeGPU("NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb")
+	if full == slice {
+		t.Errorf("a MIG slice normalised to the full card (%q)", full)
+	}
+	if !strings.Contains(string(slice), "mig") {
+		t.Errorf("the slice does not say it is one: %q", slice)
 	}
 }

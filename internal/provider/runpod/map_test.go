@@ -294,6 +294,10 @@ func TestMapExposure_AnEmptyRuntimePortListIsAReportOfNone(t *testing.T) {
 	}
 }
 
+// TestMapOffers_SecureCloud runs over a *captured* catalogue response, not an
+// invented one. The numbers below are what RunPod actually returned on
+// 2026-10-29; an earlier version of this test asserted prices I had made up
+// from the schema's examples, and every one of them was wrong.
 func TestMapOffers_SecureCloud(t *testing.T) {
 	gs := fixture[listGpuTypesResponse](t, "gpus.json").Gpus
 	if len(gs) != 4 {
@@ -302,20 +306,19 @@ func TestMapOffers_SecureCloud(t *testing.T) {
 
 	offers := mapOffers(gs, cloudSecure)
 
-	// Of the four: the 4090 and the H100 are offers; the A40 has availability
-	// NONE and the MI300X is quoted at zero.
-	if len(offers) != 2 {
-		t.Fatalf("got %d offers: %+v", len(offers), offers)
-	}
-
+	// Of the four captured entries, two have capacity somewhere. The other
+	// two report NONE overall and list no data centre at all.
 	byToken := map[node.OfferToken]node.Offer{}
 	for _, o := range offers {
 		byToken[o.Token] = o
 	}
+	if len(offers) != 2 {
+		t.Fatalf("got %d offers: %+v", len(offers), offers)
+	}
 
 	o := byToken["NVIDIA GeForce RTX 4090"]
-	if o.Price != node.Rate(690000) {
-		t.Errorf("4090 secure price = %v (%d micro), want $0.69/hr", o.Price, int64(o.Price))
+	if o.Price != node.Rate(890_000) {
+		t.Errorf("4090 secure price = %v (%d micro), want $0.89/hr", o.Price, int64(o.Price))
 	}
 	// RunPod quotes VRAM in GB and ember's Offer carries MiB. A straight
 	// assignment would report a 24 GB card as 24 MiB, and every --min-vram
@@ -323,38 +326,58 @@ func TestMapOffers_SecureCloud(t *testing.T) {
 	if o.VRAM != node.MiB(24*1024) {
 		t.Errorf("4090 VRAM = %v, want %v", o.VRAM, node.MiB(24*1024))
 	}
-	if o.Region != "US-TX-3" {
+	// The 4090 reads NONE overall and LOW in US-IL-1, so the region names
+	// the site that actually has it.
+	if o.Region != "US-IL-1" {
 		t.Errorf("region = %q", o.Region)
 	}
 	if err := o.Validate(); err != nil {
 		t.Errorf("the mapped offer does not validate: %v", err)
 	}
 
-	h := byToken["NVIDIA H100 80GB HBM3"]
-	if h.Price != node.Rate(2690000) {
-		t.Errorf("H100 secure price = %v", h.Price)
+	a := byToken["NVIDIA A100 80GB PCIe"]
+	if a.Price != node.Rate(1_790_000) {
+		t.Errorf("A100 secure price = %v, want $1.79/hr", a.Price)
 	}
-	if h.VRAM != node.MiB(80*1024) {
-		t.Errorf("H100 VRAM = %v", h.VRAM)
+	if a.VRAM != node.MiB(80*1024) {
+		t.Errorf("A100 VRAM = %v", a.VRAM)
 	}
 }
 
-// TestMapOffers_CommunityCloudPricesAndAvailabilityDiffer. The two clouds are
-// quoted separately, and a GPU this tier does not offer is not an offer:
-// listing it would have ember up pick hardware that cannot be rented and fail
-// at create.
-func TestMapOffers_CommunityCloudPricesAndAvailabilityDiffer(t *testing.T) {
+// TestMapOffers_TheTwoCloudsAreQuotedSeparately, and a GPU a tier does not
+// offer is not an offer there: listing it would have ember up pick hardware
+// that cannot be rented and fail at create.
+func TestMapOffers_TheTwoCloudsAreQuotedSeparately(t *testing.T) {
 	gs := fixture[listGpuTypesResponse](t, "gpus.json").Gpus
-	offers := mapOffers(gs, cloudCommunity)
+	community := map[node.OfferToken]node.Offer{}
+	for _, o := range mapOffers(gs, cloudCommunity) {
+		community[o.Token] = o
+	}
 
-	if len(offers) != 1 {
-		t.Fatalf("got %d offers: %+v", len(offers), offers)
+	if got := community["NVIDIA GeForce RTX 4090"].Price; got != node.Rate(340_000) {
+		t.Errorf("4090 community price = %v, want $0.34/hr", got)
 	}
-	if offers[0].Token != "NVIDIA GeForce RTX 4090" {
-		t.Fatalf("got %+v", offers[0])
+	if got := community["NVIDIA A100 80GB PCIe"].Price; got != node.Rate(1_190_000) {
+		t.Errorf("A100 community price = %v, want $1.19/hr", got)
 	}
-	if offers[0].Price != node.Rate(440000) {
-		t.Errorf("community price = %v, want $0.44/hr", offers[0].Price)
+
+	// Secure-only hardware must not appear in the community listing even
+	// though the response carries a community price for it.
+	if _, found := community["AMD Instinct MI300X OAM"]; found {
+		t.Error("a secure-only GPU was offered in the community cloud")
+	}
+}
+
+// TestMapOffers_NoCapacityAnywhereIsNotAnOffer. Both of these report NONE
+// overall and list no data centre, which is the real shape of "none".
+func TestMapOffers_NoCapacityAnywhereIsNotAnOffer(t *testing.T) {
+	gs := fixture[listGpuTypesResponse](t, "gpus.json").Gpus
+	for _, cloud := range []string{cloudSecure, cloudCommunity} {
+		for _, o := range mapOffers(gs, cloud) {
+			if o.Token == "AMD Instinct MI300X OAM" || o.Token == "NVIDIA A100-SXM4-40GB" {
+				t.Errorf("%s: %q has no capacity anywhere and was offered", cloud, o.Token)
+			}
+		}
 	}
 }
 
@@ -452,11 +475,66 @@ func TestMapProto(t *testing.T) {
 	}
 }
 
-func TestFirstOrEmpty(t *testing.T) {
-	if got := firstOrEmpty(nil); got != "" {
-		t.Errorf("got %q", got)
+// TestAvailability_ASummaryIsNotAVerdict is the case the live catalogue
+// taught. RunPod reported an RTX 4090 as NONE overall while its US-IL-1 entry
+// read LOW, so filtering on the top-level figure alone would have had ember
+// answer "no capacity" for a card that was rentable.
+func TestAvailability_ASummaryIsNotAVerdict(t *testing.T) {
+	g := gpuType{Availability: "NONE", DataCenters: []dataCentre{{ID: "US-IL-1", Availability: "LOW"}}}
+	if !hasCapacity(g) {
+		t.Error("a GPU with capacity in one data centre was dropped")
 	}
-	if got := firstOrEmpty([]string{"a", "b"}); got != "a" {
+	if got := availabilityOf(g); got != "LOW" {
+		t.Errorf("availability = %q, want the best any site reports", got)
+	}
+	if got := bestRegion(g); got != "US-IL-1" {
+		t.Errorf("region = %q", got)
+	}
+}
+
+func TestAvailability_NoneAnywhereIsNoCapacity(t *testing.T) {
+	for _, g := range []gpuType{
+		{Availability: "NONE"},
+		{Availability: "NONE", DataCenters: []dataCentre{{ID: "X", Availability: "NONE"}}},
+		{Availability: ""},
+	} {
+		if hasCapacity(g) {
+			t.Errorf("%+v was treated as having capacity", g)
+		}
+	}
+}
+
+// TestAvailability_RegionNamesASiteThatHasSome, so `ember offers` does not
+// print a data centre with none as though it were where the node would land.
+func TestAvailability_RegionNamesASiteThatHasSome(t *testing.T) {
+	g := gpuType{Availability: "LOW", DataCenters: []dataCentre{
+		{ID: "EMPTY", Availability: "NONE"},
+		{ID: "BUSY", Availability: "HIGH"},
+	}}
+	if got := bestRegion(g); got != "BUSY" {
+		t.Errorf("region = %q, want the site with capacity", got)
+	}
+	if got := availabilityOf(g); got != "HIGH" {
+		t.Errorf("availability = %q", got)
+	}
+	if got := bestRegion(gpuType{}); got != "" {
+		t.Errorf("a GPU with no data centres reported region %q", got)
+	}
+}
+
+// TestRank_AnUnknownLevelIsNeitherHiddenNorTrusted. ember should not drop a
+// GPU because the API grew a word it does not know, nor claim it is plentiful.
+func TestRank(t *testing.T) {
+	if rank("HIGH") <= rank("MEDIUM") || rank("MEDIUM") <= rank("LOW") || rank("LOW") <= rank("NONE") {
+		t.Error("the levels do not order")
+	}
+	if rank("NONE") != 0 || rank("") != 0 {
+		t.Error("NONE and empty must be the floor")
+	}
+	if rank("PLENTIFUL") <= rank("NONE") || rank("PLENTIFUL") >= rank("MEDIUM") {
+		t.Errorf("an unrecognised level ranks %d, want above NONE and below MEDIUM", rank("PLENTIFUL"))
+	}
+	if got := availabilityOf(gpuType{}); got != "unknown" {
 		t.Errorf("got %q", got)
 	}
 }

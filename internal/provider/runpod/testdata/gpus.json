@@ -1,57 +1,147 @@
 {
   "gpus": [
     {
-      "id": "NVIDIA GeForce RTX 4090",
-      "name": "RTX 4090",
-      "manufacturer": "NVIDIA",
-      "memory": 24,
-      "secure": true,
-      "community": true,
-      "price": { "secure": 0.69, "community": 0.44 },
-      "maxCount": { "secure": 8, "community": 4 },
-      "availability": "HIGH",
-      "cudaVersions": ["12.4", "12.6"],
-      "dataCenters": ["US-TX-3", "EU-SE-1"]
-    },
-    {
-      "id": "NVIDIA H100 80GB HBM3",
-      "name": "H100 SXM",
-      "manufacturer": "NVIDIA",
-      "memory": 80,
-      "secure": true,
-      "community": false,
-      "price": { "secure": 2.69, "community": 0 },
-      "maxCount": { "secure": 8, "community": 0 },
-      "availability": "MEDIUM",
-      "cudaVersions": ["12.4"],
-      "dataCenters": ["US-KS-2"]
-    },
-    {
-      "id": "NVIDIA A40",
-      "name": "A40",
-      "manufacturer": "NVIDIA",
-      "memory": 48,
-      "secure": true,
-      "community": true,
-      "price": { "secure": 0.39, "community": 0.28 },
-      "maxCount": { "secure": 8, "community": 2 },
       "availability": "NONE",
-      "cudaVersions": ["12.4"],
-      "dataCenters": []
+      "community": false,
+      "id": "AMD Instinct MI300X OAM",
+      "manufacturer": "AMD",
+      "maxCount": {
+        "community": 0,
+        "secure": 8
+      },
+      "memory": 192,
+      "name": "MI300X",
+      "pool": null,
+      "price": {
+        "community": 0.5,
+        "secure": 2.39
+      },
+      "secure": true
     },
     {
-      "id": "AMD Instinct MI300X",
-      "name": "MI300X",
-      "manufacturer": "AMD",
-      "memory": 192,
-      "secure": true,
-      "community": false,
-      "price": { "secure": 0, "community": 0 },
-      "maxCount": { "secure": 8, "community": 0 },
-      "availability": "HIGH",
-      "cudaVersions": [],
-      "dataCenters": ["US-TX-3"]
+      "availability": "LOW",
+      "community": true,
+      "cudaVersions": [
+        {
+          "available": true,
+          "version": "12.4"
+        },
+        {
+          "available": true,
+          "version": "13.2"
+        }
+      ],
+      "dataCenters": [
+        {
+          "availability": "LOW",
+          "id": "CA-MTL-3",
+          "name": "CA-MTL-3"
+        },
+        {
+          "availability": "LOW",
+          "id": "US-MO-1",
+          "name": "US-MO-1"
+        }
+      ],
+      "id": "NVIDIA A100 80GB PCIe",
+      "manufacturer": "NVIDIA",
+      "maxCount": {
+        "community": 6,
+        "secure": 8
+      },
+      "memory": 80,
+      "name": "A100 PCIe",
+      "pool": "AMPERE_80",
+      "price": {
+        "community": 1.19,
+        "secure": 1.79,
+        "serverless": 2.72
+      },
+      "secure": true
+    },
+    {
+      "availability": "NONE",
+      "community": true,
+      "cudaVersions": [
+        {
+          "available": false,
+          "version": "13.1"
+        }
+      ],
+      "id": "NVIDIA A100-SXM4-40GB",
+      "manufacturer": "NVIDIA",
+      "maxCount": {
+        "community": 2,
+        "secure": 0
+      },
+      "memory": 40,
+      "name": "A100 SXM 40GB",
+      "pool": null,
+      "price": {
+        "community": 1,
+        "secure": 0
+      },
+      "secure": false
+    },
+    {
+      "availability": "NONE",
+      "community": true,
+      "cudaVersions": [
+        {
+          "available": false,
+          "version": "12.2"
+        },
+        {
+          "available": false,
+          "version": "12.4"
+        },
+        {
+          "available": false,
+          "version": "12.6"
+        },
+        {
+          "available": false,
+          "version": "12.8"
+        },
+        {
+          "available": false,
+          "version": "12.9"
+        },
+        {
+          "available": false,
+          "version": "13.0"
+        },
+        {
+          "available": false,
+          "version": "13.2"
+        },
+        {
+          "available": false,
+          "version": "13.4"
+        }
+      ],
+      "dataCenters": [
+        {
+          "availability": "LOW",
+          "id": "US-IL-1",
+          "name": "US-IL-1"
+        }
+      ],
+      "id": "NVIDIA GeForce RTX 4090",
+      "manufacturer": "NVIDIA",
+      "maxCount": {
+        "community": 8,
+        "secure": 8
+      },
+      "memory": 24,
+      "name": "RTX 4090",
+      "pool": "ADA_24",
+      "price": {
+        "community": 0.34,
+        "secure": 0.89,
+        "serverless": 1.34
+      },
+      "secure": true
     }
-  ],
-  "pagination": { "nextCursor": null }
+  ]
 }

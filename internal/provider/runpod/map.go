@@ -202,7 +202,14 @@ func mapOffers(gpus []gpuType, cloud string) []node.Offer {
 		if price <= 0 {
 			continue
 		}
-		if g.Availability == availabilityNone {
+		// Dropped only when nothing anywhere has capacity. The top-level
+		// figure is a summary: the live catalogue reported an RTX 4090 as
+		// NONE overall while its US-IL-1 entry read LOW, and filtering on
+		// the summary alone would have had ember answer "no capacity" for a
+		// card that was rentable. Offering one that turns out to be gone
+		// costs a failed create and no money; hiding one costs the operator
+		// the thing they came for.
+		if !hasCapacity(g) {
 			continue
 		}
 		if maxCount < 1 {
@@ -216,8 +223,8 @@ func mapOffers(gpus []gpuType, cloud string) []node.Offer {
 			// RunPod quotes GB; ember's Offer carries MiB.
 			VRAM:   node.GiB(g.Memory),
 			Price:  node.RateFromUSD(price),
-			Region: firstOrEmpty(g.DataCenters),
-			Label:  fmt.Sprintf("%s, %d GiB, up to %d per pod, availability %s", g.Name, g.Memory, maxCount, strings.ToLower(g.Availability)),
+			Region: bestRegion(g),
+			Label:  fmt.Sprintf("%s, %d GiB, up to %d per pod, availability %s", g.Name, g.Memory, maxCount, strings.ToLower(availabilityOf(g))),
 		})
 	}
 	return out
@@ -229,11 +236,63 @@ const (
 	availabilityNone = "NONE"
 )
 
-func firstOrEmpty(ss []string) string {
-	if len(ss) == 0 {
-		return ""
+// hasCapacity reports whether anything, anywhere, says this GPU can be had.
+func hasCapacity(g gpuType) bool {
+	if g.Availability != availabilityNone && g.Availability != "" {
+		return true
 	}
-	return ss[0]
+	for _, dc := range g.DataCenters {
+		if dc.Availability != availabilityNone && dc.Availability != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// availabilityOf is the level worth printing: the best any site reports,
+// falling back to the overall figure.
+func availabilityOf(g gpuType) string {
+	best := g.Availability
+	for _, dc := range g.DataCenters {
+		if rank(dc.Availability) > rank(best) {
+			best = dc.Availability
+		}
+	}
+	if best == "" {
+		return "unknown"
+	}
+	return best
+}
+
+// rank orders RunPod's availability levels. An unrecognised level sorts above
+// NONE and below LOW: ember should not hide a GPU because the API grew a word
+// it does not know, nor claim it is plentiful.
+func rank(a string) int {
+	switch a {
+	case "HIGH":
+		return 3
+	case "MEDIUM":
+		return 2
+	case "LOW":
+		return 1
+	case availabilityNone, "":
+		return 0
+	default:
+		return 1
+	}
+}
+
+// bestRegion names a site that actually has capacity, so `ember offers` does
+// not print a data centre with none as though it were where the node would
+// land.
+func bestRegion(g gpuType) string {
+	best, bestRank := "", -1
+	for _, dc := range g.DataCenters {
+		if r := rank(dc.Availability); r > bestRank {
+			best, bestRank = dc.ID, r
+		}
+	}
+	return best
 }
 
 // mapPorts turns ember's port requests into RunPod's "port/protocol" strings.

@@ -39,7 +39,15 @@ var noiseWords = map[string]bool{
 	// types that.
 	"instinct": true, "radeon": true, "quadro": true,
 	"pcie": true, "sxm": true, "sxm2": true, "sxm3": true, "sxm4": true, "sxm5": true,
+	"sxm6": true, "sxm7": true,
 	"nvl": true, "oam": true,
+	// Cooling, not silicon. RunPod lists "NVIDIA B300 SXM6 AC"; air- and
+	// liquid-cooled are the same chip, and without these an operator typing
+	// `--gpu b300` matches nothing at all.
+	"ac": true, "lc": true,
+	// "NVIDIA RTX 6000 Ada Generation" -- "ada" was already here and
+	// "generation" was not, which left "rtx6000generation".
+	"generation": true,
 	// Memory *type*, which is not memory *capacity* and does not change
 	// which card you get. RunPod spells the card "NVIDIA H100 80GB HBM3",
 	// and leaving this in welded it onto the capacity suffix as

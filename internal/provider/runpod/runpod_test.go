@@ -128,11 +128,13 @@ func TestOffers_MapsTheCatalogue(t *testing.T) {
 func TestOffers_AppliesTheFilter(t *testing.T) {
 	p := newTestProvider(t, serveFile(t, "gpus.json"))
 
-	offers, err := p.Offers(t.Context(), node.Filter{GPU: node.NormalizeGPU("h100")})
+	// "a100" accepts "a100-80g": the capacity suffix makes the catalogue's
+	// name more specific than what an operator types.
+	offers, err := p.Offers(t.Context(), node.Filter{GPU: node.NormalizeGPU("a100")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(offers) != 1 || !strings.Contains(string(offers[0].Token), "H100") {
+	if len(offers) != 1 || !strings.Contains(string(offers[0].Token), "A100 80GB") {
 		t.Fatalf("got %+v", offers)
 	}
 }
@@ -550,5 +552,63 @@ func TestInspect_ReportsAnUnrecognisedStatus(t *testing.T) {
 	p := newTestProvider(t, serveFile(t, "pod_unknown_status.json"))
 	if _, err := p.Inspect(t.Context(), node.Handle{Provider: Name, ID: "weird9"}); err == nil {
 		t.Fatal("an unrecognised status was accepted")
+	}
+}
+
+// TestEveryCallHitsThePathTheSpecDocuments.
+//
+// A regression test for the first live call this package ever made, which
+// went to https://api.runpod.io/v2/v2/catalog/gpus. BaseURL ended in "/v2"
+// because RunPod's migration guide describes the base that way, while the
+// request paths were copied from the OpenAPI document, whose paths already
+// begin with /v2. Each half was defensible and together they doubled it.
+//
+// Asserting the whole path rather than the suffix is the point: a test that
+// checked only "contains /catalog/gpus" would have passed on the broken URL.
+// The expectations below are the spec's own path strings.
+func TestEveryCallHitsThePathTheSpecDocuments(t *testing.T) {
+	if BaseURL != "https://api.runpod.io" {
+		t.Fatalf("BaseURL = %q: the /v2 belongs to the paths, so adding it here doubles it", BaseURL)
+	}
+
+	for _, tc := range []struct {
+		name string
+		want string
+		call func(*Provider) error
+	}{
+		{"offers", "/v2/catalog/gpus", func(p *Provider) error {
+			_, err := p.Offers(t.Context(), node.Filter{})
+			return err
+		}},
+		{"create", "/v2/pods", func(p *Provider) error {
+			_, err := p.Create(t.Context(), request(t))
+			return err
+		}},
+		{"inspect", "/v2/pods/abc123", func(p *Provider) error {
+			_, err := p.Inspect(t.Context(), node.Handle{Provider: Name, ID: "abc123"})
+			return err
+		}},
+		{"list", "/v2/pods", func(p *Provider) error {
+			_, err := p.List(t.Context())
+			return err
+		}},
+		{"destroy", "/v2/pods/abc123", func(p *Provider) error {
+			return p.Destroy(t.Context(), node.Handle{Provider: Name, ID: "abc123"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+				got = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"abc123","status":"PROVISIONING","gpus":[],"pods":[]}`))
+			})
+			if err := tc.call(p); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if got != tc.want {
+				t.Errorf("%s hit %q, want %q", tc.name, got, tc.want)
+			}
+		})
 	}
 }

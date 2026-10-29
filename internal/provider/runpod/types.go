@@ -11,8 +11,16 @@
 // gpuTypeIds/imageName fields and a different pod body).
 package runpod
 
-// BaseURL is RunPod's v2 API.
-const BaseURL = "https://api.runpod.io/v2"
+// BaseURL is the RunPod API server root.
+//
+// The "/v2" belongs to the paths, not here. RunPod's own migration guide
+// describes the base URL as ".../v2", and writing it that way produced
+// https://api.runpod.io/v2/v2/catalog/gpus on the first live call: the
+// OpenAPI document's own paths already begin with /v2, and those are what
+// this package's request paths are copied from. Keeping the base at the
+// server root means a path here can be compared against the spec character
+// for character, which is the version that stays right.
+const BaseURL = "https://api.runpod.io"
 
 // createPodRequest is POST /v2/pods.
 //
@@ -150,8 +158,22 @@ type gpuType struct {
 	Community    bool     `json:"community"`
 	Price        gpuPrice `json:"price"`
 	MaxCount     gpuCount `json:"maxCount"`
-	Availability string   `json:"availability"`
-	DataCenters  []string `json:"dataCenters,omitempty"`
+	// Availability is the overall level. It can read NONE while an
+	// individual data centre still has capacity -- the live catalogue showed
+	// exactly that for an RTX 4090 -- so it is a summary and not a verdict.
+	Availability string `json:"availability"`
+
+	// DataCenters is per-site availability. Objects, not strings: the first
+	// fixture here guessed strings from the schema's "array" and the live
+	// call refused to decode.
+	DataCenters []dataCentre `json:"dataCenters,omitempty"`
+}
+
+// dataCentre is one site's availability for a GPU type.
+type dataCentre struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Availability string `json:"availability"`
 }
 
 // gpuPrice is the list price per hour for a single GPU, per cloud tier.

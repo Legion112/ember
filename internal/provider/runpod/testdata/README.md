@@ -6,9 +6,14 @@ rather than at runtime with a GPU attached.
 
 ## Where they came from, and what that means
 
-They were built from RunPod's **published OpenAPI schema** for
-`https://api.runpod.io/v2` — field names, types, enum values and the documented
-examples — and not captured from a live account.
+`gpus.json` is **captured from the live API** on 2026-10-29: four real entries
+from `GET /v2/catalog/gpus?include=AVAILABILITY&product=POD`, trimmed to the
+ones that exercise the interesting cases. The prices and availability levels
+in it are real.
+
+The `pod_*.json` files are still built from RunPod's **published OpenAPI
+schema** — field names, types, enum values and the documented examples — and
+have not been checked against a live response.
 
 That distinction is worth stating plainly, because it is the limit of what
 these fixtures prove:
@@ -22,11 +27,17 @@ these fixtures prove:
 - Anything the schema does not describe is absent here. A real response may
   carry fields these do not.
 
-So the mapping is tested, and the *assumption that these are what RunPod
-actually sends* is not. Replace each file with a captured live response as soon
-as an account exists, keeping the expectations: a fixture that changes shape
-when replaced is exactly the finding worth having, and it is cheaper to learn
-it from a test diff than from a pod that provisioned and never became ready.
+So the mapping is tested, and for the `pod_*.json` files the *assumption that
+these are what RunPod actually sends* is not. Replace each with a captured live
+response: a fixture that changes shape when replaced is exactly the finding
+worth having.
+
+That is not hypothetical. Replacing `gpus.json` with a real response changed
+two things at once. `dataCenters` turned out to be an array of objects rather
+than of strings, which the live call simply refused to decode. And an RTX 4090
+reported `availability: "NONE"` overall while its `US-IL-1` entry read `"LOW"`,
+so the filter that dropped anything NONE would have had ember answer "no
+capacity" for a card that was rentable. Neither was visible from the schema.
 
 ## Files
 
