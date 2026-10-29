@@ -161,6 +161,20 @@ stable-diffusion.cpp rather than ComfyUI or diffusers, deliberately: no Python
 and no PyTorch anywhere, and 2.45 GB rather than a dozen. On a rented GPU that
 difference is pull time, and pull time is billed at GPU rates.
 
+Measured end to end on a rented RTX 4090 at $0.89/hour, generating one
+384x384 image at 8 steps:
+
+| | |
+|---|---|
+| whole pod life, rent to destroyed | **1m7s** |
+| of which, sampling | **1.15s** |
+| cost | **$0.0166** |
+
+The generation is about a tenth of a cent. Everything else is pulling a
+container and waiting for a machine to exist, and that overhead is per *pod* —
+so one image per pod is the worst possible shape, and a hundred in one session
+cost barely more than one.
+
 ## Build
 
 ```
