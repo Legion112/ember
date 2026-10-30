@@ -66,7 +66,7 @@ COVER_OVERALL := 94
 # labs and a rented pod run the same bytes.
 LAB_IMAGE := ember:lab
 
-.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish publish-sd-cuda workload-sd workload-sd-cuda clean
+.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean
 
 all: fmt vet test build
 
@@ -122,6 +122,8 @@ docker-build:
 # nothing and has no store to mount.
 SD_IMAGE := ember:sd
 SD_CUDA_IMAGE := ember:sd-cuda
+# Built for this machine's card only, never published.
+SD_CUDA_LOCAL_IMAGE := ember:sd-cuda-local
 MODEL ?=
 
 # require-model fails with the command that fixes it rather than a build error
@@ -147,8 +149,38 @@ workload-sd:
 # The CUDA variant, for a rented GPU. Upstream publishes no prebuilt Linux
 # CUDA binary, so this compiles stable-diffusion.cpp against the toolkit --
 # minutes, not seconds.
+#
+# CUDA_ARCHS overrides the Dockerfile's default, which is the set of cards
+# worth renting.
 workload-sd-cuda:
-	docker build -t $(SD_CUDA_IMAGE) -f workload-sd-cuda.Dockerfile .
+	docker build -t $(SD_CUDA_IMAGE) -f workload-sd-cuda.Dockerfile \
+		$(if $(CUDA_ARCHS),--build-arg CUDA_ARCHS="$(CUDA_ARCHS)",) .
+
+# The same image, built for the card in *this* machine.
+#
+# Deliberately not in CI and not in the published image. The published one
+# carries the architectures of cards ember can rent; this machine's card is
+# not one of them, and a 2080 Ti at sm_75 would add minutes to every cold
+# build in CI to serve exactly one computer.
+#
+# The architecture is read from the card rather than configured, because a
+# number typed into a Makefile is a number that is wrong after a hardware
+# change -- and wrong here does not fail, it falls back to the CPU backend
+# and looks like a slow success.
+#
+# Tagged separately so it cannot be mistaken for the image a rented node
+# runs. `ember.local.example.yaml` names this tag.
+workload-sd-cuda-local:
+	@command -v nvidia-smi >/dev/null 2>&1 || { \
+		echo "nvidia-smi not found: this target builds for the GPU in this machine"; exit 1; }
+	@arch=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '. '); \
+	test -n "$$arch" || { echo "could not read a compute capability from nvidia-smi"; exit 1; }; \
+	echo "building for sm_$$arch ($$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1))"; \
+	docker build -t $(SD_CUDA_LOCAL_IMAGE) -f workload-sd-cuda.Dockerfile \
+		--build-arg CUDA_ARCHS="$$arch" .
+	@echo
+	@echo "built $(SD_CUDA_LOCAL_IMAGE). Run it with:"
+	@echo "  ember up --config ember.local.yaml"
 
 # Assertions about the published workload images, behind their own tag.
 #

@@ -49,6 +49,14 @@ type deps struct {
 	// touching the operator's credentials file.
 	Creds *config.Credentials
 
+	// DetectGPU overrides what the local provider finds in this machine.
+	//
+	// The same hazard Creds exists for. Left to resolve itself it reads the
+	// developer's own graphics card, and a test asserting "nothing matches
+	// --gpu h100" would pass on CI and fail on a workstation -- which is
+	// exactly what happened when local GPU support was added.
+	DetectGPU func(ctx context.Context) local.GPU
+
 	// CloudBaseURL redirects every cloud provider's API.
 	//
 	// Without it a test that registers RunPod with a fake token talks to
@@ -369,7 +377,14 @@ func buildRegistry(d deps, creds config.Credentials, cfg config.Config) (*provid
 		engine = c
 	}
 	reg := provider.NewRegistry()
-	if err := reg.Add(local.New(engine)); err != nil {
+	lp := local.New(engine)
+	// Injected the same way credentials are, and for the same reason: left
+	// to resolve itself, this reads the developer's own graphics card, and
+	// the CLI tests would behave differently on a machine that has one.
+	if d.DetectGPU != nil {
+		lp.Detect = d.DetectGPU
+	}
+	if err := reg.Add(lp); err != nil {
 		return nil, err
 	}
 

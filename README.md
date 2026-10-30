@@ -260,6 +260,51 @@ Nothing secret is ever passed as a command-line flag, because
 `/proc/<pid>/cmdline` is world-readable — on a rented machine, readable by
 whoever else is on that host.
 
+### Generating on this machine's GPU
+
+A model that does not fit in VRAM is not a model that cannot run. sd-cli will
+keep weights in system RAM and stream them into VRAM per layer
+(`--offload-to-cpu`), and its auto-fit planner already does so when VRAM is
+short:
+
+```
+auto-fit plan:
+  compute-device weight cache priority: diffusion > te > vae
+  components (params: compute device -> RAM -> other GPU -> disk)
+```
+
+So 56 GiB of weights run behind an 11 GiB card. Slowly — roughly 35 GB crosses
+PCIe on each of 28 steps — but for nothing. Most iterations of a prompt are
+asking "is the composition right", and that question does not need a rented
+A100.
+
+```bash
+make workload-sd-cuda-local          # builds for the card in this machine
+ember up --config ember.local.yaml   # same assets, same digests, free
+```
+
+[`ember.local.example.yaml`](ember.local.example.yaml) is the same
+configuration as the rented one with the provider changed and
+`--offload-to-cpu` added. The store is a Docker named volume — the same code
+path a rented network volume uses, costing nothing and surviving between runs.
+
+**The image is built separately on purpose.** The published `ember-sd` carries
+the architectures of cards worth renting — `sm_80`, `86`, `89`, `90`. A
+desktop card is usually none of them, and adding one would lengthen every cold
+build in CI to serve a single computer. `make workload-sd-cuda-local` reads
+this machine's compute capability from `nvidia-smi` and builds for exactly it,
+under a separate tag so it cannot be mistaken for the image a rented node
+runs.
+
+Running the published image on an unsupported card does **not** fail. It finds
+no usable kernel, falls back to the CPU backend, and looks like a very slow
+success — which is what `gpu_probe` below is for.
+
+The local provider reports a real offer when it finds a card, so `ember
+offers` and `min_vram_gib` work the way they do against a cloud provider.
+Without one it reports no GPU, exactly as before, which is what keeps the labs
+working on machines that have never had one.
+
 ### Checking the card before trusting it
 
 A GPU that cannot initialize does not fail. It silently becomes a slow CPU, at
