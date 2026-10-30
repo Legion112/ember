@@ -2,22 +2,36 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Legion112/ember/internal/awssig"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider/local"
+	"github.com/Legion112/ember/internal/provider/providertest"
 )
 
 // storeConfig writes an ember.yaml naming a store, and returns its path.
 func storeConfig(t *testing.T, d deps, extra string) string {
 	t.Helper()
+	return storeConfigFor(t, d, "local", extra)
+}
+
+func storeConfigFor(t *testing.T, d deps, provider, extra string) string {
+	t.Helper()
 	dir := t.TempDir()
 	p := filepath.Join(dir, config.FileName)
-	body := "provider: local\n" +
+	body := "provider: " + provider + "\n" +
 		"image: " + local.DefaultImage + "\n" +
 		"ttl: 10m\n" +
 		"config_dir: " + dir + "\n" +
@@ -214,5 +228,358 @@ func TestUp_MountsTheStoreItWasToldAbout(t *testing.T) {
 		if strings.HasPrefix(c, "ContainerCreate") {
 			t.Errorf("--dry-run created a container: %v", e.Calls)
 		}
+	}
+}
+
+func TestStorePush_RefusalsBeforeAnythingIsRead(t *testing.T) {
+	d := labDeps(t)
+	for _, tc := range []struct {
+		name    string
+		extra   string
+		args    []string
+		wantMsg string
+	}{
+		{"no file", storeBlock, []string{"push"}, "exactly one file"},
+		{
+			// The same flag-order trap as rm: the standard flag package
+			// stops at the first non-flag argument.
+			name: "flags after the file", extra: storeBlock,
+			args: []string{"push", "x.gguf", "-config"}, wantMsg: "flags come before the file",
+		},
+		{"no store named", "", []string{"push", "x.gguf"}, "no store is named"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := storeConfig(t, d, tc.extra)
+			args := append(append([]string{}, tc.args[:1]...), "-config", cfg)
+			args = append(args, tc.args[1:]...)
+			if tc.name == "flags after the file" {
+				args = []string{"push", "x.gguf", "-config", cfg}
+			}
+			var out bytes.Buffer
+			err := runStore(args, &out, d)
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("err = %q, want it to mention %q", err, tc.wantMsg)
+			}
+		})
+	}
+}
+
+func TestStorePush_RefusesANameTheNodeWouldRefuse(t *testing.T) {
+	// The same check an asset name gets. Caught here rather than after the
+	// upload, which for a 40 GB model is the difference between an error and
+	// an hour.
+	d := labDeps(t)
+	cfg := storeConfig(t, d, storeBlock)
+	var out bytes.Buffer
+	if err := runStore([]string{"push", "-config", cfg, "-as", "../escape.gguf", "x"}, &out, d); err == nil {
+		t.Error("an escaping name was accepted")
+	}
+}
+
+func TestStorePush_RefusesAProviderWithNoS3(t *testing.T) {
+	// The local provider has stores but no S3 endpoint: its volumes are on
+	// the daemon, not in a datacentre. Reported rather than attempted
+	// against a hostname that does not exist.
+	d := labDeps(t)
+	cfg := storeConfig(t, d, storeBlock)
+	var out bytes.Buffer
+	if err := runStore([]string{"create", "-config", cfg}, &out, d); err != nil {
+		t.Fatal(err)
+	}
+
+	f := filepath.Join(t.TempDir(), "sd15.gguf")
+	if err := os.WriteFile(f, []byte("weights"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	err := runStore([]string{"push", "-config", cfg, f}, &out, d)
+	if err == nil {
+		t.Fatal("pushed to a provider with no S3 endpoint")
+	}
+	if !strings.Contains(err.Error(), "S3") {
+		t.Errorf("err = %q", err)
+	}
+}
+
+func TestDigestOf_RewindsForTheUpload(t *testing.T) {
+	// The file is hashed in its own pass and then uploaded, so a digest that
+	// left the handle at EOF would upload nothing and report success.
+	p := filepath.Join(t.TempDir(), "x")
+	if err := os.WriteFile(p, []byte("the weights"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	sum, err := digestOf(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rest) != "the weights" {
+		t.Errorf("after hashing, the file reads %q; the upload would have sent that", rest)
+	}
+	if len(sum) != 64 {
+		t.Errorf("digest = %q", sum)
+	}
+}
+
+// TestStorePush_UploadsAndPrintsTheDigest is the happy path.
+//
+// Both endpoints are stand-ins, through the seams that exist for exactly
+// this: CloudBaseURL puts a RunPod-shaped store in the registry without
+// reaching RunPod, and S3BaseURL catches the upload. A test that could reach
+// either service behaves differently on a machine that has credentials.
+func TestStorePush_UploadsAndPrintsTheDigest(t *testing.T) {
+	body := []byte("these are the weights")
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.Contains(req.URL.Path, "network-volumes") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"networkVolumes":[{"id":"vol_abc","name":"ember-store-models",`+
+				`"size":40,"dataCenter":"EU-RO-1","type":"STANDARD"}],`+
+				`"pagination":{"hasNextPage":false}}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(api.Close)
+
+	var uploaded []byte
+	var auth, contentSHA string
+	s3srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		auth = req.Header.Get("Authorization")
+		contentSHA = req.Header.Get("X-Amz-Content-Sha256")
+		uploaded, _ = io.ReadAll(req.Body)
+		w.Header().Set("ETag", `"e"`)
+	}))
+	t.Cleanup(s3srv.Close)
+
+	d := labDeps(t)
+	d.CloudBaseURL = api.URL
+	d.S3BaseURL = s3srv.URL
+	d.Creds = &config.Credentials{
+		RunPod: node.NewSecret([]byte("rp-token")),
+		S3: awssig.Credentials{
+			AccessKey: "user_test", Secret: node.NewSecret([]byte("rps_secret")),
+		},
+	}
+
+	cfg := storeConfigFor(t, d, "runpod", storeBlock)
+	f := filepath.Join(t.TempDir(), "sd15.gguf")
+	if err := os.WriteFile(f, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runStore([]string{"push", "-config", cfg, f}, &out, d); err != nil {
+		t.Fatalf("push = %v\n%s", err, out.String())
+	}
+
+	if !bytes.Equal(uploaded, body) {
+		t.Errorf("uploaded %q, want %q", uploaded, body)
+	}
+	if !strings.Contains(auth, awssig.Algorithm) {
+		t.Errorf("the upload was not signed: %q", auth)
+	}
+	// Signed over the digest of the body, which is also what gets printed.
+	sum := sha256.Sum256(body)
+	want := hex.EncodeToString(sum[:])
+	if contentSHA != want {
+		t.Errorf("X-Amz-Content-Sha256 = %q, want %q", contentSHA, want)
+	}
+	// The digest is printed because it is the value `assets:` needs, and
+	// reading it from the pass that uploaded the file is how the two cannot
+	// disagree.
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("the digest was not printed:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "as: sd15.gguf") {
+		t.Errorf("the asset stanza was not printed:\n%s", out.String())
+	}
+}
+
+func TestStorePush_RefusesAProviderWhoseStoreHasNoRegion(t *testing.T) {
+	// The local provider's volumes are on the daemon, not in a datacentre,
+	// so there is no S3 endpoint to derive. Refused rather than attempted
+	// against a hostname that does not exist.
+	d := labDeps(t)
+	cfg := storeConfig(t, d, storeBlock)
+	if err := runStore([]string{"create", "-config", cfg}, &bytes.Buffer{}, d); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(t.TempDir(), "sd15.gguf")
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := runStore([]string{"push", "-config", cfg, f}, &out, d)
+	if err == nil {
+		t.Fatal("pushed to a store with no datacentre")
+	}
+	if !strings.Contains(err.Error(), "S3") {
+		t.Errorf("err = %q", err)
+	}
+}
+
+func TestStorePush_RefusesWithoutS3Credentials(t *testing.T) {
+	// The common first run: the API key is set and the S3 pair was never
+	// created, because RunPod issues them on a different page.
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"networkVolumes":[{"id":"vol_abc","name":"ember-store-models",`+
+			`"size":40,"dataCenter":"EU-RO-1"}],"pagination":{"hasNextPage":false}}`)
+	}))
+	t.Cleanup(api.Close)
+
+	d := labDeps(t)
+	d.CloudBaseURL = api.URL
+	d.Creds = &config.Credentials{RunPod: node.NewSecret([]byte("rp-token"))}
+
+	cfg := storeConfigFor(t, d, "runpod", storeBlock)
+	f := filepath.Join(t.TempDir(), "sd15.gguf")
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := runStore([]string{"push", "-config", cfg, f}, &out, d)
+	if err == nil {
+		t.Fatal("pushed with no S3 credentials")
+	}
+	// The message has to say where they come from: the usual cause is that
+	// the key was never created, not that it was mistyped.
+	if !strings.Contains(err.Error(), "S3 API keys") {
+		t.Errorf("err = %q, want it to name the console page", err)
+	}
+}
+
+func TestStore_UsageTextIsReachable(t *testing.T) {
+	// -h runs the usage closure, which is where the explanation of why this
+	// command exists at all lives. A closure nothing calls is one that can
+	// stop compiling without anybody noticing.
+	d := labDeps(t)
+	for _, sub := range []string{"create", "rm", "push"} {
+		t.Run(sub, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := runStore([]string{sub, "-h"}, &out, d); err == nil {
+				t.Error("-h did not return a usage error")
+			}
+			if !strings.Contains(out.String(), "ember store "+sub) {
+				t.Errorf("usage did not describe the subcommand:\n%s", out.String())
+			}
+		})
+	}
+}
+
+func TestStorePush_RefusesADirectory(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, storeBlock)
+	if err := runStore([]string{"create", "-config", cfg}, &bytes.Buffer{}, d); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := runStore([]string{"push", "-config", cfg, t.TempDir()}, &out, d)
+	if err == nil {
+		t.Fatal("a directory was accepted")
+	}
+	if !strings.Contains(err.Error(), "directory") {
+		t.Errorf("err = %q", err)
+	}
+}
+
+func TestStorePush_RefusesAMissingFile(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, storeBlock)
+	if err := runStore([]string{"create", "-config", cfg}, &bytes.Buffer{}, d); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStore([]string{"push", "-config", cfg, "/nope/absent.gguf"}, &bytes.Buffer{}, d); err == nil {
+		t.Error("a missing file was accepted")
+	}
+}
+
+func TestStorePush_RefusesWhenTheStoreDoesNotExist(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, storeBlock)
+	f := filepath.Join(t.TempDir(), "x.gguf")
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runStore([]string{"push", "-config", cfg, f}, &bytes.Buffer{}, d)
+	if err == nil {
+		t.Fatal("pushed to a store that does not exist")
+	}
+	if !strings.Contains(err.Error(), "ember store create") {
+		t.Errorf("err = %q, want it to name the command that makes one", err)
+	}
+}
+
+func TestStoreCreate_SaysWhatItWillCost(t *testing.T) {
+	// The one command whose whole cost is in the future. The operator is
+	// never again as well placed to decide it is too much.
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if req.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":"vol_abc","name":"ember-store-models","size":40,`+
+				`"dataCenter":"EU-RO-1","type":"STANDARD"}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"networkVolumes":[],"pagination":{"hasNextPage":false}}`)
+	}))
+	t.Cleanup(api.Close)
+
+	d := labDeps(t)
+	d.CloudBaseURL = api.URL
+	d.Creds = &config.Credentials{RunPod: node.NewSecret([]byte("rp-token"))}
+
+	var out bytes.Buffer
+	cfg := storeConfigFor(t, d, "runpod", storeBlock)
+	if err := runStore([]string{"create", "-config", cfg}, &out, d); err != nil {
+		t.Fatalf("create = %v", err)
+	}
+	// 40 GiB at $0.07 is $2.80 a month, for as long as it exists.
+	if !strings.Contains(out.String(), "every month") {
+		t.Errorf("create did not say the charge recurs:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "ember store rm models") {
+		t.Errorf("create did not name what ends it:\n%s", out.String())
+	}
+}
+
+func TestAttachStore_RefusesAProviderWithNoStorage(t *testing.T) {
+	// A config that names a store against a provider that has none. Caught
+	// before anything is rented rather than as a nil type assertion when the
+	// run is about to start.
+	p := providertest.NewRecordingProvider("plain")
+	_, err := attachStore(t.Context(), p, config.Config{
+		Provider: "plain",
+		Store:    config.StoreConfig{Name: "models"},
+	})
+	if err == nil {
+		t.Fatal("accepted")
+	}
+	if !strings.Contains(err.Error(), "no persistent storage") {
+		t.Errorf("err = %q", err)
+	}
+}
+
+func TestAttached_IsZero(t *testing.T) {
+	if !(Attached{}).IsZero() {
+		t.Error("the zero Attached is not zero")
+	}
+	if (Attached{Handle: node.StoreHandle{Provider: "p", ID: "v"}}).IsZero() {
+		t.Error("a populated Attached reported zero")
 	}
 }

@@ -368,6 +368,32 @@ A leaked node bills by the hour in silence. These are not style preferences.
   and the one that matters for forty gigabytes of somebody else's weights. An
   attacker on the path can deny service — the fetch fails closed and nothing
   is written — but cannot substitute content.
+- **An incomplete multipart upload keeps every part that arrived, and bills
+  for them.** It is not an object, so it does not appear in a listing -- the
+  same shape as a leaked pod: nothing shows it and it charges by the month.
+  The abort runs from a defer on `context.WithoutCancel`, for the reason
+  `provision`'s destroy does: Ctrl-C is the most likely way to end up there,
+  and an abort on the cancelled context fails instantly. When the abort
+  itself fails, the error says so, because the operator now has parts they do
+  not know about.
+- **S3 answers 200 and then reports the failure in the body.** The connection
+  is held open while the object is assembled, so a client that trusted the
+  status reports success for an upload that did not complete.
+- **A signature's only other feedback is a 403 with no detail**, which is why
+  every step of SigV4 is a pure function checked against AWS's own published
+  values rather than against a server. `SignatureDoesNotMatch` and
+  `AccessDenied` are both 403: the reason is in the body, and a client that
+  reported only the code would hand back the one detail that cannot be
+  guessed. The path encoder is hand-written because `url.QueryEscape` writes
+  a space as `+` -- every key without a space signs correctly and the first
+  key with one fails.
+- **`Sign` does not set `X-Amz-Content-Sha256`.** S3 requires it and the S3
+  client sets it, but it is not part of SigV4, and signing it in the signer
+  would mean this package could never be checked against AWS's published test
+  vectors -- which do not carry that header.
+- **Push checks what is local and free before what is remote and slow.** A
+  typo in a filename fails without a round trip, and the file is hashed last,
+  so a missing credential does not cost a pass over forty gigabytes first.
 - **Assets are fetched and verified before the workload, and a failure there
   means it never starts.** The cheapest moment to discover that the weights
   are wrong is before the GPU has been asked to do anything with them. It runs

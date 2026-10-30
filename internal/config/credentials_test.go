@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Legion112/ember/internal/awssig"
 )
 
 // clearEnv keeps a test from reading the developer's own tokens.
@@ -207,5 +209,37 @@ func TestLoadCredentials_ReportsAConfigDirThatIsNotADirectory(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stat") {
 		t.Errorf("got %v", err)
+	}
+}
+
+func TestLoadCredentials_S3FromTheEnvironment(t *testing.T) {
+	// Both halves move together. Taking one from the environment and the
+	// other from the file would pair an access key with somebody else's
+	// secret, and the only symptom is a 403.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, CredentialsFile),
+		[]byte("runpod_s3_access_key: from_file\nrunpod_s3_secret: file_secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fromFile, err := LoadCredentials(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromFile.S3.AccessKey != "from_file" || fromFile.S3.Secret.IsZero() {
+		t.Fatalf("file credentials = %+v", fromFile.S3)
+	}
+
+	t.Setenv(awssig.EnvAccessKey, "from_env")
+	t.Setenv(awssig.EnvSecret, "env_secret")
+	fromEnv, err := LoadCredentials(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromEnv.S3.AccessKey != "from_env" {
+		t.Errorf("access key = %q, want the environment to win", fromEnv.S3.AccessKey)
+	}
+	if string(fromEnv.S3.Secret.Bytes()) != "env_secret" {
+		t.Error("the secret came from the file while the access key came from the environment")
 	}
 }

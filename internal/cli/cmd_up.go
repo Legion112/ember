@@ -56,6 +56,15 @@ type deps struct {
 	// first version of the test below did exactly that, and the comment
 	// claiming otherwise was the only thing standing in for this field.
 	CloudBaseURL string
+
+	// S3BaseURL redirects the store upload endpoint.
+	//
+	// Separate from CloudBaseURL because they are separate services on
+	// separate hosts, and for the same reason that one exists: a test that
+	// pushed to a store must not be able to reach RunPod. Without it the
+	// endpoint is derived from the store's datacentre and is a real
+	// hostname.
+	S3BaseURL string
 }
 
 // credentials resolves this run's provider tokens.
