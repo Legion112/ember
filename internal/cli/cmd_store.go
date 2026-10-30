@@ -524,7 +524,7 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 	if err != nil {
 		return usageError{err}
 	}
-	spec.Cmd = nil
+	spec.Cmds = nil
 	spec.Outputs = nil
 
 	if *dryRun {
