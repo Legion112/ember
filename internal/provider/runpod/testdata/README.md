@@ -167,3 +167,31 @@ asked for outputs from `/workspace/out` failed at the tar with
 
 That is a real interaction and not a documentation detail: every config that
 mounts a store and writes outputs to `/workspace` depends on it.
+
+### Network volume throughput, measured 2026-10-30
+
+RunPod documents 200-400 MB/s for the standard tier. Measured on an RTX 4090
+in EU-RO-1, writing and then reading a 2.21 GB checkpoint:
+
+| | |
+|---|---|
+| write, 2.21 GB onto the volume | **2 s** |
+| read, cold, on a *different* pod | **2.13 s** for 2.11 GB of parameters |
+
+That is roughly **1.0 GB/s**, two and a half to five times the documented
+figure. The read is sd-cli's own tensor-load accounting, on a node that had
+never seen the file -- a second pod entirely, which is also the proof that
+weights outlive the machine.
+
+Two caveats worth keeping with the number. The file was written about a
+minute earlier on the same storage cluster, so MooseFS may have served it
+from its own cache; a read of something written last week could be slower.
+And the figure this is usually compared against -- 56 MB/s of container pull
+-- is still *inferred* from a single 62-second time-to-ready, never measured
+on its own.
+
+What it changes is less than it looks. For a 40 GB model set on an H100 the
+pull is about 11.9 minutes either way, so dropping the volume read from a
+documented 133 s to a measured 40 s moves the break-even from roughly six
+runs a month to five. The conclusion was robust because the pull dominates,
+which is worth knowing even when a measurement agrees with you.
