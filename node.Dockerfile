@@ -62,5 +62,19 @@ RUN rm -f /etc/ssh/ssh_host_*
 COPY --from=build /out/embernode /usr/local/bin/embernode
 COPY --from=build /out/emberwl   /usr/local/bin/emberwl
 
+# Where outputs are written, created here because nothing else will.
+#
+# RunPod normally provides /workspace as the pod's own volume disk -- but
+# attaching a network volume removes it: the API refuses a pod that asks for
+# both, because upstream drops the persistent disk whenever a volume is
+# attached. Observed on the first live store run, where a workload writing to
+# /workspace/out failed at the tar with "Cannot open: No such file or
+# directory" because the directory was never there.
+#
+# The workload images already create it. This one did not, which made the
+# bare node unusable for any run that both mounts a store and fetches
+# outputs.
+RUN mkdir -p /workspace/out
+
 EXPOSE 22
 ENTRYPOINT ["/usr/local/bin/embernode"]

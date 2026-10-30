@@ -341,6 +341,13 @@ A leaked node bills by the hour in silence. These are not style preferences.
 - **Images are pinned to a tag or a digest; `:latest` is refused.** The point
   of ember is to measure what a model costs and how long it takes, and two runs
   a week apart that both say `:latest` may not have run the same software.
+- **Attaching a network volume removes `/workspace` entirely.** The API
+  refuses a pod asking for both a persistent disk and a volume, because
+  upstream drops the disk whenever a volume is attached -- and what that means
+  in practice is that the directory is not there at all, not that it is empty.
+  Found on the first live store run: a workload writing to `/workspace/out`
+  failed at the tar with "Cannot open: No such file or directory". The node
+  image now creates it, as the workload images already did.
 - **A store outlives every node that mounts it, and that is what makes it
   dangerous.** It bills by the gigabyte-month whether or not anything is
   attached, so it is the first resource here that can leak while every node is

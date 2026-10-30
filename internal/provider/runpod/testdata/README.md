@@ -135,3 +135,35 @@ where the schema details above came from.
 Both are built from the live v2 schema and the field names observed above
 (`dataCenter`, not `dataCenterId`). The `pagination` object is real: it is what
 the live `GET /v2/network-volumes` returned on an empty account.
+
+### What the first live store run showed, 2026-10-30
+
+Verified against a real volume and two real pods, for under a cent in total.
+
+**Create, list and remove all work as mapped.** `POST /v2/network-volumes`
+with `dataCenter` returned `72rbq2xyad` in EU-RO-1, the listing matched
+ember's own report field for field, and `DELETE` removed it. The label
+`ember-store-verify` round-tripped, so `ParseStoreLabel` recognises what
+`StoreCreate` writes.
+
+**The S3 upload lands real bytes.** SigV4 was accepted on the first attempt --
+no 403 -- and a file pushed from the laptop was read back byte for byte by a
+pod that mounted the volume. That is the whole upload path proven: signing,
+single PUT, and the object actually existing.
+
+**`mounts.network` is honoured, and the custom path with it.** The volume
+appeared at `/models` and not at RunPod's default, backed by
+`mfs#euro-2.runpod.net:9421` -- MooseFS, which matches what RunPod's own
+engineering write-up says the network-volume tier runs on.
+
+**Attaching a network volume removes `/workspace` entirely.** The schema says
+`persistent` and `network` are mutually exclusive because "upstream drops a
+persistent disk whenever a volume is attached"; what that means in practice is
+that the directory is not there at all. A pod with a store has no
+`/workspace` unless its image creates one. The workload images already do
+(`RUN mkdir -p /workspace/out`); the bare node image did not, and a run that
+asked for outputs from `/workspace/out` failed at the tar with
+"Cannot open: No such file or directory".
+
+That is a real interaction and not a documentation detail: every config that
+mounts a store and writes outputs to `/workspace` depends on it.
