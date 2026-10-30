@@ -748,6 +748,16 @@ func (l *Lab) ReadBanner(port int, within time.Duration) (string, error) {
 type NodeSpec struct {
 	Name string
 
+	// Image overrides LabImage.
+	//
+	// It exists so the listener assertion can be made about the image that
+	// actually goes onto a public IP. ember-sd repeats the node image's
+	// sshd configuration by hand, on a different base, with a different
+	// package manager -- and until this field existed, the lab that proves
+	// nothing listens outside port 22 could only be run against the one
+	// image that never leaves the laptop.
+	Image string
+
 	// AuthorizedKey is the operator's public key, in authorized_keys form.
 	AuthorizedKey string
 
@@ -816,7 +826,7 @@ func (l *Lab) StartNode(ctx context.Context, spec NodeSpec) (id, addr string) {
 
 	resp, err := l.cli.ContainerCreate(ctx,
 		&container.Config{
-			Image: LabImage,
+			Image: imageOr(spec.Image),
 			Env:   env,
 			// Always labelled with ember's run-id key, so AssertNoStray
 			// covers it and a lab that forgets to clean up fails rather
@@ -988,4 +998,24 @@ func (l *Lab) WaitExited(ctx context.Context, id string, within time.Duration) {
 func DigestOf(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+// imageOr is the image a node runs, defaulting to the lab's own.
+func imageOr(name string) string {
+	if name != "" {
+		return name
+	}
+	return LabImage
+}
+
+// HaveImage reports whether the daemon has this image locally.
+//
+// Used by the labs that assert about a published image: they must not pull
+// one -- a lab that reached the network would be testing GitHub -- and they
+// must not skip, because a silently skipped lab is worse than a red build.
+// The caller fails with the command that builds it.
+func (l *Lab) HaveImage(ctx context.Context, name string) bool {
+	l.t.Helper()
+	_, err := l.cli.ImageInspect(ctx, name)
+	return err == nil
 }

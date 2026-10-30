@@ -149,8 +149,8 @@ image carries sshd and `embernode` alongside whatever you came to run.
 | file | what it builds |
 |---|---|
 | `node.Dockerfile` | the bare node: sshd and `embernode`, nothing else |
-| `workload-sd.Dockerfile` | node + stable-diffusion.cpp (CPU) + a GGUF model |
-| `workload-sd-cuda.Dockerfile` | the same compiled against CUDA, for a rented GPU |
+| `workload-sd.Dockerfile` | node + stable-diffusion.cpp (CPU) + a GGUF model baked in |
+| `workload-sd-cuda.Dockerfile` | the same compiled against CUDA — **no model**, weights come from a store |
 
 ```
 make workload-sd MODEL=/path/to/v1-5-pruned_bf16.gguf
@@ -174,6 +174,21 @@ The generation is about a tenth of a cent. Everything else is pulling a
 container and waiting for a machine to exist, and that overhead is per *pod* —
 so one image per pod is the worst possible shape, and a hundred in one session
 cost barely more than one.
+
+**That measurement is why the CUDA image no longer carries a model.** The
+checkpoint was 51% of the image and 92% of what the run cost, and a `COPY`'d
+model gets a layer digest that is yours alone — so it can never hit a shared
+cache on any host, and the identical bytes sit on the same machines under
+somebody else's digest while yours is re-downloaded on every pod. Above about
+10 GB it stops being possible at all: the registry refuses a larger layer, and
+Wan 2.2's experts are 14 GB each.
+
+Weights go on a store instead: `ember store push` once, `assets:` names them
+with a digest, and the node verifies what it mounts before the GPU is asked to
+do anything.
+
+The CPU variant still bakes one in. It exists to prove a pipeline locally for
+nothing and has no store to mount.
 
 ## Build
 

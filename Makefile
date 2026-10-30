@@ -114,9 +114,12 @@ lint:
 docker-build:
 	docker build -t $(LAB_IMAGE) -f node.Dockerfile .
 
-# A workload image is the node image plus whatever it was rented to run. The
-# model is not in this repository -- it is gigabytes and it is somebody else's
-# weights -- so MODEL has to name a local file.
+# A workload image is the node image plus whatever it was rented to run.
+#
+# The CUDA image carries no model: weights go on a store, pushed once with
+# `ember store push` and named by `assets:` with a digest. MODEL is still
+# needed by the CPU variant, which exists to prove a pipeline locally for
+# nothing and has no store to mount.
 SD_IMAGE := ember:sd
 SD_CUDA_IMAGE := ember:sd-cuda
 MODEL ?=
@@ -145,11 +148,7 @@ workload-sd:
 # CUDA binary, so this compiles stable-diffusion.cpp against the toolkit --
 # minutes, not seconds.
 workload-sd-cuda:
-	$(require-model)
-	cp "$(MODEL)" .model.gguf
-	docker build -t $(SD_CUDA_IMAGE) -f workload-sd-cuda.Dockerfile \
-		--build-arg MODEL_PATH=.model.gguf . ; \
-	rc=$$?; rm -f .model.gguf; exit $$rc
+	docker build -t $(SD_CUDA_IMAGE) -f workload-sd-cuda.Dockerfile .
 
 # The labs refuse to skip themselves: a missing image is a hard failure with
 # the command to fix it, never a t.Skip. A silently skipped lab is worse than

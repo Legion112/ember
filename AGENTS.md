@@ -368,6 +368,27 @@ A leaked node bills by the hour in silence. These are not style preferences.
   and the one that matters for forty gigabytes of somebody else's weights. An
   attacker on the path can deny service — the fetch fails closed and nothing
   is written — but cannot substitute content.
+- **The workload image carries no model, and the measurement is why.** The
+  checkpoint was 51% of ember-sd and 92% of what a one-shot run cost, and a
+  `COPY`'d model gets a layer digest that is ours alone -- so it can never hit
+  a shared cache on any host, while the identical bytes sit on the same
+  machines under somebody else's digest. Removing it took the image from 5.08
+  GB to 2.87 GB. Above about 10 GB baking stops being possible at all: the
+  registry refuses a larger layer and Wan 2.2's experts are 14 GB each.
+- **The listener assertion runs against the published image too.** ember-sd
+  cannot be built FROM the node image -- that one is debian-slim and CUDA
+  needs an NVIDIA base -- so it repeats the sshd configuration by hand, on a
+  different base, with a different package manager. The platform-port
+  concession was justified by a property of the image that never leaves the
+  laptop while a *different* image was the one RunPod published a port to.
+  The lab now takes an image name, and a missing image is a hard failure
+  naming the command that builds it: it must not pull (that would be testing
+  GitHub) and must not skip (that reports success for something that never
+  ran).
+- **A precaution nobody can point at a failure for just makes every build
+  slower.** The workload workflow deleted .NET, Android and GHC before
+  building, for space. The log says it started with 86 GB free and spent two
+  and a half minutes reaching 111 GB. Removed.
 - **An incomplete multipart upload keeps every part that arrived, and bills
   for them.** It is not an object, so it does not appear in a listing -- the
   same shape as a leaked pod: nothing shows it and it charges by the month.

@@ -122,8 +122,37 @@ func TestHostKey_AMismatchIsNotRetried(t *testing.T) {
 // rather than assumed, and it would stop being true the moment the image
 // gained a service.
 func TestNodeImage_ListensOnNothingButSSH(t *testing.T) {
+	assertListensOnlyOnSSH(t, "")
+}
+
+// TestWorkloadImage_ListensOnNothingButSSH is the same assertion about the
+// image that actually goes onto a public IP.
+//
+// ember-sd cannot be built FROM the node image -- that one is debian-slim and
+// CUDA needs an NVIDIA base -- so it repeats the sshd configuration by hand,
+// on a different base, with a different package manager. Until this existed,
+// the duplication was verified by nothing: the platform-port concession was
+// justified by a property of the image that never leaves the laptop, while a
+// different image was the one RunPod published a port to.
+//
+// It does not pull. A lab that reached the network would be testing GitHub,
+// and one that skipped itself would report success for something that never
+// ran -- so a missing image is a hard failure naming the command that builds
+// it.
+func TestWorkloadImage_ListensOnNothingButSSH(t *testing.T) {
+	assertListensOnlyOnSSH(t, "ember:sd-cuda")
+}
+
+func assertListensOnlyOnSSH(t *testing.T, image string) {
+	t.Helper()
 	l := harness.New(t)
-	n := mintAndStart(t, l, "listeners")
+
+	if image != "" && !l.HaveImage(t.Context(), image) {
+		t.Fatalf("%s is not built. The assertion this lab makes is about that image, "+
+			"so it cannot be skipped:\n  make workload-sd-cuda", image)
+	}
+
+	n := mintAndStartImage(t, l, "listeners", image)
 
 	// ss over the Docker API rather than over the tunnel: what is being
 	// tested is the image, and the question is what it binds before anything
@@ -149,12 +178,12 @@ func TestNodeImage_ListensOnNothingButSSH(t *testing.T) {
 
 	for _, p := range ports {
 		if p != "22" {
-			t.Errorf("the node image listens on %s as well as 22; everything it binds is a candidate for a provider to publish. Listening sockets:\n%s", p, out)
+			t.Errorf("the image listens on %s as well as 22; everything it binds is a candidate for a provider to publish. Listening sockets:\n%s", p, out)
 		}
 	}
 
 	// And specifically not the port RunPod proxies to the world.
 	if strings.Contains(out, "19123") {
-		t.Errorf("the node image listens on RunPod's public proxy port:\n%s", out)
+		t.Errorf("the image listens on RunPod's public proxy port:\n%s", out)
 	}
 }

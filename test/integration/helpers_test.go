@@ -37,6 +37,13 @@ type labNode struct {
 // own public key as the only way in.
 func mintAndStart(t *testing.T, l *harness.Lab, name string) labNode {
 	t.Helper()
+	return mintAndStartImage(t, l, name, "")
+}
+
+// mintAndStartImage starts a node from a named image, for the labs that
+// assert about one other than ember:lab. An empty name is the lab's own.
+func mintAndStartImage(t *testing.T, l *harness.Lab, name, image string) labNode {
+	t.Helper()
 
 	pair, err := hostkey.Mint()
 	if err != nil {
@@ -44,6 +51,7 @@ func mintAndStart(t *testing.T, l *harness.Lab, name string) labNode {
 	}
 	id, addr := l.StartNode(t.Context(), harness.NodeSpec{
 		Name:          name,
+		Image:         image,
 		AuthorizedKey: identity(t, l).AuthorizedKey,
 		HostKeyPEM:    string(pair.Private.Bytes()),
 	})
