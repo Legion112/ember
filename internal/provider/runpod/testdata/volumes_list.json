@@ -1,0 +1,26 @@
+{
+  "networkVolumes": [
+    {
+      "id": "agv6w2qcg7",
+      "name": "ember-store-models",
+      "size": 40,
+      "dataCenter": "EU-RO-1",
+      "type": "STANDARD"
+    },
+    {
+      "id": "zz9plural",
+      "name": "my-training-data",
+      "size": 200,
+      "dataCenter": "US-KS-2",
+      "type": "STANDARD"
+    },
+    {
+      "id": "hp1fast",
+      "name": "ember-store-wan-2-2",
+      "size": 2048,
+      "dataCenter": "EU-RO-1",
+      "type": "HIGH_PERFORMANCE"
+    }
+  ],
+  "pagination": { "nextCursor": null, "hasNextPage": false }
+}

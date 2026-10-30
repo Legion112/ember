@@ -612,3 +612,114 @@ func TestMapExposure_RefusesAnOutOfRangePublicPort(t *testing.T) {
 		t.Fatal("an out-of-range public port was narrowed silently, so the exposure report would name a different port")
 	}
 }
+
+func TestVolumePrice_ReadsTheVolumeRatherThanAssuming(t *testing.T) {
+	// The rate comes off the volume's own reported type and size, so a volume
+	// created elsewhere, or one whose tier changed, is priced as it is.
+	for _, tc := range []struct {
+		name string
+		vol  networkVolume
+		want node.StorePrice
+	}{
+		{"standard below a terabyte", networkVolume{Size: 40, Type: "STANDARD"}, standardRate},
+		{"standard at the bulk boundary", networkVolume{Size: bulkFromGiB, Type: "STANDARD"}, standardBulkRate},
+		{"standard above it", networkVolume{Size: 4000, Type: "STANDARD"}, standardBulkRate},
+		{"high performance is dearer at any size", networkVolume{Size: 10, Type: "HIGH_PERFORMANCE"}, highPerformanceRate},
+		{"case is not a tier", networkVolume{Size: 10, Type: "high_performance"}, highPerformanceRate},
+		{
+			// A tier RunPod has not told us about is priced as standard
+			// rather than refused: the figure is informational and a listing
+			// that errored would hide every other store beside it.
+			name: "an unknown tier falls back", vol: networkVolume{Size: 40, Type: "PLATINUM"}, want: standardRate,
+		},
+		{"no tier reported", networkVolume{Size: 40}, standardRate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := volumePrice(tc.vol); got != tc.want {
+				t.Errorf("volumePrice = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMapVolume_RefusesWhatItCannotUse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		vol     networkVolume
+		wantMsg string
+	}{
+		{"no id", networkVolume{Name: "ember-store-models", Size: 10}, "no id"},
+		{"negative size", networkVolume{ID: "v1", Name: "ember-store-models", Size: -1}, "negative size"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ours, err := mapVolume(tc.vol)
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if ours {
+				t.Error("a volume that could not be mapped was still claimed as ember's")
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("err = %q, want it to mention %q", err, tc.wantMsg)
+			}
+		})
+	}
+
+	// Somebody else's volume is neither ours nor an error. `ember store rm`
+	// acts on what this returns.
+	s, ours, err := mapVolume(networkVolume{ID: "v1", Name: "my-training-data", Size: 10})
+	if err != nil || ours {
+		t.Errorf("mapVolume on a foreign volume = (%+v, %v, %v), want (zero, false, nil)", s, ours, err)
+	}
+}
+
+func TestRegionOffers_ReadsTheSitesOwnAvailability(t *testing.T) {
+	// The bug this exists to prevent: mapOffers reports bestRegion(g), the
+	// single site with the most capacity. An RTX 4090 reads NONE overall and
+	// LOW in US-IL-1, so filtering mapOffers' output by region would have
+	// dropped a card that is rentable exactly where the store lives.
+	gpus := fixture[listGpuTypesResponse](t, "gpus.json").Gpus
+
+	got := regionOffers(gpus, cloudSecure, "US-IL-1")
+	if len(got) != 1 {
+		t.Fatalf("got %d offers in US-IL-1, want the 4090: %+v", len(got), got)
+	}
+	if got[0].Region != "US-IL-1" {
+		t.Errorf("region = %q, want the store's site", got[0].Region)
+	}
+	if got[0].GPU != node.NormalizeGPU("rtx4090") {
+		t.Errorf("gpu = %q", got[0].GPU)
+	}
+
+	// A site with capacity for a different card returns that card and not
+	// the 4090.
+	mtl := regionOffers(gpus, cloudSecure, "CA-MTL-3")
+	if len(mtl) != 1 || !strings.Contains(string(mtl[0].GPU), "a100") {
+		t.Errorf("CA-MTL-3 gave %+v, want the A100", mtl)
+	}
+
+	// A site nothing is available in is empty, which the caller turns into a
+	// refusal naming the datacentre.
+	if nowhere := regionOffers(gpus, cloudSecure, "XX-NOWHERE-9"); len(nowhere) != 0 {
+		t.Errorf("an unknown site gave %+v", nowhere)
+	}
+
+	// No region asked for is the unfiltered catalogue.
+	if all := regionOffers(gpus, cloudSecure, ""); len(all) != len(mapOffers(gpus, cloudSecure)) {
+		t.Errorf("an empty region changed the catalogue: %d vs %d", len(all), len(mapOffers(gpus, cloudSecure)))
+	}
+}
+
+func TestRegionOffers_SkipsASiteWithNoCapacity(t *testing.T) {
+	// A datacentre that lists the card at NONE is not a placement, even
+	// though the card appears in its list.
+	gpus := []gpuType{{
+		ID: "NVIDIA GeForce RTX 4090", Name: "RTX 4090", Memory: 24,
+		Secure: true, Price: gpuPrice{Secure: 0.89}, MaxCount: gpuCount{Secure: 1},
+		Availability: "HIGH",
+		DataCenters:  []dataCentre{{ID: "EU-RO-1", Availability: "NONE"}},
+	}}
+	if got := regionOffers(gpus, cloudSecure, "EU-RO-1"); len(got) != 0 {
+		t.Errorf("a site reporting NONE produced %+v", got)
+	}
+}
