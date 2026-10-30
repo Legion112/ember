@@ -73,8 +73,26 @@ type Container struct {
 	Ports map[uint16]Binding
 
 	// IPs maps network name to the container's address on it.
-	IPs      map[string]string
+	IPs map[string]string
+
+	// Binds is what was mounted into this container, as host:container
+	// strings. Reported so a test can tell a node created with a store from
+	// one created without; the daemon is the source for a real container.
+	Binds []string
+
 	ExitCode int
+}
+
+// Volume is a Docker named volume ember created.
+//
+// It is the local provider's stand-in for a cloud network volume: it outlives
+// every container that mounts it, it is listed and removed independently, and
+// it is the only thing in the lab that behaves like a resource nothing
+// destroys for you. A bind mount into a temp directory would have been less
+// code and would not have had that property, which is the one being tested.
+type Volume struct {
+	Name   string
+	Labels map[string]string
 }
 
 // Network is a user-defined bridge ember created.
@@ -115,6 +133,13 @@ type API interface {
 	NetworkCreate(ctx context.Context, name string, labels map[string]string) (string, error)
 	NetworkRemove(ctx context.Context, id string) error
 	NetworkList(ctx context.Context, label string) ([]Network, error)
+
+	// VolumeCreate is idempotent: Docker returns the existing volume for a
+	// name that already exists rather than failing, which matches what
+	// `ember store create` should do when run twice.
+	VolumeCreate(ctx context.Context, name string, labels map[string]string) (Volume, error)
+	VolumeRemove(ctx context.Context, name string) error
+	VolumeList(ctx context.Context, label string) ([]Volume, error)
 
 	ContainerCreate(ctx context.Context, spec ContainerSpec) (string, error)
 	ContainerStart(ctx context.Context, id string) error

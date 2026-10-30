@@ -35,6 +35,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
@@ -127,8 +128,19 @@ func New(t *testing.T) *Lab {
 	l.WriteConfig(map[string]string{})
 
 	t.Cleanup(func() {
+		// Snapshot first, then clean up, then report. The order matters and
+		// the previous one was wrong: Reap removed everything and
+		// AssertNoStray then looked at an empty daemon, so it could not fail
+		// -- for containers, networks or anything else. Every lab's final
+		// assertion was passing because there was nothing left to see.
+		//
+		// Both properties are wanted. Reaping stops one failing lab from
+		// cascading into every later one, and the report is the only thing
+		// that says a lab leaked. Taking the snapshot before the reap is what
+		// lets them coexist.
+		stray := l.strayNow()
 		l.Reap()
-		l.AssertNoStray()
+		l.reportStray(stray)
 		_ = cli.Close()
 	})
 	return l
@@ -299,12 +311,35 @@ func (l *Lab) Nodes(ctx context.Context) []container.Summary {
 }
 
 // AssertNoStray fails if anything wearing ember's label is still there.
+// AssertNoStray fails the lab if anything wearing ember's label is still
+// there. It is also run from the lab's own cleanup, which snapshots first so
+// that reaping cannot empty the daemon before this looks.
 func (l *Lab) AssertNoStray() {
 	l.t.Helper()
+	l.reportStray(l.strayNow())
+}
+
+// stray is what one look at the daemon found.
+type stray struct {
+	networks []network.Summary
+	volumes  []*volume.Volume
+	nodes    []container.Summary
+}
+
+func (l *Lab) strayNow() stray {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	return stray{
+		networks: l.Networks(ctx),
+		volumes:  l.Volumes(ctx),
+		nodes:    l.Nodes(ctx),
+	}
+}
 
-	if ns := l.Networks(ctx); len(ns) > 0 {
+func (l *Lab) reportStray(s stray) {
+	l.t.Helper()
+
+	if ns := s.networks; len(ns) > 0 {
 		var names []string
 		for _, n := range ns {
 			names = append(names, n.Name)
@@ -314,7 +349,22 @@ func (l *Lab) AssertNoStray() {
 			len(ns), strings.Join(names, ", "))
 	}
 
-	cs := l.Nodes(ctx)
+	// Volumes outlive both. A store is the one resource in ember that
+	// nothing destroys on a deadline, so a lab that creates one and does not
+	// remove it leaks on the developer's daemon for good -- the same shape as
+	// the networks above, which went unnoticed until Docker ran out of
+	// address pools, except that these hold gigabytes.
+	if vs := s.volumes; len(vs) > 0 {
+		var names []string
+		for _, v := range vs {
+			names = append(names, v.Name)
+		}
+		l.t.Errorf("%d volume(s) wearing ember's label survived the lab: %s"+
+			"\nOn a cloud provider each of these would still be billing by the month.",
+			len(vs), strings.Join(names, ", "))
+	}
+
+	cs := s.nodes
 	if len(cs) == 0 {
 		return
 	}
@@ -326,9 +376,14 @@ func (l *Lab) AssertNoStray() {
 		"\nOn a rented GPU each of these would still be billing.", len(cs), b.String())
 }
 
-// Reap removes anything this lab left behind, so one failing lab does not
-// cascade into every later one. It runs before AssertNoStray records the
-// failure, never instead of it.
+// Reap removes anything this lab left behind.
+//
+// It is called from the lab's own cleanup so that one failing lab does not
+// cascade into every later one, and a lab that leaves something behind *on
+// purpose* calls it itself once it has finished asserting on it -- SIGKILL
+// labs do exactly that. The cleanup snapshots the daemon before reaping, so
+// calling this at the end of a test body is also how a deliberate leak is
+// declared: anything still there when the snapshot is taken is reported.
 func (l *Lab) Reap() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -345,6 +400,55 @@ func (l *Lab) Reap() {
 	for _, n := range l.Networks(ctx) {
 		_ = l.cli.NetworkRemove(ctx, n.ID)
 	}
+	// Volumes last, because a volume still mounted by a container cannot be
+	// removed -- the containers above have to go first.
+	for _, v := range l.Volumes(ctx) {
+		_ = l.cli.VolumeRemove(ctx, v.Name, true)
+	}
+}
+
+// CreateVolume makes a store volume out-of-band, through Docker.
+//
+// Seeded this way rather than through ember on purpose: a lab that creates
+// the thing it is about to read is testing the writer, and the reader is what
+// this is for. The labels are the ones the local provider writes, so what
+// comes back through StoreList is indistinguishable from a store ember made.
+func (l *Lab) CreateVolume(ctx context.Context, name string) {
+	l.t.Helper()
+	if _, err := l.cli.VolumeCreate(ctx, volume.CreateOptions{
+		Name:   name,
+		Labels: map[string]string{local.LabelKind: "store", local.LabelLabel: name},
+	}); err != nil {
+		l.t.Fatalf("create volume %s: %v", name, err)
+	}
+	// The helper owns what it made. Cleanups run last-registered-first, so
+	// this one runs before the lab's own stray check and a seeded volume is
+	// not reported as a leak -- while a volume ember itself left behind
+	// still is. Leaving it to each lab to remember would mean the first one
+	// that forgot turned a working check into a failing suite.
+	l.t.Cleanup(func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = l.cli.VolumeRemove(rctx, name, true)
+	})
+}
+
+// Volumes lists the volumes wearing ember's kind label.
+func (l *Lab) Volumes(ctx context.Context) []*volume.Volume {
+	l.t.Helper()
+	resp, err := l.cli.VolumeList(ctx, volume.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("label", local.LabelKind)),
+	})
+	if err != nil {
+		l.t.Fatalf("list volumes: %v", err)
+	}
+	var out []*volume.Volume
+	for _, v := range resp.Volumes {
+		if v != nil && v.Labels[local.LabelKind] == "store" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // Networks lists the networks wearing ember's run-id label.

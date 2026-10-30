@@ -28,7 +28,7 @@ const Name node.ProviderID = "local"
 
 // Labels ember sets on everything it creates here.
 const (
-	LabelKind    = "ember.kind"     // "node" | "network"
+	LabelKind    = "ember.kind"     // "node" | "network" | "store"
 	LabelLabel   = "ember.label"    // provider.Label(...)
 	LabelHostKey = "ember.hostkey"  // "ssh-ed25519 AAAA..." — public, safe in a label
 	LabelUser    = "ember.ssh-user" // who to log in as
@@ -50,6 +50,12 @@ type Provider struct {
 	// because a container is already a sandbox and a second unprivileged user
 	// buys nothing here.
 	User string
+
+	// Store is the named volume to mount into every node this provider
+	// creates, and Mount is where it lands. Both zero means no store, which
+	// is what every run looked like before stores existed.
+	Store node.StoreHandle
+	Mount node.Mount
 }
 
 // New returns a provider using engine.
@@ -67,6 +73,12 @@ func (p *Provider) Caps() provider.Caps {
 		HostKeyFromAPI: true,
 		Free:           true,
 		Tags:           true,
+
+		// Docker named volumes. They cost nothing, which is the point: the
+		// whole store lifecycle -- create, mount, survive a destroy, list,
+		// remove -- is exercised for free here against the same code paths a
+		// rented one uses.
+		Stores: true,
 	}
 }
 
@@ -183,6 +195,7 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 			"EMBER_RUN_ID":      string(req.RunID),
 		},
 		PublishTCP: []uint16{sshPort},
+		Binds:      p.binds(),
 	}
 
 	id, err := p.Engine.ContainerCreate(ctx, spec)
@@ -374,3 +387,96 @@ func parseState(s string) (node.State, error) {
 		return node.StateInvalid, fmt.Errorf("unrecognised container state %q", s)
 	}
 }
+
+// binds is the store mount, or nothing.
+//
+// Docker's bind syntax takes a volume name in the host position, which is how
+// a named volume is mounted rather than a host directory. Nothing is produced
+// when there is no store, so a node without one is created exactly as it was
+// before stores existed.
+func (p *Provider) binds() []string {
+	if p.Store.ID == "" || p.Mount.IsZero() {
+		return nil
+	}
+	return []string{string(p.Store.ID) + ":" + p.Mount.Path()}
+}
+
+// volumeName is the Docker name for a store.
+//
+// The same label `ember store rm` parses, so a volume created here is one
+// StoreList recognises and one somebody else's volume cannot be mistaken for.
+func volumeName(name string) string { return provider.StoreLabel(name) }
+
+// StoreCreate makes a Docker named volume.
+//
+// Idempotent, because the daemon is: creating a name that exists returns it.
+// That matches what the cloud providers do closely enough for the labs to
+// exercise the same command twice without special-casing.
+func (p *Provider) StoreCreate(ctx context.Context, name string, sizeGiB int, region string) (node.Store, error) {
+	if err := provider.ValidateStoreName(name); err != nil {
+		return node.Store{}, err
+	}
+	// Size and region are accepted and ignored rather than refused. A Docker
+	// volume grows into whatever the host has and lives wherever the daemon
+	// does, so there is nothing to enforce -- but refusing them would mean a
+	// config that works against RunPod fails here, and the labs exist to run
+	// the same config for free.
+	v, err := p.Engine.VolumeCreate(ctx, volumeName(name), map[string]string{
+		LabelKind:  "store",
+		LabelLabel: provider.StoreLabel(name),
+	})
+	if err != nil {
+		return node.Store{}, fmt.Errorf("create store %s: %w", name, err)
+	}
+	return node.Store{
+		Handle:  node.StoreHandle{Provider: Name, ID: node.StoreID(v.Name)},
+		Name:    name,
+		SizeGiB: sizeGiB,
+		Region:  region,
+		// Free, and said so rather than left at a zero that happens to mean
+		// the same thing: Caps.Free is how the budget check is skipped
+		// honestly, and this is the storage equivalent.
+		Price: 0,
+	}, nil
+}
+
+// StoreList returns every volume ember created here.
+func (p *Provider) StoreList(ctx context.Context) ([]node.Store, error) {
+	vols, err := p.Engine.VolumeList(ctx, LabelKind)
+	if err != nil {
+		return nil, fmt.Errorf("list stores: %w", err)
+	}
+	var out []node.Store
+	for _, v := range vols {
+		if v.Labels[LabelKind] != "store" {
+			continue
+		}
+		name, err := provider.ParseStoreLabel(v.Name)
+		if err != nil {
+			// Carries ember's kind label but not a name ember wrote. Skipped
+			// rather than reported, same as a foreign volume at RunPod.
+			continue
+		}
+		out = append(out, node.Store{
+			Handle: node.StoreHandle{Provider: Name, ID: node.StoreID(v.Name)},
+			Name:   name,
+		})
+	}
+	return out, nil
+}
+
+// StoreDestroy removes a volume. Not found counts as success.
+func (p *Provider) StoreDestroy(ctx context.Context, h node.StoreHandle) error {
+	if h.ID == "" {
+		return fmt.Errorf("store handle names no volume")
+	}
+	if err := p.Engine.VolumeRemove(ctx, string(h.ID)); err != nil {
+		if errors.Is(err, dockerengine.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("destroy store %s: %w", h, err)
+	}
+	return nil
+}
+
+var _ provider.StoreAPI = (*Provider)(nil)

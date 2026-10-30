@@ -219,6 +219,29 @@ that sentence made unrepresentable rather than merely tested.
   Docker had subnetted its whole address pool and every run failed with "all
   predefined address pools have been fully subnetted". `AssertNoStray` now
   covers networks, and a lab asserts `ember up` leaves none.
+- **`AssertNoStray` could not fail, and nobody noticed for the life of the
+  suite.** The lab's cleanup ran `Reap()` and then `AssertNoStray()` in that
+  order, so the reap removed every container and network and the assertion
+  then looked at an empty daemon. Its own comment claimed it ran "before
+  AssertNoStray records the failure, never instead of it"; the code did the
+  opposite. Every lab's final assertion was passing because there was nothing
+  left to see — the exact failure mode the `--- SKIP` gate exists to prevent,
+  reached without skipping anything. The cleanup now snapshots the daemon,
+  then reaps, then reports the snapshot, so both properties hold: one failing
+  lab still cannot cascade, and a leak is still named. Found by reinstating a
+  deliberate leak and watching the suite stay green.
+- **A lab helper owns what it creates.** `CreateVolume` registers its own
+  cleanup rather than leaving each lab to remember, because cleanups run
+  last-registered-first: the seeded volume goes before the stray check looks,
+  while a volume ember itself left behind is still reported. The first lab
+  that forgot would otherwise have turned a working check into a failing
+  suite, which is how a working check gets weakened instead of obeyed.
+- **A lab that leaks on purpose says so.** The two SIGKILL labs exist to leave
+  a node behind, and the first run of the repaired stray check reported both.
+  They call `Reap()` themselves once they have finished asserting, which
+  declares the orphan as deliberate and keeps the check unconditional for
+  every lab that leaks by mistake. Relaxing the check instead would have put
+  it straight back where it was.
 - **Known gap:** `local.Destroy` finds the run id by inspecting the container,
   so a node whose container was already removed by something else leaves its
   network behind. `reconcile` holds the run id and is the right place to fix
