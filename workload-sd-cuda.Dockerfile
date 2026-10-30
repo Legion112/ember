@@ -57,11 +57,24 @@ RUN git clone --recursive https://github.com/leejet/stable-diffusion.cpp /src \
 # threads, at the GPU's price. See internal/gpucheck.
 #
 # 80 is here for the A100 and 90 for the H100; 86 and 89 stay for Ampere
-# consumer and Ada. sm_75 is deliberately *not* here: a 2080 Ti has 11 GiB,
-# which cannot hold the models this image exists to run, and the CPU variant
-# covers working locally. So the sentence above stays true -- this image still
-# will not run on the machine that builds it -- and that is now a decision
-# rather than an accident. CMake also emits virtual code for the highest entry, so
+# consumer and Ada.
+#
+# sm_75 is not here, and the reason is narrower than it first looked. The
+# first version of this comment said an 11 GiB 2080 Ti "cannot hold the models
+# this image exists to run", which is false: sd-cli will keep weights in
+# system RAM and stream them into VRAM per layer (--offload-to-cpu), and its
+# auto-fit planner already does so when VRAM is short. 56 GiB of weights on an
+# 11 GiB card is slow, not impossible.
+#
+# What is true is that every architecture costs build time. Measured on a
+# four-vCPU runner: two architectures took 1846s, four took 4264s. A fifth is
+# affordable under the raised timeout but nobody has yet shown the image is
+# usable on such a card -- whether 1536x1536 even fits beside a 4412 MiB
+# compute buffer, and what a step costs when 35 GB crosses PCIe to reach it.
+#
+# So this is deferred pending that measurement rather than ruled out, and
+# issue #5 is where it gets decided. The image still will not run on the
+# machine that builds it. CMake also emits virtual code for the highest entry, so
 # the binary carries compute_90 PTX -- which is what leaves Blackwell a
 # forward-JIT path until the base image is new enough to build sm_120
 # natively (that needs CUDA 12.8+; this is 12.6.3). The lab reads the markers
