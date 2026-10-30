@@ -286,6 +286,33 @@ A download is written beside its destination and renamed only once the digest
 matches, so a file at the final name is always one that has been verified at
 least once. An interrupted fetch leaves nothing behind.
 
+### Filling a store
+
+```bash
+ember store push ./v1-5-pruned_bf16.gguf
+```
+
+Nothing is rented. The file goes straight to the volume over RunPod's
+S3-compatible endpoint, so the only charge is the storage that was going to
+exist anyway — fetching the same file from a node would bill the download at
+GPU rates, which is about ten minutes of an H100 for a 40 GB model set, every
+time a store is filled.
+
+It prints the digest at the end, because that is the value `assets:` needs and
+reading it from the same pass that uploaded the file is how the two cannot
+disagree.
+
+This needs a **second credential**: RunPod issues S3 keys separately from the
+API key, on the Credentials page under "S3 API keys", and shows the secret
+once. They go in `credentials.yaml` as `runpod_s3_access_key` and
+`runpod_s3_secret`, or in `RUNPOD_S3_ACCESS_KEY` / `RUNPOD_S3_SECRET`.
+
+Only **10 of RunPod's 23** volume-capable datacentres serve the S3 API. A
+store created outside those can only be filled by renting something to
+download into it, so the datacentre is worth choosing deliberately — see
+[docs/gpu-availability-history.md](docs/gpu-availability-history.md) for what
+else that choice decides.
+
 `mount` is refused if it would shadow `/root` or `/etc`, which hold the
 authorized_keys and host key `embernode` writes at startup — a store there
 leaves sshd with neither and a handshake failure that reads exactly like an

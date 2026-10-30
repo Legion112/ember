@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Legion112/ember/internal/awssig"
 	"github.com/Legion112/ember/internal/node"
 )
 
@@ -28,12 +29,24 @@ const (
 type Credentials struct {
 	RunPod node.Secret
 	Vast   node.Secret
+
+	// S3 is the key pair for RunPod's S3-compatible endpoint, which uploads
+	// to a store without renting anything.
+	//
+	// Separate from RunPod above because they are separate credentials:
+	// RunPod issues them on a different page of the console, the secret is
+	// shown exactly once, and the API key cannot sign an S3 request. An
+	// account can have one and not the other, which is why having no S3 key
+	// is not an error until something asks to upload.
+	S3 awssig.Credentials
 }
 
 // credentialsFile is the on-disk shape.
 type credentialsFile struct {
-	RunPod string `yaml:"runpod_api_key"`
-	Vast   string `yaml:"vast_api_key"`
+	RunPod      string `yaml:"runpod_api_key"`
+	Vast        string `yaml:"vast_api_key"`
+	S3AccessKey string `yaml:"runpod_s3_access_key"`
+	S3Secret    string `yaml:"runpod_s3_secret"`
 }
 
 // LoadCredentials reads tokens from the environment, then from dir.
@@ -69,6 +82,10 @@ func LoadCredentials(dir string) (Credentials, error) {
 		}
 		c.RunPod = secretOrZero(f.RunPod)
 		c.Vast = secretOrZero(f.Vast)
+		c.S3 = awssig.Credentials{
+			AccessKey: strings.TrimSpace(f.S3AccessKey),
+			Secret:    secretOrZero(f.S3Secret),
+		}
 	case os.IsNotExist(err):
 		// Fine. Nothing requires a credentials file.
 	default:
@@ -81,6 +98,14 @@ func LoadCredentials(dir string) (Credentials, error) {
 	}
 	if v := strings.TrimSpace(os.Getenv(EnvVast)); v != "" {
 		c.Vast = node.NewSecret([]byte(v))
+	}
+	// Both halves move together. Overriding one from the environment and
+	// leaving the other from the file would pair an access key with somebody
+	// else's secret, and the only symptom is a 403.
+	ak := strings.TrimSpace(os.Getenv(awssig.EnvAccessKey))
+	sk := strings.TrimSpace(os.Getenv(awssig.EnvSecret))
+	if ak != "" || sk != "" {
+		c.S3 = awssig.Credentials{AccessKey: ak, Secret: secretOrZero(sk)}
 	}
 	return c, nil
 }

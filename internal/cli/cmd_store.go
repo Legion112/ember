@@ -2,14 +2,20 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
+	"github.com/Legion112/ember/internal/awssig"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
+	"github.com/Legion112/ember/internal/s3"
 )
 
 func cmdStore(args []string, out io.Writer) error { return runStore(args, out, deps{}) }
@@ -30,6 +36,8 @@ func runStore(args []string, out io.Writer, d deps) error {
 		return runStoreCreate(args[1:], out, d)
 	case "rm":
 		return runStoreRm(args[1:], out, d)
+	case "push":
+		return runStorePush(args[1:], out, d)
 	case "-h", "--help", "help":
 		storeUsage(out)
 		return nil
@@ -43,6 +51,7 @@ func storeUsage(out io.Writer) {
 	outf(out, "ember store manages persistent storage that outlives a node.\n\n")
 	outf(out, "A store is the one thing ember creates that no deadline, no reaper and\nno Ctrl-C ever ends. It bills by the month whether or not anything is\nattached to it, which is why nothing creates one as a side effect.\n\n")
 	outf(out, "  create   create the store named in ember.yaml\n")
+	outf(out, "  push     upload a local file to the store, without renting anything\n")
 	outf(out, "  rm       destroy a store and everything on it\n\n")
 	outf(out, "`ember ls` reports every store and what it costs.\n")
 }
@@ -252,3 +261,154 @@ type Attached struct {
 
 // IsZero reports whether this run mounts nothing.
 func (a Attached) IsZero() bool { return a.Handle.IsZero() }
+
+// runStorePush uploads a local file to the store over the S3 endpoint.
+//
+// The point of doing it this way is that no compute is running: the bytes go
+// straight to the volume, and the only charge is the storage that was going
+// to exist anyway. Fetching the same file from a node would bill the download
+// at GPU rates -- about ten minutes of an H100 for a 40 GB model set, every
+// time a store is filled.
+//
+// It prints the digest at the end because that is the value `assets:` needs,
+// and reading it from the same pass that uploaded the file is how the two
+// cannot disagree.
+func runStorePush(args []string, out io.Writer, d deps) error {
+	fs := flag.NewFlagSet("store push", flag.ContinueOnError)
+	fs.SetOutput(out)
+	cfgPath := fs.String("config", config.FileName, "path to ember.yaml")
+	as := fs.String("as", "", "what to call it on the store; defaults to the file's own name")
+	fs.Usage = func() {
+		outf(out, "ember store push uploads a local file to the store.\n\n")
+		outf(out, "Nothing is rented. The file goes straight to the volume over RunPod's\nS3 endpoint, so the only charge is the storage itself -- fetching the\nsame file from a node would bill the download at GPU rates.\n\n")
+		outf(out, "usage: ember store push <file> [flags]\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return usageError{err}
+	}
+	if fs.NArg() != 1 {
+		return usageError{fmt.Errorf("ember store push takes exactly one file and got %d argument(s) (%v); "+
+			"flags come before the file, as in `ember store push -config %s ./sd15.gguf`", fs.NArg(), fs.Args(), *cfgPath)}
+	}
+	local := fs.Arg(0)
+
+	reg, _, cfg, err := registryAndStore(*cfgPath, d)
+	if err != nil {
+		return err
+	}
+	if !cfg.HasStore() {
+		return usageError{fmt.Errorf("no store is named in %s; push needs somewhere to put the file", *cfgPath)}
+	}
+
+	name := *as
+	if name == "" {
+		name = filepath.Base(local)
+	}
+	// The same check the node applies to an asset name, so a file pushed
+	// under a name the node would refuse fails here instead of after the
+	// upload.
+	name, err = node.SafeRelPath(name)
+	if err != nil {
+		return usageError{fmt.Errorf("name %q %w", name, err)}
+	}
+
+	// The local, free checks first. A typo in a filename should fail without
+	// a round trip, and an unreadable file should fail before anything asks
+	// a provider about a store.
+	//
+	// The operator named this file on the command line, which is the whole
+	// purpose of the argument; there is no path to constrain it to, because
+	// push uploads a checkpoint from wherever it was downloaded.
+	f, err := os.Open(local) //nolint:gosec // G304: the file to upload is the argument
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() {
+		return fmt.Errorf("%s is a directory; push takes one file", local)
+	}
+
+	sp, p, err := storeProvider(reg, node.ProviderID(cfg.Provider))
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	store, found, err := findStore(ctx, sp, cfg.Store.Name)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("no store named %q at %s. Create it with:\n  ember store create", cfg.Store.Name, p.Name())
+	}
+	if store.Region == "" {
+		return fmt.Errorf("provider %s does not expose its stores over S3, so there is nothing to push to. "+
+			"Put the file on the volume directly", p.Name())
+	}
+
+	// Hashed last, because it reads the whole file: a missing credential or
+	// a store in the wrong datacentre should not cost a pass over forty
+	// gigabytes first. It has to be known to print at the end, and a digest
+	// taken from the same bytes that went up is the only one worth putting
+	// in a config.
+	sum, err := digestOf(f)
+	if err != nil {
+		return err
+	}
+
+	creds, err := d.credentials(mustConfigDir(cfg, d))
+	if err != nil {
+		return err
+	}
+
+	endpoint := s3.EndpointFor(store.Region)
+	if d.S3BaseURL != "" {
+		endpoint = d.S3BaseURL
+	}
+	c := &s3.Client{
+		Endpoint: endpoint,
+		Region:   store.Region,
+		Creds:    creds.S3,
+	}
+	if c.Creds.IsZero() {
+		return fmt.Errorf("no S3 credentials. RunPod issues these separately from the API key, "+
+			"on the Credentials page under \"S3 API keys\", and shows the secret once. "+
+			"Put them in credentials.yaml as runpod_s3_access_key and runpod_s3_secret, or set %s and %s",
+			awssig.EnvAccessKey, awssig.EnvSecret)
+	}
+
+	outf(out, "pushing %s to %s in %s\n", local, store.Name, store.Region)
+	if err := c.Upload(ctx, string(store.Handle.ID), name, f, fi.Size(), out); err != nil {
+		return err
+	}
+
+	outf(out, "\nuploaded. Add it to %s:\n\nassets:\n  - url: <where a node can fetch it>\n    sha256: %s\n    as: %s\n",
+		*cfgPath, sum, name)
+	return nil
+}
+
+// digestOf hashes the whole file and rewinds it for the upload.
+func digestOf(f *os.File) (string, error) {
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("read %s: %w", f.Name(), err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// mustConfigDir resolves the credentials directory, falling back to the
+// config's own so that a failure here is reported by the loader rather than
+// by a nil path somewhere lower down.
+func mustConfigDir(cfg config.Config, d deps) string {
+	if ps, err := resolvePaths(cfg, d); err == nil {
+		return ps.config
+	}
+	return cfg.ConfigDir
+}
