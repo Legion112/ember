@@ -44,7 +44,7 @@ func runDown(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
-	reg, store, err := registryAndStore(*cfgPath, d)
+	reg, store, _, err := registryAndStore(*cfgPath, d)
 	if err != nil {
 		return err
 	}

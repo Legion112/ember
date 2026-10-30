@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Legion112/ember/internal/config"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/reconcile"
 	"github.com/Legion112/ember/internal/statestore"
@@ -34,20 +35,32 @@ func runLs(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
-	findings, _, err := scan(*cfgPath, out, d)
+	findings, stores, _, err := scan(*cfgPath, out, d)
 	if err != nil {
 		return err
 	}
 
 	if len(findings) == 0 {
 		outf(out, "no nodes.\n")
-		return nil
 	}
 	for _, f := range findings {
 		outf(out, "%s\n", f)
 	}
 
-	if n := reconcile.Attention(findings); n > 0 {
+	// Printed after the nodes and on every run, including the run where
+	// there are no nodes at all. A store with nothing attached is the one
+	// charge that no deadline, no reaper and no Ctrl-C ever ends, so the
+	// clean-bill-of-health case is exactly the one it must not be omitted
+	// from.
+	for _, f := range stores {
+		outf(out, "%s\n", f)
+	}
+	if total := reconcile.MonthlyTotal(stores); total > 0 {
+		outf(out, "storage: %s/month, which no deadline or reaper ends.\n", total)
+	}
+
+	all := append(append([]reconcile.Finding(nil), findings...), stores...)
+	if n := reconcile.Attention(all); n > 0 {
 		return &FindingsError{N: n}
 	}
 	return nil
@@ -68,7 +81,7 @@ func runReap(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
-	findings, ctx, err := scan(*cfgPath, out, d)
+	findings, _, ctx, err := scan(*cfgPath, out, d)
 	if err != nil {
 		return err
 	}
@@ -89,7 +102,7 @@ func runReap(args []string, out io.Writer, d deps) error {
 		return nil
 	}
 
-	reg, store, err := registryAndStore(*cfgPath, d)
+	reg, store, _, err := registryAndStore(*cfgPath, d)
 	if err != nil {
 		return err
 	}
@@ -105,42 +118,60 @@ func runReap(args []string, out io.Writer, d deps) error {
 }
 
 // scan collects from every provider and classifies the result.
-func scan(cfgPath string, out io.Writer, d deps) ([]reconcile.Finding, context.Context, error) {
-	reg, store, err := registryAndStore(cfgPath, d)
+//
+// Nodes and stores come back separately because they are acted on
+// differently: reap destroys expired nodes and must never be handed a store,
+// and the two cost shapes print differently. One registry serves both, so a
+// caller that needs the stores does not pay for a second round of config
+// loading and credential reading.
+func scan(cfgPath string, out io.Writer, d deps) ([]reconcile.Finding, []reconcile.Finding, context.Context, error) {
+	reg, store, cfg, err := registryAndStore(cfgPath, d)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	records, err := store.List()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	ctx := context.Background()
 	listings, errs := reconcile.Collect(ctx, reg)
-	return reconcile.Scan(listings, errs, records, time.Now()), ctx, nil
+	nodes := reconcile.Scan(listings, errs, records, time.Now())
+
+	stores, storeErrs := reconcile.CollectStores(ctx, reg)
+	configured := map[node.ProviderID]string{}
+	if cfg.HasStore() {
+		configured[node.ProviderID(cfg.Provider)] = cfg.Store.Name
+	}
+	return nodes, reconcile.ScanStores(stores, storeErrs, configured), ctx, nil
 }
 
-func registryAndStore(cfgPath string, d deps) (*provider.Registry, *statestore.Store, error) {
+// registryAndStore builds everything a scan needs from one config read.
+//
+// The config comes back with them because the caller needs it too, and a
+// second config.Load would be a second chance for the two copies to disagree
+// about which store this run is talking about.
+func registryAndStore(cfgPath string, d deps) (*provider.Registry, *statestore.Store, config.Config, error) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, cfg, err
 	}
 	ps, err := resolvePaths(cfg, d)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, cfg, err
 	}
 	creds, err := d.credentials(ps.config)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, cfg, err
 	}
 	reg, err := buildRegistry(d, creds, cfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, cfg, err
 	}
 	store, err := openStore(ps.state)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, cfg, err
 	}
-	return reg, store, nil
+	return reg, store, cfg, nil
 }

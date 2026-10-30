@@ -331,3 +331,67 @@ func TestOutputDirOrDefault_ReportsAnUnresolvableStateDir(t *testing.T) {
 		t.Fatal("a state dir that cannot be resolved was accepted")
 	}
 }
+
+func TestConfig_HasStore(t *testing.T) {
+	if (Config{}).HasStore() {
+		t.Error("an empty config claims a store")
+	}
+	if !(Config{Store: StoreConfig{Name: "models"}}).HasStore() {
+		t.Error("a config naming a store does not claim one")
+	}
+}
+
+func TestConfig_StoreMount(t *testing.T) {
+	// The default is /models and deliberately not /workspace, which is the
+	// provider default and also where ember writes outputs: a store there
+	// would bill for every render for as long as the store exists.
+	m, err := (Config{}).StoreMount()
+	if err != nil {
+		t.Fatalf("StoreMount() = %v", err)
+	}
+	if m.Path() != DefaultMount {
+		t.Errorf("default mount = %q, want %q", m.Path(), DefaultMount)
+	}
+	if m.Path() == "/workspace" {
+		t.Error("the default mount is /workspace, which bills every render")
+	}
+
+	m, err = (Config{Store: StoreConfig{Mount: "/weights"}}).StoreMount()
+	if err != nil {
+		t.Fatalf("StoreMount() = %v", err)
+	}
+	if m.Path() != "/weights" {
+		t.Errorf("mount = %q, want /weights", m.Path())
+	}
+}
+
+func TestConfig_StoreMountRefusesADangerousPath(t *testing.T) {
+	// The refusal lives in node.MountAt; this checks the config path reaches
+	// it rather than defaulting around it. A yaml key that could spell
+	// /workspace or /root would undo a sealed type with one line of text.
+	for _, bad := range []string{"/workspace", "/workspace/out", "/root", "/etc", "models", "/"} {
+		t.Run(bad, func(t *testing.T) {
+			if _, err := (Config{Store: StoreConfig{Mount: bad}}).StoreMount(); err == nil {
+				t.Errorf("mount %q was accepted", bad)
+			}
+		})
+	}
+}
+
+func TestLoad_ReadsTheStoreBlock(t *testing.T) {
+	p := write(t, "store:\n  name: models\n  size_gib: 40\n  region: EU-RO-1\n  mount: /weights\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if !cfg.HasStore() {
+		t.Fatal("the store block was not read")
+	}
+	if cfg.Store.Name != "models" || cfg.Store.SizeGiB != 40 || cfg.Store.Region != "EU-RO-1" {
+		t.Errorf("store = %+v", cfg.Store)
+	}
+	m, err := cfg.StoreMount()
+	if err != nil || m.Path() != "/weights" {
+		t.Errorf("StoreMount = %q, %v", m.Path(), err)
+	}
+}
