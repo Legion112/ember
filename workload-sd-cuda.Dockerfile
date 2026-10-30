@@ -94,12 +94,24 @@ COPY --from=sdbuild /out/ /opt/sd/
 RUN printf '/opt/sd\n' > /etc/ld.so.conf.d/ember-sd.conf && ldconfig \
  && ln -sf /opt/sd/sd-cli /usr/local/bin/sd-cli
 
-# Baked in rather than fetched at run time: downloading weights on a rented
-# GPU bills the download at GPU rates, and a node that reaches out on startup
-# depends on somebody else's uptime for a run you are paying for.
-ARG MODEL_PATH=.model.gguf
-COPY ${MODEL_PATH} /opt/models/sd15.gguf
-
+# No model. This image is code, and the weights live on a store.
+#
+# They used to be COPY'd in, and the comment said that baking them avoided
+# billing the download at GPU rates. That was true and it was the wrong trade
+# at any size worth having. A COPY'd model gets a layer digest that is ours
+# alone, so it can never hit a shared cache on any host -- the identical bytes
+# sit on the same machines under somebody else's digest, and we re-download
+# ours on every pod. The checkpoint was 51% of this image and 92% of what a
+# one-shot run cost. Above about 10 GB it is not even possible: the registry
+# refuses a layer larger than that, and Wan 2.2's experts are 14 GB each.
+#
+# `ember store push` puts them on a volume once, for the price of the storage
+# and no compute, and `assets:` names them with a digest so the node verifies
+# what it mounts before anything expensive runs.
+#
+# The mount point is not baked in either: the config names it, node.MountAt
+# refuses the paths that would break the node, and the workload's own command
+# refers to it.
 RUN mkdir -p /workspace/out
 
 EXPOSE 22

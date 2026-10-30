@@ -5,22 +5,17 @@
 # several gigabytes, which a home upload link makes painful while a runner
 # pushes it inside GitHub's own network.
 #
-# Manual only. It is expensive to build and the model it bakes in rarely
-# changes, so rebuilding it on every push to master would burn runner minutes
-# for nothing.
+# Manual only. Compiling stable-diffusion.cpp against the CUDA toolkit takes
+# tens of minutes, and nothing in it changes when a Go file does.
+#
+# It no longer bakes in a checkpoint. Weights go on a store, which is why this
+# workflow stopped needing a model URL, a digest to verify it with, and the
+# disk to hold all three copies.
 name: workload image
 
 on:
   workflow_dispatch:
     inputs:
-      model_url:
-        description: GGUF checkpoint to bake in
-        required: true
-        default: https://huggingface.co/kostakoff/stable-diffusion-v1-5-GGUF/resolve/main/v1-5-pruned_bf16.gguf
-      model_sha256:
-        description: sha256 of that file, so a moved URL cannot change the node
-        required: true
-        default: ""
       tag:
         description: image tag
         required: true
@@ -36,29 +31,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # A CUDA devel base plus the build tree plus the final image does not
-      # fit in a runner's default free space. The preinstalled toolchains are
-      # several tens of gigabytes and nothing here uses them.
-      - name: make room
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          sudo docker image prune -af || true
-          df -h /
+      # No "make room" step. It used to delete .NET, Android and GHC before
+      # building, because a CUDA devel base plus the build tree plus the
+      # final image plus a 1.76 GB checkpoint was thought not to fit.
+      #
+      # The log says otherwise: the last run that did it reported 86 GB free
+      # before the cleanup and 111 GB after, having spent two and a half
+      # minutes to free space nothing needed. Without the model baked in
+      # there is even less to hold. Removed rather than kept "just in case" --
+      # a precaution nobody can point at a failure for is one that just makes
+      # every build slower.
 
       - name: resolve the image name
         run: |
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE=ghcr.io/$owner/ember-sd" >> "$GITHUB_ENV"
-
-      # Verified by digest. A checkpoint fetched from a moving URL is a node
-      # whose output changes without anything in this repository changing.
-      - name: fetch the model
-        run: |
-          curl -sSL --retry 3 -o .model.gguf "${{ inputs.model_url }}"
-          echo "${{ inputs.model_sha256 }}  .model.gguf" | sha256sum -c -
-          ls -la .model.gguf
 
       - uses: docker/login-action@v3
         with:
@@ -74,7 +61,6 @@ jobs:
           context: .
           file: workload-sd-cuda.Dockerfile
           push: true
-          build-args: MODEL_PATH=.model.gguf
           tags: |
             ${{ env.IMAGE }}:${{ inputs.tag }}
             ${{ env.IMAGE }}:${{ github.sha }}
