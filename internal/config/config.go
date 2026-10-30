@@ -117,6 +117,22 @@ type Config struct {
 	// possible moment turns a card that needed forty seconds into a refusal.
 	// Empty is gpucheck.DefaultTimeout.
 	GPUProbeTimeout time.Duration `yaml:"gpu_probe_timeout"`
+
+	// MinCUDA is the oldest CUDA runtime the image can run against, as
+	// "major.minor" -- for example "12.6", which is what this repository's
+	// workload-sd-cuda.Dockerfile builds against.
+	//
+	// It restricts placement to hosts new enough to run the image. Empty
+	// asks for no constraint, which is what ember did for its whole life
+	// before this key existed: every pod accepted any CUDA version,
+	// including hosts too old for the image about to run on them -- a
+	// failure that appears only after the pod is created and billing.
+	//
+	// Empty by default because the field is unmeasured. RunPod publishes it
+	// and its enum, but nothing here has confirmed that it actually filters
+	// placement, and a constraint that silently narrows capacity without
+	// doing anything would be worse than none.
+	MinCUDA string `yaml:"min_cuda"`
 }
 
 // AssetConfig is one file to put on the store.

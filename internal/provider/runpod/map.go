@@ -509,3 +509,30 @@ func availabilityOrUnknown(a string) string {
 	}
 	return a
 }
+
+// allowedCudaFrom renders every version RunPod accepts that is at least min.
+//
+// Empty min means no constraint at all, which is the shape that sends no
+// field. A min newer than anything in the enum is an error rather than an
+// empty list: an empty list would read as "no constraint" to the API and
+// quietly give back the behaviour the caller was trying to avoid.
+func allowedCudaFrom(min string) ([]string, error) {
+	if strings.TrimSpace(min) == "" {
+		return nil, nil
+	}
+	var out []string
+	for _, v := range cudaVersions {
+		ok, err := node.CUDAAtLeast(v, min)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no CUDA version RunPod offers is %s or newer; it accepts %s",
+			min, strings.Join(cudaVersions, ", "))
+	}
+	return out, nil
+}

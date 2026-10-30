@@ -481,6 +481,7 @@ func buildSpec(cfg config.Config, store Attached) (node.Spec, error) {
 
 		GPUProbe:        cfg.GPUProbe,
 		GPUProbeTimeout: cfg.GPUProbeTimeout,
+		MinCUDA:         cfg.MinCUDA,
 
 		Image:   cfg.Image,
 		Cmd:     cfg.Cmd,

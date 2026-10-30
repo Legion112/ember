@@ -157,6 +157,29 @@ make workload-sd MODEL=/path/to/v1-5-pruned_bf16.gguf
 ember up --config sd.yaml     # provider: local — free, CPU, a few seconds
 ```
 
+#### Publishing the CUDA image
+
+Either machine can publish it, and both run the same checks first.
+
+```bash
+gh workflow run "workload image" -f tag=sd-cuda --ref master   # in CI
+make publish-sd-cuda TAG=sd-cuda                               # from here
+```
+
+The local path needs `docker login ghcr.io -u <user>` with a classic token
+carrying `write:packages`, and never takes the token on a command line.
+
+Both build the image, run the publish lab set named once as `PUBLISH_LABS` in
+the `Makefile`, and push only if it passes. That sharing is the point: the
+workflow used to carry its own list of labs, and it drifted — a lab written to
+catch a published image whose `embernode` did not understand `embernode fetch`
+was not in it, so the one publish it existed to guard was the one place it
+never ran.
+
+Locally the compile takes about nine minutes on sixteen cores against thirty
+on a four-vCPU runner, and the push is seconds rather than minutes: the runtime
+base is pinned by digest, so only the layers that actually changed go up.
+
 stable-diffusion.cpp rather than ComfyUI or diffusers, deliberately: no Python
 and no PyTorch anywhere, and 2.45 GB rather than a dozen. On a rented GPU that
 difference is pull time, and pull time is billed at GPU rates.
@@ -236,6 +259,43 @@ make every clean run look like a problem.
 Nothing secret is ever passed as a command-line flag, because
 `/proc/<pid>/cmdline` is world-readable — on a rented machine, readable by
 whoever else is on that host.
+
+### Checking the card before trusting it
+
+A GPU that cannot initialize does not fail. It silently becomes a slow CPU, at
+the GPU's price. One run learned this the expensive way: an A100 came up, CUDA
+reported `system not yet initialized`, sd-cli fell back to its CPU backend, and
+a 32-billion-parameter model began running on 128 threads. ember thought the
+workload was fine, because it was running.
+
+```yaml
+gpu_probe: ["sh", "-c", "sd-cli --list-devices | grep -qi cuda"]
+gpu_probe_timeout: 2m
+```
+
+`gpu_probe` runs on the node before the assets and before the workload, and
+must exit zero. Empty runs no probe. It is a command rather than a check ember
+makes itself, because what proves a card usable belongs to the image — and
+deliberately not `nvidia-smi`, which will list a card on a host whose NVSwitch
+fabric is down, which is exactly the failure above.
+
+`gpu_probe_timeout` is how long the card has to come up, retried every five
+seconds, default two minutes. Retried rather than checked once because the
+driver's own words were *not yet*: an SXM board waits for
+`nvidia-fabricmanager` on the host, and probing at the earliest possible moment
+turns a card that needed forty seconds into a refusal.
+
+```yaml
+min_cuda: "12.6"
+```
+
+`min_cuda` restricts placement to hosts whose CUDA runtime is at least this,
+which matters because the image carries a runtime and a host older than it
+cannot run the image at all. Empty sends no constraint — which is what ember
+did for its whole life before this key existed. It is empty by default because
+nothing has yet confirmed against the live API that the field actually filters
+placement, and a constraint that narrows capacity without doing anything would
+be worse than none.
 
 ### Stores
 

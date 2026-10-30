@@ -724,3 +724,81 @@ func TestCaps_BillsPerSecondWithNoMinimum(t *testing.T) {
 func TestRunPod_StoreCapsMatchImplementation(t *testing.T) {
 	providertest.AssertStoreCapsMatch(t, New(node.NewSecret([]byte("k"))))
 }
+
+// TestCreate_SendsNoCUDAConstraintByDefault.
+//
+// The field is unmeasured, so it must be absent unless an operator asked for
+// it. An omitted field is what RunPod documents as "any CUDA version is
+// acceptable", which is the behaviour every existing config already has.
+func TestCreate_SendsNoCUDAConstraintByDefault(t *testing.T) {
+	var raw map[string]any
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"nocuda","status":"PROVISIONING"}`))
+	})
+	if _, err := p.Create(t.Context(), request(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := raw["allowedCudaVersions"]; present {
+		t.Errorf("allowedCudaVersions was sent for a spec that named no minimum: %v", raw["allowedCudaVersions"])
+	}
+}
+
+// TestCreate_SendsEveryCUDAVersionAtOrAboveTheMinimum.
+//
+// ember sent nothing here for its whole life, so every pod accepted any CUDA
+// version -- including a host whose driver predates the image's runtime, which
+// cannot run that image at all. That does not fail while filtering offers; it
+// fails after the pod exists and is billing.
+func TestCreate_SendsEveryCUDAVersionAtOrAboveTheMinimum(t *testing.T) {
+	var body createPodRequest
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"cuda1","status":"PROVISIONING"}`))
+	})
+
+	req := request(t)
+	req.Spec.MinCUDA = "12.8"
+	if _, err := p.Create(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"13.0", "12.9", "12.8"}
+	if len(body.AllowedCudaVersions) != len(want) {
+		t.Fatalf("allowedCudaVersions = %v, want %v", body.AllowedCudaVersions, want)
+	}
+	for i := range want {
+		if body.AllowedCudaVersions[i] != want[i] {
+			t.Fatalf("allowedCudaVersions = %v, want %v", body.AllowedCudaVersions, want)
+		}
+	}
+}
+
+// TestCreate_RefusesAMinimumRunPodCannotMeet.
+//
+// Rendered before the request is built, so this is a refusal rather than a
+// create that quietly drops the constraint and rents a host that cannot run
+// the image.
+func TestCreate_RefusesAMinimumRunPodCannotMeet(t *testing.T) {
+	called := false
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"never","status":"PROVISIONING"}`))
+	})
+
+	req := request(t)
+	req.Spec.MinCUDA = "99.0"
+	if _, err := p.Create(t.Context(), req); err == nil {
+		t.Error("a CUDA minimum RunPod cannot meet was accepted")
+	}
+	if called {
+		t.Error("a pod was created anyway; the constraint must be settled before anything is rented")
+	}
+}

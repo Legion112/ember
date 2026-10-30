@@ -806,3 +806,62 @@ func TestMapCPUOffers_SkipsASiteWithNoCapacity(t *testing.T) {
 		t.Errorf("got %d offers unfiltered, want 2", len(got))
 	}
 }
+
+func TestAllowedCudaFrom(t *testing.T) {
+	// Empty is "no constraint", which must send no field at all rather than
+	// an empty list -- RunPod reads a missing field as "any version".
+	got, err := allowedCudaFrom("")
+	if err != nil || got != nil {
+		t.Errorf("allowedCudaFrom(\"\") = %v, %v; want nil, nil", got, err)
+	}
+	if got, _ := allowedCudaFrom("   "); got != nil {
+		t.Errorf("allowedCudaFrom(whitespace) = %v, want nil", got)
+	}
+
+	got, err = allowedCudaFrom("12.8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"13.0", "12.9", "12.8"}
+	if len(got) != len(want) {
+		t.Fatalf("allowedCudaFrom(12.8) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("allowedCudaFrom(12.8) = %v, want %v", got, want)
+		}
+	}
+
+	// The oldest in the enum takes everything.
+	if got, _ := allowedCudaFrom("11.8"); len(got) != len(cudaVersions) {
+		t.Errorf("allowedCudaFrom(11.8) returned %d of %d versions", len(got), len(cudaVersions))
+	}
+
+	// Newer than anything RunPod has is an error, not an empty list: an
+	// empty list reads as "no constraint" and would silently give back the
+	// behaviour the caller was trying to avoid.
+	if _, err := allowedCudaFrom("99.0"); err == nil {
+		t.Error("a CUDA version newer than RunPod offers produced no error")
+	}
+	if _, err := allowedCudaFrom("not-a-version"); err == nil {
+		t.Error("an unreadable version was accepted")
+	}
+}
+
+// TestCudaVersionsAreNewestFirst guards the order the renderer relies on, and
+// that the enum is the one RunPod published.
+func TestCudaVersionsAreNewestFirst(t *testing.T) {
+	for i := 1; i < len(cudaVersions); i++ {
+		newer, err := node.CUDAAtLeast(cudaVersions[i-1], cudaVersions[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !newer {
+			t.Fatalf("cudaVersions is not newest-first at %d: %q before %q",
+				i, cudaVersions[i-1], cudaVersions[i])
+		}
+	}
+	if cudaVersions[len(cudaVersions)-1] != "11.8" {
+		t.Errorf("the oldest version is %q; RunPod's enum ends at 11.8", cudaVersions[len(cudaVersions)-1])
+	}
+}
