@@ -85,7 +85,10 @@ jobs:
           push: false
           tags: ember:sd-cuda
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # ignore-error because a cache is an optimisation. The export
+          # talking to the Actions cache service is not a reason to throw
+          # away a thirty-minute compile that succeeded.
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - uses: actions/setup-go@v6
         with:
@@ -105,7 +108,11 @@ jobs:
       # pinned revision -- an agreement the ordinary lab suite checks on every
       # pull request.
       - name: verify the image before publishing it
-        run: make test-image-labs-publish
+        # docker-build first: the harness needs ember:lab for its own node, and
+        # the lab target checks for it rather than building it, the way every
+        # other image lab target does. `make publish-sd-cuda` gets it as a
+        # prerequisite; a runner has to ask for it.
+        run: make docker-build test-image-labs-publish
 
       # Tagged and pushed, rather than built a second time. The bytes that
       # were just tested are the bytes that ship.
