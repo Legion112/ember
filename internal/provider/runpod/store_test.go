@@ -282,14 +282,20 @@ func TestCreate_AttachesTheStoreAndPinsTheDatacentre(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"id":"pod1","name":"n","status":"PROVISIONING"}`)
 	})
-	p.Store = node.StoreHandle{Provider: Name, ID: "agv6w2qcg7"}
-	p.Mount = mustMount(t, "/models")
-	p.StoreRegion = "EU-RO-1"
 	// A configured datacentre list is overridden, not intersected: an
 	// intersection could be empty while the store's own site has capacity.
 	p.DataCenters = []string{"US-KS-2"}
 
-	if _, err := p.Create(t.Context(), request(t)); err != nil {
+	req := request(t)
+	spec := req.Spec
+	spec.Store = node.StoreHandle{Provider: Name, ID: "agv6w2qcg7"}
+	spec.Mount = mustMount(t, "/models")
+	req.Spec = spec
+	// The node goes where the chosen offer is, which for a store run is the
+	// store's own site.
+	req.Offer.Region = "EU-RO-1"
+
+	if _, err := p.Create(t.Context(), req); err != nil {
 		t.Fatalf("Create = %v", err)
 	}
 
@@ -352,9 +358,8 @@ func TestOffers_RefusesWhenTheStoreSiteHasNothing(t *testing.T) {
 	// sends the operator to try a different card. The real answer is that
 	// their weights are in the wrong site, and the fix is a datacentre.
 	p := newTestProvider(t, serveFile(t, "gpus.json"))
-	p.StoreRegion = "XX-NOWHERE-9"
 
-	_, err := p.Offers(t.Context(), node.Filter{})
+	_, err := p.Offers(t.Context(), node.Filter{Region: "XX-NOWHERE-9"})
 	if err == nil {
 		t.Fatal("an empty region reported no error")
 	}

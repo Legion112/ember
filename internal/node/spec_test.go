@@ -153,3 +153,44 @@ func TestNewSpec_ErrorsNameTheField(t *testing.T) {
 		t.Errorf("error should explain the pin requirement, got %v", err)
 	}
 }
+
+func TestNewSpec_RefusesHalfAMount(t *testing.T) {
+	// Half a mount is not a smaller mount, it is a silent one. A store with
+	// nowhere to land would be attached and unreachable; a mount with no
+	// store would be a path the workload reads and finds empty. Both look
+	// like a run that succeeded and produced nothing.
+	mount, err := MountAt("/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := StoreHandle{Provider: "local", ID: "ember-store-models"}
+
+	base := SpecOptions{Image: "ghcr.io/x/y:v1", TTL: time.Hour}
+
+	storeOnly := base
+	storeOnly.Store = handle
+	if _, err := NewSpec(storeOnly); err == nil {
+		t.Error("a store with no mount path was accepted")
+	}
+
+	mountOnly := base
+	mountOnly.Mount = mount
+	if _, err := NewSpec(mountOnly); err == nil {
+		t.Error("a mount path with no store was accepted")
+	}
+
+	both := base
+	both.Store, both.Mount = handle, mount
+	s, err := NewSpec(both)
+	if err != nil {
+		t.Fatalf("a complete mount was refused: %v", err)
+	}
+	if s.Store != handle || s.Mount != mount {
+		t.Errorf("the mount did not survive NewSpec: %+v / %+v", s.Store, s.Mount)
+	}
+
+	// Neither is the shape every run had before stores existed.
+	if _, err := NewSpec(base); err != nil {
+		t.Errorf("a spec with no store was refused: %v", err)
+	}
+}

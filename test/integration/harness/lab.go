@@ -241,10 +241,38 @@ func (l *Lab) Run(ctx context.Context, args ...string) Result {
 	return l.run(ctx, nil, args...)
 }
 
+// RunSub runs a two-level subcommand, as `ember store create --config ...`.
+//
+// Run inserts --config after the first word, which is right for a flat
+// command with positional arguments -- `ember down <handle>` needs its flags
+// before the handle, because the standard flag package stops parsing at the
+// first non-flag argument. For a two-level command that same insertion
+// produces `ember store --config X create`, which the dispatcher reads as a
+// store subcommand named "--config". Hence a separate entry point rather than
+// a cleverer Run: the two shapes genuinely differ, and guessing which one is
+// meant from the argument list is how a lab ends up asserting against a usage
+// error.
+func (l *Lab) RunSub(ctx context.Context, group, sub string, args ...string) Result {
+	l.t.Helper()
+	full := append([]string{group, sub, "--config", l.ConfigPath}, args...)
+	return l.runRaw(ctx, full...)
+}
+
 func (l *Lab) run(ctx context.Context, before func(*exec.Cmd), args ...string) Result {
 	l.t.Helper()
 
 	full := append([]string{args[0], "--config", l.ConfigPath}, args[1:]...)
+	return l.execEmber(ctx, before, full)
+}
+
+// runRaw runs ember with exactly these arguments.
+func (l *Lab) runRaw(ctx context.Context, full ...string) Result {
+	l.t.Helper()
+	return l.execEmber(ctx, nil, full)
+}
+
+func (l *Lab) execEmber(ctx context.Context, before func(*exec.Cmd), full []string) Result {
+	l.t.Helper()
 	cmd := exec.CommandContext(ctx, l.Bin, full...)
 	cmd.Dir = l.Dir
 	// A deliberately small environment. HOME is inside the lab so that a bug
