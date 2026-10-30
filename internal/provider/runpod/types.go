@@ -56,6 +56,10 @@ type createPodRequest struct {
 	// DataCenterIds restricts placement. Empty lets RunPod choose.
 	DataCenterIds []string `json:"dataCenterIds,omitempty"`
 
+	// Mounts is the persistent storage attached to this pod. Nil sends no
+	// field at all, which is what a pod with no store must look like.
+	Mounts *mounts `json:"mounts,omitempty"`
+
 	// StartSsh asks RunPod to run its own sshd.
 	//
 	// ember sets this false and runs its own, because RunPod's sshd uses a
@@ -189,4 +193,95 @@ type gpuCount struct {
 
 type listGpuTypesResponse struct {
 	Gpus []gpuType `json:"gpus"`
+}
+
+// --- network volumes -------------------------------------------------------
+//
+// Every field name and bound below was taken from the live API before any of
+// this was written, not from the documentation, which is wrong in three ways:
+// it describes only the other API (rest.runpod.io/v1), spells the datacentre
+// field `dataCenterId` where this one wants `dataCenter`, and gives the
+// minimum size as 0 where the server answers "minimum: got 1, want 10". See
+// testdata/README.md for the transcript.
+
+// VolumePath is where ember's stores are reached on the v2 API.
+//
+// Hyphenated. `/v2/networkvolumes` is a 404 and `/v2/network-volumes` is the
+// live path, which is the sort of thing a client written from the docs
+// discovers on its first create, after the operator has decided to spend
+// money.
+const VolumePath = "/v2/network-volumes"
+
+// volumeTypeStandard is the tier ember creates.
+//
+// RunPod also sells HIGH_PERFORMANCE at twice the price for roughly three
+// times the throughput. ember does not offer the choice yet because nothing
+// has measured whether it pays for the workloads this is for, and a knob
+// whose right setting nobody knows is a knob that gets set wrong.
+const volumeTypeStandard = "STANDARD"
+
+// networkVolume is one volume as the API reports it.
+type networkVolume struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+
+	// Size is in GiB and is what gets billed, used or not.
+	Size int `json:"size"`
+
+	// DataCenter is the site, and therefore the only site a pod that mounts
+	// this volume can be placed in.
+	DataCenter string `json:"dataCenter"`
+
+	// Type is STANDARD or HIGH_PERFORMANCE, set at creation and immutable.
+	// It decides the rate, so it is read rather than assumed.
+	Type string `json:"type,omitempty"`
+}
+
+// createVolumeRequest is POST /v2/network-volumes.
+type createVolumeRequest struct {
+	Name       string `json:"name"`
+	Size       int    `json:"size"`
+	DataCenter string `json:"dataCenter"`
+	Type       string `json:"type,omitempty"`
+}
+
+// listVolumesResponse is GET /v2/network-volumes.
+//
+// Paginated, which the other API's bare array is not. A client that read only
+// the first page would under-report stores, and under-reporting a resource
+// that bills monthly with nothing attached is precisely the leak ember exists
+// to make visible.
+type listVolumesResponse struct {
+	NetworkVolumes []networkVolume `json:"networkVolumes"`
+	Pagination     pagination      `json:"pagination"`
+}
+
+type pagination struct {
+	NextCursor  *string `json:"nextCursor"`
+	HasNextPage bool    `json:"hasNextPage"`
+}
+
+// mounts is the storage attached to a pod.
+//
+// Network, not a top-level networkVolumeId: that spelling belongs to the
+// other API. The array holds at most one entry today and is an array for
+// RunPod's own forward compatibility.
+//
+// Persistent is deliberately never set. The API refuses a pod that asks for
+// both, because it "drops a persistent disk whenever a volume is attached" --
+// so a field ember filled in by habit would turn a store into a 400.
+type mounts struct {
+	Network []networkMount `json:"network,omitempty"`
+}
+
+// networkMount attaches one volume at one path.
+//
+// Path has no default: the API requires it. ember's choice of /models is
+// therefore not an override of RunPod's /workspace but the only way to answer
+// the field at all -- which is fortunate, because /workspace is where ember
+// writes outputs and a store mounted there would bill for every render for as
+// long as the store exists.
+type networkMount struct {
+	VolumeID string `json:"volumeId"`
+	Path     string `json:"path"`
 }

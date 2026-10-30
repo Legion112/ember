@@ -345,6 +345,33 @@ A leaked node bills by the hour in silence. These are not style preferences.
   and the one that matters for forty gigabytes of somebody else's weights. An
   attacker on the path can deny service — the fetch fails closed and nothing
   is written — but cannot substitute content.
+- **A store pins every node that mounts it to one datacentre, and the offer
+  filter has to be re-read through that site.** `mapOffers` reports
+  `bestRegion(g)` — the single site with the most capacity — so filtering its
+  output by the store's region would have rejected a card that is rentable
+  exactly where the weights are. A live RTX 4090 reads `NONE` overall and
+  `LOW` in US-IL-1; with a store in US-IL-1, the filter-afterwards version
+  answers "no capacity" for a card you could have rented. `regionOffers`
+  rewrites each entry to its own site's availability instead. Same shape of
+  bug as the one `hasCapacity` exists to prevent, one layer up.
+- **A store's datacentre overrides the configured placement list, it does not
+  intersect with it.** An intersection can be empty while the store's own site
+  has capacity, and a placement list excluding the store's site is a request
+  the provider can only refuse.
+- **An empty offer list with a store attached is a refusal, not an empty
+  list.** "No offers matched" reads as "that GPU is sold out everywhere" and
+  sends the operator to try another card; the real answer is that their
+  weights are in the wrong site, and the fix is a datacentre.
+- **A paginated listing is followed to the end, and both halves are checked.**
+  `hasNextPage` without a cursor is a page ember cannot ask for; following a
+  cursor while `hasNextPage` is false re-reads the last page forever. The loop
+  is bounded, and hitting the bound is an error saying the listing is
+  incomplete — a listing silently missing its tail is exactly the leak
+  `ScanStores` exists to prevent.
+- **A created store whose label does not come back is a refusal.** A store
+  ember cannot recognise is one `ember ls` will not report and
+  `ember store rm` will not remove: a leak created by the command meant to be
+  the careful one.
 - **A provider may have two APIs that disagree about field names.** RunPod
   serves network volumes at `api.runpod.io/v2/network-volumes` *and*
   `rest.runpod.io/v1/networkvolumes`, and the same field is `dataCenter` on

@@ -124,3 +124,14 @@ than multiplying a published rate by a size.
 Both OpenAPI documents are public and unauthenticated
 (`api.runpod.io/v2/openapi.json`, `rest.runpod.io/v1/openapi.json`), which is
 where the schema details above came from.
+
+### Volume fixtures
+
+| file | what it is |
+|---|---|
+| `volumes_list.json` | three volumes: one of ember's, one that is **not** ember's and must be skipped, and a high-performance one at the bulk size so the rate is picked from the volume rather than assumed |
+| `volume_created.json` | the 201 body from a create |
+
+Both are built from the live v2 schema and the field names observed above
+(`dataCenter`, not `dataCenterId`). The `pagination` object is real: it is what
+the live `GET /v2/network-volumes` returned on an empty account.

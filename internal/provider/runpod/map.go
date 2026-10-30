@@ -332,3 +332,99 @@ func mapPorts(reqs []exposure.PortRequest) ([]string, error) {
 	}
 	return out, nil
 }
+
+// --- network volumes -------------------------------------------------------
+
+// Storage rates, per GiB per month.
+//
+// From RunPod's published pricing rather than from an invoice, which is the
+// weaker of the two and said so here: the hourly GPU rate in this file comes
+// from the live catalogue, and MinBilling was corrected once already because a
+// plausible assumption about a provider turned out to be wrong. There is a
+// GET /v2/billing/network-volumes endpoint that reports what was actually
+// charged, and when a store has existed for a month these become a comparison
+// rather than a belief.
+const (
+	standardRate        = node.StorePrice(70_000)  // $0.07/GiB/month below 1 TiB
+	standardBulkRate    = node.StorePrice(50_000)  // $0.05/GiB/month at and above 1 TiB
+	highPerformanceRate = node.StorePrice(140_000) // $0.14/GiB/month, any size
+
+	// bulkFromGiB is where the cheaper standard tier starts. RunPod writes
+	// the boundary as "1 TB"; this is the GiB figure the size field uses.
+	bulkFromGiB = 1024
+)
+
+// volumePrice is what this volume costs per GiB per month.
+//
+// Derived from the volume's own reported type and size rather than from what
+// ember asked for, so a volume created elsewhere -- or one whose tier RunPod
+// changed under it -- is priced as it actually is.
+func volumePrice(v networkVolume) node.StorePrice {
+	if strings.EqualFold(v.Type, "HIGH_PERFORMANCE") {
+		return highPerformanceRate
+	}
+	if v.Size >= bulkFromGiB {
+		return standardBulkRate
+	}
+	return standardRate
+}
+
+// mapVolume turns one API volume into a store, or says why it cannot.
+//
+// A volume ember did not create is not an error and not a store: it is
+// somebody else's, and `ember store rm` acts on what this returns.
+func mapVolume(v networkVolume) (node.Store, bool, error) {
+	name, err := provider.ParseStoreLabel(v.Name)
+	if err != nil {
+		return node.Store{}, false, nil //nolint:nilerr // not ours is not a failure
+	}
+	if v.ID == "" {
+		return node.Store{}, false, fmt.Errorf("volume %q has no id", v.Name)
+	}
+	if v.Size < 0 {
+		return node.Store{}, false, fmt.Errorf("volume %s reports a negative size (%d)", v.Name, v.Size)
+	}
+	return node.Store{
+		Handle:  node.StoreHandle{Provider: Name, ID: node.StoreID(v.ID)},
+		Name:    name,
+		SizeGiB: v.Size,
+		Region:  v.DataCenter,
+		Price:   volumePrice(v),
+	}, true, nil
+}
+
+// regionOffers narrows the catalogue to one datacentre.
+//
+// This is what a store costs you in flexibility: a volume lives in one site
+// and a pod that mounts it must be placed there, so the whole catalogue is
+// re-read through that site's own availability.
+//
+// It is not the same as filtering mapOffers' output by Region. mapOffers
+// reports bestRegion(g) -- the single site with the most capacity -- so an
+// offer available in EU-RO-1 but best in US-IL-1 would be labelled US-IL-1
+// and then rejected by a filter looking for EU-RO-1. The card was rentable
+// where the store is and ember would have said "no capacity", which is the
+// same shape of bug as the one hasCapacity exists to prevent.
+func regionOffers(gpus []gpuType, cloud, region string) []node.Offer {
+	if region == "" {
+		return mapOffers(gpus, cloud)
+	}
+	var kept []gpuType
+	for _, g := range gpus {
+		for _, dc := range g.DataCenters {
+			if dc.ID != region {
+				continue
+			}
+			if rank(dc.Availability) <= 0 {
+				break
+			}
+			// Rewritten so the rest of the mapping reads this site's
+			// availability rather than the global summary.
+			g.Availability = dc.Availability
+			g.DataCenters = []dataCentre{dc}
+			kept = append(kept, g)
+			break
+		}
+	}
+	return mapOffers(kept, cloud)
+}
