@@ -18,6 +18,8 @@ package harness
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/crc64"
@@ -459,6 +461,75 @@ func (l *Lab) CreateVolume(ctx context.Context, name string) {
 		defer cancel()
 		_ = l.cli.VolumeRemove(rctx, name, true)
 	})
+}
+
+// CreateStore runs `ember store create` and registers its removal.
+//
+// Through ember, unlike CreateVolume, because some labs are about the command
+// itself. The cleanup is registered here for the same reason CreateVolume
+// registers one: cleanups run last-registered-first, so the store goes before
+// the stray check looks, and the first lab that forgot would otherwise have
+// turned a working check into a failing suite.
+func (l *Lab) CreateStore(ctx context.Context, name string) {
+	l.t.Helper()
+	if out := l.RunSub(ctx, "store", "create"); out.ExitCode != 0 {
+		l.t.Fatalf("store create exited %d: %s", out.ExitCode, out.Combined())
+	}
+	l.t.Cleanup(func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		// Removed at the daemon rather than through ember: a lab whose
+		// assertions already failed should not need ember to work in order
+		// to clean up after itself.
+		_ = l.cli.VolumeRemove(rctx, provider.StoreLabel(name), true)
+	})
+}
+
+// SeedVolume writes a file into a store volume and returns its SHA-256.
+//
+// Out-of-band, through a throwaway container, because the thing under test is
+// the verifying -- and a lab that used ember to put the file there would be
+// asserting that ember agrees with itself.
+//
+// It is also what lets the asset lab run with no network at all: with the
+// file already present and verified in place, the configured URL is never
+// fetched, so pointing it somewhere unreachable proves the fetch did not go
+// looking.
+func (l *Lab) SeedVolume(ctx context.Context, vol, name, content string) string {
+	l.t.Helper()
+
+	resp, err := l.cli.ContainerCreate(ctx,
+		&container.Config{
+			Image: LabImage,
+			// The image's entrypoint is embernode, which would try to be a
+			// node. This container only has to write a file.
+			Entrypoint: []string{"/bin/sh", "-c"},
+			Cmd:        []string{"mkdir -p \"$(dirname /seed/" + name + ")\" && printf %s \"$CONTENT\" > /seed/" + name},
+			Env:        []string{"CONTENT=" + content},
+		},
+		&container.HostConfig{Binds: []string{vol + ":/seed"}},
+		nil, nil, "")
+	if err != nil {
+		l.t.Fatalf("create seed container: %v", err)
+	}
+	defer func() {
+		_ = l.cli.ContainerRemove(context.Background(), resp.ID, container.RemoveOptions{Force: true})
+	}()
+	if err := l.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		l.t.Fatalf("start seed container: %v", err)
+	}
+	l.WaitExited(ctx, resp.ID, 30*time.Second)
+
+	j, err := l.cli.ContainerInspect(ctx, resp.ID)
+	if err != nil {
+		l.t.Fatalf("inspect seed container: %v", err)
+	}
+	if j.State.ExitCode != 0 {
+		l.t.Fatalf("seeding %s exited %d", name, j.State.ExitCode)
+	}
+
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }
 
 // Volumes lists the volumes wearing ember's kind label.
@@ -911,4 +982,10 @@ func (l *Lab) WaitExited(ctx context.Context, id string, within time.Duration) {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// DigestOf is the SHA-256 a lab should claim for this content.
+func DigestOf(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }

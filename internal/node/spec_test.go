@@ -194,3 +194,41 @@ func TestNewSpec_RefusesHalfAMount(t *testing.T) {
 		t.Errorf("a spec with no store was refused: %v", err)
 	}
 }
+
+func TestNewSpec_RefusesAssetsWithNowhereToPutThem(t *testing.T) {
+	// A fetch with no store writes gigabytes to the node's own disk and
+	// throws them away with it: a run that downloads a model, discards it,
+	// and reports success.
+	a := Asset{URL: "https://h/x", SHA256: strings.Repeat("a", 64), As: "sd15.gguf"}
+	base := SpecOptions{Image: "ghcr.io/x/y:v1", TTL: time.Hour}
+
+	noStore := base
+	noStore.Assets = []Asset{a}
+	if _, err := NewSpec(noStore); err == nil {
+		t.Error("assets with no store were accepted")
+	}
+
+	// And the asset list itself is validated here, so a bad one fails before
+	// anything is rented.
+	mount, err := MountAt("/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withStore := base
+	withStore.Store = StoreHandle{Provider: "local", ID: "v1"}
+	withStore.Mount = mount
+	withStore.Assets = []Asset{{URL: "https://h/x", SHA256: "nope", As: "a.gguf"}}
+	if _, err := NewSpec(withStore); err == nil {
+		t.Error("an asset with a bad digest was accepted")
+	}
+
+	ok := withStore
+	ok.Assets = []Asset{a}
+	s, err := NewSpec(ok)
+	if err != nil {
+		t.Fatalf("a valid asset was refused: %v", err)
+	}
+	if len(s.Assets) != 1 {
+		t.Errorf("assets = %+v", s.Assets)
+	}
+}

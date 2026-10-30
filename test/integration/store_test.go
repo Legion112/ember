@@ -111,9 +111,7 @@ func TestStore_CreateMountRunDestroyRemove(t *testing.T) {
 		"cmd":   `[/bin/sh, -c, "echo weights > /models/model.bin; cat /models/model.bin"]`,
 	})
 
-	if out := l.RunSub(ctx, "store", "create"); out.ExitCode != 0 {
-		t.Fatalf("store create exited %d: %s", out.ExitCode, out.Combined())
-	}
+	l.CreateStore(ctx, "models")
 
 	// First run writes to the store.
 	first := l.Run(ctx, "up")
@@ -181,4 +179,91 @@ func TestStore_UpRefusesAStoreThatDoesNotExist(t *testing.T) {
 	if vs := l.Volumes(ctx); len(vs) != 0 {
 		t.Errorf("up created a store rather than refusing: %v", names(vs))
 	}
+}
+
+// TestAssets_VerifiedInPlaceWithoutTouchingTheNetwork.
+//
+// The asset is seeded onto the store first, so the configured URL is never
+// fetched -- and it is deliberately unreachable, which is what proves that.
+// What this exercises is the argv `assets.Command` writes being parsed by
+// `embernode fetch` on a real node, over a real SSH connection, through real
+// shell quoting: a flag renamed on one side and not the other is a node that
+// fetches nothing and a workload that finds an empty directory.
+func TestAssets_VerifiedInPlaceWithoutTouchingTheNetwork(t *testing.T) {
+	l := harness.New(t)
+	ctx := t.Context()
+
+	l.WriteConfig(map[string]string{"store": storeYAML})
+	l.CreateStore(ctx, "models")
+	sum := l.SeedVolume(ctx, "ember-store-models", "sd15.gguf", "these are the weights")
+
+	l.WriteConfig(map[string]string{
+		"store":  storeYAML,
+		"assets": assetYAML(sum),
+		"cmd":    `[/bin/sh, -c, "cat /models/sd15.gguf"]`,
+	})
+
+	out := l.Run(ctx, "up")
+	if out.ExitCode != 0 {
+		t.Fatalf("up exited %d: %s", out.ExitCode, out.Combined())
+	}
+	if !strings.Contains(out.Stdout, "present and verified") {
+		t.Errorf("the asset was not verified in place:\n%s", out.Combined())
+	}
+	if !strings.Contains(out.Stdout, "these are the weights") {
+		t.Errorf("the workload did not read the asset:\n%s", out.Combined())
+	}
+	// The URL points nowhere. Reaching it would have failed the run, so a
+	// clean exit is the proof that nothing was downloaded.
+	if strings.Contains(out.Stdout, "fetching") {
+		t.Errorf("the asset was already there and was fetched anyway:\n%s", out.Combined())
+	}
+}
+
+// TestAssets_TamperedWeightsRefuseBeforeTheWorkloadRuns.
+//
+// The control that stands in for a read-only mount. A store is writable by
+// every node that mounts it, so one run can leave something behind that the
+// next would load as its model; RunPod offers no way to prevent the write, so
+// it is detected -- and detected before any GPU time is spent on it.
+func TestAssets_TamperedWeightsRefuseBeforeTheWorkloadRuns(t *testing.T) {
+	l := harness.New(t)
+	ctx := t.Context()
+
+	l.WriteConfig(map[string]string{"store": storeYAML})
+	l.CreateStore(ctx, "models")
+	// Seeded with something other than what the config will claim.
+	sum := l.SeedVolume(ctx, "ember-store-models", "sd15.gguf", "not the weights at all")
+	_ = sum
+
+	l.WriteConfig(map[string]string{
+		"store":  storeYAML,
+		"assets": assetYAML(harness.DigestOf("these are the weights")),
+		"cmd":    `[/bin/sh, -c, "echo THE WORKLOAD RAN"]`,
+	})
+
+	out := l.Run(ctx, "up")
+	if out.ExitCode == 0 {
+		t.Fatalf("a tampered asset was accepted:\n%s", out.Combined())
+	}
+	if !strings.Contains(out.Combined(), "does not match its digest") {
+		t.Errorf("the refusal does not say why:\n%s", out.Combined())
+	}
+	// The whole point of checking first.
+	if strings.Contains(out.Combined(), "THE WORKLOAD RAN") {
+		t.Errorf("the workload ran against weights that failed verification:\n%s", out.Combined())
+	}
+	// And the node still went away.
+	if n := len(l.Nodes(ctx)); n != 0 {
+		t.Errorf("%d node(s) survived a refused run", n)
+	}
+}
+
+const storeYAML = "\n  name: models\n  size_gib: 40\n  region: EU-RO-1"
+
+// assetYAML points at a URL nothing answers. Every asset lab here has the
+// file on the store already, so a fetch would be a bug -- and one that shows
+// up as a failed run rather than as a silently slower one.
+func assetYAML(sum string) string {
+	return "\n  - url: http://127.0.0.1:9/never\n    sha256: " + sum + "\n    as: sd15.gguf"
 }

@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Legion112/ember/internal/assets"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
 	"github.com/Legion112/ember/internal/dockerengine/dockerclient"
@@ -104,11 +105,6 @@ func runUp(args []string, out io.Writer, d deps) error {
 		cfg.Cmd = cmdArgs
 	}
 
-	spec, err := buildSpec(cfg)
-	if err != nil {
-		return usageError{err}
-	}
-
 	paths, err := resolvePaths(cfg, d)
 	if err != nil {
 		return err
@@ -127,13 +123,26 @@ func runUp(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
-	// Resolved after the registry exists, because only the provider knows
-	// what a store's id is -- RunPod's is an opaque token, the local
-	// provider's is the volume name -- and before anything is rented,
-	// because a run that discovers its store is missing after creating a
-	// node has already started paying.
-	if spec, err = attachStore(context.Background(), p, cfg, spec); err != nil {
+	// The store is resolved before the spec is built, not after.
+	//
+	// Only the provider knows what a store's id is -- RunPod's is an opaque
+	// token, the local provider's is the volume name -- so this needs the
+	// registry. Doing it first is what lets NewSpec enforce that assets
+	// always have somewhere to land: a spec built before resolution would
+	// carry assets with no store and have to be patched afterwards, which is
+	// an invariant that holds only if everybody remembers to patch.
+	//
+	// It also happens before anything is rented, because a run that
+	// discovers its store is missing after creating a node has already
+	// started paying for the discovery.
+	store, err := attachStore(context.Background(), p, cfg)
+	if err != nil {
 		return err
+	}
+
+	spec, err := buildSpec(cfg, store)
+	if err != nil {
+		return usageError{err}
 	}
 
 	opts, err := buildOptions(paths, cfg, out)
@@ -175,6 +184,16 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 		return err
 	}
 	defer func() { _ = client.Close() }()
+
+	// Assets first, and a failure here means the workload never starts.
+	//
+	// The cheapest moment to discover that the weights are wrong is before
+	// the GPU has been asked to do anything with them. It runs over the same
+	// connection the workload uses, so its output streams live and its exit
+	// status is known when it happens rather than polled for afterwards.
+	if err := ensureAssets(ctx, out, sshexec.New(client.SSH()), spec, so); err != nil {
+		return err
+	}
 
 	var serveErr error
 	if len(spec.Cmd) > 0 {
@@ -405,7 +424,7 @@ func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, 
 	}
 }
 
-func buildSpec(cfg config.Config) (node.Spec, error) {
+func buildSpec(cfg config.Config, store Attached) (node.Spec, error) {
 	ports, err := cfg.ParsePorts()
 	if err != nil {
 		return node.Spec{}, err
@@ -427,13 +446,35 @@ func buildSpec(cfg config.Config) (node.Spec, error) {
 	if err := workload.Validate(cfg.Cmd); err != nil {
 		return node.Spec{}, err
 	}
+	assetList, err := cfg.ParseAssets()
+	if err != nil {
+		return node.Spec{}, err
+	}
+	// Parsed here rather than on the node, so a misspelled `verify: alwyas`
+	// fails before anything is rented instead of after.
+	if _, err := assets.ParsePolicy(cfg.Verify); err != nil {
+		return node.Spec{}, err
+	}
+
+	// The store's own datacentre wins over whatever the config asked for.
+	// They can only disagree by mistake, and the store is the half that
+	// cannot move: the volume is where it is, and a node that mounts it has
+	// to be created there.
+	if store.Region != "" {
+		filter.Region = store.Region
+	}
+
 	return node.NewSpec(node.SpecOptions{
+		Assets:  assetList,
+		Verify:  cfg.Verify,
 		Image:   cfg.Image,
 		Cmd:     cfg.Cmd,
 		Ports:   ports,
 		Filter:  filter,
 		TTL:     cfg.TTL,
 		Outputs: outputs,
+		Store:   store.Handle,
+		Mount:   store.Mount,
 	})
 }
 
@@ -446,4 +487,45 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 // openStore is a thin wrapper so cmd_up does not import statestore twice.
 func openStore(dir string) (*statestore.Store, error) {
 	return statestore.Open(filepath.Join(dir, statestore.DirName))
+}
+
+// ensureAssets puts every asset on the store before the workload runs.
+//
+// Sequential rather than concurrent. These are gigabytes over one link, so
+// parallel fetches would share the same bandwidth and arrive no sooner, while
+// making the progress output impossible to read and a failure impossible to
+// attribute.
+func ensureAssets(ctx context.Context, out io.Writer, r sshx.Runner, spec node.Spec, so session.Options) error {
+	if len(spec.Assets) == 0 {
+		return nil
+	}
+	if spec.Mount.IsZero() {
+		// Unreachable through NewSpec, which refuses assets without a store,
+		// and checked anyway because what it guards is a fetch writing
+		// gigabytes to the node's own disk and throwing them away with it.
+		return fmt.Errorf("%d asset(s) with nowhere to put them: no store is mounted", len(spec.Assets))
+	}
+
+	// Parsed once rather than per asset. It was already validated in
+	// buildSpec, before anything was rented; this is the conversion.
+	policy, err := assets.ParsePolicy(spec.Verify)
+	if err != nil {
+		return err
+	}
+
+	for _, a := range spec.Assets {
+		cmd, err := assets.Command(spec.Mount, a, policy)
+		if err != nil {
+			return err
+		}
+		res, err := workload.Run(ctx, r, append([]string{cmd.Path}, cmd.Args...), out)
+		if err != nil {
+			return fmt.Errorf("asset %s: %w", a.As, err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("asset %s: the node refused it (exit %d); nothing was run against it", a.As, res.ExitCode)
+		}
+		so.Log.Debug("asset ready", "as", a.As, "took", res.Duration)
+	}
+	return nil
 }

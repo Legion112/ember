@@ -57,6 +57,13 @@ type Spec struct {
 	// run needs.
 	Store StoreHandle
 	Mount Mount
+
+	// Assets must be on the store, verified, before Cmd runs.
+	Assets []Asset
+
+	// Verify is the policy for an asset already present. Empty is the strict
+	// one; the string is parsed by internal/assets, which owns the meaning.
+	Verify string
 }
 
 // SpecOptions is the input to NewSpec.
@@ -71,6 +78,8 @@ type SpecOptions struct {
 	Volume  MiB
 	Store   StoreHandle
 	Mount   Mount
+	Assets  []Asset
+	Verify  string
 }
 
 // NewSpec validates o and returns the Spec it describes.
@@ -91,6 +100,13 @@ func NewSpec(o SpecOptions) (Spec, error) {
 	// nowhere to land would be attached and unreachable; a mount with no
 	// store would be a path the workload reads and finds empty. Both would
 	// look like a successful run that produced nothing.
+	if len(o.Assets) > 0 && o.Store.IsZero() {
+		return Spec{}, fmt.Errorf("%d asset(s) are listed but no store is mounted; they would be written to "+
+			"the node's own disk and thrown away with it", len(o.Assets))
+	}
+	if _, err := ValidateAssets(o.Assets); err != nil {
+		return Spec{}, err
+	}
 	if o.Store.IsZero() != o.Mount.IsZero() {
 		return Spec{}, fmt.Errorf("a store needs a mount path and a mount path needs a store; got store %q and mount %q",
 			o.Store, o.Mount)
@@ -115,6 +131,8 @@ func NewSpec(o SpecOptions) (Spec, error) {
 		Volume:  o.Volume,
 		Store:   o.Store,
 		Mount:   o.Mount,
+		Assets:  append([]Asset(nil), o.Assets...),
+		Verify:  o.Verify,
 	}, nil
 }
 

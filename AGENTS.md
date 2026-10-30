@@ -368,6 +368,28 @@ A leaked node bills by the hour in silence. These are not style preferences.
   and the one that matters for forty gigabytes of somebody else's weights. An
   attacker on the path can deny service — the fetch fails closed and nothing
   is written — but cannot substitute content.
+- **Assets are fetched and verified before the workload, and a failure there
+  means it never starts.** The cheapest moment to discover that the weights
+  are wrong is before the GPU has been asked to do anything with them. It runs
+  over the same SSH connection the workload uses, so the output streams live
+  and the exit status is known when it happens.
+- **A mismatched digest is reported, never repaired by re-downloading.**
+  Something wrote to the store and what did is not knowable from the node;
+  what is knowable is that the bytes are not the ones this run asked for, and
+  that is the moment to stop rather than the moment to guess. Overwriting
+  would also destroy the evidence.
+- **A download is renamed into place only after its digest matches.** Written
+  straight to its final name, a fetch interrupted halfway leaves a short file
+  that the next run finds "present" -- and under `verify: present`, loads as
+  a model. Every path out of the download removes the partial, because a
+  partial on a store is a file nothing cleans up and the operator pays by the
+  month to keep.
+- **The store is resolved before the spec is built, not after.** Only the
+  provider knows what a store's id is, so resolution needs the registry --
+  but a spec built first would carry assets with no store and have to be
+  patched afterwards, and an invariant that holds only if everybody remembers
+  to patch is not an invariant. Doing it first is what lets `NewSpec` refuse
+  assets that have nowhere to land.
 - **What gets mounted is on the spec, not on the provider.** A store mount is
   a property of the run and not of the account: two runs against the same
   provider can want different stores, and a provider carrying the answer has
