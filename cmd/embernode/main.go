@@ -31,6 +31,20 @@ const (
 )
 
 func main() {
+	// One subcommand, and everything else is the node entrypoint.
+	//
+	// Dispatching on os.Args rather than growing a flag package at the top:
+	// embernode is PID 1 in the container and is started by the image's
+	// ENTRYPOINT with no arguments at all. A parser that could fail on the
+	// empty case would be a node that does not come up.
+	if len(os.Args) > 1 && os.Args[1] == "fetch" {
+		if err := runFetch(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "embernode fetch: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	code, err := run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "embernode: %v\n", err)

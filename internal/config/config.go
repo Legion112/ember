@@ -83,6 +83,31 @@ type Config struct {
 
 	// Store names the persistent store this configuration uses, if any.
 	Store StoreConfig `yaml:"store"`
+
+	// Assets are the files that must be on the store, verified, before the
+	// workload runs.
+	Assets []AssetConfig `yaml:"assets"`
+
+	// Verify is what to do about an asset that is already there: "always"
+	// re-reads and re-hashes it, "present" accepts it. Empty is "always".
+	Verify string `yaml:"verify"`
+}
+
+// AssetConfig is one file to put on the store.
+//
+// The digest is not optional and has no default. A store is writable by every
+// node that mounts it, so an unverified asset is a file any previous run
+// could have replaced -- and the first thing that would notice is the model
+// producing nonsense on a GPU somebody is paying for.
+type AssetConfig struct {
+	// URL is where to fetch it from if it is not already on the store.
+	URL string `yaml:"url"`
+
+	// SHA256 is the digest the file must have, in hex.
+	SHA256 string `yaml:"sha256"`
+
+	// As is the path on the store, relative to the mount.
+	As string `yaml:"as"`
 }
 
 // StoreConfig names a persistent store and where it is mounted.
@@ -134,6 +159,28 @@ func (c Config) StoreMount() (node.Mount, error) {
 
 // HasStore reports whether this configuration names a store.
 func (c Config) HasStore() bool { return c.Store.Name != "" }
+
+// ParseAssets validates the asset list and returns it in domain form.
+//
+// Refused as a set rather than one at a time, so two entries that land on the
+// same name with different digests are caught here: whichever fetch ran
+// second would overwrite a verified file or fail against a digest that was
+// never meant for it, and the error would blame the store for what the config
+// asked for.
+func (c Config) ParseAssets() ([]node.Asset, error) {
+	if len(c.Assets) == 0 {
+		return nil, nil
+	}
+	if !c.HasStore() {
+		return nil, fmt.Errorf("assets are listed but no store is named; they would be written to the "+
+			"node's own disk and thrown away with it. Add a store block, or remove the %d asset(s)", len(c.Assets))
+	}
+	out := make([]node.Asset, 0, len(c.Assets))
+	for _, a := range c.Assets {
+		out = append(out, node.Asset{URL: a.URL, SHA256: a.SHA256, As: a.As})
+	}
+	return node.ValidateAssets(out)
+}
 
 // Default is what ember uses with no file and no flags.
 func Default() Config {

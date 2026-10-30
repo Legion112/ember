@@ -207,38 +207,48 @@ func findStore(ctx context.Context, sp provider.StoreAPI, name string) (node.Sto
 // here would be ember bringing a standing monthly charge into existence
 // because a config mentioned a name, which is the one thing `ember store
 // create` exists to prevent.
-func attachStore(ctx context.Context, p provider.Provider, cfg config.Config, spec node.Spec) (node.Spec, error) {
+func attachStore(ctx context.Context, p provider.Provider, cfg config.Config) (Attached, error) {
 	if !cfg.HasStore() {
-		return spec, nil
+		return Attached{}, nil
 	}
 
 	sp, ok := p.(provider.StoreAPI)
 	if !ok || !p.Caps().Stores {
-		return spec, fmt.Errorf("this configuration names the store %q, but provider %s has no persistent storage; "+
+		return Attached{}, fmt.Errorf("this configuration names the store %q, but provider %s has no persistent storage; "+
 			"remove the store block or choose a provider that does", cfg.Store.Name, p.Name())
 	}
 
 	s, found, err := findStore(ctx, sp, cfg.Store.Name)
 	if err != nil {
-		return spec, err
+		return Attached{}, err
 	}
 	if !found {
-		return spec, fmt.Errorf("no store named %q at %s. Create it with:\n  ember store create\n"+
+		return Attached{}, fmt.Errorf("no store named %q at %s. Create it with:\n  ember store create\n"+
 			"Nothing here will make one for you: a store bills by the month and nothing destroys it on a deadline",
 			cfg.Store.Name, p.Name())
 	}
 
 	mount, err := cfg.StoreMount()
 	if err != nil {
-		return spec, err
+		return Attached{}, err
 	}
-
-	spec.Store, spec.Mount = s.Handle, mount
-	if s.Region != "" {
-		// The store's own region wins over whatever the config asked for.
-		// They can only disagree by mistake, and the store is the half that
-		// cannot move.
-		spec.Filter.Region = s.Region
-	}
-	return spec, nil
+	return Attached{Handle: s.Handle, Mount: mount, Region: s.Region}, nil
 }
+
+// Attached is the store this run will mount, resolved.
+//
+// A value rather than three return parameters, because the three travel
+// together everywhere and a caller that dropped the region would silently
+// lose the placement lock -- the one part of this whose absence looks like
+// success right up until the node lands in the wrong datacentre.
+type Attached struct {
+	Handle node.StoreHandle
+	Mount  node.Mount
+
+	// Region is the store's datacentre, empty for a provider that does not
+	// pin stores to one.
+	Region string
+}
+
+// IsZero reports whether this run mounts nothing.
+func (a Attached) IsZero() bool { return a.Handle.IsZero() }

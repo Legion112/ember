@@ -251,6 +251,41 @@ is finished with from one being kept between runs, and a line that said
 "leaked" about weights you deliberately uploaded invites an `ember store rm`
 that costs a re-upload. It names the command and leaves the decision alone.
 
+### Assets
+
+Weights are listed, not baked in. Each one is fetched onto the store once and
+verified against its digest before any workload runs:
+
+```yaml
+assets:
+  - url: https://huggingface.co/.../v1-5-pruned_bf16.gguf
+    sha256: d44a17e278412bd45c1847a91d30a69146b9bb9144c91a61fa0e357d7e2466af
+    as: sd15.gguf
+verify: always        # or `present` to skip the re-read
+```
+
+The digest is **not optional**. A store is writable by every node that mounts
+it, which makes it a channel between runs that are otherwise isolated — one
+workload can leave something behind that the next one loads as its model.
+RunPod offers no read-only mount, so the write cannot be prevented; it is
+detected instead, and detected before the GPU has been asked to do anything.
+
+That digest is also why plain HTTP is allowed. TLS authenticates the server;
+the digest authenticates the bytes, which is the stronger claim and the one
+that matters for somebody else's weights. An attacker on the path can deny
+service — the fetch fails closed and nothing is written — but cannot
+substitute content.
+
+`verify: always` is the default and re-reads what is already there, at roughly
+a gigabyte a second. `verify: present` trades that check for the time it costs
+— about forty seconds on a forty-gigabyte model set. Worth having as a choice;
+not worth being the default, because the run it protects costs dollars and the
+check costs cents.
+
+A download is written beside its destination and renamed only once the digest
+matches, so a file at the final name is always one that has been verified at
+least once. An interrupted fetch leaves nothing behind.
+
 `mount` is refused if it would shadow `/root` or `/etc`, which hold the
 authorized_keys and host key `embernode` writes at startup — a store there
 leaves sshd with neither and a handshake failure that reads exactly like an

@@ -48,8 +48,15 @@ COVERPROFILE := coverage.out
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/loopback=100,internal/cli=83,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98
+COVER_PKGS := internal/assets=91,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/loopback=100,internal/cli=83,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98
 COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,internal/dockerengine/dockerclient
+# internal/assets is below the rest because the paths it cannot reach are
+# filesystem failures with no portable way to provoke: a rename that fails
+# after the digest matched, a chmod that fails after the rename, a close that
+# fails after a successful write. The two that could be reached -- a truncated
+# response and a read-only store -- are tested; the rest would need a fake
+# filesystem, and an interface introduced to raise a coverage number is an
+# interface the production code did not need.
 # Overall across the gated set. Below 100 only because internal/keys and
 # internal/hostkey carry the documented stdlib-error gaps above.
 COVER_OVERALL := 94

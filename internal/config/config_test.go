@@ -395,3 +395,57 @@ func TestLoad_ReadsTheStoreBlock(t *testing.T) {
 		t.Errorf("StoreMount = %q, %v", m.Path(), err)
 	}
 }
+
+func TestConfig_ParseAssets(t *testing.T) {
+	const good = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+	if got, err := (Config{}).ParseAssets(); err != nil || got != nil {
+		t.Errorf("no assets = %v, %v", got, err)
+	}
+
+	// Assets with no store would be written to the node's own disk and
+	// thrown away with it -- a run that downloads forty gigabytes and
+	// discards them, reported as success.
+	withoutStore := Config{Assets: []AssetConfig{{URL: "https://h/x", SHA256: good, As: "a.gguf"}}}
+	if _, err := withoutStore.ParseAssets(); err == nil {
+		t.Error("assets with no store were accepted")
+	} else if !strings.Contains(err.Error(), "thrown away") {
+		t.Errorf("err = %q", err)
+	}
+
+	withStore := withoutStore
+	withStore.Store = StoreConfig{Name: "models"}
+	got, err := withStore.ParseAssets()
+	if err != nil {
+		t.Fatalf("ParseAssets = %v", err)
+	}
+	if len(got) != 1 || got[0].As != "a.gguf" || got[0].SHA256 != good {
+		t.Errorf("got %+v", got)
+	}
+
+	// Validation is the domain's, so a bad digest fails here too rather than
+	// on the node after a pod has been created.
+	bad := withStore
+	bad.Assets = []AssetConfig{{URL: "https://h/x", SHA256: "nope", As: "a.gguf"}}
+	if _, err := bad.ParseAssets(); err == nil {
+		t.Error("an asset with a bad digest was accepted")
+	}
+}
+
+func TestLoad_ReadsAssetsAndVerify(t *testing.T) {
+	const good = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	p := write(t, "store:\n  name: models\n"+
+		"verify: present\n"+
+		"assets:\n  - url: https://h/x.gguf\n    sha256: "+good+"\n    as: sd15.gguf\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if cfg.Verify != "present" {
+		t.Errorf("verify = %q", cfg.Verify)
+	}
+	as, err := cfg.ParseAssets()
+	if err != nil || len(as) != 1 || as[0].As != "sd15.gguf" {
+		t.Fatalf("assets = %+v, %v", as, err)
+	}
+}
