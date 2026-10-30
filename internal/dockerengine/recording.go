@@ -25,6 +25,11 @@ type RecordingEngine struct {
 	// FailOn fails any call whose record contains this substring.
 	FailOn string
 
+	// GPURuntime is what HasGPURuntime answers. False by default, which is
+	// what a machine with no nvidia-container-toolkit has -- and what every
+	// test written before GPU passthrough existed assumes.
+	GPURuntime bool
+
 	// ExecOutput is what Exec returns, keyed by the joined command. A command
 	// with no entry returns the empty string, which is what makes "the host
 	// key was not generated" a case the provider has to handle.
@@ -207,6 +212,11 @@ func (e *RecordingEngine) ContainerCreate(_ context.Context, spec ContainerSpec)
 		// with a store mounted from one created without -- which is exactly
 		// the assertion the local store needs to be able to make.
 		Binds: append([]string(nil), spec.Binds...),
+		// And the same for the GPU count, for the same reason and with a
+		// worse failure if it were dropped: a node created without a card
+		// does not fail, it runs the workload on the CPU and bills for the
+		// card it did not get.
+		GPUs: spec.GPUs,
 	}
 	return id, nil
 }
@@ -362,4 +372,14 @@ func (e *RecordingEngine) VolumeList(_ context.Context, label string) ([]Volume,
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// HasGPURuntime answers GPURuntime, and records the call.
+func (e *RecordingEngine) HasGPURuntime(_ context.Context) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("HasGPURuntime", ""); err != nil {
+		return false, err
+	}
+	return e.GPURuntime, nil
 }

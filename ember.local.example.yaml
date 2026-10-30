@@ -1,0 +1,111 @@
+# ember, generating on the GPU in this machine.
+#
+# The point is not that this is fast. It is not: the weights do not fit in an
+# 11 GiB card, so sd-cli keeps them in system RAM and streams them into VRAM
+# per layer, and roughly 35 GB crosses PCIe on each of 28 steps. A rented
+# A100 does the same image in minutes.
+#
+# The point is that it costs nothing. Most iterations of a prompt are asking
+# "is the composition right", and that question does not need an A100. Get the
+# prompt and the seed right here for free, then render once on a rented card
+# with ember.flux2.yaml -- same assets, same digests, same command, one line
+# different.
+
+provider: local
+
+# NOT the published image. `make workload-sd-cuda-local` reads this machine's
+# compute capability from nvidia-smi and builds for exactly that.
+#
+# The published ember-sd carries the architectures of cards worth renting --
+# sm_80, 86, 89, 90 -- and this machine's card is not one of them. Running the
+# published image here would not fail: it would find no usable kernel, fall
+# back to the CPU backend, and look like a very slow success. That is the
+# failure internal/gpucheck exists to catch, and the probe below catches it.
+image: ember:sd-cuda-local
+
+ttl: 4h
+
+# What the local provider reports for this machine's card, from nvidia-smi.
+# `ember offers` prints it.
+min_vram_gib: 8
+
+# A store here is a Docker named volume: the same code path a rented network
+# volume uses, costing nothing and surviving between runs. The weights are
+# fetched once, over this machine's own downstream link, and verified by the
+# same digests the rented config uses.
+store:
+  name: models
+  size_gib: 70
+  mount: /models
+
+assets:
+  - url: https://huggingface.co/city96/FLUX.2-dev-gguf/resolve/main/flux2-dev-Q8_0.gguf
+    sha256: 09d005300dd8dcbbd489bb75ada6254145c84c2c9c3d7cc1829e3c5dedcb42ce
+    as: flux2-dev-Q8_0.gguf
+
+  - url: https://huggingface.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf
+    sha256: b2a40e5ef4eab8837d0462c303e8147ec754e2963e41916b551107d2b0ca6527
+    as: Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf
+
+  - url: https://huggingface.co/black-forest-labs/FLUX.2-small-decoder/resolve/main/full_encoder_small_decoder.safetensors
+    sha256: ea4273f02d1fafbf8e1d1c2cf6018ed8748652eb0bf34f2dd91171f16f15ab62
+    as: flux2-ae.safetensors
+
+# present, not always. The rented config re-hashes 56 GiB on every run because
+# a network volume is writable by every node that mounts it -- a cross-run
+# channel worth a minute of an A100. A Docker volume on this machine is not
+# that: nothing else writes it, and re-reading 56 GiB off this disk before
+# every local iteration would make the free path the slow one to start.
+verify: present
+
+# The same probe as the rented config, and it matters more here. The published
+# image genuinely cannot run on this card; this is what turns that into a
+# refusal instead of a silent CPU fallback.
+gpu_probe:
+  - sh
+  - -c
+  - "sd-cli --list-devices | grep -qi cuda"
+gpu_probe_timeout: 1m
+
+cmd:
+  - sd-cli
+  - --diffusion-model
+  - /models/flux2-dev-Q8_0.gguf
+  - --llm
+  - /models/Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf
+  - --vae
+  - /models/flux2-ae.safetensors
+
+  # The whole reason this configuration is possible. Weights live in RAM and
+  # are pulled into VRAM as each layer needs them. 56 GiB of weights in a
+  # 125 GiB machine behind an 11 GiB card.
+  - --offload-to-cpu
+
+  - --prompt
+  - "A detailed anime illustration of a young woman alone on the open-air platform of a rural railway station at dusk. Cel-shaded with crisp linework, warm rim light from the setting sun behind her, cool blue tones in the shadows."
+  - --sampling-method
+  - euler
+  - --cfg-scale
+  - "1.0"
+  - --guidance
+  - "4.0"
+  - --steps
+  - "28"
+
+  # 1024, not 1536. The DiT's compute buffer alone was 4412 MiB at 1536x1536
+  # on a card with 80 GiB to spare; on 11 GiB, beside a streaming layer, it is
+  # the first thing that will not fit. Raise it once a run has proved it fits.
+  - -W
+  - "1024"
+  - -H
+  - "1024"
+
+  - --seed
+  - "20261030"
+  - --diffusion-fa
+  - -v
+  - -o
+  - /workspace/out/local.png
+
+outputs:
+  - /workspace/out:renders

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,14 @@ func labDeps(t *testing.T) deps {
 	// environment: a machine that has one would register the real provider,
 	// and the tests would make live API calls and behave differently from
 	// one machine to the next.
-	return deps{Engine: e, HomeDir: t.TempDir(), Creds: &config.Credentials{}}
+	return deps{
+		Engine: e, HomeDir: t.TempDir(), Creds: &config.Credentials{},
+		// And the graphics card, for the same reason as the credentials
+		// above: without this, a machine with a GPU registers a local offer
+		// carrying it, and assertions here mean something different from one
+		// developer's desk to the next.
+		DetectGPU: func(context.Context) local.GPU { return local.GPU{} },
+	}
 }
 
 func TestUp_RefusesWithoutAnImage(t *testing.T) {

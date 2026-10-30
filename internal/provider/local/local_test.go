@@ -1,6 +1,7 @@
 package local
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -17,12 +18,38 @@ import (
 // now rather than its own default, so the fake has to know about it.
 const specImage = "ghcr.io/example/comfyui:v1"
 
+// newProvider returns a provider that is certain it has no GPU.
+//
+// Pinned rather than detected, because otherwise every assertion in this file
+// would mean something different on a machine with a graphics card than on
+// one without -- and the machine this repository is developed on has one
+// while CI does not. A unit test whose result depends on the hardware under
+// it is not a unit test.
 func newProvider(t *testing.T) (*Provider, *dockerengine.RecordingEngine) {
 	t.Helper()
 	e := dockerengine.NewRecordingEngine()
 	e.AddImage(DefaultImage)
 	e.AddImage(specImage)
-	return New(e), e
+	p := New(e)
+	p.Detect = func(context.Context) GPU { return GPU{} }
+	return p, e
+}
+
+// testGPU is the card the GPU-flavoured tests pretend this machine has. The
+// real one it was modelled on is an 11 GiB 2080 Ti.
+var testGPU = GPU{Model: "rtx2080ti", VRAM: 11264, ComputeCap: "7.5"}
+
+// newGPUProvider returns a provider with testGPU and a daemon that can pass
+// it through.
+//
+// Both, because both are required and they fail independently -- the machine
+// this was developed on had the card and not the runtime.
+func newGPUProvider(t *testing.T) (*Provider, *dockerengine.RecordingEngine) {
+	t.Helper()
+	p, e := newProvider(t)
+	p.Detect = func(context.Context) GPU { return testGPU }
+	e.GPURuntime = true
+	return p, e
 }
 
 func request(t *testing.T) node.CreateRequest {
@@ -782,5 +809,220 @@ func TestLocal_StoreListSkipsOtherEmberResources(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("got %+v, want nothing: that volume is not a store", got)
+	}
+}
+
+// TestOffers_ReportsARealLocalGPU. The only free GPU offer ember has, and
+// what makes "iterate locally, render once on a rented card" expressible.
+func TestOffers_ReportsARealLocalGPU(t *testing.T) {
+	p, _ := newGPUProvider(t)
+
+	got, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d offers, want 1", len(got))
+	}
+	o := got[0]
+	if o.GPU != testGPU.Model {
+		t.Errorf("GPU = %q, want %q", o.GPU, testGPU.Model)
+	}
+	if o.VRAM != testGPU.VRAM {
+		t.Errorf("VRAM = %d, want %d", o.VRAM, testGPU.VRAM)
+	}
+	// Still free. The budget check is skipped because Caps().Free says so,
+	// not because a real price happened to be zero.
+	if o.Price != 0 {
+		t.Errorf("price = %v, want free", o.Price)
+	}
+}
+
+// TestOffers_MatchesOnlyWhatTheCardCanActuallyDo.
+//
+// Handing back a 2080 Ti for `--gpu rtx4090` would be worse than handing back
+// a CPU container, because the run would look like it worked.
+func TestOffers_MatchesOnlyWhatTheCardCanActuallyDo(t *testing.T) {
+	p, _ := newGPUProvider(t)
+
+	for name, tc := range map[string]struct {
+		f     node.Filter
+		match bool
+	}{
+		"the card it has":        {node.Filter{GPU: "rtx2080ti"}, true},
+		"a different card":       {node.Filter{GPU: "rtx4090"}, false},
+		"vram it has":            {node.Filter{MinVRAM: 11264}, true},
+		"less vram than it has":  {node.Filter{MinVRAM: 8192}, true},
+		"more vram than it has":  {node.Filter{MinVRAM: 24576}, false},
+		"no constraint at all":   {node.Filter{}, true},
+		"the whole rented model": {node.Filter{MinVRAM: 81920}, false},
+	} {
+		got, err := p.Offers(t.Context(), tc.f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (len(got) > 0) != tc.match {
+			t.Errorf("%s: got %d offers, want match=%v", name, len(got), tc.match)
+		}
+	}
+}
+
+// TestCreate_HandsTheCardToTheContainer.
+//
+// The assertion the recorder exists for. A node created without a device
+// request does not fail -- it comes up, runs the workload on the CPU, and
+// looks exactly like a successful run.
+func TestCreate_HandsTheCardToTheContainer(t *testing.T) {
+	p, e := newGPUProvider(t)
+
+	req := request(t)
+	offers, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Offer = offers[0]
+
+	h, err := p.Create(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := e.ContainerInspect(t.Context(), h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.GPUs != 1 {
+		t.Errorf("the container was created with %d GPU(s), want 1; a node with no card "+
+			"runs the workload on the CPU and looks like it worked", c.GPUs)
+	}
+}
+
+// TestCreate_AsksForNoCardOnACPUOffer. The reverse, and it matters: the
+// offer is what the operator was shown, so a CPU run must not quietly get a
+// card either.
+func TestCreate_AsksForNoCardOnACPUOffer(t *testing.T) {
+	p, e := newProvider(t) // no GPU detected
+	req := request(t)
+	offers, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Offer = offers[0]
+
+	h, err := p.Create(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := e.ContainerInspect(t.Context(), h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.GPUs != 0 {
+		t.Errorf("a CPU offer produced a container with %d GPU(s)", c.GPUs)
+	}
+}
+
+func TestGpusFor(t *testing.T) {
+	for name, tc := range map[string]struct {
+		o    node.Offer
+		want int
+	}{
+		"a card":            {node.Offer{GPU: "rtx2080ti", VRAM: 11264, GPUCount: 1}, 1},
+		"two cards":         {node.Offer{GPU: "rtx2080ti", VRAM: 11264, GPUCount: 2}, 2},
+		"count unset":       {node.Offer{GPU: "rtx2080ti", VRAM: 11264}, 1},
+		"the none sentinel": {node.Offer{GPU: "none", GPUCount: 1}, 0},
+		"empty model":       {node.Offer{VRAM: 11264}, 0},
+		// VRAM zero with a model name is not a card ember can use, and asking
+		// the daemon for a device on that basis would be asking on no
+		// evidence.
+		"no vram": {node.Offer{GPU: "rtx2080ti", GPUCount: 1}, 0},
+	} {
+		if got := gpusFor(tc.o); got != tc.want {
+			t.Errorf("%s: gpusFor = %d, want %d", name, got, tc.want)
+		}
+	}
+}
+
+// TestOffers_WillNotPromiseACardDockerCannotPassThrough.
+//
+// The state this machine was actually in: an 11 GiB 2080 Ti, and no
+// nvidia-container-toolkit. nvidia-smi sees the card; the daemon refuses the
+// device request with "could not select device driver". Advertising it would
+// be a promise ember cannot keep, found at create, after a config was written
+// around it.
+func TestOffers_WillNotPromiseACardDockerCannotPassThrough(t *testing.T) {
+	p, e := newGPUProvider(t)
+	e.GPURuntime = false // the card is there; Docker cannot hand it over
+
+	got, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d offers, want the CPU one", len(got))
+	}
+	if got[0].GPU != "none" || got[0].VRAM != 0 {
+		t.Errorf("offered %s/%d MiB on a daemon with no nvidia runtime", got[0].GPU, got[0].VRAM)
+	}
+
+	// And a filter asking for the card gets a refusal rather than a CPU
+	// container wearing its name. The refusal is explanatory -- see
+	// TestOffers_ExplainsACardDockerCannotReach -- because "no capacity"
+	// with a working GPU in the machine is not a usable thing to read.
+	none, err := p.Offers(t.Context(), node.Filter{GPU: testGPU.Model})
+	if err == nil {
+		t.Errorf("a request for %s matched %v", testGPU.Model, none)
+	}
+	if len(none) != 0 {
+		t.Errorf("a request for %s matched %v", testGPU.Model, none)
+	}
+}
+
+// TestOffers_SurvivesADaemonThatCannotAnswer.
+//
+// The CPU offer is still good. Failing the whole listing over a GPU question
+// would break every lab on every machine that never had a card.
+func TestOffers_SurvivesADaemonThatCannotAnswer(t *testing.T) {
+	p, e := newGPUProvider(t)
+	e.Errors["HasGPURuntime"] = errors.New("daemon said no")
+
+	got, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatalf("Offers failed because the GPU question did: %v", err)
+	}
+	if len(got) != 1 || got[0].GPU != "none" {
+		t.Errorf("got %v, want a plain CPU offer", got)
+	}
+}
+
+// TestOffers_ExplainsACardDockerCannotReach.
+//
+// "no capacity" is a baffling thing to read with a working GPU in the
+// machine, and the fix is one package away. The runpod provider names the
+// datacentre it could not place in; this names what to install.
+func TestOffers_ExplainsACardDockerCannotReach(t *testing.T) {
+	p, e := newGPUProvider(t)
+	e.GPURuntime = false
+
+	_, err := p.Offers(t.Context(), node.Filter{MinVRAM: 8192})
+	if err == nil {
+		t.Fatal("a GPU request on a daemon that cannot pass one through returned no error")
+	}
+	if !errors.Is(err, node.ErrNoCapacity) {
+		t.Errorf("got %v, want it to wrap ErrNoCapacity", err)
+	}
+	for _, want := range []string{"rtx2080ti", "nvidia-container-toolkit"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+
+	// A run that wants no GPU is unaffected: the CPU offer is still good,
+	// and refusing it would break every lab on a machine with a card.
+	got, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatalf("a CPU request was refused because of a GPU problem: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("got %d offers for a CPU request, want 1", len(got))
 	}
 }

@@ -141,6 +141,7 @@ func (d *Client) ContainerCreate(ctx context.Context, spec dockerengine.Containe
 		&container.HostConfig{
 			PortBindings: bindings,
 			Binds:        spec.Binds,
+			Resources:    container.Resources{DeviceRequests: deviceRequests(spec.GPUs)},
 		},
 		networkConfig(spec.Network),
 		nil, spec.Name,
@@ -207,11 +208,18 @@ func (d *Client) ContainerInspect(ctx context.Context, id string) (dockerengine.
 	// catch the daemon doing something else, which is the entire thing it is
 	// for.
 	var binds []string
+	gpus := 0
 	if j.HostConfig != nil {
 		binds = append(binds, j.HostConfig.Binds...)
+		for _, dr := range j.HostConfig.DeviceRequests {
+			if dr.Driver == nvidiaDriver || dr.Driver == "" {
+				gpus += dr.Count
+			}
+		}
 	}
 
 	return dockerengine.Container{
+		GPUs:     gpus,
 		ID:       j.ID,
 		Name:     strings.TrimPrefix(j.Name, "/"),
 		Image:    j.Config.Image,
@@ -335,4 +343,50 @@ func (d *Client) VolumeList(ctx context.Context, label string) ([]dockerengine.V
 		out = append(out, dockerengine.Volume{Name: v.Name, Labels: v.Labels})
 	}
 	return out, nil
+}
+
+// nvidiaDriver is the device-request driver the NVIDIA container toolkit
+// registers with the daemon.
+const nvidiaDriver = "nvidia"
+
+// deviceRequests turns a GPU count into what the Docker API wants.
+//
+// Nil for zero, and deliberately not an empty slice: a HostConfig carrying an
+// empty DeviceRequests is a different thing on the wire from one carrying
+// none, and the container ember created for its whole life until now carried
+// none.
+//
+// The capability list is how the daemon knows what to look for. Without
+// [["gpu"]] the request matches no device and the create succeeds with no
+// card attached -- which is the silent failure this whole path exists to
+// avoid.
+func deviceRequests(gpus int) []container.DeviceRequest {
+	if gpus <= 0 {
+		return nil
+	}
+	return []container.DeviceRequest{{
+		Driver:       nvidiaDriver,
+		Count:        gpus,
+		Capabilities: [][]string{{"gpu"}},
+	}}
+}
+
+// HasGPURuntime reports whether the daemon has the NVIDIA runtime registered.
+//
+// Read from the daemon rather than by looking for nvidia-smi or a package:
+// what matters is not whether the host has a driver but whether *Docker* can
+// pass a device through, and only the daemon knows that. The toolkit
+// registers itself as a runtime, so its presence in this list is the question
+// being asked.
+func (d *Client) HasGPURuntime(ctx context.Context) (bool, error) {
+	info, err := d.c.Info(ctx)
+	if err != nil {
+		return false, fmt.Errorf("ask the docker daemon what runtimes it has: %w", err)
+	}
+	for name := range info.Runtimes {
+		if strings.Contains(strings.ToLower(name), "nvidia") {
+			return true, nil
+		}
+	}
+	return false, nil
 }

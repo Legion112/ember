@@ -80,6 +80,13 @@ type Container struct {
 	// one created without; the daemon is the source for a real container.
 	Binds []string
 
+	// GPUs is how many devices the daemon says were handed to this
+	// container. Reported for the same reason Binds is: a container created
+	// without a GPU is indistinguishable from one created with it until
+	// something asks the daemon, and the failure mode is a workload that
+	// silently runs on the CPU at full price.
+	GPUs int
+
 	ExitCode int
 }
 
@@ -123,12 +130,35 @@ type ContainerSpec struct {
 	// NetworkMode is normally empty, meaning the user-defined Network above.
 	// It exists only so RefuseHostNetwork has something to refuse.
 	NetworkMode string
+
+	// GPUs is how many NVIDIA devices to hand the container. Zero is none,
+	// which is what every container ember created before local GPU runs
+	// existed.
+	//
+	// A count rather than a bool, because the Docker API takes one and
+	// because "all" is a thing a machine with two cards should have to ask
+	// for deliberately. It becomes a DeviceRequest with the nvidia driver,
+	// which needs nvidia-container-toolkit installed on the host -- without
+	// it the daemon refuses the create, which is the right failure: loudly,
+	// before anything runs, rather than a container that quietly has no card.
+	GPUs int
 }
 
 // API is the subset of the Docker Engine API ember uses.
 type API interface {
 	Ping(ctx context.Context) error
 	ImageExists(ctx context.Context, ref string) (bool, error)
+
+	// HasGPURuntime reports whether the daemon can hand a container an
+	// NVIDIA device.
+	//
+	// Separate from "is there a card in this machine", because the two fail
+	// independently and only together make a GPU offer honest. A desktop
+	// with a 2080 Ti and no nvidia-container-toolkit has a perfectly good
+	// card that Docker cannot pass through, and an offer advertising it
+	// would be a promise ember cannot keep -- discovered at create, after an
+	// operator wrote a config around it.
+	HasGPURuntime(ctx context.Context) (bool, error)
 
 	NetworkCreate(ctx context.Context, name string, labels map[string]string) (string, error)
 	NetworkRemove(ctx context.Context, id string) error

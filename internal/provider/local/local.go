@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Legion112/ember/internal/dockerengine"
@@ -61,6 +62,33 @@ type Provider struct {
 	// because a container is already a sandbox and a second unprivileged user
 	// buys nothing here.
 	User string
+
+	// Detect reports the GPU on this machine, if any. Nil uses DetectGPU,
+	// which shells out to nvidia-smi and answers "none" to every failure.
+	//
+	// A seam because the alternative is a test suite whose result depends on
+	// whether the machine running it has a graphics card. Every lab in this
+	// repository ran on the assumption that this provider has no GPU, and
+	// they have to keep passing on a machine that does.
+	Detect func(ctx context.Context) GPU
+
+	gpuOnce sync.Once
+	gpu     GPU
+}
+
+// gpuNow detects once per provider.
+//
+// Cached because Offers is called on every run and nvidia-smi costs tens of
+// milliseconds; a card does not appear or vanish inside one ember invocation.
+func (p *Provider) gpuNow(ctx context.Context) GPU {
+	p.gpuOnce.Do(func() {
+		detect := p.Detect
+		if detect == nil {
+			detect = DetectGPU
+		}
+		p.gpu = detect(ctx)
+	})
+	return p.gpu
 }
 
 // New returns a provider using engine.
@@ -138,15 +166,59 @@ func (p *Provider) Offers(ctx context.Context, f node.Filter) ([]node.Offer, err
 		Region:   "localhost",
 		Label:    "a container on this machine's docker daemon, free",
 	}
-	// A filter asking for a GPU must not match: the local provider has none,
-	// and silently handing back a CPU container for `--gpu rtx4090` would
-	// make a benchmark meaningless.
-	if f.GPU != "" && f.GPU != "none" {
-		return nil, nil
+
+	// A card on this machine is a real offer, and the only free one ember
+	// has. It is what makes "get the prompt right locally, then render once
+	// on a rented A100" expressible: the weights stream from system RAM, so
+	// VRAM bounds how fast it is rather than whether it runs at all.
+	//
+	// Both conditions, and they fail independently. A desktop can have a
+	// perfectly good card that Docker cannot pass through, because
+	// nvidia-container-toolkit is not installed -- which is the state this
+	// machine was in when the feature was first run. Advertising the card
+	// anyway would be a promise ember cannot keep, discovered at create
+	// after somebody wrote a config around it.
+	//
+	// A daemon that cannot answer is treated as "no runtime" rather than an
+	// error: the CPU offer below is still perfectly good, and failing the
+	// whole listing because of a GPU question would break every lab on every
+	// machine that never had a card.
+	g := p.gpuNow(ctx)
+	runtime := false
+	if !g.IsZero() {
+		if ok, err := p.Engine.HasGPURuntime(ctx); err == nil && ok {
+			runtime = true
+			o.GPU = g.Model
+			o.VRAM = g.VRAM
+			o.Label = fmt.Sprintf("%s on this machine's docker daemon, free", g.Model)
+		}
 	}
-	if f.MinVRAM > 0 {
-		return nil, nil
+
+	// A card the daemon cannot pass through earns an explanation, not
+	// silence. "no capacity" is a baffling thing to read with a working GPU
+	// in the machine, and the fix is one package away -- so say which one,
+	// the way the runpod provider names a datacentre it could not place in.
+	if !g.IsZero() && !runtime && (f.GPU != "" || f.MinVRAM > 0) {
+		return nil, fmt.Errorf("%w: this machine has a %s but docker cannot hand it to a container. "+
+			"Install nvidia-container-toolkit and restart the daemon:\n"+
+			"  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html\n"+
+			"Until then the local provider can still run CPU workloads",
+			node.ErrNoCapacity, g.Model)
 	}
+
+	// No explicit "does this filter match" check here, deliberately.
+	//
+	// There used to be one, guarding against handing back a CPU container
+	// for `--gpu rtx4090` -- which would make a benchmark meaningless, and
+	// now that a local card is possible would be worse still, because a run
+	// on the wrong card looks like it worked. But node.Filter.Match already
+	// refuses both cases (GPUModel.Accepts, and MinVRAM against the offer's
+	// VRAM), so a second copy here was a second place for the rule to live
+	// and drift. Reinstating the bug proved it: deleting the checks changed
+	// no test, because FilterOffers was doing the work either way.
+	//
+	// TestOffers_MatchesOnlyWhatTheCardCanActuallyDo is the guard, and it
+	// asserts the provider's behaviour rather than which layer produces it.
 	return provider.FilterOffers(f, []node.Offer{o}), nil
 }
 
@@ -201,6 +273,12 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 		},
 		PublishTCP: []uint16{sshPort},
 		Binds:      binds(req),
+
+		// From the offer, not from the machine. The offer is what the filter
+		// matched and what the operator was shown, so a run that was given a
+		// CPU offer must not quietly receive a card -- and a run that asked
+		// for the card must not quietly be denied it.
+		GPUs: gpusFor(req.Offer),
 	}
 
 	id, err := p.Engine.ContainerCreate(ctx, spec)
@@ -507,3 +585,19 @@ func (p *Provider) StoreDestroy(ctx context.Context, h node.StoreHandle) error {
 }
 
 var _ provider.StoreAPI = (*Provider)(nil)
+
+// gpusFor is how many devices the container should be handed.
+//
+// Keyed on the offer carrying a GPU rather than on this machine having one.
+// The daemon refuses a device request when nvidia-container-toolkit is not
+// installed, which is the right failure: loudly, at create, instead of a
+// container that comes up with no card and runs the workload on the CPU.
+func gpusFor(o node.Offer) int {
+	if o.GPU == "" || o.GPU == "none" || o.VRAM == 0 {
+		return 0
+	}
+	if o.GPUCount > 0 {
+		return o.GPUCount
+	}
+	return 1
+}
