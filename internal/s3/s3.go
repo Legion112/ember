@@ -207,7 +207,7 @@ func (c *Client) multipart(ctx context.Context, bucket, key string, src io.Reade
 		if perr != nil {
 			return fmt.Errorf("part %d of %d: %w", i+1, parts, perr)
 		}
-		etag := resp.Header.Get("ETag")
+		etag := partETag(resp)
 		if etag == "" {
 			// Without it the completion call cannot name the part, and S3
 			// would reject the whole upload after every byte had been sent.
@@ -364,6 +364,63 @@ type initiateResult struct {
 	UploadID string   `xml:"UploadId"`
 }
 
+// partETag is the tag to echo back for an uploaded part.
+//
+// The body first, the header second, and both normalised -- because the
+// header cannot be trusted to survive the trip. RunPod serves this endpoint
+// behind Cloudflare, which rewrites the tag into a weak validator:
+//
+//	Etag: W/"4c28640dc8df1933aaea192100d50ae0"
+//
+// Echo that back and the completion is refused with "InvalidPart: part 1
+// ETag mismatch", after every byte of every part has been sent. The response
+// body carries the origin's own value and no proxy touches it, so it wins
+// where it exists.
+//
+// Found against the real endpoint. A test server echoes back whatever the
+// client sent and agrees with any encoding, so nothing short of a CDN in the
+// path could have produced this.
+func partETag(resp response) string {
+	var r uploadPartResult
+	if err := xml.Unmarshal(resp.Body, &r); err == nil && r.ETag != "" {
+		return normalizeETag(r.ETag)
+	}
+	return normalizeETag(resp.Header.Get("ETag"))
+}
+
+// normalizeETag strips the weak-validator marker and the quotes around it.
+//
+// Quotes go because Go's XML encoder escapes them into `&#34;`, which the
+// gateway compares without un-escaping; `W/` goes because it is the proxy's
+// annotation and not part of the tag.
+func normalizeETag(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "W/")
+	s = strings.TrimPrefix(s, "w/")
+	return strings.Trim(s, `"`)
+}
+
+// uploadPartResult is the body RunPod returns from UploadPart.
+//
+// AWS leaves it empty and puts the tag only in the header; this endpoint
+// sends both, which is what makes the body usable as the authority.
+type uploadPartResult struct {
+	XMLName xml.Name `xml:"UploadPartResult"`
+	ETag    string   `xml:"ETag"`
+}
+
+// completedPart names one uploaded part in the completion call.
+//
+// The ETag is stored stripped of the quotes S3 wraps it in, and that is not
+// cosmetic. Go's XML encoder escapes a quote in character data, so keeping
+// them emits `<ETag>&#34;abc&#34;</ETag>` -- and RunPod's gateway compares
+// that string without un-escaping it, answering "InvalidPart: part 1 ETag
+// mismatch" after every byte of every part has already been sent.
+//
+// Bare hex has nothing to escape, so it reaches the server as written
+// whatever the implementation does. Found against the real endpoint on the
+// first multipart upload: the test server echoed back whatever the client
+// sent, which exercises the sequence and can say nothing about the encoding.
 type completedPart struct {
 	PartNumber int64  `xml:"PartNumber"`
 	ETag       string `xml:"ETag"`
