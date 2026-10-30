@@ -64,6 +64,20 @@ type Spec struct {
 	// Verify is the policy for an asset already present. Empty is the strict
 	// one; the string is parsed by internal/assets, which owns the meaning.
 	Verify string
+
+	// GPUProbe must exit zero before anything else runs on the node, and
+	// GPUProbeTimeout is how long it may take to start doing so.
+	//
+	// A command rather than something ember knows how to check itself. What
+	// proves a card usable depends on the image -- a CUDA build answers a
+	// device listing, a ROCm one does not, and a CPU-only run has nothing to
+	// prove -- so the contract is an exit status and the knowledge lives in
+	// the config next to the image it describes.
+	//
+	// Empty runs no probe, which is what every config written before this
+	// existed asks for.
+	GPUProbe        []string
+	GPUProbeTimeout time.Duration
 }
 
 // SpecOptions is the input to NewSpec.
@@ -80,6 +94,9 @@ type SpecOptions struct {
 	Mount   Mount
 	Assets  []Asset
 	Verify  string
+
+	GPUProbe        []string
+	GPUProbeTimeout time.Duration
 }
 
 // NewSpec validates o and returns the Spec it describes.
@@ -111,6 +128,15 @@ func NewSpec(o SpecOptions) (Spec, error) {
 		return Spec{}, fmt.Errorf("a store needs a mount path and a mount path needs a store; got store %q and mount %q",
 			o.Store, o.Mount)
 	}
+	if o.GPUProbeTimeout < 0 {
+		return Spec{}, fmt.Errorf("negative gpu probe timeout")
+	}
+	// A CPU-only run has no card, so a probe against one could only ever
+	// fail -- and it would fail after the machine was rented, which is the
+	// shape of mistake this whole package exists to catch early.
+	if len(o.GPUProbe) > 0 && o.Filter.CPUOnly {
+		return Spec{}, fmt.Errorf("a gpu probe is configured but this run asks for no GPU")
+	}
 	if err := o.Filter.Validate(); err != nil {
 		return Spec{}, err
 	}
@@ -133,6 +159,9 @@ func NewSpec(o SpecOptions) (Spec, error) {
 		Mount:   o.Mount,
 		Assets:  append([]Asset(nil), o.Assets...),
 		Verify:  o.Verify,
+
+		GPUProbe:        append([]string(nil), o.GPUProbe...),
+		GPUProbeTimeout: o.GPUProbeTimeout,
 	}, nil
 }
 

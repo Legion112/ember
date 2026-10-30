@@ -232,3 +232,44 @@ func TestNewSpec_RefusesAssetsWithNowhereToPutThem(t *testing.T) {
 		t.Errorf("assets = %+v", s.Assets)
 	}
 }
+
+func TestNewSpec_RefusesANegativeProbeTimeout(t *testing.T) {
+	o := validSpecOptions()
+	o.GPUProbeTimeout = -time.Second
+	if _, err := NewSpec(o); err == nil {
+		t.Error("a negative gpu probe timeout was accepted")
+	}
+}
+
+// TestNewSpec_RefusesAProbeOnACPURun: a CPU-only run has no card, so a GPU
+// probe against one can only ever fail -- and it would fail after the machine
+// was rented, which is the exact shape of late discovery the probe exists to
+// prevent.
+func TestNewSpec_RefusesAProbeOnACPURun(t *testing.T) {
+	o := validSpecOptions()
+	o.Filter.CPUOnly = true
+	o.GPUProbe = []string{"sh", "-c", "nvidia-smi"}
+	if _, err := NewSpec(o); err == nil {
+		t.Error("a gpu probe was accepted on a run that asks for no GPU")
+	}
+}
+
+func TestNewSpec_CopiesTheProbe(t *testing.T) {
+	o := validSpecOptions()
+	o.GPUProbe = []string{"sh", "-c", "true"}
+	o.GPUProbeTimeout = 90 * time.Second
+
+	s, err := NewSpec(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.GPUProbeTimeout != 90*time.Second {
+		t.Errorf("GPUProbeTimeout = %v", s.GPUProbeTimeout)
+	}
+	// Copied, not aliased: a caller mutating its slice afterwards must not
+	// change what the spec says will be run on the node.
+	o.GPUProbe[2] = "false"
+	if s.GPUProbe[2] != "true" {
+		t.Error("the spec aliases the caller's probe slice")
+	}
+}
