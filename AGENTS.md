@@ -318,6 +318,41 @@ A leaked node bills by the hour in silence. These are not style preferences.
 - **Images are pinned to a tag or a digest; `:latest` is refused.** The point
   of ember is to measure what a model costs and how long it takes, and two runs
   a week apart that both say `:latest` may not have run the same software.
+- **A store outlives every node that mounts it, and that is what makes it
+  dangerous.** It bills by the gigabyte-month whether or not anything is
+  attached, so it is the first resource here that can leak while every node is
+  correctly destroyed and `ember ls` prints a clean bill of health. ember
+  learned to *see* a store before it learned to *make* one, and nothing that
+  rents a node may create one as a side effect: a standing monthly charge
+  needs the operator to have typed `ember store create`.
+- **It is called a store, not a volume.** `node.Spec.Volume` already means
+  RunPod's container disk, which dies with the pod. Two things called "volume"
+  with opposite lifetimes is how somebody deletes the wrong one.
+- **A store cannot be mounted over `/root`, `/etc` or `/workspace`.**
+  `node.Mount` is sealed and `MountAt` holds the refusal list. The first two
+  shadow the host key and the authorized_keys embernode writes at startup, so
+  sshd comes up with neither and the handshake failure reads exactly like a
+  host-key attack. `/workspace` is RunPod's default mount path *and* where
+  ember writes outputs, so a store there bills for every render for as long as
+  the store exists — and the operator finds out on the invoice a month later.
+- **Every asset is verified by digest before any GPU time is spent on it.**
+  A store is writable by every node that mounts it, which makes it a channel
+  between runs that are otherwise isolated: one workload can leave something
+  behind that the next one loads as its model. RunPod offers no read-only
+  mount, so the write cannot be prevented and is detected instead.
+- **The digest is why plain HTTP is allowed for an asset.** TLS authenticates
+  the server; the digest authenticates the bytes, which is the stronger claim
+  and the one that matters for forty gigabytes of somebody else's weights. An
+  attacker on the path can deny service — the fetch fails closed and nothing
+  is written — but cannot substitute content.
+- **A provider may have two APIs that disagree about field names.** RunPod
+  serves network volumes at `api.runpod.io/v2/network-volumes` *and*
+  `rest.runpod.io/v1/networkvolumes`, and the same field is `dataCenter` on
+  one and `dataCenterId` on the other; the published documentation describes
+  only the second. The minimum size is 10 and not the documented 0. All of it
+  came from one free `GET` and one deliberately-invalid `POST` made before any
+  client code existed — which is the cheapest calibration in this repository
+  and the model for the rest. See `internal/provider/runpod/testdata/README.md`.
 
 ## Style
 

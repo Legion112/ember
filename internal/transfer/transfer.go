@@ -245,52 +245,20 @@ func safeName(prefix, name string) (string, error) {
 		return "", errors.New("empty name")
 	}
 
-	// Tar uses forward slashes regardless of platform; a backslash is treated
-	// as a separator too, so a Windows-style name cannot smuggle one past the
-	// component check below.
-	slashed := strings.ReplaceAll(name, `\`, "/")
-
-	// An absolute member name is refused rather than reinterpreted as
-	// relative. Most extractors strip the leading slash, and that is
-	// contained -- os.Root sees to that -- but it is still a rewrite of what
-	// the archive asked for, and ember's own TarCommand never produces one:
-	// it changes directory and names the base precisely so member names are
-	// relative. An absolute name therefore means this archive was not made
+	// The component-by-component check, and the reason it is not a Clean,
+	// live in node.SafeRelPath. They are shared because a tar member from a
+	// rented machine and an asset name from a config file are the same
+	// problem, and a containment check written twice is a containment check
+	// fixed once. An absolute member name is refused there rather than
+	// reinterpreted as relative: most extractors strip the leading slash, and
+	// that is contained -- os.Root sees to that -- but ember's own TarCommand
+	// never produces one, so an absolute name means this archive was not made
 	// the way ember asks, which is worth saying rather than quietly fixing.
-	if strings.HasPrefix(slashed, "/") {
-		return "", errors.New("is an absolute path")
+	rel, err := node.SafeRelPath(name)
+	if err != nil {
+		return "", err
 	}
-
-	parts := strings.Split(slashed, "/")
-
-	// The components are checked before any cleaning, which is the whole
-	// point. path.Clean("/../a.png") returns "/a.png": it *absorbs* the ".."
-	// because nothing is above root. An earlier version of this function
-	// cleaned first and then looked for a leading "..", so the check could
-	// never fire -- every hostile name was silently rewritten into a valid
-	// one. Nothing escaped, because os.Root still held, but a member called
-	// "../authorized_keys" landed as "authorized_keys" and ember reported
-	// success. Refusing is right for the same reason node.validateOutputs
-	// refuses an unclean request instead of cleaning it: "/out/.." and "/out"
-	// are different requests, and quietly turning one into the other hands
-	// back something nobody asked for.
-	kept := make([]string, 0, len(parts))
-	for _, p := range parts {
-		switch p {
-		case "":
-			// A doubled or trailing separator carries no meaning.
-		case ".":
-			// Harmless, and dropping it is not a rewrite of intent.
-		case "..":
-			return "", errors.New("escapes the output directory")
-		default:
-			kept = append(kept, p)
-		}
-	}
-	if len(kept) == 0 {
-		return "", errors.New("names nothing")
-	}
-	return path.Join(prefix, path.Join(kept...)), nil
+	return path.Join(prefix, rel), nil
 }
 
 func mkdirAllIn(root *os.Root, name string) error {

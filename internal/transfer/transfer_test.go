@@ -658,3 +658,67 @@ func TestTarCommand_RefusesAPathWithANULByte(t *testing.T) {
 		t.Fatal("a path with a NUL byte was accepted")
 	}
 }
+
+func TestFetch_ReportsAnOutputDirectoryItCannotOpen(t *testing.T) {
+	// The output directory is a file. MkdirAll fails, and so does OpenRoot --
+	// which is the first thing between a rented machine's tar stream and this
+	// disk, so a failure to establish it must be reported rather than fallen
+	// through.
+	base := t.TempDir()
+	dir := filepath.Join(base, "run-1")
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Fetch(t.Context(), sshx.NewRecordingRunner(),
+		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, dir)
+	if err == nil {
+		t.Fatal("fetching into a file was accepted")
+	}
+	if !strings.Contains(err.Error(), "output directory") {
+		t.Errorf("got %q, want it to name the output directory", err)
+	}
+}
+
+func TestFetch_ReportsBothAFailedExtractionAndAFailedCommand(t *testing.T) {
+	// Both halves, not whichever was noticed first. A tar that failed partway
+	// produces a valid prefix of an archive, so the extraction error says the
+	// data is bad and the exit status says why -- and an operator given only
+	// the first goes looking for a corrupt disk.
+	r := sshx.NewRecordingRunner()
+	cmd, _ := TarCommand("/workspace/out")
+	r.Outputs[cmd.String()] = []byte("this is not gzip")
+	r.Waits[cmd.String()] = &sshx.ExitError{Cmd: cmd.String(), Code: 2, Stderr: "tar: /workspace/out: No such file or directory"}
+
+	_, err := Fetch(t.Context(), r,
+		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, filepath.Join(t.TempDir(), "run-1"))
+	if err == nil {
+		t.Fatal("a failed fetch reported success")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "gzip") {
+		t.Errorf("got %q, want it to carry the extraction failure", msg)
+	}
+	if !strings.Contains(msg, "No such file") {
+		t.Errorf("got %q, want it to carry the command's own stderr", msg)
+	}
+}
+
+func TestExtract_ReportsAFileBlockedByADirectory(t *testing.T) {
+	// A directory and a regular file with the same name in one archive. The
+	// open fails, and the failure has to name the member rather than surface
+	// as a bare EISDIR from somewhere in the extraction.
+	r, _ := root(t)
+	src := targz(t,
+		entry{name: "out/a", kind: tar.TypeDir},
+		entry{name: "out/a", body: "now a file"},
+	)
+
+	_, err := Extract(t.Context(), bytes.NewReader(src), r, "renders")
+	if err == nil {
+		t.Fatal("a file landing on a directory was accepted")
+	}
+	if !strings.Contains(err.Error(), "create") {
+		t.Errorf("got %q, want it to say what it could not create", err)
+	}
+}

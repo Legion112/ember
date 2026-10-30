@@ -10,6 +10,7 @@ import (
 	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
+	"github.com/Legion112/ember/internal/provider/providertest"
 )
 
 // specImage is what request() asks for. The provider runs the spec's image
@@ -572,4 +573,12 @@ func TestCreate_NamesTheMissingImageAndHowToGetIt(t *testing.T) {
 	if !strings.Contains(err.Error(), "make docker-build") {
 		t.Errorf("the error does not say how to fix it: %v", err)
 	}
+}
+
+func TestLocal_StoreCapsMatchImplementation(t *testing.T) {
+	// Checked here rather than in internal/provider, which cannot import a
+	// provider without a cycle. Every provider calls this, so a Caps.Stores
+	// set without a StoreAPI -- or a StoreAPI nothing will ever ask for --
+	// fails next to the provider that got it wrong.
+	providertest.AssertStoreCapsMatch(t, New(dockerengine.NewRecordingEngine()))
 }

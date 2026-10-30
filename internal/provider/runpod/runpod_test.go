@@ -15,6 +15,7 @@ import (
 	"github.com/Legion112/ember/internal/httpx"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
+	"github.com/Legion112/ember/internal/provider/providertest"
 )
 
 // newTestProvider points a real Provider at an httptest.Server.
@@ -680,4 +681,8 @@ func TestCaps_BillsPerSecondWithNoMinimum(t *testing.T) {
 	if strings.Contains(b.String(), "minimum") {
 		t.Errorf("a minimum was reported where none applies: %q", b.String())
 	}
+}
+
+func TestRunPod_StoreCapsMatchImplementation(t *testing.T) {
+	providertest.AssertStoreCapsMatch(t, New(node.NewSecret([]byte("k"))))
 }

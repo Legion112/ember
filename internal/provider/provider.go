@@ -89,6 +89,95 @@ type Caps struct {
 	// failure is a destroyed node with a loud message rather than a public
 	// port nobody looks at. See exposure.AssertSSHOnly.
 	PublicSSH bool
+
+	// Stores means this provider offers persistent storage that outlives a
+	// node, and that it implements StoreAPI.
+	//
+	// False -- the zero value -- means it does not, so a provider author who
+	// forgets the field gets "this provider cannot mount a store" rather than
+	// a nil type assertion at the moment a run is about to start. Same
+	// direction as PublicSSH above, for the same reason.
+	Stores bool
+}
+
+// StoreAPI is the subset of a provider that manages persistent stores.
+//
+// It is separate from Provider rather than three more methods on it, because
+// most providers will not have stores and a Provider that must stub them is a
+// Provider that can stub them wrongly. Caps.Stores says whether a given
+// provider satisfies this, and providertest.AssertStoreCapsMatch -- which
+// every provider's own test calls -- checks that the two agree, so the claim
+// cannot drift from the fact in either direction.
+//
+// Nothing here destroys a node, and nothing in Provider destroys a store. The
+// split is deliberate: these are the two resources in ember with different
+// lifetimes, and a single Destroy that could mean either is one typo away from
+// deleting forty gigabytes of weights instead of a pod.
+type StoreAPI interface {
+	// StoreCreate makes a store and returns it. It is never called except
+	// from an explicit `ember store create`: a store is a standing monthly
+	// charge, and nothing that rents a node may bring one into existence as a
+	// side effect.
+	StoreCreate(ctx context.Context, name string, sizeGiB int, region string) (node.Store, error)
+
+	// StoreList returns every store at this provider, ember's or not.
+	//
+	// Every store, because the question `ember ls` asks is "what am I paying
+	// for", and a listing filtered to what ember recognises cannot answer it.
+	// Filtering happens above, where the answer can say "this one is not
+	// ember's" out loud.
+	StoreList(ctx context.Context) ([]node.Store, error)
+
+	// StoreDestroy removes a store and everything on it. Not found counts as
+	// success, as node destruction does.
+	StoreDestroy(ctx context.Context, h node.StoreHandle) error
+}
+
+// StorePrefix marks a store ember created.
+//
+// Distinct from a node's label, and parsed differently: Label packs three
+// dash-separated fields and ParseLabel splits on "-" expecting exactly three,
+// which a store named "wan-2-2" would break into six. A store has no deadline
+// and no run id -- outliving runs is the whole point -- so its label is a
+// prefix and a name, and reading it back is a CutPrefix rather than a split.
+const StorePrefix = LabelPrefix + "-store-"
+
+// StoreLabel is the provider-visible name of a store ember owns.
+func StoreLabel(name string) string { return StorePrefix + name }
+
+// ParseStoreLabel reads back what StoreLabel wrote.
+//
+// Strict and never a substring match, for the same reason ParseLabel is:
+// `ember store rm` destroys what this identifies, and somebody else's volume
+// in the same account is not ember's to delete.
+func ParseStoreLabel(s string) (string, error) {
+	name, ok := strings.CutPrefix(s, StorePrefix)
+	if !ok || name == "" {
+		return "", fmt.Errorf("store %q was not created by ember", s)
+	}
+	return name, nil
+}
+
+// ValidateStoreName refuses a name that would not survive the round trip.
+//
+// A name is checked here rather than wherever it is typed, because the thing
+// being protected is ParseStoreLabel: a name containing the prefix, or
+// leading and trailing space the provider silently trims, produces a label
+// that reads back as a different store than the one created.
+func ValidateStoreName(name string) error {
+	if name == "" {
+		return fmt.Errorf("store name is empty")
+	}
+	if strings.TrimSpace(name) != name {
+		return fmt.Errorf("store name %q has leading or trailing space", name)
+	}
+	if strings.ContainsAny(name, "/\\\x00") {
+		return fmt.Errorf("store name %q contains a path separator", name)
+	}
+	if strings.Contains(name, StorePrefix) {
+		return fmt.Errorf("store name %q contains %q, which is the prefix ember uses to recognise its own stores", name, StorePrefix)
+	}
+	return nil
 }
 
 // Registry holds the providers this run knows about.
