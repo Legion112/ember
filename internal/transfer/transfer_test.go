@@ -303,7 +303,7 @@ func TestSafeName(t *testing.T) {
 }
 
 func TestTarCommand(t *testing.T) {
-	cmd, err := TarCommand("/workspace/out")
+	cmd, err := TarCommand("/workspace/out", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestTarCommand_RefusesAPathThatIsNotOne(t *testing.T) {
 		"/",
 		"",
 	} {
-		if _, err := TarCommand(bad); err == nil {
+		if _, err := TarCommand(bad, ""); err == nil {
 			t.Errorf("TarCommand(%q) was accepted", bad)
 		}
 	}
@@ -352,7 +352,7 @@ func TestTarCommand_QuotesAPathWithShellMetacharacters(t *testing.T) {
 		"/workspace/a'b",
 		"/workspace/a\"b",
 	} {
-		cmd, err := TarCommand(p)
+		cmd, err := TarCommand(p, "")
 		if err != nil {
 			t.Errorf("TarCommand(%q): %v", p, err)
 			continue
@@ -373,8 +373,8 @@ func TestTarCommand_QuotesAPathWithShellMetacharacters(t *testing.T) {
 func TestFetch_RetrievesEveryOutput(t *testing.T) {
 	r := sshx.NewRecordingRunner()
 
-	one, _ := TarCommand("/workspace/out")
-	two, _ := TarCommand("/workspace/run.log")
+	one, _ := TarCommand("/workspace/out", "")
+	two, _ := TarCommand("/workspace/run.log", "")
 	r.Outputs[one.String()] = targz(t, entry{name: "out/a.png", body: "pixels"})
 	r.Outputs[two.String()] = targz(t, entry{name: "run.log", body: "lines"})
 
@@ -382,7 +382,7 @@ func TestFetch_RetrievesEveryOutput(t *testing.T) {
 	res, err := Fetch(t.Context(), r, []node.OutputPath{
 		{Remote: "/workspace/out", Local: "renders"},
 		{Remote: "/workspace/run.log", Local: "logs"},
-	}, dir)
+	}, dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,8 +401,8 @@ func TestFetch_RetrievesEveryOutput(t *testing.T) {
 // log should not lose the renders because the log was never written.
 func TestFetch_OneFailureDoesNotLoseTheRest(t *testing.T) {
 	r := sshx.NewRecordingRunner()
-	good, _ := TarCommand("/workspace/out")
-	bad, _ := TarCommand("/workspace/missing")
+	good, _ := TarCommand("/workspace/out", "")
+	bad, _ := TarCommand("/workspace/missing", "")
 	r.Outputs[good.String()] = targz(t, entry{name: "out/a.png", body: "pixels"})
 	r.Errors[bad.String()] = &sshx.ExitError{Cmd: bad.String(), Code: 2, Stderr: "tar: /workspace/missing: No such file or directory"}
 
@@ -410,7 +410,7 @@ func TestFetch_OneFailureDoesNotLoseTheRest(t *testing.T) {
 	res, err := Fetch(t.Context(), r, []node.OutputPath{
 		{Remote: "/workspace/missing", Local: "logs"},
 		{Remote: "/workspace/out", Local: "renders"},
-	}, dir)
+	}, dir, "")
 
 	if err == nil {
 		t.Fatal("a missing output was reported as success")
@@ -433,12 +433,12 @@ func TestFetch_OneFailureDoesNotLoseTheRest(t *testing.T) {
 // quietly.
 func TestFetch_ANonZeroTarIsReportedEvenWhenTheArchiveParsed(t *testing.T) {
 	r := sshx.NewRecordingRunner()
-	cmd, _ := TarCommand("/workspace/out")
+	cmd, _ := TarCommand("/workspace/out", "")
 	r.Outputs[cmd.String()] = targz(t, entry{name: "out/a.png", body: "pixels"})
 	r.Waits[cmd.String()] = &sshx.ExitError{Cmd: cmd.String(), Code: 2, Stderr: "tar: some files differ"}
 
 	dir := t.TempDir()
-	res, err := Fetch(t.Context(), r, []node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, dir)
+	res, err := Fetch(t.Context(), r, []node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, dir, "")
 	if err == nil {
 		t.Fatal("a non-zero tar exit was accepted because the archive happened to parse")
 	}
@@ -449,7 +449,7 @@ func TestFetch_ANonZeroTarIsReportedEvenWhenTheArchiveParsed(t *testing.T) {
 }
 
 func TestFetch_NoOutputsIsNoWork(t *testing.T) {
-	res, err := Fetch(t.Context(), sshx.NewRecordingRunner(), nil, filepath.Join(t.TempDir(), "unused"))
+	res, err := Fetch(t.Context(), sshx.NewRecordingRunner(), nil, filepath.Join(t.TempDir(), "unused"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +465,7 @@ func TestFetch_ReportsAnUnusableOutputDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Fetch(t.Context(), sshx.NewRecordingRunner(),
-		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, inTheWay)
+		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, inTheWay, "")
 	if err == nil {
 		t.Fatal("a file in place of the output directory was accepted")
 	}
@@ -473,7 +473,7 @@ func TestFetch_ReportsAnUnusableOutputDirectory(t *testing.T) {
 
 func TestFetch_ReportsABadRemotePath(t *testing.T) {
 	_, err := Fetch(t.Context(), sshx.NewRecordingRunner(),
-		[]node.OutputPath{{Remote: "relative", Local: "renders"}}, t.TempDir())
+		[]node.OutputPath{{Remote: "relative", Local: "renders"}}, t.TempDir(), "")
 	if err == nil {
 		t.Fatal("a relative remote path was accepted")
 	}
@@ -645,7 +645,7 @@ func TestFetch_HonoursCancellation(t *testing.T) {
 	cancel()
 
 	_, err := Fetch(ctx, sshx.NewRecordingRunner(),
-		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, t.TempDir())
+		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, t.TempDir(), "")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
 	}
@@ -654,7 +654,7 @@ func TestFetch_HonoursCancellation(t *testing.T) {
 // TestTarCommand_RefusesAPathWithANULByte. The one thing quoting cannot
 // carry: a NUL cannot appear in an argument at all.
 func TestTarCommand_RefusesAPathWithANULByte(t *testing.T) {
-	if _, err := TarCommand("/workspace/a\x00b"); err == nil {
+	if _, err := TarCommand("/workspace/a\x00b", ""); err == nil {
 		t.Fatal("a path with a NUL byte was accepted")
 	}
 }
@@ -671,7 +671,7 @@ func TestFetch_ReportsAnOutputDirectoryItCannotOpen(t *testing.T) {
 	}
 
 	_, err := Fetch(t.Context(), sshx.NewRecordingRunner(),
-		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, dir)
+		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, dir, "")
 	if err == nil {
 		t.Fatal("fetching into a file was accepted")
 	}
@@ -686,12 +686,12 @@ func TestFetch_ReportsBothAFailedExtractionAndAFailedCommand(t *testing.T) {
 	// data is bad and the exit status says why -- and an operator given only
 	// the first goes looking for a corrupt disk.
 	r := sshx.NewRecordingRunner()
-	cmd, _ := TarCommand("/workspace/out")
+	cmd, _ := TarCommand("/workspace/out", "")
 	r.Outputs[cmd.String()] = []byte("this is not gzip")
 	r.Waits[cmd.String()] = &sshx.ExitError{Cmd: cmd.String(), Code: 2, Stderr: "tar: /workspace/out: No such file or directory"}
 
 	_, err := Fetch(t.Context(), r,
-		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, filepath.Join(t.TempDir(), "run-1"))
+		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, filepath.Join(t.TempDir(), "run-1"), "")
 	if err == nil {
 		t.Fatal("a failed fetch reported success")
 	}
@@ -720,5 +720,42 @@ func TestExtract_ReportsAFileBlockedByADirectory(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "create") {
 		t.Errorf("got %q, want it to say what it could not create", err)
+	}
+}
+
+// TestTarCommand_BoundsTheArchiveByAMarkerFile.
+//
+// A file, not a timestamp. ember's clock and the node's are different clocks,
+// so "--newer=@<unix computed here>" would send too much or too little
+// whenever they disagreed. A marker touched on the node is compared against
+// mtimes from that same clock.
+func TestTarCommand_BoundsTheArchiveByAMarkerFile(t *testing.T) {
+	cmd, err := TarCommand("/workspace/out", "/tmp/.ember-fetch-mark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cmd.String()
+	// GNU tar spells it --newer. --newer-than is not a flag and fails the
+	// whole command, which was found by running it.
+	if !strings.Contains(got, "--newer=/tmp/.ember-fetch-mark") {
+		t.Errorf("the marker did not reach tar: %s", got)
+	}
+
+	// No marker is the shape every single-command run had before batching
+	// existed, and it must stay byte-for-byte the same.
+	plain, err := TarCommand("/workspace/out", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.String(), "--newer") {
+		t.Errorf("an unbounded fetch carries a filter: %s", plain.String())
+	}
+}
+
+func TestTarCommand_RefusesAnUnusableMarker(t *testing.T) {
+	for _, bad := range []string{"relative/mark", "/tmp/../etc/mark", "/tmp/./mark"} {
+		if _, err := TarCommand("/workspace/out", bad); err == nil {
+			t.Errorf("TarCommand accepted marker %q", bad)
+		}
 	}
 }
