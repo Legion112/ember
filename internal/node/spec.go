@@ -45,6 +45,18 @@ type Spec struct {
 	Filter  Filter
 	TTL     time.Duration
 	Volume  MiB
+
+	// Store is the persistent store to mount, and Mount is where it lands
+	// inside the node. Both zero means no store.
+	//
+	// They live on the spec rather than on a provider, because what gets
+	// mounted is a property of the run and not of the account: two runs
+	// against the same provider can want different stores, and a provider
+	// carrying the answer would have to be rebuilt between them. Every
+	// provider receives them through CreateRequest with everything else the
+	// run needs.
+	Store StoreHandle
+	Mount Mount
 }
 
 // SpecOptions is the input to NewSpec.
@@ -57,6 +69,8 @@ type SpecOptions struct {
 	Filter  Filter
 	TTL     time.Duration
 	Volume  MiB
+	Store   StoreHandle
+	Mount   Mount
 }
 
 // NewSpec validates o and returns the Spec it describes.
@@ -72,6 +86,14 @@ func NewSpec(o SpecOptions) (Spec, error) {
 	}
 	if o.Volume < 0 {
 		return Spec{}, fmt.Errorf("negative volume size")
+	}
+	// Half a mount is not a smaller mount, it is a silent one. A store with
+	// nowhere to land would be attached and unreachable; a mount with no
+	// store would be a path the workload reads and finds empty. Both would
+	// look like a successful run that produced nothing.
+	if o.Store.IsZero() != o.Mount.IsZero() {
+		return Spec{}, fmt.Errorf("a store needs a mount path and a mount path needs a store; got store %q and mount %q",
+			o.Store, o.Mount)
 	}
 	if err := o.Filter.Validate(); err != nil {
 		return Spec{}, err
@@ -91,6 +113,8 @@ func NewSpec(o SpecOptions) (Spec, error) {
 		Filter:  o.Filter,
 		TTL:     o.TTL,
 		Volume:  o.Volume,
+		Store:   o.Store,
+		Mount:   o.Mount,
 	}, nil
 }
 

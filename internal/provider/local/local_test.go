@@ -668,10 +668,7 @@ func TestLocal_CreateMountsTheStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Store = s.Handle
-	p.Mount = mustMount(t, "/models")
-
-	h, err := p.Create(t.Context(), request(t))
+	h, err := p.Create(t.Context(), storeRequest(t, s.Handle, "/models"))
 	if err != nil {
 		t.Fatalf("Create = %v", err)
 	}
@@ -709,9 +706,7 @@ func TestLocal_DestroyingANodeLeavesTheStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Store, p.Mount = s.Handle, mustMount(t, "/models")
-
-	h, err := p.Create(ctx, request(t))
+	h, err := p.Create(ctx, storeRequest(t, s.Handle, "/models"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,6 +717,17 @@ func TestLocal_DestroyingANodeLeavesTheStore(t *testing.T) {
 	if err != nil || len(got) != 1 {
 		t.Fatalf("after destroying the node the store is %+v (%v); it must outlive the run", got, err)
 	}
+}
+
+// storeRequest is a create request that mounts a store, built the way the CLI
+// builds one: on the spec, so the provider carries no per-run state.
+func storeRequest(t *testing.T, h node.StoreHandle, path string) node.CreateRequest {
+	t.Helper()
+	req := request(t)
+	spec := req.Spec
+	spec.Store, spec.Mount = h, mustMount(t, path)
+	req.Spec = spec
+	return req
 }
 
 func mustMount(t *testing.T, p string) node.Mount {

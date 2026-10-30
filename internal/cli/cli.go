@@ -82,6 +82,7 @@ func commands() []command {
 		{"ls", "list nodes ember created, across every configured provider", cmdLs},
 		{"reap", "destroy every node past its deadline", cmdReap},
 		{"offers", "list rentable offers matching a filter", cmdOffers},
+		{"store", "create or destroy persistent storage that outlives a node", cmdStore},
 	}
 }
 

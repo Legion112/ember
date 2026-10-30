@@ -127,6 +127,15 @@ func runUp(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
+	// Resolved after the registry exists, because only the provider knows
+	// what a store's id is -- RunPod's is an opaque token, the local
+	// provider's is the volume name -- and before anything is rented,
+	// because a run that discovers its store is missing after creating a
+	// node has already started paying.
+	if spec, err = attachStore(context.Background(), p, cfg, spec); err != nil {
+		return err
+	}
+
 	opts, err := buildOptions(paths, cfg, out)
 	if err != nil {
 		return err

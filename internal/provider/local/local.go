@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,16 @@ const (
 	LabelLabel   = "ember.label"    // provider.Label(...)
 	LabelHostKey = "ember.hostkey"  // "ssh-ed25519 AAAA..." — public, safe in a label
 	LabelUser    = "ember.ssh-user" // who to log in as
+
+	// LabelSize and LabelRegion record what a store was asked for.
+	//
+	// A Docker volume has neither: it grows into whatever the host has and
+	// lives wherever the daemon does. They are recorded anyway so the
+	// listing round-trips what `ember store create` was told, which is what
+	// makes the local provider a stand-in a lab can assert against rather
+	// than one that reports 0 GiB for everything.
+	LabelSize   = "ember.size-gib"
+	LabelRegion = "ember.region"
 )
 
 // DefaultImage is the node image. It carries sshd and a docker client, and is
@@ -50,12 +61,6 @@ type Provider struct {
 	// because a container is already a sandbox and a second unprivileged user
 	// buys nothing here.
 	User string
-
-	// Store is the named volume to mount into every node this provider
-	// creates, and Mount is where it lands. Both zero means no store, which
-	// is what every run looked like before stores existed.
-	Store node.StoreHandle
-	Mount node.Mount
 }
 
 // New returns a provider using engine.
@@ -195,7 +200,7 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 			"EMBER_RUN_ID":      string(req.RunID),
 		},
 		PublishTCP: []uint16{sshPort},
-		Binds:      p.binds(),
+		Binds:      binds(req),
 	}
 
 	id, err := p.Engine.ContainerCreate(ctx, spec)
@@ -394,11 +399,11 @@ func parseState(s string) (node.State, error) {
 // a named volume is mounted rather than a host directory. Nothing is produced
 // when there is no store, so a node without one is created exactly as it was
 // before stores existed.
-func (p *Provider) binds() []string {
-	if p.Store.ID == "" || p.Mount.IsZero() {
+func binds(req node.CreateRequest) []string {
+	if req.Spec.Store.IsZero() || req.Spec.Mount.IsZero() {
 		return nil
 	}
-	return []string{string(p.Store.ID) + ":" + p.Mount.Path()}
+	return []string{string(req.Spec.Store.ID) + ":" + req.Spec.Mount.Path()}
 }
 
 // volumeName is the Docker name for a store.
@@ -421,10 +426,17 @@ func (p *Provider) StoreCreate(ctx context.Context, name string, sizeGiB int, re
 	// does, so there is nothing to enforce -- but refusing them would mean a
 	// config that works against RunPod fails here, and the labs exist to run
 	// the same config for free.
-	v, err := p.Engine.VolumeCreate(ctx, volumeName(name), map[string]string{
+	labels := map[string]string{
 		LabelKind:  "store",
 		LabelLabel: provider.StoreLabel(name),
-	})
+	}
+	if sizeGiB > 0 {
+		labels[LabelSize] = strconv.Itoa(sizeGiB)
+	}
+	if region != "" {
+		labels[LabelRegion] = region
+	}
+	v, err := p.Engine.VolumeCreate(ctx, volumeName(name), labels)
 	if err != nil {
 		return node.Store{}, fmt.Errorf("create store %s: %w", name, err)
 	}
@@ -432,7 +444,15 @@ func (p *Provider) StoreCreate(ctx context.Context, name string, sizeGiB int, re
 		Handle:  node.StoreHandle{Provider: Name, ID: node.StoreID(v.Name)},
 		Name:    name,
 		SizeGiB: sizeGiB,
-		Region:  region,
+		// No region, deliberately, even though one was asked for and is
+		// recorded on the label above. A Docker volume is not in a
+		// datacentre: it is wherever the daemon is. Reporting the string
+		// back would invent a placement constraint that does not exist, and
+		// the caller acts on it -- a store with a region narrows the offer
+		// filter to that region, and the local provider's only offer is
+		// "localhost", so every run would refuse with "no capacity". The
+		// region lock is real on RunPod and is tested there.
+		Region: "",
 		// Free, and said so rather than left at a zero that happens to mean
 		// the same thing: Caps.Free is how the budget check is skipped
 		// honestly, and this is the storage equivalent.
@@ -457,9 +477,16 @@ func (p *Provider) StoreList(ctx context.Context) ([]node.Store, error) {
 			// rather than reported, same as a foreign volume at RunPod.
 			continue
 		}
+		// Parsed, not guessed: a label this package did not write, or wrote
+		// in a version that spelled it differently, reads as "unknown size"
+		// rather than as some number.
+		size, _ := strconv.Atoi(v.Labels[LabelSize])
 		out = append(out, node.Store{
-			Handle: node.StoreHandle{Provider: Name, ID: node.StoreID(v.Name)},
-			Name:   name,
+			Handle:  node.StoreHandle{Provider: Name, ID: node.StoreID(v.Name)},
+			Name:    name,
+			SizeGiB: size,
+			// See StoreCreate: the label records what was asked for, and a
+			// Docker volume still has no site to report.
 		})
 	}
 	return out, nil

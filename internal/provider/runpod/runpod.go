@@ -64,24 +64,6 @@ type Provider struct {
 
 	// DiskGiB overrides DefaultDiskGiB.
 	DiskGiB int
-
-	// Store is the network volume to attach to every node this provider
-	// creates, and Mount is where it lands inside the container.
-	//
-	// Both zero means no store, which is the shape every run had before this
-	// existed. Set, they also pin placement: a volume lives in one datacentre
-	// and a pod that mounts it must be created there, so StoreRegion takes
-	// over from DataCenters rather than being merged with it.
-	Store node.StoreHandle
-	Mount node.Mount
-
-	// StoreRegion is the datacentre the store lives in.
-	//
-	// Carried separately from Store because the offer filter needs it before
-	// anything has been created, and asking the API where a volume lives on
-	// every Offers call would be a request per listing for a fact that cannot
-	// change: a volume's datacentre is fixed at creation.
-	StoreRegion string
 }
 
 // New returns a provider using the given API token.
@@ -167,18 +149,23 @@ func (p *Provider) Offers(ctx context.Context, f node.Filter) ([]node.Offer, err
 		return nil, fmt.Errorf("list runpod gpu types: %w", err)
 	}
 
-	offers := regionOffers(resp.Gpus, p.cloud(), p.StoreRegion)
+	// The region comes from the filter, which is where a placement
+	// constraint belongs. A store pins its node to one datacentre, and the
+	// caller expresses that by narrowing the filter rather than by
+	// configuring the provider -- so two runs wanting different stores need
+	// no second provider.
+	offers := regionOffers(resp.Gpus, p.cloud(), f.Region)
 
 	// A store that pins placement and a datacentre with nothing available is
 	// a refusal, not an empty list. "no offers matched" reads as "that GPU is
 	// sold out everywhere" and sends the operator to try a different card,
 	// when the real answer is that their weights are in the wrong site -- and
 	// the fix is to pick a datacentre, not a GPU.
-	if p.StoreRegion != "" && len(offers) == 0 && len(resp.Gpus) > 0 {
+	if f.Region != "" && len(offers) == 0 && len(resp.Gpus) > 0 {
 		return nil, fmt.Errorf("%w: nothing is available in %s, where the store lives. "+
 			"A node must be created in the store's datacentre, so this is a choice between "+
 			"waiting for capacity there and creating a store somewhere else",
-			node.ErrNoCapacity, p.StoreRegion)
+			node.ErrNoCapacity, f.Region)
 	}
 	return provider.FilterOffers(f, offers), nil
 }
@@ -206,8 +193,8 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 		Ports:         ports,
 		Disk:          p.disk(),
 		Cloud:         p.cloud(),
-		DataCenterIds: p.dataCenters(),
-		Mounts:        p.mounts(),
+		DataCenterIds: p.dataCenters(req),
+		Mounts:        mountsFor(req),
 		// ember runs its own sshd with the host key it minted. RunPod's own
 		// sshd would present a key ember cannot predict, forcing
 		// trust-on-first-use against a brand-new IP.
@@ -328,9 +315,9 @@ func (p *Provider) Destroy(ctx context.Context, h node.Handle) error {
 // there, so an intersection could be empty while the store's own site has
 // capacity -- and a placement list that excluded the store's site would be a
 // request RunPod can only refuse.
-func (p *Provider) dataCenters() []string {
-	if p.StoreRegion != "" {
-		return []string{p.StoreRegion}
+func (p *Provider) dataCenters(req node.CreateRequest) []string {
+	if !req.Spec.Store.IsZero() && req.Offer.Region != "" {
+		return []string{req.Offer.Region}
 	}
 	return p.DataCenters
 }
@@ -340,12 +327,12 @@ func (p *Provider) dataCenters() []string {
 // Nothing when there is no store, so a pod created without one carries no
 // mounts field at all rather than an empty object -- the create body stays
 // exactly what it was before stores existed.
-func (p *Provider) mounts() *mounts {
-	if p.Store.ID == "" || p.Mount.IsZero() {
+func mountsFor(req node.CreateRequest) *mounts {
+	if req.Spec.Store.IsZero() || req.Spec.Mount.IsZero() {
 		return nil
 	}
 	return &mounts{Network: []networkMount{{
-		VolumeID: string(p.Store.ID),
-		Path:     p.Mount.Path(),
+		VolumeID: string(req.Spec.Store.ID),
+		Path:     req.Spec.Mount.Path(),
 	}}}
 }

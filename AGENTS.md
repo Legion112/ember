@@ -368,6 +368,22 @@ A leaked node bills by the hour in silence. These are not style preferences.
   and the one that matters for forty gigabytes of somebody else's weights. An
   attacker on the path can deny service — the fetch fails closed and nothing
   is written — but cannot substitute content.
+- **What gets mounted is on the spec, not on the provider.** A store mount is
+  a property of the run and not of the account: two runs against the same
+  provider can want different stores, and a provider carrying the answer has
+  to be rebuilt between them. It travels in `CreateRequest` with everything
+  else the run needs, and the placement constraint it implies is expressed by
+  narrowing `Filter.Region` rather than by configuring the provider.
+- **Half a mount is refused by NewSpec.** A store with no path would be
+  attached and unreachable; a path with no store would be a directory the
+  workload reads and finds empty. Both look like a run that succeeded and
+  produced nothing.
+- **The local provider reports no region for its stores, although one was
+  asked for and is recorded on the label.** A Docker volume is not in a
+  datacentre; it is wherever the daemon is. Reporting the string back invents
+  a placement constraint, and the caller acts on it -- a store with a region
+  narrows the offer filter, the local provider's only offer is "localhost",
+  and every local run then refuses with "no capacity". Found by running it.
 - **A store pins every node that mounts it to one datacentre, and the offer
   filter has to be re-read through that site.** `mapOffers` reports
   `bestRegion(g)` — the single site with the most capacity — so filtering its
