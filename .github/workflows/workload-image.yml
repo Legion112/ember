@@ -55,6 +55,50 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Built into the local daemon first, verified, and only then pushed.
+      #
+      # The assertions are about this image -- that it binds nothing but 22,
+      # and that it carries no weights -- so this is where they belong. Run
+      # in CI instead they would need a forty-minute compile on every pull
+      # request; run after the push they would find a bad image that had
+      # already shipped.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: workload-sd-cuda.Dockerfile
+          load: true
+          push: false
+          tags: ember:sd-cuda
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: verify the image before publishing it
+        run: |
+          # Two assertions, and both run against the image this job just
+          # built: it binds nothing but 22, and it carries no weights. The
+          # first is what the platform-port concession rests on -- RunPod
+          # publishes 19123 to the world on every pod and ember tolerates it
+          # only because nothing in the image listens there.
+          #
+          # The third image lab, video support, is not here: it has to run
+          # sd-cli, and the CUDA binary needs libcuda.so.1 which this runner
+          # has no GPU to provide. It runs against the CPU build, which
+          # carries the same binary from the same pinned revision -- an
+          # agreement the ordinary lab suite checks on every pull request.
+          #
+          # The harness needs ember:lab for its own node, and that is the
+          # cheap image.
+          docker build -t ember:lab -f node.Dockerfile .
+          EMBER_INTEGRATION=1 go test -tags='integration imagelab' -count=1 -v \
+            ./test/integration/... \
+            -run 'TestWorkloadImage_(ListensOnNothingButSSH|CarriesNoWeights)' \
+            | tee /tmp/labs.log
+          if grep -q -- '--- SKIP' /tmp/labs.log; then
+            echo "::error::a lab skipped itself"; exit 1
+          fi
+
       - uses: docker/build-push-action@v6
         id: build
         with:

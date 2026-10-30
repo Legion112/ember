@@ -125,24 +125,6 @@ func TestNodeImage_ListensOnNothingButSSH(t *testing.T) {
 	assertListensOnlyOnSSH(t, "")
 }
 
-// TestWorkloadImage_ListensOnNothingButSSH is the same assertion about the
-// image that actually goes onto a public IP.
-//
-// ember-sd cannot be built FROM the node image -- that one is debian-slim and
-// CUDA needs an NVIDIA base -- so it repeats the sshd configuration by hand,
-// on a different base, with a different package manager. Until this existed,
-// the duplication was verified by nothing: the platform-port concession was
-// justified by a property of the image that never leaves the laptop, while a
-// different image was the one RunPod published a port to.
-//
-// It does not pull. A lab that reached the network would be testing GitHub,
-// and one that skipped itself would report success for something that never
-// ran -- so a missing image is a hard failure naming the command that builds
-// it.
-func TestWorkloadImage_ListensOnNothingButSSH(t *testing.T) {
-	assertListensOnlyOnSSH(t, "ember:sd-cuda")
-}
-
 func assertListensOnlyOnSSH(t *testing.T, image string) {
 	t.Helper()
 	l := harness.New(t)
