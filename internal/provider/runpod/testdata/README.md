@@ -51,3 +51,76 @@ capacity" for a card that was rentable. Neither was visible from the schema.
 | `pod_unknown_status.json` | a status ember does not recognise, which must be an error |
 | `pods_list.json` | a list response: no runtime, no ssh, plus one pod that is not ember's |
 | `gpus.json` | the GPU catalogue, including entries ember must filter out |
+
+## Network volumes: what the live API answered, 2026-10-30
+
+Captured before any client code was written, because the documentation and the
+third-party clients disagreed and one free `GET` settles it. All of this is
+from real responses, not from the docs.
+
+**There are two APIs, and they are not the same.** Both answer:
+
+| request | result |
+|---|---|
+| `GET api.runpod.io/v2/networkvolumes` | 404 |
+| `GET api.runpod.io/v2/network-volumes` | 200 — note the hyphen |
+| `GET rest.runpod.io/v1/networkvolumes` | 200 — no hyphen |
+
+ember uses the **v2** one, on the same host it already uses for pods. That
+removes the second `httpx.Client` the plan expected to need: `httpx.resolve`
+refuses a path containing `://`, so two hosts would have meant two clients.
+
+**The field is `dataCenter` on v2 and `dataCenterId` on v1.** A create with
+`dataCenterId` against v2 is refused:
+
+```
+422 {"errors":["$: missing property 'dataCenter'",
+               "$: additional properties 'dataCenterId' not allowed"]}
+```
+
+The published docs describe only the v1 spelling. A client written from them
+would fail on its first create — after the operator had already decided to
+spend money.
+
+**The minimum size is 10 GiB, not 0.** The same 422 carries
+`"$.size: minimum: got 1, want 10"`. The docs give the minimum as 0 and the
+maximum as 4000; the schema says 10 and 4096. `node.MinStoreGiB` and
+`MaxStoreGiB` hold the measured pair, so a size ember will refuse locally
+costs nothing instead of a round trip.
+
+**The list is paginated**, which the v1 bare array is not:
+
+```json
+{"networkVolumes":[], "pagination":{"nextCursor":null,"hasNextPage":false}}
+```
+
+A client reading only the first page under-reports stores — and under-reporting
+a resource that bills monthly with nothing attached is precisely the leak
+`ScanStores` exists to catch. The cursor is followed.
+
+**Attachment is `mounts.network`, not `networkVolumeId`.** The pod create body
+takes:
+
+```json
+{"mounts": {"network": [{"volumeId": "...", "path": "/models"}]}}
+```
+
+`maxItems` is 1 today. `path` has **no default — it must be specified**, so
+ember choosing `/models` is not an override of `/workspace` but the only way
+to answer the field at all.
+
+**`persistent` and `network` are mutually exclusive**, enforced with a 400:
+"upstream drops a persistent disk whenever a volume is attached". So a store
+and a container volume disk cannot both be asked for.
+
+**`volumeId` is immutable after create**; only `path` may be PATCHed, and
+`network: []` is rejected rather than clearing the mount.
+
+Two more facts worth having: `VolumeType` is `STANDARD | HIGH_PERFORMANCE`,
+and there is a `GET /v2/billing/network-volumes` endpoint that reports what
+was actually charged — which is a better source for the standing-charge line
+than multiplying a published rate by a size.
+
+Both OpenAPI documents are public and unauthenticated
+(`api.runpod.io/v2/openapi.json`, `rest.runpod.io/v1/openapi.json`), which is
+where the schema details above came from.
