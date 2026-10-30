@@ -124,7 +124,7 @@ func TestNewSpec_CopiesItsInputs(t *testing.T) {
 	o.Env["A"] = "2"
 	o.Ports[0].Local = 9999
 
-	if s.Cmd[0] != "python" {
+	if s.Cmds[0][0] != "python" {
 		t.Error("Cmd aliased the caller's slice")
 	}
 	if s.Env["A"] != "1" {
@@ -359,5 +359,58 @@ func TestNewSpec_CarriesMinCUDA(t *testing.T) {
 	}
 	if s.MinCUDA != "12.6" {
 		t.Errorf("MinCUDA = %q", s.MinCUDA)
+	}
+}
+
+// TestNewSpec_CmdAndCmdsAreTheSameThing: one command is a batch of one, so
+// everything downstream reads Cmds and nothing has to ask which spelling the
+// operator used.
+func TestNewSpec_CmdAndCmdsAreTheSameThing(t *testing.T) {
+	o := validSpecOptions()
+	o.Cmd = []string{"sd-cli", "-p", "a cat"}
+	s, err := NewSpec(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Cmds) != 1 || s.Cmds[0][2] != "a cat" {
+		t.Fatalf("Cmds = %v", s.Cmds)
+	}
+
+	o2 := validSpecOptions()
+	o2.Cmd = nil
+	o2.Cmds = [][]string{{"sd-cli", "-p", "one"}, {"sd-cli", "-p", "two"}}
+	s2, err := NewSpec(o2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s2.Cmds) != 2 || s2.Cmds[1][2] != "two" {
+		t.Fatalf("Cmds = %v", s2.Cmds)
+	}
+
+	// Copied, not aliased: a caller mutating its slice afterwards must not
+	// change what the node will be asked to run.
+	o2.Cmds[0][2] = "mutated"
+	if s2.Cmds[0][2] != "one" {
+		t.Error("the spec aliases the caller's command slices")
+	}
+}
+
+// TestNewSpec_RefusesBothSpellings. A config answering "what does this node
+// run" twice is one where an operator watches the wrong thing execute.
+func TestNewSpec_RefusesBothSpellings(t *testing.T) {
+	o := validSpecOptions()
+	o.Cmd = []string{"a"}
+	o.Cmds = [][]string{{"b"}}
+	if _, err := NewSpec(o); err == nil {
+		t.Error("a spec with both cmd and cmds was accepted")
+	}
+}
+
+func TestNewSpec_RefusesAnEmptyStep(t *testing.T) {
+	o := validSpecOptions()
+	o.Cmd = nil
+	o.Cmds = [][]string{{"sd-cli"}, {}}
+	if _, err := NewSpec(o); err == nil {
+		t.Error("a batch containing an empty command was accepted")
 	}
 }

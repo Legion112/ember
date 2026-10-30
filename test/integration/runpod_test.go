@@ -94,7 +94,7 @@ func TestRunPod_FullLifecycleAgainstTheFake(t *testing.T) {
 			defer func() { _ = client.Close() }()
 
 			res, ferr := transfer.Fetch(ctx, sshexec.New(client.SSH()),
-				[]node.OutputPath{{Remote: "/etc/hostname", Local: "host"}}, outDir)
+				[]node.OutputPath{{Remote: "/etc/hostname", Local: "host"}}, outDir, "")
 			fetched = res
 			return ferr
 		})

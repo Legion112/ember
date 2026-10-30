@@ -260,6 +260,37 @@ Nothing secret is ever passed as a command-line flag, because
 `/proc/<pid>/cmdline` is world-readable — on a rented machine, readable by
 whoever else is on that host.
 
+### Several results from one rental
+
+`cmd` runs one thing. `cmds` runs several, in sequence, on one node:
+
+```yaml
+cmds:
+  - [sd-cli, --diffusion-model, /models/flux2.gguf, --prompt, "a cat",  -o, /workspace/out/01.png]
+  - [sd-cli, --diffusion-model, /models/flux2.gguf, --prompt, "a dog",  -o, /workspace/out/02.png]
+```
+
+Every per-rental cost is paid once instead of once per result: waiting for the
+machine, pulling the image, reading and verifying the weights, loading them.
+Measured on a rented A100 that is about three minutes against roughly 100
+seconds of generation, so ten images rented ten times spend more than half the
+bill re-doing setup.
+
+Still opaque argv, deliberately — ember does not know what `sd-cli`'s flags
+mean, the same reason `gpu_probe` is a command rather than a built-in check.
+Use `cmd` or `cmds`, never both.
+
+**Outputs come home after each step, not once at the end.** A ten-step batch
+is over an hour on a rented card, and fetching only at the end means an
+expired deadline or a closed laptop loses all of it rather than everything so
+far. The first step fetches everything; each later one fetches only what is
+newer than the previous fetch, bounded by a marker file touched on the node —
+a file rather than a timestamp, because ember's clock and the node's are not
+the same clock.
+
+A failed step stops the batch, and its output is still collected: the step
+that failed is often the one whose output explains why.
+
 ### Generating on this machine's GPU
 
 A model that does not fit in VRAM is not a model that cannot run. sd-cli will

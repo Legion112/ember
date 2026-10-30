@@ -214,15 +214,17 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 		return err
 	}
 
-	var serveErr error
-	if len(spec.Cmd) > 0 {
-		// A node rented to run something stops when it has run it. Holding
-		// afterwards would bill for a machine with nothing left to do, which
-		// is the whole failure mode ember exists to prevent.
-		serveErr = runWorkload(ctx, out, client, sshexec.New(client.SSH()), spec, so)
-	} else {
-		serveErr = session.Serve(ctx, out, client, session.Forwards(spec.Ports), so)
+	// A node rented to run something stops when it has run it. Holding
+	// afterwards would bill for a machine with nothing left to do, which is
+	// the whole failure mode ember exists to prevent.
+	// Decided once, so every step of a batch lands together.
+	runDir := transfer.RunDir(outDir, s.RunID, time.Now())
+
+	if len(spec.Cmds) > 0 {
+		return runSteps(ctx, out, client, sshexec.New(client.SSH()), spec, so, runDir)
 	}
+
+	serveErr := session.Serve(ctx, out, client, session.Forwards(spec.Ports), so)
 
 	// Outputs are fetched even when the session ended badly, and on a context
 	// that survives the operator's Ctrl-C. The node is about to be destroyed
@@ -232,13 +234,94 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputTimeout)
 	defer cancel()
 
-	if err := fetchOutputs(fetchCtx, out, sshexec.New(client.SSH()), s.RunID, spec.Outputs, outDir); err != nil {
+	if err := fetchOutputs(fetchCtx, out, sshexec.New(client.SSH()), spec.Outputs, runDir, ""); err != nil {
 		if serveErr != nil {
 			return errors.Join(serveErr, err)
 		}
 		return err
 	}
 	return serveErr
+}
+
+// fetchMarker is the file on the node whose mtime bounds the next fetch.
+//
+// /tmp and not the output directory, so it never lands in an archive and is
+// never mistaken for a result.
+const fetchMarker = "/tmp/.ember-fetch-mark"
+
+// runSteps runs each command in turn and brings that step's output home
+// before the next one starts.
+//
+// Fetching between steps rather than once at the end is the point. A ten-step
+// batch is over an hour on a rented card; fetching only at the end means an
+// expired deadline, a dropped connection or a closed laptop loses all of it
+// rather than everything so far, and an operator cannot look at the third
+// result and decide to stop paying for the other seven.
+//
+// The first step fetches everything, which is exactly what a single-command
+// run did before this existed. Each later step fetches only what is newer
+// than the previous fetch, so a file already home is not sent again -- which
+// matters little for a 2 MB image and a great deal for the minutes of video
+// the store was built for.
+func runSteps(
+	ctx context.Context,
+	out io.Writer,
+	client tunnel.Dialer,
+	r sshx.Runner,
+	spec node.Spec,
+	so session.Options,
+	runDir string,
+) error {
+	var errs []error
+	since := ""
+
+	for i, cmd := range spec.Cmds {
+		if len(spec.Cmds) > 1 {
+			outf(out, "step %d/%d: %s\n", i+1, len(spec.Cmds), workload.Describe(cmd))
+		}
+		stepErr := runWorkload(ctx, out, client, r, cmd, spec.Ports, so)
+		if stepErr != nil {
+			errs = append(errs, fmt.Errorf("step %d/%d: %w", i+1, len(spec.Cmds), stepErr))
+		}
+
+		// On a context that survives Ctrl-C, for the same reason the
+		// single-command path does it: the node is about to be destroyed and
+		// a step that failed is often the one whose output is worth having.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputTimeout)
+		ferr := fetchOutputs(fetchCtx, out, r, spec.Outputs, runDir, since)
+		cancel()
+		if ferr != nil {
+			errs = append(errs, ferr)
+		}
+
+		// Stop at the first failure. A batch where step 3 failed and 4
+		// through 10 ran anyway is a batch nobody can trust, and the
+		// remaining steps would bill for work the operator no longer wants.
+		if stepErr != nil {
+			break
+		}
+		if i < len(spec.Cmds)-1 {
+			if err := markFetched(ctx, r); err != nil {
+				// Not fatal: a missing marker means the next fetch sends
+				// everything again, which is wasteful rather than wrong.
+				so.Log.Warn("could not mark the fetch point; the next step will re-send what is already home", "err", err)
+				since = ""
+			} else {
+				since = fetchMarker
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// markFetched touches the marker on the node, after a fetch, so the next one
+// sends only what the next step writes.
+func markFetched(ctx context.Context, r sshx.Runner) error {
+	// workload.Run reports a non-zero exit as an error as well as a code, so
+	// the error is the whole answer; a separate ExitCode check here would be
+	// unreachable.
+	_, err := workload.Run(ctx, r, []string{"touch", fetchMarker}, io.Discard)
+	return err
 }
 
 // runWorkload holds the forwards open while the command runs.
@@ -249,11 +332,11 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 // Both seams are parameters rather than one client, so the decision and the
 // reporting here are testable against a recording dialer and runner instead
 // of needing a node.
-func runWorkload(ctx context.Context, out io.Writer, d tunnel.Dialer, r sshx.Runner, spec node.Spec, so session.Options) error {
+func runWorkload(ctx context.Context, out io.Writer, d tunnel.Dialer, r sshx.Runner, cmd []string, ports []node.PortMap, so session.Options) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	if fwds := session.Forwards(spec.Ports); len(fwds) > 0 {
+	if fwds := session.Forwards(ports); len(fwds) > 0 {
 		for _, f := range fwds {
 			outf(out, "  %-12s http://%s\n", f.Name, f.Local[0])
 		}
@@ -269,8 +352,8 @@ func runWorkload(ctx context.Context, out io.Writer, d tunnel.Dialer, r sshx.Run
 		}()
 	}
 
-	outf(out, "running: %s\n", workload.Describe(spec.Cmd))
-	res, err := workload.Run(ctx, r, spec.Cmd, out)
+	outf(out, "running: %s\n", workload.Describe(cmd))
+	res, err := workload.Run(ctx, r, cmd, out)
 	outf(out, "workload finished in %s\n", res.Duration.Round(time.Millisecond))
 	return err
 }
@@ -287,15 +370,18 @@ const outputTimeout = 30 * time.Minute
 // It takes the sshx.Runner seam rather than the SSH client, so the reporting
 // and the error handling here are testable against a recording runner instead
 // of needing a node.
-func fetchOutputs(ctx context.Context, out io.Writer, r sshx.Runner, runID node.RunID, outputs []node.OutputPath, base string) error {
+// dir is the run's output directory, decided once by the caller. It used to
+// be computed here from time.Now(), which was invisible while a run fetched
+// once and wrong the moment it fetched per step: three steps produced three
+// directories a minute apart, for one run.
+func fetchOutputs(ctx context.Context, out io.Writer, r sshx.Runner, outputs []node.OutputPath, dir, since string) error {
 	if len(outputs) == 0 {
 		return nil
 	}
 
-	dir := transfer.RunDir(base, runID, time.Now())
 	outf(out, "fetching %d output path(s) into %s\n", len(outputs), dir)
 
-	res, err := transfer.Fetch(ctx, r, outputs, dir)
+	res, err := transfer.Fetch(ctx, r, outputs, dir, since)
 
 	// What arrived is reported even when something failed, because "3 of 4
 	// paths, 1.2 GiB" is what tells the operator whether the run is worth
@@ -328,8 +414,12 @@ func dryRunUp(out io.Writer, p provider.Provider, spec node.Spec, opts provision
 	}
 	outf(out, "dry-run: would rent %s from %s at %v for %v\n", offer.Token, p.Name(), offer.Price, spec.TTL)
 	outf(out, "dry-run: would run %s and forward %d port(s)\n", spec.Image, len(spec.Ports))
-	if len(spec.Cmd) > 0 {
-		outf(out, "dry-run: would execute: %s\n", workload.Describe(spec.Cmd))
+	for i, c := range spec.Cmds {
+		if len(spec.Cmds) > 1 {
+			outf(out, "dry-run: step %d/%d: %s\n", i+1, len(spec.Cmds), workload.Describe(c))
+			continue
+		}
+		outf(out, "dry-run: would execute: %s\n", workload.Describe(c))
 	}
 	outf(out, "dry-run: nothing was created\n")
 	return nil
@@ -472,6 +562,14 @@ func buildSpec(cfg config.Config, store Attached) (node.Spec, error) {
 	if err := workload.Validate(cfg.Cmd); err != nil {
 		return node.Spec{}, err
 	}
+	// Every step, for the same reason: an argv the remote shell cannot be
+	// handed safely is a config error, and finding it at step seven means
+	// six steps of a rented card have already been paid for.
+	for i, c := range cfg.Cmds {
+		if err := workload.Validate(c); err != nil {
+			return node.Spec{}, fmt.Errorf("cmds[%d]: %w", i, err)
+		}
+	}
 	assetList, err := cfg.ParseAssets()
 	if err != nil {
 		return node.Spec{}, err
@@ -500,6 +598,7 @@ func buildSpec(cfg config.Config, store Attached) (node.Spec, error) {
 
 		Image:   cfg.Image,
 		Cmd:     cfg.Cmd,
+		Cmds:    cfg.Cmds,
 		Ports:   ports,
 		Filter:  filter,
 		TTL:     cfg.TTL,

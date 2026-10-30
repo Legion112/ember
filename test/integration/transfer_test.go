@@ -56,7 +56,7 @@ func TestTransfer_FetchesOutputsOverARealSSHConnection(t *testing.T) {
 	res, err := transfer.Fetch(t.Context(), runner, []node.OutputPath{
 		{Remote: "/workspace/out", Local: "renders"},
 		{Remote: "/workspace/run.log", Local: "logs"},
-	}, dir)
+	}, dir, "")
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestTransfer_AMissingPathIsAnErrorAndNotAnEmptyArchive(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "run")
 	_, err = transfer.Fetch(t.Context(), sshexec.New(client.SSH()),
-		[]node.OutputPath{{Remote: "/workspace/never-written", Local: "renders"}}, dir)
+		[]node.OutputPath{{Remote: "/workspace/never-written", Local: "renders"}}, dir, "")
 	if err == nil {
 		t.Fatal("tar over a path that does not exist was reported as a successful fetch")
 	}
@@ -143,7 +143,7 @@ func TestTransfer_RefusesASymlinkTheNodeWrote(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "run")
 	res, err := transfer.Fetch(t.Context(), runner,
-		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, dir)
+		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, dir, "")
 
 	// The real file still arrives.
 	if res.Files != 1 {
@@ -186,7 +186,7 @@ func TestTransfer_SurvivesALargePayload(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "run")
 	start := time.Now()
 	res, err := transfer.Fetch(t.Context(), runner,
-		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, dir)
+		[]node.OutputPath{{Remote: "/workspace/out", Local: "renders"}}, dir, "")
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
