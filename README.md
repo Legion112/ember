@@ -335,6 +335,34 @@ attack. `/workspace` is refused too: it is the provider's default mount path
 *and* where ember writes outputs, so a store there bills for every render for
 as long as the store exists.
 
+## Video
+
+[`ember.video.example.yaml`](ember.video.example.yaml) is the configuration
+the store exists for. Wan 2.2's experts are 14 GB each, which could not be
+baked into an image if anybody wanted to — the registry refuses a layer above
+about 10 GB — so the weights go on a volume and the node verifies them before
+the GPU is asked to do anything.
+
+The pinned `stable-diffusion.cpp` supports it: `-M vid_gen`, `--video-frames`,
+Wan's own latent format and the Wan 2.2 S2V audio encoder are all in the
+binary this repository builds, asserted by a lab so the answer cannot quietly
+stop being true when the pin moves. Both images are pinned to the same
+upstream commit, which the same lab checks.
+
+Two things that configuration does not do, deliberately:
+
+**It generates one clip, not a minute.** No open-weight model generates a
+minute in one pass — 81 frames at 16 fps is about five seconds, and the frame
+counts that map to clean latent lengths are 33, 77 and 81. A minute is twelve
+clips chained on the last frame of the one before, which is a pipeline rather
+than a command and does not belong in `cmd:`. The seams between those clips,
+not the fidelity within them, are what makes a long video hard.
+
+**Nothing has run it end to end.** It is written from the measured API shapes
+and the flags in this repository's own image. The first real run is a
+calibration — it costs money, and what it produces is a number and a fixture
+rather than a pass or a fail.
+
 ## Design notes
 
 Things worked out but not built, kept where the reasoning was fresh rather

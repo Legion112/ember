@@ -1,0 +1,79 @@
+# ember, generating video from a model on a store.
+#
+# This is the configuration the store exists for. The weights are 14 GB per
+# expert for Wan 2.2 and could not be baked into an image if anybody wanted
+# to -- the registry refuses a layer above about 10 GB -- so they live on a
+# volume, pushed once, and the node verifies them before the GPU is asked to
+# do anything.
+#
+# Nothing here has been run end to end yet. It is written from the measured
+# API shapes and the sd-cli flags in this repository's own image, and the
+# first real run is a calibration rather than a lab: it costs money, and what
+# it produces is a number and a fixture, not a pass or a fail.
+
+provider: runpod
+
+# No model in it. The image is CUDA, sd-cli and embernode -- 2.87 GB, down
+# from 5.08 GB when a checkpoint was baked in.
+image: ghcr.io/legion112/ember-sd@sha256:REPLACE_WITH_THE_DIGEST_CI_PRINTS
+
+# Video is minutes per clip, not the second an image takes. The ceiling here
+# is what stops a run that wedged from billing until somebody notices, so it
+# is set from the job rather than left at the default.
+ttl: 2h
+
+# The store pins every node that mounts it to its own datacentre, so the GPU
+# has to be available there. EU-RO-1 is the widest of the ten datacentres
+# that both take a volume and serve the S3 API.
+gpu: rtx4090
+max_hourly_usd: "3.00"
+max_run_usd: "8.00"
+
+store:
+  name: models
+  size_gib: 50
+  region: EU-RO-1
+  mount: /models
+
+# Fetched once onto the store and verified on every run afterwards. The
+# digest is not optional: a store is writable by every node that mounts it,
+# and this is what stands in for a read-only mount.
+#
+# `ember store push ./wan2.1-t2v-1.3b.gguf` prints the sha256 to paste here.
+assets:
+  - url: https://huggingface.co/EXAMPLE/wan2.1-t2v-1.3b-gguf/resolve/main/wan2.1-t2v-1.3b-Q8_0.gguf
+    sha256: REPLACE_WITH_THE_DIGEST_PUSH_PRINTS
+    as: wan2.1-t2v-1.3b.gguf
+
+verify: always
+
+# 33 frames is one of the counts that maps to a clean latent length -- 33, 77
+# and 81 -- and at 16 fps it is about two seconds. A minute of video is
+# twelve clips of 81 chained on the last frame of the one before, which is a
+# pipeline rather than a command and does not belong in `cmd`.
+cmd:
+  - sd-cli
+  - -M
+  - vid_gen
+  - -m
+  - /models/wan2.1-t2v-1.3b.gguf
+  - -p
+  - "a paper boat on a slow river, morning light"
+  - --video-frames
+  - "33"
+  - -W
+  - "832"
+  - -H
+  - "480"
+  - --steps
+  - "20"
+  - --seed
+  - "1312"
+  - -o
+  - /workspace/out/boat.mp4
+
+# /workspace, never the store: outputs written to a mounted volume would bill
+# by the month for as long as the store exists. node.MountAt refuses a store
+# mounted there for the same reason.
+outputs:
+  - /workspace/out:renders

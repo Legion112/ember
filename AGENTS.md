@@ -368,6 +368,13 @@ A leaked node bills by the hour in silence. These are not style preferences.
   and the one that matters for forty gigabytes of somebody else's weights. An
   attacker on the path can deny service — the fetch fails closed and nothing
   is written — but cannot substitute content.
+- **A capability checked on one image must be true of the other.** The CPU and
+  CUDA workload images are built from the same stable-diffusion.cpp revision
+  on purpose, so a result from one is comparable with the other -- and so the
+  video-support check, which can only run on the CPU build (the CUDA binary
+  needs libcuda.so.1 to print its own help, and the lab machine has no GPU),
+  says something about the image that actually goes to RunPod. The lab asserts
+  the two pins agree before it asserts anything else.
 - **The workload image carries no model, and the measurement is why.** The
   checkpoint was 51% of ember-sd and 92% of what a one-shot run cost, and a
   `COPY`'d model gets a layer digest that is ours alone -- so it can never hit
