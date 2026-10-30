@@ -341,6 +341,11 @@ A leaked node bills by the hour in silence. These are not style preferences.
 - **Images are pinned to a tag or a digest; `:latest` is refused.** The point
   of ember is to measure what a model costs and how long it takes, and two runs
   a week apart that both say `:latest` may not have run the same software.
+- **The volume is faster than documented, and it barely matters.** Measured
+  ~1.0 GB/s against a published 200-400 MB/s. For a 40 GB model set the pull
+  dominates either way, so the break-even moves from about six runs a month to
+  five. A measurement that agrees with the conclusion is still worth having --
+  it is how you learn the conclusion did not depend on the guess.
 - **Attaching a network volume removes `/workspace` entirely.** The API
   refuses a pod asking for both a persistent disk and a volume, because
   upstream drops the disk whenever a volume is attached -- and what that means
