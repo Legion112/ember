@@ -66,7 +66,7 @@ COVER_OVERALL := 94
 # labs and a rented pod run the same bytes.
 LAB_IMAGE := ember:lab
 
-.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration clean
+.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs clean
 
 all: fmt vet test build
 
@@ -149,6 +149,28 @@ workload-sd:
 # minutes, not seconds.
 workload-sd-cuda:
 	docker build -t $(SD_CUDA_IMAGE) -f workload-sd-cuda.Dockerfile .
+
+# Assertions about the published workload images, behind their own tag.
+#
+# Not part of test-integration because they need images that `make
+# docker-build` does not produce and the CUDA one takes forty minutes to
+# compile. The workflow that builds an image runs these against it before
+# pushing, which is a better place than CI: a bad image never ships.
+#
+# They are not skipped -- they are not compiled unless the tag says the images
+# are here. A lab that skips itself reports success for something that never
+# ran.
+test-image-labs:
+	@docker image inspect $(SD_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(SD_IMAGE) is missing. Build it with:"; \
+		echo "  make workload-sd MODEL=/path/to/a.gguf"; exit 1; }
+	@docker image inspect $(SD_CUDA_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(SD_CUDA_IMAGE) is missing. Build it with:"; \
+		echo "  make workload-sd-cuda"; exit 1; }
+	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
+		-run 'TestWorkloadImage_' | tee /tmp/ember-image-labs.log
+	@if grep -q -- '--- SKIP' /tmp/ember-image-labs.log; then \
+		echo "a lab skipped itself"; exit 1; fi
 
 # The labs refuse to skip themselves: a missing image is a hard failure with
 # the command to fix it, never a t.Skip. A silently skipped lab is worse than

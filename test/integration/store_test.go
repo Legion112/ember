@@ -271,84 +271,21 @@ func assetYAML(sum string) string {
 	return "\n  - url: http://127.0.0.1:9/never\n    sha256: " + sum + "\n    as: sd15.gguf"
 }
 
-// TestWorkloadImage_SupportsVideoGeneration.
+// TestWorkloadImages_PinTheSameUpstreamRevision.
 //
-// Not a generation. A real Wan clip is minutes of GPU time and the model is
-// gigabytes, so running one is a calibration that costs money rather than a
-// lab that runs on every build -- and a lab that pulled a checkpoint would be
-// testing Hugging Face.
+// The CPU and CUDA images are built from the same stable-diffusion.cpp
+// revision on purpose, so a result from one is comparable with the other --
+// and so a capability checked on one is true of the other. The image labs
+// rely on that: the CUDA binary cannot run on a machine with no GPU, so its
+// video support is verified through the CPU build.
 //
-// What is free and worth asserting is that the binary can do it at all. The
-// plan for this phase said to check whether the pinned stable-diffusion.cpp
-// commit predates Wan support and bump it if so; this is that check, kept as
-// a test so the answer cannot quietly stop being true when the pin moves.
-//
-// Asserted against the CPU image, because the CUDA build cannot run on a
-// machine with no GPU -- sd-cli there needs libcuda.so.1 to print its own
-// help. The two are pinned to the same upstream commit on purpose, which is
-// what the first assertion below checks: without it this would be proving
-// something about a different program than the one that goes to RunPod.
-func TestWorkloadImage_SupportsVideoGeneration(t *testing.T) {
-	l := harness.New(t)
-	ctx := t.Context()
-
-	cpuCommit := sdPin(t, "workload-sd.Dockerfile", `SD_RELEASE=master-\d+-([0-9a-f]+)`)
-	gpuCommit := sdPin(t, "workload-sd-cuda.Dockerfile", `SD_COMMIT=([0-9a-f]+)`)
-	if cpuCommit != gpuCommit {
+// No image needed, which is why this one runs everywhere.
+func TestWorkloadImages_PinTheSameUpstreamRevision(t *testing.T) {
+	cpu := sdPin(t, "workload-sd.Dockerfile", `SD_RELEASE=master-\d+-([0-9a-f]+)`)
+	gpu := sdPin(t, "workload-sd-cuda.Dockerfile", `SD_COMMIT=([0-9a-f]+)`)
+	if cpu != gpu {
 		t.Fatalf("the CPU image is built from stable-diffusion.cpp %s and the CUDA image from %s. "+
-			"They are pinned together so a result from one is comparable with the other, and so a "+
-			"capability checked on one is true of the other", cpuCommit, gpuCommit)
-	}
-
-	const image = "ember:sd"
-	if !l.HaveImage(ctx, image) {
-		t.Fatalf("%s is not built, and this asserts about the sd-cli in it:\n"+
-			"  make workload-sd MODEL=/path/to/a.gguf", image)
-	}
-
-	n := mintAndStartImage(t, l, "vidgen", image)
-	help := l.ExecOut(ctx, n.ID, "sd-cli", "--help")
-
-	for _, want := range []string{
-		// The mode a Wan model needs. Without it the pin predates video
-		// entirely and ember.video.example.yaml is fiction.
-		"vid_gen",
-		// How long a clip is, and the flag a chained pipeline drives.
-		"--video-frames",
-		// Wan's own latent format, which is how a Wan checkpoint is decoded
-		// rather than read as a Stable Diffusion one.
-		"wan",
-	} {
-		if !strings.Contains(help, want) {
-			t.Errorf("sd-cli at %s does not mention %q; the pin may predate Wan support:\n%s",
-				cpuCommit, want, help)
-		}
-	}
-}
-
-// TestWorkloadImage_CarriesNoWeights.
-//
-// The point of the store, asserted rather than trusted: a Dockerfile that
-// grew a COPY back would otherwise show up only as a pull that got slower.
-func TestWorkloadImage_CarriesNoWeights(t *testing.T) {
-	l := harness.New(t)
-	ctx := t.Context()
-
-	const image = "ember:sd-cuda"
-	if !l.HaveImage(ctx, image) {
-		t.Fatalf("%s is not built, and this asserts about that image:\n  make workload-sd-cuda", image)
-	}
-
-	n := mintAndStartImage(t, l, "noweights", image)
-	out := l.ExecOut(ctx, n.ID, "sh", "-c", "ls /opt/models 2>&1 || true")
-	if !strings.Contains(out, "No such file") {
-		t.Errorf("the workload image carries weights at /opt/models:\n%s", out)
-	}
-
-	// And it still carries the program, so the check above is not passing
-	// because the image is empty.
-	if got := l.ExecOut(ctx, n.ID, "sh", "-c", "test -e /opt/sd/sd-cli && echo present"); !strings.Contains(got, "present") {
-		t.Errorf("sd-cli is missing from the image: %q", got)
+			"They are pinned together so a result from one is comparable with the other", cpu, gpu)
 	}
 }
 

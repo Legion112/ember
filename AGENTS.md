@@ -394,6 +394,18 @@ A leaked node bills by the hour in silence. These are not style preferences.
   machines under somebody else's digest. Removing it took the image from 5.08
   GB to 2.87 GB. Above about 10 GB baking stops being possible at all: the
   registry refuses a larger layer and Wan 2.2's experts are 14 GB each.
+- **A lab about a published image belongs where the image is built.** The
+  workload-image assertions failed CI on their first run, because CI builds
+  only `ember:lab` and the CUDA image takes forty minutes to compile.
+  Requiring it on every pull request makes every pull request slow; failing
+  without it makes every pull request red, which is worse -- it teaches people
+  to ignore red. They sit behind an `imagelab` build tag and the publishing
+  workflow runs them against the image it just built, *before* pushing, so a
+  bad image never ships rather than being noticed afterwards. Not a skip: the
+  file is not compiled without the tag, and the one assertion that cannot run
+  there -- video support needs `sd-cli`, and the CUDA binary wants
+  libcuda.so.1 on a runner with no GPU -- runs against the CPU build, whose
+  revision the ordinary suite checks matches.
 - **The listener assertion runs against the published image too.** ember-sd
   cannot be built FROM the node image -- that one is debian-slim and CUDA
   needs an NVIDIA base -- so it repeats the sshd configuration by hand, on a
