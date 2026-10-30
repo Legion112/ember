@@ -24,7 +24,20 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Measured, not guessed. A cold build of four architectures took 4264s
+    # -- 71 minutes -- of which 311s was the cache export. Against the old
+    # 90-minute ceiling that left 19 minutes, which is not a margin for a job
+    # that fails an hour in and has to start over.
+    #
+    # Cold is the uncommon case: it happens only when SD_COMMIT or CUDA_ARCHS
+    # changes, because the cache below keys on nothing else. A warm run should
+    # be the push and no compile at all, so a generous ceiling costs nothing
+    # on the runs that actually happen.
+    #
+    # It is also the ceiling on how many architectures are affordable. Four
+    # cost 71 minutes; a fifth would not fit under 90 and would barely fit
+    # under this.
+    timeout-minutes: 180
     permissions:
       contents: read
       packages: write
