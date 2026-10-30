@@ -258,6 +258,16 @@ attack. `/workspace` is refused too: it is the provider's default mount path
 *and* where ember writes outputs, so a store there bills for every render for
 as long as the store exists.
 
+## Design notes
+
+Things worked out but not built, kept where the reasoning was fresh rather
+than in a commit message nobody will search for.
+
+- [Collecting GPU availability over time](docs/gpu-availability-history.md) —
+  RunPod reports capacity only as it is right now, and a store pins every
+  future run to one datacentre, so "which site reliably has this card" is a
+  question a single sample cannot answer and nobody is recording.
+
 ## Licence
 
 MIT.
