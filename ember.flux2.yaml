@@ -1,0 +1,174 @@
+# ember, FLUX.2 [dev] on a store: the configuration the store was built for.
+#
+# 56.16 GiB of weights, of which 23.33 GiB is a 24-billion-parameter LLM used
+# only to read the prompt. Nothing here fits on a consumer card, and nothing
+# here could be baked into an image: the diffusion file alone is 32.60 GiB and
+# the registry refuses a layer above about 10 GiB.
+#
+# The weights are not uploaded from home either. At 67 Mbps upstream, 56.16
+# GiB is one hour and fifty-two minutes of pushing -- after an hour of pulling
+# it down to the house first. `ember store sync` rents a CPU machine for six
+# cents an hour and has the datacentre fetch them instead, which is the whole
+# reason that command exists.
+#
+# HOW THIS IS MEANT TO BE USED. The store outlives every node that mounts it,
+# which is the point: the 56.16 GiB is fetched once and then re-read by every
+# later run for about a minute. So prompt iteration is `ember up` again, not
+# `store sync` again, and each `ember up` destroys its GPU on the way out --
+# WithNode's defer does that even if the workload fails or the laptop is shut.
+#
+# Nothing destroys the store. It bills $0.0067 an hour, $0.16 a day, $4.90 a
+# month, with no deadline and no node attached, and `ember ls` is what prints
+# that standing charge. `ember store rm` is the only thing that stops it, and
+# it has to be typed.
+#
+# LICENSE: FLUX.2 [dev] is non-commercial. The weights and anything generated
+# from them carry that restriction; this repository's MIT licence does not
+# extend to the output of this file.
+
+provider: runpod
+
+# sd-cli built from stable-diffusion.cpp 77b72a2, which carries
+# src/model/integrations/flux2.cpp, and an embernode that knows the `fetch`
+# subcommand -- the published image before this one predated it, and read
+# `embernode fetch ...` as "be a node" instead.
+#
+# 1.59 GiB on the wire, down from 3.23 GiB: no checkpoint baked in.
+#
+# Built with CUDA_ARCHS="80;86;89" -- native sm_80, sm_86, sm_89, plus
+# compute_89 PTX for forward JIT onto Blackwell. The fatbin was read back to
+# confirm it:
+#
+#   strings -a /opt/sd/sd-cli | grep -oE 'sm_[0-9]+|compute_[0-9]+' | sort -u
+#   -> compute_89 sm_80 sm_86 sm_89
+#
+# Built on the dev machine (9m1s for three architectures, against 30m46s in CI
+# for two) and pushed from there in 29 seconds, because the runtime base is
+# pinned by digest so only the rebuilt sd-cli and embernode layers were new.
+# Tagged sd-cuda-arch80 rather than overwriting sd-cuda, so CI's image is still
+# there to compare against. See issue #2.
+image: ghcr.io/legion112/ember-sd@sha256:95789a8e2e85850afcbadb95a116dfa7bd682ef61d15aaeaf3eab4d0815bdf87
+
+ttl: 1h
+
+# No GPU is named, and that is the point: the requirement is VRAM, not a
+# model. 56.16 GiB resident plus activations at 1536x1536 needs 80 GiB, and the
+# budget ceiling picks the cheapest card that has it -- in EUR-IS-1, the A100
+# 80GB at $1.79.
+#
+# This briefly had `gpu: rtxpro6000` hard-coded, because the published image
+# was built with CUDA_ARCHS="86;89" and the A100 is sm_80: PTX JITs forward,
+# never back, so the cheapest qualifying card was the one card that could not
+# run the image. It would have failed with "no kernel image is available for
+# execution on the device" after paying for the pull and the 56 GiB store read.
+#
+# The image this now pins carries native sm_80, so the filter can say what it
+# means again. See issue #2.
+min_vram_gib: 80
+max_hourly_usd: "2.60"
+max_run_usd: "3.00"
+
+# A store pins every node that mounts it to one datacentre, so the datacentre
+# is chosen for what is available in it rather than for the store. EUR-IS-1 is
+# the only one of the ten that serve the S3 API with three cards at 80 GiB or
+# more, which is the only hedge there is against a capacity refusal.
+store:
+  name: flux2
+  size_gib: 70
+  region: EUR-IS-1
+  mount: /models
+
+# Digests are the LFS object ids from the Hugging Face tree API, so none of
+# these files has been downloaded to get them. If one is wrong, the mismatch
+# surfaces during `store sync` on a six-cent CPU machine rather than on a card
+# that bills $1.79 an hour.
+assets:
+  - url: https://huggingface.co/city96/FLUX.2-dev-gguf/resolve/main/flux2-dev-Q8_0.gguf
+    sha256: 09d005300dd8dcbbd489bb75ada6254145c84c2c9c3d7cc1829e3c5dedcb42ce
+    as: flux2-dev-Q8_0.gguf
+
+  # The text encoder is a whole instruct-tuned LLM. This is what the prompt is
+  # read by, and why prompt adherence is the thing to look at in the output.
+  - url: https://huggingface.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf
+    sha256: b2a40e5ef4eab8837d0462c303e8147ec754e2963e41916b551107d2b0ca6527
+    as: Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf
+
+  # black-forest-labs/FLUX.2-dev/ae.safetensors is gated and answers 401
+  # without a licence click. This is the ungated encoder/decoder from
+  # FLUX.2-small-decoder, which docs/flux2.md names as the alternative and the
+  # flux2-dev recipe accepts under required_any: [[vae, tae]].
+  - url: https://huggingface.co/black-forest-labs/FLUX.2-small-decoder/resolve/main/full_encoder_small_decoder.safetensors
+    sha256: ea4273f02d1fafbf8e1d1c2cf6018ed8748652eb0bf34f2dd91171f16f15ab62
+    as: flux2-ae.safetensors
+
+verify: always
+
+# The probe that stands between renting a card and trusting it.
+#
+# This run already paid to learn why it is here. An A100-SXM4-80GB came up,
+# the weights verified, and sd-cli reported:
+#
+#   ggml_cuda_init: failed to initialize CUDA: system not yet initialized
+#   [W] auto-fit: no GPU devices; using the default backend
+#   [V] Using CPU backend
+#
+# and then started a 32-billion-parameter model on 128 CPU threads. The text
+# encoder alone took 122 seconds where a working card takes about one. Nothing
+# in ember thought anything was wrong, because the workload was running. That
+# cost $0.37 and produced nothing.
+#
+# A pipeline rather than `nvidia-smi`, because nvidia-smi can list a card on a
+# host whose NVSwitch fabric is not up -- which is the exact failure above.
+# --list-devices makes sd-cli enumerate ggml backends, so it answers the only
+# question that matters: will the program we are about to run find a GPU.
+gpu_probe:
+  - sh
+  - -c
+  - "sd-cli --list-devices | grep -qi cuda"
+
+# Retried, not checked once, because the driver said "not yet". An SXM board
+# waits for nvidia-fabricmanager on the host, and probing at the earliest
+# possible moment turns a card that needed forty seconds into a refusal.
+gpu_probe_timeout: 2m
+
+# Parameters from examples/server/recipes/flux2-dev.json at the pinned commit:
+# euler, cfg-scale 1, guidance 4, size_multiple 16. The recipe defaults to
+# 1024x1024 and 20 steps; 1536 (96 x 16) and 28 steps is what the headroom is
+# for.
+#
+# --offload-to-cpu is absent, and that absence is the point. Every example in
+# upstream's docs/flux2.md passes it, because upstream is testing on hardware
+# that has to. Both models stay resident here.
+cmd:
+  - sd-cli
+  - --diffusion-model
+  - /models/flux2-dev-Q8_0.gguf
+  - --llm
+  - /models/Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf
+  - --vae
+  - /models/flux2-ae.safetensors
+  - --prompt
+  - "A detailed anime illustration of a young woman alone on the open-air platform of a rural railway station at dusk, waiting for a train that has not arrived. She has long dark hair loose in the wind and wears an oversized cream knit cardigan over a pleated navy skirt, a canvas tote bag hanging from her left shoulder. She is turned in three-quarter view, looking up and away to the left, her right hand holding a strand of hair back from her face. Behind her stands a weathered painted-wood station sign reading EMBER in neat dark capitals, with a smaller enamel plate bolted beneath it reading 1536. Overhead power lines cut across a sky graded from deep orange at the horizon to violet above; two tungsten platform lamps have just flickered on and throw long shadows toward the viewer. Cel-shaded with crisp confident linework and soft gradient rendering, painterly background with visible brushwork, strong warm rim light from the setting sun behind her, cool blue tones in the shadows. Full body, shallow depth of field falling away down the empty tracks, and no other text anywhere in the image."
+  - --sampling-method
+  - euler
+  - --cfg-scale
+  - "1.0"
+  - --guidance
+  - "4.0"
+  - --steps
+  - "28"
+  - --width
+  - "1536"
+  - --height
+  - "1536"
+  - --seed
+  - "20261030"
+  - --diffusion-fa
+  - -v
+  - -o
+  - /workspace/out/flux2-station.png
+
+# /workspace, never the store: a render written onto a mounted volume bills by
+# the month for as long as the store exists.
+outputs:
+  - /workspace/out:renders

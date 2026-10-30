@@ -48,7 +48,7 @@ COVERPROFILE := coverage.out
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/assets=91,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/loopback=100,internal/cli=83,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98
+COVER_PKGS := internal/assets=91,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/loopback=100,internal/cli=83,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100
 COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,internal/dockerengine/dockerclient
 # internal/assets is below the rest because the paths it cannot reach are
 # filesystem failures with no portable way to provoke: a rename that fails

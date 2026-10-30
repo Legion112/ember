@@ -18,6 +18,7 @@ import (
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
 	"github.com/Legion112/ember/internal/dockerengine/dockerclient"
+	"github.com/Legion112/ember/internal/gpucheck"
 	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/keys"
 	"github.com/Legion112/ember/internal/node"
@@ -185,7 +186,17 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 	}
 	defer func() { _ = client.Close() }()
 
-	// Assets first, and a failure here means the workload never starts.
+	// The card before the weights, and the weights before the workload.
+	//
+	// This order is the cheap-failure order. A dead GPU costs the probe
+	// timeout; a dead GPU discovered after `verify: always` costs the probe
+	// timeout plus re-hashing every byte on the store, which for a 56 GiB
+	// model set is a minute of a card that cannot run it anyway.
+	if err := gpucheck.Wait(ctx, sshexec.New(client.SSH()), spec.GPUProbe, spec.GPUProbeTimeout, out, so.Log); err != nil {
+		return err
+	}
+
+	// Assets next, and a failure here means the workload never starts.
 	//
 	// The cheapest moment to discover that the weights are wrong is before
 	// the GPU has been asked to do anything with them. It runs over the same
@@ -465,8 +476,12 @@ func buildSpec(cfg config.Config, store Attached) (node.Spec, error) {
 	}
 
 	return node.NewSpec(node.SpecOptions{
-		Assets:  assetList,
-		Verify:  cfg.Verify,
+		Assets: assetList,
+		Verify: cfg.Verify,
+
+		GPUProbe:        cfg.GPUProbe,
+		GPUProbeTimeout: cfg.GPUProbeTimeout,
+
 		Image:   cfg.Image,
 		Cmd:     cfg.Cmd,
 		Ports:   ports,

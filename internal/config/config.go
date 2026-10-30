@@ -91,6 +91,32 @@ type Config struct {
 	// Verify is what to do about an asset that is already there: "always"
 	// re-reads and re-hashes it, "present" accepts it. Empty is "always".
 	Verify string `yaml:"verify"`
+
+	// GPUProbe is a command that must exit zero on the node before ember
+	// fetches an asset or starts the workload.
+	//
+	// It exists because a GPU that cannot initialize does not fail -- it
+	// silently becomes a slow CPU at the GPU's price. One run lost $0.37
+	// that way: CUDA reported "system not yet initialized", sd-cli fell back
+	// to the CPU backend, and ember happily streamed a 32B model running on
+	// 128 threads. Nothing was broken enough to notice.
+	//
+	// A command and not a built-in check, because what proves a card usable
+	// belongs to the image. For this repository's CUDA image:
+	//
+	//	gpu_probe: ["sh", "-c", "sd-cli --list-devices | grep -qi cuda"]
+	//
+	// Empty runs no probe.
+	GPUProbe []string `yaml:"gpu_probe"`
+
+	// GPUProbeTimeout is how long the card has to become usable.
+	//
+	// Retried rather than checked once, because the driver's own words were
+	// "not yet": an SXM board sits on an NVSwitch fabric that the host brings
+	// up, and CUDA refuses until it has. Probing once at the earliest
+	// possible moment turns a card that needed forty seconds into a refusal.
+	// Empty is gpucheck.DefaultTimeout.
+	GPUProbeTimeout time.Duration `yaml:"gpu_probe_timeout"`
 }
 
 // AssetConfig is one file to put on the store.

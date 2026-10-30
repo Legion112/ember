@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Legion112/ember/internal/assets"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/test/integration/harness"
 )
 
@@ -115,5 +117,88 @@ func TestWorkloadImage_CarriesNoWeights(t *testing.T) {
 	// because the image is empty.
 	if got := l.ExecOut(ctx, n.ID, "sh", "-c", "test -e /opt/sd/sd-cli && echo present"); !strings.Contains(got, "present") {
 		t.Errorf("sd-cli is missing from the image: %q", got)
+	}
+}
+
+// TestWorkloadImage_UnderstandsTheFetchCommand asserts that the image's
+// embernode knows the subcommand ember invokes on it.
+//
+// This one is written from a failure. The published ember-sd was built from a
+// commit that predated `embernode fetch`, and that binary does not reject an
+// unknown subcommand -- main() dispatches on os.Args[1] and anything else is
+// the node entrypoint, which is the right shape for a process started as PID
+// 1 with no arguments at all. So `embernode fetch --dir /models --url ...`
+// was read as "be a node", and the node entrypoint failed on the one thing
+// missing from an SSH session's environment: EMBER_HOST_KEY, which PID 1
+// unsets on purpose so no later exec can read it back out of /proc.
+//
+// The symptom in production was therefore a host-key error during an asset
+// fetch, on a pod whose host key was fine. Nothing was wrong with ember or
+// with the image except that they were different ages.
+//
+// This lab cannot assert that symptom, and the reason is worth keeping. In
+// production the fetch arrives as an SSH remote command, and an SSH session's
+// environment never held EMBER_HOST_KEY, so the entrypoint fails on the
+// missing key. Here it arrives by `docker exec`, which inherits the
+// container's *configured* environment rather than PID 1's live one -- so the
+// key is there, installHostKey succeeds, and the old binary gets as far as
+// failing to bind a second sshd to port 22. Same bug, two symptoms, neither
+// of them mentioning a subcommand.
+//
+// So what is asserted is the one thing that holds either way: a binary that
+// dispatches on "fetch" prints that flag set's usage, and a binary that does
+// not cannot print it whatever its environment contains.
+//
+// The flag names come from assets.Command rather than from a literal here, so
+// this compares what ember will actually send against what the image will
+// actually accept. assets.Command and runFetch living in one package stops
+// those two drifting within a build; it cannot stop a build from being older
+// than the caller, which is what a published image always might be.
+func TestWorkloadImage_UnderstandsTheFetchCommand(t *testing.T) {
+	l := harness.New(t)
+	ctx := t.Context()
+
+	const image = "ember:sd-cuda"
+	if !l.HaveImage(ctx, image) {
+		t.Fatalf("%s is not built, and this asserts about the embernode in it:\n  make workload-sd-cuda", image)
+	}
+
+	mount, err := node.MountAt("/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A plausible asset, never fetched: -h returns before any of these
+	// values is used, so the test neither touches the network nor needs the
+	// mount to exist.
+	cmd, err := assets.Command(mount, node.Asset{
+		URL:    "https://example.invalid/weights.gguf",
+		SHA256: strings.Repeat("a", 64),
+		As:     "weights.gguf",
+	}, assets.VerifyAlways)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n := mintAndStartImage(t, l, "fetchcmd", image)
+
+	// `|| true` because -h is a non-zero exit by design, and ExecOut treats a
+	// non-zero exit as a failed lab.
+	out := l.ExecOut(ctx, n.ID, "sh", "-c", cmd.Path+" fetch -h 2>&1 || true")
+
+	// flag.NewFlagSet("embernode fetch", ...) is what prints this, so it
+	// appears if and only if main() dispatched on the subcommand.
+	if !strings.Contains(out, "Usage of embernode fetch") {
+		t.Fatalf("%s did not dispatch on `fetch` and ran the node entrypoint instead, so its "+
+			"embernode predates `embernode fetch`; rebuild and republish the image:\n%s", image, out)
+	}
+
+	for _, arg := range cmd.Args {
+		name, ok := strings.CutPrefix(arg, "--")
+		if !ok {
+			continue
+		}
+		if !strings.Contains(out, "-"+name) {
+			t.Errorf("ember sends --%s but the embernode in %s does not define it:\n%s", name, image, out)
+		}
 	}
 }
