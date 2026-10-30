@@ -533,3 +533,85 @@ func TestUpload_WritesProgress(t *testing.T) {
 		t.Errorf("progress does not name the file:\n%s", out.String())
 	}
 }
+
+func TestUpload_SendsTheETagWithoutXMLEscaping(t *testing.T) {
+	// The bug this exists for cost a full upload to find. S3 returns an ETag
+	// wrapped in quotes; Go's XML encoder escapes a quote in character data,
+	// so echoing the header verbatim emits `&#34;abc&#34;` -- and RunPod's
+	// gateway compares that without un-escaping, rejecting the completion
+	// after every part has been sent.
+	//
+	// Asserted on the bytes that go out, not on the round trip: a server
+	// that echoes back whatever it was given agrees with any encoding, which
+	// is exactly why the first version of this test passed.
+	var completion []byte
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		q := req.URL.Query()
+		switch {
+		case req.Method == http.MethodPost && q.Has("uploads"):
+			_, _ = fmt.Fprint(w, `<InitiateMultipartUploadResult><UploadId>up-1</UploadId></InitiateMultipartUploadResult>`)
+		case req.Method == http.MethodPut:
+			// Quoted, as a real S3 returns it.
+			w.Header().Set("ETag", `"d41d8cd98f00b204e9800998ecf8427e"`)
+		case req.Method == http.MethodPost:
+			completion, _ = io.ReadAll(req.Body)
+			_, _ = fmt.Fprint(w, `<CompleteMultipartUploadResult/>`)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	c := &Client{Endpoint: s.URL, Region: "EU-RO-1", HTTP: s.Client(),
+		PartSize: 4 << 10, SinglePutLimit: 8 << 10,
+		Creds: awssig.Credentials{AccessKey: "u", Secret: node.NewSecret([]byte("k"))}}
+
+	size := c.singleLimit() + c.partSize()
+	if err := c.Upload(t.Context(), "v", "k.gguf", bigReader{size}, size, nil); err != nil {
+		t.Fatalf("Upload = %v", err)
+	}
+
+	body := string(completion)
+	if strings.Contains(body, "&#34;") {
+		t.Errorf("the completion carries an XML-escaped quote, which RunPod rejects:\n%s", body)
+	}
+	if !strings.Contains(body, "<ETag>d41d8cd98f00b204e9800998ecf8427e</ETag>") {
+		t.Errorf("the ETag is not the bare digest:\n%s", body)
+	}
+}
+
+func TestPartETag_SurvivesAProxyInThePath(t *testing.T) {
+	// RunPod serves S3 behind Cloudflare, which rewrites the tag into a weak
+	// validator. Echoing `W/"abc"` back is refused with "InvalidPart" after
+	// every byte of every part has been sent -- so the body, which no proxy
+	// touches, is the authority and the header is normalised.
+	const want = "4c28640dc8df1933aaea192100d50ae0"
+	for _, tc := range []struct {
+		name string
+		resp response
+	}{
+		{"body wins over a mangled header", response{
+			Header: http.Header{"Etag": {`W/"` + want + `"`}},
+			Body:   []byte(`<UploadPartResult><ETag>"` + want + `"</ETag></UploadPartResult>`),
+		}},
+		{"header alone, weak", response{Header: http.Header{"Etag": {`W/"` + want + `"`}}}},
+		{"header alone, quoted", response{Header: http.Header{"Etag": {`"` + want + `"`}}}},
+		{"header alone, bare", response{Header: http.Header{"Etag": {want}}}},
+		{"body alone", response{
+			Header: http.Header{},
+			Body:   []byte(`<UploadPartResult><ETag>` + want + `</ETag></UploadPartResult>`),
+		}},
+		{"a body that is not an UploadPartResult falls back to the header", response{
+			Header: http.Header{"Etag": {`"` + want + `"`}},
+			Body:   []byte(`<Something/>`),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := partETag(tc.resp); got != want {
+				t.Errorf("partETag = %q, want %q", got, want)
+			}
+		})
+	}
+
+	if got := partETag(response{Header: http.Header{}}); got != "" {
+		t.Errorf("an absent tag gave %q, want empty so the caller refuses", got)
+	}
+}
