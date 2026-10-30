@@ -3,6 +3,7 @@ package node
 import (
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -78,6 +79,22 @@ type Spec struct {
 	// existed asks for.
 	GPUProbe        []string
 	GPUProbeTimeout time.Duration
+
+	// MinCUDA is the oldest CUDA runtime this image can run against, as
+	// "major.minor" -- for example "12.6". Empty asks for no constraint.
+	//
+	// A property of the run rather than of the account, which is why it is
+	// here: the image carries a CUDA runtime, and a host whose driver
+	// predates it cannot run that image at all. ember sent nothing at all
+	// until this existed, so every pod it created accepted any CUDA version
+	// -- including one too old for the image about to run on it. That
+	// failure does not surface when offers are filtered. It surfaces after
+	// the pod exists and is billing.
+	//
+	// How to express it belongs to the provider. RunPod takes an
+	// allowedCudaVersions list on create, from a fixed enum, so it sends
+	// every version at or above this one.
+	MinCUDA string
 }
 
 // SpecOptions is the input to NewSpec.
@@ -97,6 +114,7 @@ type SpecOptions struct {
 
 	GPUProbe        []string
 	GPUProbeTimeout time.Duration
+	MinCUDA         string
 }
 
 // NewSpec validates o and returns the Spec it describes.
@@ -131,6 +149,11 @@ func NewSpec(o SpecOptions) (Spec, error) {
 	if o.GPUProbeTimeout < 0 {
 		return Spec{}, fmt.Errorf("negative gpu probe timeout")
 	}
+	if o.MinCUDA != "" {
+		if _, _, err := ParseCUDAVersion(o.MinCUDA); err != nil {
+			return Spec{}, err
+		}
+	}
 	// A CPU-only run has no card, so a probe against one could only ever
 	// fail -- and it would fail after the machine was rented, which is the
 	// shape of mistake this whole package exists to catch early.
@@ -162,6 +185,7 @@ func NewSpec(o SpecOptions) (Spec, error) {
 
 		GPUProbe:        append([]string(nil), o.GPUProbe...),
 		GPUProbeTimeout: o.GPUProbeTimeout,
+		MinCUDA:         o.MinCUDA,
 	}, nil
 }
 
@@ -258,4 +282,42 @@ func cloneEnv(m map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// ParseCUDAVersion reads a "major.minor" CUDA version.
+//
+// Strings and not a number, because "12.10" is not 12.1 and a float would say
+// it was. Compared as a pair of integers for the same reason: a provider's
+// list of acceptable versions is sorted by what the driver supports, and
+// sorting it as text puts 12.9 above 12.10.
+func ParseCUDAVersion(s string) (major, minor int, err error) {
+	maj, min, ok := strings.Cut(strings.TrimSpace(s), ".")
+	if !ok {
+		return 0, 0, fmt.Errorf("cuda version %q is not major.minor", s)
+	}
+	major, err = strconv.Atoi(maj)
+	if err != nil || major < 0 {
+		return 0, 0, fmt.Errorf("cuda version %q has an unreadable major", s)
+	}
+	minor, err = strconv.Atoi(min)
+	if err != nil || minor < 0 {
+		return 0, 0, fmt.Errorf("cuda version %q has an unreadable minor", s)
+	}
+	return major, minor, nil
+}
+
+// CUDAAtLeast reports whether have is version want or newer.
+func CUDAAtLeast(have, want string) (bool, error) {
+	hm, hn, err := ParseCUDAVersion(have)
+	if err != nil {
+		return false, err
+	}
+	wm, wn, err := ParseCUDAVersion(want)
+	if err != nil {
+		return false, err
+	}
+	if hm != wm {
+		return hm > wm, nil
+	}
+	return hn >= wn, nil
 }

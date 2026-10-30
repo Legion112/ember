@@ -73,6 +73,24 @@ type createPodRequest struct {
 	// defend.
 	StartSsh bool `json:"startSsh"`
 
+	// AllowedCudaVersions restricts placement to hosts whose CUDA runtime is
+	// in this list. Empty sends no field, which RunPod documents as "any
+	// CUDA version is acceptable".
+	//
+	// "Any" is what ember asked for until this existed, and it is the wrong
+	// default for a tool that pins its image by digest: the image carries a
+	// CUDA runtime, and a host older than it cannot run the image at all.
+	// Nothing about that shows up while filtering offers -- it shows up
+	// after the pod is created and billing, as a container that will not
+	// start or a CUDA that will not initialize.
+	//
+	// NOT YET MEASURED. The field and its enum are in RunPod's published
+	// schema, but that it actually filters placement has not been confirmed
+	// against the live API, so Spec.MinCUDA is empty by default and this
+	// stays absent until an operator asks for it. See AGENTS.md on a
+	// provider capability being measured rather than assumed.
+	AllowedCudaVersions []string `json:"allowedCudaVersions,omitempty"`
+
 	// TemplateId is unused by ember: a template carries ports and env from
 	// somebody else's defaults, and a template that gains an http port
 	// upstream would reintroduce public exposure with no change here. The
@@ -331,4 +349,16 @@ type cpuPrice struct {
 
 type listCpuTypesResponse struct {
 	Cpus []cpuType `json:"cpus"`
+}
+
+// cudaVersions is RunPod's accepted enum for allowedCudaVersions, newest
+// first, copied from its published OpenAPI schema.
+//
+// Written down rather than derived, because it is somebody else's closed set:
+// sending a version not in it is a rejected create, and a version RunPod adds
+// later does ember no good until it is added here. Newest first so the
+// rendered list reads the way the schema does.
+var cudaVersions = []string{
+	"13.0", "12.9", "12.8", "12.7", "12.6",
+	"12.5", "12.4", "12.3", "12.2", "12.1", "12.0", "11.8",
 }

@@ -66,7 +66,7 @@ COVER_OVERALL := 94
 # labs and a rented pod run the same bytes.
 LAB_IMAGE := ember:lab
 
-.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs clean
+.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish publish-sd-cuda workload-sd workload-sd-cuda clean
 
 all: fmt vet test build
 
@@ -171,6 +171,63 @@ test-image-labs:
 		-run 'TestWorkloadImage_' | tee /tmp/ember-image-labs.log
 	@if grep -q -- '--- SKIP' /tmp/ember-image-labs.log; then \
 		echo "a lab skipped itself"; exit 1; fi
+
+# The labs a publish must pass, named once so CI and a laptop run the same set.
+#
+# This is the parity that makes two publish paths safe. The workflow used to
+# carry its own `-run` expression, which drifted: a lab added to catch a
+# published image that lacked `embernode fetch` was not in it, so the one thing
+# it existed to guard was the one thing it did not run against.
+#
+# The video lab is deliberately absent. It needs ember:sd, the CPU build, and
+# a publish of the CUDA image should not require an unrelated image to exist.
+# TestWorkloadImages_PinTheSameUpstreamRevision is what keeps the two honest.
+PUBLISH_LABS := 'TestWorkloadImage_(ListensOnNothingButSSH|CarriesNoWeights|UnderstandsTheFetchCommand|CoversTheCardsEmberCanRent)'
+
+# The subset of the image labs that needs only the CUDA image and ember:lab.
+test-image-labs-publish:
+	@docker image inspect $(SD_CUDA_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(SD_CUDA_IMAGE) is missing. Build it with:"; \
+		echo "  make workload-sd-cuda"; exit 1; }
+	@docker image inspect $(LAB_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(LAB_IMAGE) is missing. Build it with:"; \
+		echo "  make docker-build"; exit 1; }
+	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
+		-run $(PUBLISH_LABS) | tee /tmp/ember-publish-labs.log
+	@if grep -q -- '--- SKIP' /tmp/ember-publish-labs.log; then \
+		echo "a lab skipped itself"; exit 1; fi
+
+# Publishing the CUDA image from this machine, as an equal of the CI workflow.
+#
+# The workflow's header used to give two reasons for CI-only publishing: no
+# registry credential on a laptop, and a home upload link too slow for several
+# gigabytes. The first is the repository owner's call and they have made it.
+# The second turned out to be wrong by a wide margin -- the runtime base is
+# pinned by digest, so a rebuild sends only the layers that changed: 1.66 GiB
+# of image, 29 seconds of push, because nine of seventeen layers were already
+# there.
+#
+# What does matter is that the two paths stay honest about the same things, so
+# this runs the same labs the workflow runs, and refuses to push if they fail.
+# A local publish that skipped them would be strictly worse than no local
+# publish at all -- the image that lacked `embernode fetch` shipped exactly
+# that way.
+#
+# Authenticate first, and never on a command line:
+#
+#   docker login ghcr.io -u <user>
+#
+# Usage:  make publish-sd-cuda TAG=sd-cuda
+GHCR_OWNER ?= legion112
+GHCR_IMAGE := ghcr.io/$(GHCR_OWNER)/ember-sd
+TAG ?= sd-cuda
+
+publish-sd-cuda: workload-sd-cuda docker-build test-image-labs-publish
+	docker tag $(SD_CUDA_IMAGE) $(GHCR_IMAGE):$(TAG)
+	docker push $(GHCR_IMAGE):$(TAG)
+	@echo
+	@echo "published. put this in ember.yaml:"
+	@echo "  image: $$(docker image inspect --format '{{index .RepoDigests 0}}' $(GHCR_IMAGE):$(TAG))"
 
 # The labs refuse to skip themselves: a missing image is a hard failure with
 # the command to fix it, never a t.Skip. A silently skipped lab is worse than

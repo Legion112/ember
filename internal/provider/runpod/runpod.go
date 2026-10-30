@@ -208,6 +208,14 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 		return node.Handle{}, err
 	}
 
+	// Rendered before the request is built, so a MinCUDA RunPod cannot
+	// satisfy is a refusal rather than a create that silently drops the
+	// constraint.
+	allowedCuda, err := allowedCudaFrom(req.Spec.MinCUDA)
+	if err != nil {
+		return node.Handle{}, err
+	}
+
 	body := createPodRequest{
 		// The pod name carries ember's label, because RunPod has no tag API.
 		Name:          provider.Label(req.RunID, req.Deadline),
@@ -220,6 +228,8 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 		Cloud:         p.cloud(),
 		DataCenterIds: p.dataCenters(req),
 		Mounts:        mountsFor(req),
+
+		AllowedCudaVersions: allowedCuda,
 		// ember runs its own sshd with the host key it minted. RunPod's own
 		// sshd would present a key ember cannot predict, forcing
 		// trust-on-first-use against a brand-new IP.

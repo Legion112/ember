@@ -58,10 +58,25 @@ jobs:
       # Built into the local daemon first, verified, and only then pushed.
       #
       # The assertions are about this image -- that it binds nothing but 22,
-      # and that it carries no weights -- so this is where they belong. Run
-      # in CI instead they would need a forty-minute compile on every pull
-      # request; run after the push they would find a bad image that had
-      # already shipped.
+      # that it carries no weights, that its embernode understands the
+      # subcommands ember invokes, and that its CUDA architectures cover the
+      # cards ember can rent -- so this is where they belong. Run in CI
+      # instead they would need a forty-minute compile on every pull request;
+      # run after the push they would find a bad image that had already
+      # shipped.
+      #
+      # Built exactly once. This used to build twice -- once to load and once
+      # to push -- and the measured cost of the second was 11 seconds, because
+      # it hit the builder cache. It is gone anyway: the image that gets
+      # tested is now literally the image that gets pushed, rather than one
+      # the cache promises is identical.
+      #
+      # cache-from/cache-to is the change that matters here. The sdbuild stage
+      # compiles stable-diffusion.cpp and all of ggml's CUDA kernels, keyed on
+      # nothing but SD_COMMIT and CUDA_ARCHS, and without a cache it ran from
+      # scratch on every dispatch: 1846 seconds, measured, against a 90-minute
+      # timeout. That cost is why the architecture list was kept too narrow to
+      # include the cards worth renting.
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -69,49 +84,44 @@ jobs:
           load: true
           push: false
           tags: ember:sd-cuda
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
+      # The lab set lives in the Makefile, not here.
+      #
+      # It used to be an expression in this file, and it drifted: a lab was
+      # added specifically to catch a published image whose embernode did not
+      # understand `embernode fetch`, and this `-run` never named it. The one
+      # publish it existed to guard was the one place it did not run. Both
+      # publish paths now ask make for the same set.
+      #
+      # The video lab is not in it: it has to run sd-cli, and the CUDA binary
+      # needs libcuda.so.1 which this runner has no GPU to provide. It runs
+      # against the CPU build, which carries the same binary from the same
+      # pinned revision -- an agreement the ordinary lab suite checks on every
+      # pull request.
       - name: verify the image before publishing it
-        run: |
-          # Two assertions, and both run against the image this job just
-          # built: it binds nothing but 22, and it carries no weights. The
-          # first is what the platform-port concession rests on -- RunPod
-          # publishes 19123 to the world on every pod and ember tolerates it
-          # only because nothing in the image listens there.
-          #
-          # The third image lab, video support, is not here: it has to run
-          # sd-cli, and the CUDA binary needs libcuda.so.1 which this runner
-          # has no GPU to provide. It runs against the CPU build, which
-          # carries the same binary from the same pinned revision -- an
-          # agreement the ordinary lab suite checks on every pull request.
-          #
-          # The harness needs ember:lab for its own node, and that is the
-          # cheap image.
-          docker build -t ember:lab -f node.Dockerfile .
-          EMBER_INTEGRATION=1 go test -tags='integration imagelab' -count=1 -v \
-            ./test/integration/... \
-            -run 'TestWorkloadImage_(ListensOnNothingButSSH|CarriesNoWeights)' \
-            | tee /tmp/labs.log
-          if grep -q -- '--- SKIP' /tmp/labs.log; then
-            echo "::error::a lab skipped itself"; exit 1
-          fi
+        run: make test-image-labs-publish
 
-      - uses: docker/build-push-action@v6
+      # Tagged and pushed, rather than built a second time. The bytes that
+      # were just tested are the bytes that ship.
+      - name: publish
         id: build
-        with:
-          context: .
-          file: workload-sd-cuda.Dockerfile
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ inputs.tag }}
-            ${{ env.IMAGE }}:${{ github.sha }}
+        run: |
+          docker tag ember:sd-cuda "$IMAGE:${{ inputs.tag }}"
+          docker tag ember:sd-cuda "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:${{ inputs.tag }}"
+          docker push "$IMAGE:${{ github.sha }}"
+          digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE:${{ inputs.tag }}")
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: report what to put in ember.yaml
         run: |
           echo "### workload image published" >> "$GITHUB_STEP_SUMMARY"
           echo '```yaml' >> "$GITHUB_STEP_SUMMARY"
-          echo "image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "image: ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

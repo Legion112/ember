@@ -273,3 +273,91 @@ func TestNewSpec_CopiesTheProbe(t *testing.T) {
 		t.Error("the spec aliases the caller's probe slice")
 	}
 }
+
+func TestParseCUDAVersion(t *testing.T) {
+	for _, tc := range []struct {
+		in           string
+		major, minor int
+		wantErr      bool
+	}{
+		{in: "12.6", major: 12, minor: 6},
+		{in: "13.0", major: 13, minor: 0},
+		// Not a float: 12.10 is newer than 12.9, and a float would say the
+		// opposite. This is the case the string parsing exists for.
+		{in: "12.10", major: 12, minor: 10},
+		{in: " 12.6 ", major: 12, minor: 6},
+		{in: "12", wantErr: true},
+		{in: "", wantErr: true},
+		{in: "twelve.six", wantErr: true},
+		{in: "12.x", wantErr: true},
+		{in: "-1.0", wantErr: true},
+		{in: "12.-1", wantErr: true},
+	} {
+		maj, min, err := ParseCUDAVersion(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("ParseCUDAVersion(%q) accepted a bad version", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseCUDAVersion(%q) = %v", tc.in, err)
+			continue
+		}
+		if maj != tc.major || min != tc.minor {
+			t.Errorf("ParseCUDAVersion(%q) = %d.%d, want %d.%d", tc.in, maj, min, tc.major, tc.minor)
+		}
+	}
+}
+
+func TestCUDAAtLeast(t *testing.T) {
+	for _, tc := range []struct {
+		have, want string
+		ok         bool
+	}{
+		{"12.6", "12.6", true},
+		{"12.9", "12.6", true},
+		{"13.0", "12.9", true},
+		{"12.5", "12.6", false},
+		{"11.8", "12.0", false},
+		// The comparison that a float would get wrong.
+		{"12.10", "12.9", true},
+		{"12.9", "12.10", false},
+	} {
+		got, err := CUDAAtLeast(tc.have, tc.want)
+		if err != nil {
+			t.Errorf("CUDAAtLeast(%q, %q) = %v", tc.have, tc.want, err)
+			continue
+		}
+		if got != tc.ok {
+			t.Errorf("CUDAAtLeast(%q, %q) = %v, want %v", tc.have, tc.want, got, tc.ok)
+		}
+	}
+
+	if _, err := CUDAAtLeast("nonsense", "12.6"); err == nil {
+		t.Error("an unreadable 'have' was accepted")
+	}
+	if _, err := CUDAAtLeast("12.6", "nonsense"); err == nil {
+		t.Error("an unreadable 'want' was accepted")
+	}
+}
+
+func TestNewSpec_RefusesAnUnreadableMinCUDA(t *testing.T) {
+	o := validSpecOptions()
+	o.MinCUDA = "12"
+	if _, err := NewSpec(o); err == nil {
+		t.Error("a malformed min_cuda was accepted; it would reach the provider as a bad request")
+	}
+}
+
+func TestNewSpec_CarriesMinCUDA(t *testing.T) {
+	o := validSpecOptions()
+	o.MinCUDA = "12.6"
+	s, err := NewSpec(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.MinCUDA != "12.6" {
+		t.Errorf("MinCUDA = %q", s.MinCUDA)
+	}
+}

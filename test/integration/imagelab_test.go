@@ -21,6 +21,10 @@
 package integration
 
 import (
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -201,4 +205,160 @@ func TestWorkloadImage_UnderstandsTheFetchCommand(t *testing.T) {
 			t.Errorf("ember sends --%s but the embernode in %s does not define it:\n%s", name, image, out)
 		}
 	}
+}
+
+// cudaCard is a GPU ember can select, and what compute capability it has.
+//
+// The capability is what decides whether the binary can run on it at all, and
+// it is not derivable from anything in this repository -- so it is written
+// down, with the catalogue entry it came from. Every one of these has appeared
+// in `ember offers` against RunPod.
+type cudaCard struct {
+	name string
+	// cc is the compute capability times ten: sm_80 is 80.
+	cc int
+}
+
+// cardsEmberCanRent is the table this lab checks the image against.
+//
+// sm_75 cards (2080 Ti and friends) are absent on purpose. They have 11 GiB,
+// which cannot hold the model sets this image exists to run, and the CPU
+// variant covers working locally. Their absence is a decision recorded in
+// workload-sd-cuda.Dockerfile, not an oversight.
+var cardsEmberCanRent = []cudaCard{
+	{"NVIDIA A100 80GB PCIe", 80},
+	{"NVIDIA A100-SXM4-80GB", 80},
+	{"NVIDIA RTX A5000 / A10 / RTX 3090", 86},
+	{"NVIDIA RTX 4090 / L40S", 89},
+	{"NVIDIA H100 80GB HBM3 / H100 NVL", 90},
+	{"NVIDIA B200 / B300 SXM6", 100},
+	{"NVIDIA RTX PRO 6000 Blackwell", 120},
+}
+
+// TestWorkloadImage_CoversTheCardsEmberCanRent reads the architectures out of
+// the built binary and checks them against the cards that can be rented.
+//
+// This exists because the list was wrong and nothing noticed. CUDA_ARCHS was
+// "86;89" -- 3090/A10/A5000 and 4090/L40S -- and every card with enough VRAM
+// for a large model was outside it. An `ember.yaml` selecting on VRAM rather
+// than naming a card therefore picked the cheapest 80 GiB offer, got an A100
+// at sm_80, and did not fail: sd-cli fell back to the CPU backend and ran a
+// 32-billion-parameter model on 128 threads at the GPU's price.
+//
+// The markers are read out of the binary rather than taken from the
+// Dockerfile, because the Dockerfile is the input and this is about the
+// output. They are also compared against the Dockerfile, so the two cannot
+// drift apart silently in either direction.
+func TestWorkloadImage_CoversTheCardsEmberCanRent(t *testing.T) {
+	l := harness.New(t)
+	ctx := t.Context()
+
+	const image = "ember:sd-cuda"
+	if !l.HaveImage(ctx, image) {
+		t.Fatalf("%s is not built, and this asserts about the binary in it:\n  make workload-sd-cuda", image)
+	}
+
+	n := mintAndStartImage(t, l, "cudaarch", image)
+
+	// grep rather than `strings`, which the runtime base does not carry. -a
+	// treats the binary as text; the markers are plain ASCII inside the
+	// fatbin.
+	out := l.ExecOut(ctx, n.ID, "sh", "-c",
+		"grep -aoE 'sm_[0-9]+|compute_[0-9]+' /opt/sd/sd-cli | sort -u || true")
+
+	native := map[int]bool{}  // sm_NN  -- machine code
+	virtual := map[int]bool{} // compute_NN -- PTX, JITs forward only
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "sm_"):
+			if n, err := strconv.Atoi(strings.TrimPrefix(line, "sm_")); err == nil {
+				native[n] = true
+			}
+		case strings.HasPrefix(line, "compute_"):
+			if n, err := strconv.Atoi(strings.TrimPrefix(line, "compute_")); err == nil {
+				virtual[n] = true
+			}
+		}
+	}
+	if len(native) == 0 {
+		t.Fatalf("no sm_* markers in /opt/sd/sd-cli; the binary may not be a CUDA build at all:\n%s", out)
+	}
+
+	// What the Dockerfile asked for is what the binary must contain. A build
+	// arg that silently stopped taking effect would otherwise look exactly
+	// like a correct build.
+	for _, want := range dockerfileCUDAArchs(t) {
+		if !native[want] {
+			t.Errorf("the Dockerfile asks for sm_%d but the binary does not carry it; "+
+				"CUDA_ARCHS is not reaching the compiler. Found: %v", want, sortedKeys(native))
+		}
+	}
+
+	// lowestPTX is what a newer card can JIT from. PTX is forward-compatible
+	// only: compute_90 runs on Blackwell and can do nothing for an A100.
+	lowestPTX := -1
+	for v := range virtual {
+		if lowestPTX == -1 || v < lowestPTX {
+			lowestPTX = v
+		}
+	}
+
+	for _, c := range cardsEmberCanRent {
+		if native[c.cc] {
+			continue
+		}
+		if lowestPTX != -1 && lowestPTX <= c.cc {
+			// Usable, but it pays a JIT compile on every cold start, and
+			// nothing here has measured what that costs.
+			t.Logf("%s (sm_%d) has no native code and will JIT from compute_%d", c.name, c.cc, lowestPTX)
+			continue
+		}
+		t.Errorf("%s is sm_%d and this image cannot run on it: no native sm_%d and no PTX at or below it "+
+			"(native %v, ptx %v).\nA run on this card will not fail -- it will fall back to the CPU backend "+
+			"and bill at the GPU's rate. Add %d to CUDA_ARCHS in workload-sd-cuda.Dockerfile.",
+			c.name, c.cc, c.cc, sortedKeys(native), sortedKeys(virtual), c.cc)
+	}
+}
+
+// dockerfileCUDAArchs reads the CUDA_ARCHS default out of the Dockerfile.
+//
+// Parsed rather than duplicated here: a copy would be a second place to
+// forget.
+func dockerfileCUDAArchs(t *testing.T) []int {
+	t.Helper()
+
+	b, err := os.ReadFile(filepath.Join("..", "..", "workload-sd-cuda.Dockerfile"))
+	if err != nil {
+		t.Fatalf("read the Dockerfile: %v", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG CUDA_ARCHS=")
+		if !ok {
+			continue
+		}
+		var out []int
+		for _, part := range strings.Split(strings.Trim(rest, `"`), ";") {
+			n, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil {
+				t.Fatalf("CUDA_ARCHS entry %q is not a number", part)
+			}
+			out = append(out, n)
+		}
+		if len(out) == 0 {
+			t.Fatal("CUDA_ARCHS is empty")
+		}
+		return out
+	}
+	t.Fatal("no ARG CUDA_ARCHS line in workload-sd-cuda.Dockerfile")
+	return nil
+}
+
+func sortedKeys(m map[int]bool) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
 }
