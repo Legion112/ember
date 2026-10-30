@@ -340,3 +340,91 @@ func TestRecordingEngine_BindIPCanReproduceDockersDefault(t *testing.T) {
 		t.Fatal("BindIP was ignored, so no test can reproduce a LAN-reachable node")
 	}
 }
+
+func TestRecordingEngine_Volumes(t *testing.T) {
+	e := NewRecordingEngine()
+	ctx := t.Context()
+
+	a, err := e.VolumeCreate(ctx, "ember-store-a", map[string]string{"ember.kind": "store"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Name != "ember-store-a" {
+		t.Errorf("name = %q", a.Name)
+	}
+
+	// Idempotent, as the daemon is: a name that exists comes back rather than
+	// failing, which is what `ember store create` run twice must do.
+	again, err := e.VolumeCreate(ctx, "ember-store-a", nil)
+	if err != nil || again.Name != a.Name {
+		t.Errorf("a second create = %+v, %v", again, err)
+	}
+
+	if _, err := e.VolumeCreate(ctx, "ember-store-b", map[string]string{"ember.kind": "store"}); err != nil {
+		t.Fatal(err)
+	}
+	// Unlabelled, so the filter below must not return it.
+	if _, err := e.VolumeCreate(ctx, "someone-elses", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := e.VolumeList(ctx, "ember.kind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("filtered list = %+v, want the two labelled volumes", got)
+	}
+	// Sorted, so two runs of `ember ls` print the same order.
+	if got[0].Name != "ember-store-a" || got[1].Name != "ember-store-b" {
+		t.Errorf("order = %+v, want them sorted by name", got)
+	}
+
+	if all, err := e.VolumeList(ctx, ""); err != nil || len(all) != 3 {
+		t.Errorf("unfiltered list = %+v, %v; want all three", all, err)
+	}
+
+	if err := e.VolumeRemove(ctx, "ember-store-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.VolumeRemove(ctx, "ember-store-a"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("removing a missing volume = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRecordingEngine_VolumeFailures(t *testing.T) {
+	e := NewRecordingEngine()
+	e.FailOn = "Volume"
+	ctx := t.Context()
+
+	if _, err := e.VolumeCreate(ctx, "x", nil); err == nil {
+		t.Error("VolumeCreate ignored FailOn")
+	}
+	if err := e.VolumeRemove(ctx, "x"); err == nil {
+		t.Error("VolumeRemove ignored FailOn")
+	}
+	if _, err := e.VolumeList(ctx, ""); err == nil {
+		t.Error("VolumeList ignored FailOn")
+	}
+}
+
+func TestRecordingEngine_RecordsBinds(t *testing.T) {
+	// The recorder dropped Binds, so a unit test could not tell a container
+	// created with a store mounted from one created without -- which is the
+	// one assertion the local store needs to make.
+	e := NewRecordingEngine()
+	e.AddImage("img")
+	id, err := e.ContainerCreate(t.Context(), ContainerSpec{
+		Name: "n", Image: "img", Binds: []string{"ember-store-models:/models"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := e.ContainerInspect(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Binds) != 1 || c.Binds[0] != "ember-store-models:/models" {
+		t.Errorf("binds = %v", c.Binds)
+	}
+}

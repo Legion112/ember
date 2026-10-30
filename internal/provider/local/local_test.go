@@ -582,3 +582,199 @@ func TestLocal_StoreCapsMatchImplementation(t *testing.T) {
 	// fails next to the provider that got it wrong.
 	providertest.AssertStoreCapsMatch(t, New(dockerengine.NewRecordingEngine()))
 }
+
+func TestLocal_StoreLifecycle(t *testing.T) {
+	p, _ := newProvider(t)
+	ctx := t.Context()
+
+	if got, err := p.StoreList(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("StoreList on a fresh engine = %+v, %v", got, err)
+	}
+
+	s, err := p.StoreCreate(ctx, "models", 40, "EU-RO-1")
+	if err != nil {
+		t.Fatalf("StoreCreate = %v", err)
+	}
+	if s.Name != "models" {
+		t.Errorf("name = %q", s.Name)
+	}
+	if string(s.Handle.ID) != "ember-store-models" {
+		t.Errorf("the volume is not named by the label ember parses: %q", s.Handle.ID)
+	}
+	// Free, and said so rather than left at a zero that happens to mean the
+	// same thing -- the storage equivalent of Caps.Free.
+	if s.Price != 0 || s.Monthly() != 0 {
+		t.Errorf("a local store costs %v/%v", s.Price, s.Monthly())
+	}
+
+	// Idempotent, as the daemon is. `ember store create` run twice must not
+	// be an error, or a config applied to a fresh machine and an existing one
+	// behaves differently.
+	if _, err := p.StoreCreate(ctx, "models", 40, "EU-RO-1"); err != nil {
+		t.Errorf("a second StoreCreate = %v, want success", err)
+	}
+
+	got, err := p.StoreList(ctx)
+	if err != nil || len(got) != 1 || got[0].Name != "models" {
+		t.Fatalf("StoreList = %+v, %v", got, err)
+	}
+
+	if err := p.StoreDestroy(ctx, s.Handle); err != nil {
+		t.Fatalf("StoreDestroy = %v", err)
+	}
+	if got, _ = p.StoreList(ctx); len(got) != 0 {
+		t.Errorf("after destroy: %+v", got)
+	}
+	// Gone already is the state the caller asked for.
+	if err := p.StoreDestroy(ctx, s.Handle); err != nil {
+		t.Errorf("a second StoreDestroy = %v, want success", err)
+	}
+}
+
+func TestLocal_StoreRefusals(t *testing.T) {
+	p, _ := newProvider(t)
+	if _, err := p.StoreCreate(t.Context(), "", 10, ""); err == nil {
+		t.Error("an empty store name was accepted")
+	}
+	if err := p.StoreDestroy(t.Context(), node.StoreHandle{Provider: Name}); err == nil {
+		t.Error("an empty handle was accepted")
+	}
+}
+
+func TestLocal_StoreListIgnoresVolumesEmberDidNotName(t *testing.T) {
+	// A volume carrying ember's kind label but not a name ember wrote is
+	// skipped, the same way a foreign volume at RunPod is. `ember store rm`
+	// acts on what this returns.
+	p, eng := newProvider(t)
+	if _, err := eng.VolumeCreate(t.Context(), "someone-elses-cache",
+		map[string]string{LabelKind: "store"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.StoreList(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %+v, want nothing ember can claim", got)
+	}
+}
+
+func TestLocal_CreateMountsTheStore(t *testing.T) {
+	// The assertion the recorder could not make before: Binds reached the
+	// real client and nothing else, so a node created with a store looked
+	// exactly like one created without.
+	p, eng := newProvider(t)
+	s, err := p.StoreCreate(t.Context(), "models", 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Store = s.Handle
+	p.Mount = mustMount(t, "/models")
+
+	h, err := p.Create(t.Context(), request(t))
+	if err != nil {
+		t.Fatalf("Create = %v", err)
+	}
+	c, err := eng.ContainerInspect(t.Context(), h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "ember-store-models:/models"
+	if len(c.Binds) != 1 || c.Binds[0] != want {
+		t.Errorf("binds = %v, want [%s]", c.Binds, want)
+	}
+}
+
+func TestLocal_CreateWithoutAStoreMountsNothing(t *testing.T) {
+	p, eng := newProvider(t)
+	h, err := p.Create(t.Context(), request(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := eng.ContainerInspect(t.Context(), h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Binds) != 0 {
+		t.Errorf("binds = %v on a node with no store", c.Binds)
+	}
+}
+
+func TestLocal_DestroyingANodeLeavesTheStore(t *testing.T) {
+	// The property that makes a store a store. A node is torn down at the end
+	// of every run; the weights on it are the thing that must not be.
+	p, _ := newProvider(t)
+	ctx := t.Context()
+	s, err := p.StoreCreate(ctx, "models", 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Store, p.Mount = s.Handle, mustMount(t, "/models")
+
+	h, err := p.Create(ctx, request(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Destroy(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.StoreList(ctx)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("after destroying the node the store is %+v (%v); it must outlive the run", got, err)
+	}
+}
+
+func mustMount(t *testing.T, p string) node.Mount {
+	t.Helper()
+	m, err := node.MountAt(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestLocal_StoreReportsEngineFailures(t *testing.T) {
+	ctx := t.Context()
+
+	create, _ := newProvider(t)
+	create.Engine.(*dockerengine.RecordingEngine).FailOn = "VolumeCreate"
+	if _, err := create.StoreCreate(ctx, "models", 10, ""); err == nil {
+		t.Error("a failed VolumeCreate reported success")
+	}
+
+	list, _ := newProvider(t)
+	list.Engine.(*dockerengine.RecordingEngine).FailOn = "VolumeList"
+	if _, err := list.StoreList(ctx); err == nil {
+		t.Error("a failed VolumeList reported success")
+	}
+
+	// A destroy that fails for a reason other than "already gone" is an
+	// error: the volume is still there and still holding whatever is on it.
+	del, _ := newProvider(t)
+	if _, err := del.StoreCreate(ctx, "models", 10, ""); err != nil {
+		t.Fatal(err)
+	}
+	del.Engine.(*dockerengine.RecordingEngine).FailOn = "VolumeRemove"
+	err := del.StoreDestroy(ctx, node.StoreHandle{Provider: Name, ID: "ember-store-models"})
+	if err == nil {
+		t.Error("a failed VolumeRemove reported success")
+	}
+}
+
+func TestLocal_StoreListSkipsOtherEmberResources(t *testing.T) {
+	// Networks carry ember.kind too. Filtering on the key's presence is not
+	// the same as filtering on its value, and a network listed as a store
+	// would be a store `ember store rm` tried to delete.
+	p, eng := newProvider(t)
+	if _, err := eng.VolumeCreate(t.Context(), "ember-store-models",
+		map[string]string{LabelKind: "network"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.StoreList(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %+v, want nothing: that volume is not a store", got)
+	}
+}

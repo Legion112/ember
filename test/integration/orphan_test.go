@@ -94,6 +94,12 @@ func TestOrphan_SigkillLeavesExactlyOneFindableNode(t *testing.T) {
 	if n := len(l.Nodes(t.Context())); n != 1 {
 		t.Errorf("reap destroyed a node inside its deadline; %d left", n)
 	}
+
+	// Declared, not left. This lab leaves a node behind on purpose -- that is
+	// the whole subject -- and the stray check cannot tell a deliberate
+	// orphan from an accidental one. Reaping here says which this is, and
+	// keeps the check unconditional for every lab that leaks by mistake.
+	l.Reap()
 }
 
 // countFindings counts the listing lines, ignoring the trailing summary.
@@ -131,6 +137,11 @@ func TestOrphan_DryRunReapDestroysNothing(t *testing.T) {
 	if before == 0 {
 		t.Fatal("no node to dry-run against")
 	}
+	// Same as above: the orphan is deliberate, so it is cleaned up explicitly
+	// rather than left for the stray check to report. Deferred because the
+	// assertions below may fail the lab first.
+	defer l.Reap()
+
 	dry := l.Run(t.Context(), "reap", "--dry-run")
 	if dry.ExitCode != 0 {
 		t.Fatalf("reap --dry-run exited %d\n%s", dry.ExitCode, dry.Combined())

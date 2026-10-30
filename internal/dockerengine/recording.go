@@ -3,6 +3,7 @@ package dockerengine
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -41,6 +42,7 @@ type RecordingEngine struct {
 	BindIP string
 
 	containers map[string]*Container
+	volumes    map[string]*Volume
 	networks   map[string]*Network
 	images     map[string]bool
 	nextID     int
@@ -200,6 +202,11 @@ func (e *RecordingEngine) ContainerCreate(_ context.Context, spec ContainerSpec)
 		ID: id, Name: spec.Name, Image: spec.Image, State: "created",
 		Labels: copyMap(spec.Labels), Ports: ports,
 		IPs: map[string]string{spec.Network: "10.88.0.2"},
+		// Recorded rather than dropped. Binds reached the real client and
+		// nothing else, so a unit test could not tell a container created
+		// with a store mounted from one created without -- which is exactly
+		// the assertion the local store needs to be able to make.
+		Binds: append([]string(nil), spec.Binds...),
 	}
 	return id, nil
 }
@@ -305,4 +312,54 @@ func hasLabel(labels map[string]string, filter string) bool {
 		return false
 	}
 	return !hasValue || got == v
+}
+
+func (e *RecordingEngine) VolumeCreate(_ context.Context, name string, labels map[string]string) (Volume, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("VolumeCreate", name); err != nil {
+		return Volume{}, err
+	}
+	if e.volumes == nil {
+		e.volumes = map[string]*Volume{}
+	}
+	// Idempotent, as the daemon is: creating a volume that exists returns it.
+	if v, ok := e.volumes[name]; ok {
+		return *v, nil
+	}
+	v := &Volume{Name: name, Labels: copyMap(labels)}
+	e.volumes[name] = v
+	return *v, nil
+}
+
+func (e *RecordingEngine) VolumeRemove(_ context.Context, name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("VolumeRemove", name); err != nil {
+		return err
+	}
+	if _, ok := e.volumes[name]; !ok {
+		return ErrNotFound
+	}
+	delete(e.volumes, name)
+	return nil
+}
+
+func (e *RecordingEngine) VolumeList(_ context.Context, label string) ([]Volume, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.record("VolumeList", label); err != nil {
+		return nil, err
+	}
+	var out []Volume
+	for _, v := range e.volumes {
+		if label != "" {
+			if _, ok := v.Labels[label]; !ok {
+				continue
+			}
+		}
+		out = append(out, *v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
@@ -201,6 +202,15 @@ func (d *Client) ContainerInspect(ctx context.Context, id string) (dockerengine.
 		ips[name] = ep.IPAddress
 	}
 
+	// Read back from the daemon rather than echoed from the request, for the
+	// reason Ports is: a check that reads ember's own create call cannot
+	// catch the daemon doing something else, which is the entire thing it is
+	// for.
+	var binds []string
+	if j.HostConfig != nil {
+		binds = append(binds, j.HostConfig.Binds...)
+	}
+
 	return dockerengine.Container{
 		ID:       j.ID,
 		Name:     strings.TrimPrefix(j.Name, "/"),
@@ -209,6 +219,7 @@ func (d *Client) ContainerInspect(ctx context.Context, id string) (dockerengine.
 		Labels:   j.Config.Labels,
 		Ports:    ports,
 		IPs:      ips,
+		Binds:    binds,
 		ExitCode: j.State.ExitCode,
 	}, nil
 }
@@ -285,3 +296,43 @@ func labelFilter(label string) filters.Args {
 
 // Client must satisfy API.
 var _ dockerengine.API = (*Client)(nil)
+
+func (d *Client) VolumeCreate(ctx context.Context, name string, labels map[string]string) (dockerengine.Volume, error) {
+	// Idempotent at the daemon: creating a name that exists returns the
+	// existing volume rather than failing, and the labels of the first
+	// creation win. That is the behaviour the interface documents, so there
+	// is nothing here to make it so.
+	v, err := d.c.VolumeCreate(ctx, volume.CreateOptions{Name: name, Labels: labels})
+	if err != nil {
+		return dockerengine.Volume{}, fmt.Errorf("create volume %s: %w", name, err)
+	}
+	return dockerengine.Volume{Name: v.Name, Labels: v.Labels}, nil
+}
+
+func (d *Client) VolumeRemove(ctx context.Context, name string) error {
+	// force=false, deliberately. A volume still mounted by a container must
+	// fail rather than be yanked out from under it: the container is the one
+	// thing that might still be writing the weights.
+	if err := d.c.VolumeRemove(ctx, name, false); err != nil {
+		if cerrdefs.IsNotFound(err) {
+			return dockerengine.ErrNotFound
+		}
+		return fmt.Errorf("remove volume %s: %w", name, err)
+	}
+	return nil
+}
+
+func (d *Client) VolumeList(ctx context.Context, label string) ([]dockerengine.Volume, error) {
+	resp, err := d.c.VolumeList(ctx, volume.ListOptions{Filters: labelFilter(label)})
+	if err != nil {
+		return nil, fmt.Errorf("list volumes: %w", err)
+	}
+	out := make([]dockerengine.Volume, 0, len(resp.Volumes))
+	for _, v := range resp.Volumes {
+		if v == nil {
+			continue
+		}
+		out = append(out, dockerengine.Volume{Name: v.Name, Labels: v.Labels})
+	}
+	return out, nil
+}
