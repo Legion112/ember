@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -429,5 +431,60 @@ func TestStoreDestroy_ReportsAFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "runpod/v1") {
 		t.Errorf("err = %q, want it to name the store that is still there", err)
+	}
+}
+
+func TestOffers_CPUCatalogueIsADifferentEndpoint(t *testing.T) {
+	var asked string
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		asked = r.URL.Path + "?" + r.URL.RawQuery
+		raw, err := os.ReadFile(filepath.Join("testdata", "cpus.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(raw)
+	})
+
+	got, err := p.Offers(t.Context(), node.Filter{CPUOnly: true, Region: "EU-RO-1"})
+	if err != nil {
+		t.Fatalf("Offers = %v", err)
+	}
+	if !strings.Contains(asked, "/v2/catalog/cpus") {
+		t.Errorf("asked %q, want the CPU catalogue", asked)
+	}
+	// product=POD is required: the endpoint refuses include=AVAILABILITY
+	// without it, because availability differs by product.
+	if !strings.Contains(asked, "product=POD") {
+		t.Errorf("asked %q, want product=POD", asked)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d offers: %+v", len(got), got)
+	}
+	if !got[0].IsCPU() || got[0].Token != "cpu3c" {
+		t.Errorf("cheapest = %+v, want the compute-optimized family", got[0])
+	}
+}
+
+func TestOffers_RefusesWhenNoCPUIsAvailableWhereTheStoreIs(t *testing.T) {
+	p := newTestProvider(t, serveFile(t, "cpus.json"))
+	_, err := p.Offers(t.Context(), node.Filter{CPUOnly: true, Region: "XX-NOWHERE-9"})
+	if err == nil {
+		t.Fatal("an empty datacentre reported no error")
+	}
+	if !errors.Is(err, node.ErrNoCapacity) {
+		t.Errorf("err = %v, want ErrNoCapacity", err)
+	}
+	if !strings.Contains(err.Error(), "where the store lives") {
+		t.Errorf("err = %q, want it to say why the region is fixed", err)
+	}
+}
+
+func TestOffers_ReportsAFailedCPUCatalogue(t *testing.T) {
+	p := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	if _, err := p.Offers(t.Context(), node.Filter{CPUOnly: true}); err == nil {
+		t.Error("a failed CPU catalogue reported success")
 	}
 }

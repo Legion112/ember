@@ -322,6 +322,27 @@ API key, on the Credentials page under "S3 API keys", and shows the secret
 once. They go in `credentials.yaml` as `runpod_s3_access_key` and
 `runpod_s3_secret`, or in `RUNPOD_S3_ACCESS_KEY` / `RUNPOD_S3_SECRET`.
 
+### Or let a rented machine fetch them
+
+```bash
+ember store sync
+```
+
+`push` sends bytes from here; `sync` rents the cheapest machine RunPod has —
+**$0.06/hour against $0.89 for a 4090** — and has it download the URLs in
+`assets:` at datacentre bandwidth. No GPU is rented, because the job is bound
+by the network and the disk.
+
+Which one is right depends on where the files already are:
+
+| | from here (`push`) | from the internet (`sync`) |
+|---|---|---|
+| sd15, 2.21 GB | 4 min of your upstream | **2m27s, $0.0024** |
+| a 40 GB model set | **81 min** of your upstream | minutes, about a cent |
+
+Measured, not estimated: 67 Mbps up from here, and sd15 fetched and verified
+on a `cpu3c` for a quarter of a cent.
+
 Only **10 of RunPod's 23** volume-capable datacentres serve the S3 API. A
 store created outside those can only be filled by renting something to
 download into it, so the datacentre is worth choosing deliberately — see

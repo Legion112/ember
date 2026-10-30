@@ -23,6 +23,16 @@ type Filter struct {
 	AllowInterruptible bool
 
 	Region string // empty matches any
+
+	// CPUOnly asks for a machine with no GPU at all.
+	//
+	// A filter rather than a flag on the spec, because it is a statement
+	// about what to rent. It is also exclusive in both directions: with it
+	// set, only CPU offers match; without it, only GPU offers do. A run that
+	// wanted a card and silently got a CPU box would fail at the workload,
+	// and one that wanted a cheap downloader and got a 4090 would cost
+	// fifteen times what it meant to.
+	CPUOnly bool
 }
 
 // Validate rejects a Filter that cannot be satisfied by construction.
@@ -41,6 +51,21 @@ func (f Filter) Validate() error {
 
 // Match reports whether o satisfies f.
 func (f Filter) Match(o Offer) bool {
+	if f.CPUOnly != o.IsCPU() {
+		return false
+	}
+	if f.CPUOnly {
+		// Nothing below applies: a CPU offer has no card, no VRAM and no
+		// count to compare, and the GPU model it would be matched against is
+		// the processor family.
+		if f.MaxPrice > 0 && o.Price > f.MaxPrice {
+			return false
+		}
+		if o.Interruptible && !f.AllowInterruptible {
+			return false
+		}
+		return f.Region == "" || o.Region == f.Region
+	}
 	// Accepts, not equality: the capacity suffix makes an offer's model name
 	// more specific than what an operator types. See GPUModel.Accepts.
 	if !o.GPU.Accepts(f.GPU) {

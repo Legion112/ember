@@ -127,6 +127,14 @@ type Offer struct {
 	// 8-GPU node gets rented on a one-GPU budget.
 	Price Rate
 
+	// VCPU is how many virtual cores a CPU-only offer carries, and zero on a
+	// GPU offer -- where the cores come with the card and are not chosen.
+	//
+	// It is both the figure the provider needs at create time and the thing
+	// that tells the two kinds apart. A separate boolean would be a second
+	// source of truth for the same fact, and the two could disagree.
+	VCPU int
+
 	Region        string
 	Interruptible bool
 	Label         string // one human line for `ember offers`
@@ -139,6 +147,9 @@ func (o Offer) Validate() error {
 	}
 	if o.Token == "" {
 		return fmt.Errorf("offer from %s has no token", o.Provider)
+	}
+	if o.VCPU < 0 {
+		return fmt.Errorf("offer %s has a negative vCPU count", o.Token)
 	}
 	if o.GPUCount < 0 {
 		return fmt.Errorf("offer %s/%s has negative gpu count", o.Provider, o.Token)
@@ -153,5 +164,16 @@ func (o Offer) Validate() error {
 }
 
 func (o Offer) String() string {
+	if o.IsCPU() {
+		return fmt.Sprintf("%s/%s %d vCPU %v", o.Provider, o.Token, o.VCPU, o.Price)
+	}
 	return fmt.Sprintf("%s/%s %dx%s %v", o.Provider, o.Token, o.GPUCount, o.GPU, o.Price)
 }
+
+// IsCPU reports whether this offer is a CPU-only machine.
+//
+// There is no GPU on one, so nothing that needs a card may be scheduled
+// against it -- which is the whole reason ember rents one: filling a store
+// needs bandwidth and a disk, and renting a 4090 to download a file costs
+// fifteen times as much as renting the cheapest thing that can.
+func (o Offer) IsCPU() bool { return o.VCPU > 0 && o.GPUCount == 0 }

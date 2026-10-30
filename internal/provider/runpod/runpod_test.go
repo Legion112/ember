@@ -90,11 +90,49 @@ func TestProvider_CloudDefaultsToSecure(t *testing.T) {
 }
 
 func TestProvider_DiskDefault(t *testing.T) {
-	if got := (&Provider{}).disk(); got != DefaultDiskGiB {
+	gpu := node.Offer{GPU: "rtx4090", GPUCount: 1}
+	if got := (&Provider{}).disk(gpu); got != DefaultDiskGiB {
 		t.Errorf("got %d", got)
 	}
-	if got := (&Provider{DiskGiB: 200}).disk(); got != 200 {
+	if got := (&Provider{DiskGiB: 200}).disk(gpu); got != 200 {
 		t.Errorf("got %d", got)
+	}
+}
+
+func TestProvider_DiskIsClampedOnACPUMachine(t *testing.T) {
+	// Measured, not documented: the schema puts no maximum on the field and
+	// the API refuses the pod with "Container Disk must be less than or
+	// equal to 20". GPU pods have no such ceiling, so this is a property of
+	// the product rather than a default that could be lowered for both.
+	cpu := node.Offer{Token: "cpu3c", VCPU: 2}
+
+	if got := (&Provider{}).disk(cpu); got != CPUMaxDiskGiB {
+		t.Errorf("the default %d GiB was not clamped: got %d", DefaultDiskGiB, got)
+	}
+	if got := (&Provider{DiskGiB: 200}).disk(cpu); got != CPUMaxDiskGiB {
+		t.Errorf("got %d, want the CPU ceiling", got)
+	}
+	// Clamped, not raised: a smaller request is honoured.
+	if got := (&Provider{DiskGiB: 10}).disk(cpu); got != 10 {
+		t.Errorf("got %d, want the smaller request honoured", got)
+	}
+}
+
+func TestCreate_SendsCPUOrGPUButNeverBoth(t *testing.T) {
+	// The API refuses a pod that asks for both, so the two fields are
+	// pointers and exactly one is filled. The offer decides, which is why
+	// there is nothing to keep in step.
+	gpu := node.Offer{Provider: Name, Token: "NVIDIA GeForce RTX 4090", GPU: "rtx4090", GPUCount: 1}
+	if g, c := gpuFor(gpu), cpuFor(gpu); g == nil || c != nil {
+		t.Errorf("a GPU offer gave gpu=%+v cpu=%+v", g, c)
+	}
+	cpu := node.Offer{Provider: Name, Token: "cpu3c", VCPU: 4}
+	g, c := gpuFor(cpu), cpuFor(cpu)
+	if g != nil || c == nil {
+		t.Fatalf("a CPU offer gave gpu=%+v cpu=%+v", g, c)
+	}
+	if c.ID != "cpu3c" || c.VcpuCount != 4 {
+		t.Errorf("cpu config = %+v", c)
 	}
 }
 

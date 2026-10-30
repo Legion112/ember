@@ -420,6 +420,27 @@ A leaked node bills by the hour in silence. These are not style preferences.
   slower.** The workload workflow deleted .NET, Android and GHC before
   building, for space. The log says it started with 86 GB free and spent two
   and a half minutes reaching 111 GB. Removed.
+- **Push what is on this disk, sync what is on the internet.** Uploading from
+  here is free and bounded by the home link -- measured at 67 Mbps, which is
+  four minutes for a 2 GB checkpoint and eighty-one for a 40 GB model set.
+  Renting the cheapest machine with no GPU and having it download instead
+  costs $0.06/hour against $0.89 for a 4090, and fetching sd15 that way took
+  2m27s end to end for a quarter of a cent. Neither is the right answer
+  always, which is why both exist.
+- **Filter.CPUOnly is exclusive in both directions.** A run that wanted a card
+  and silently got a CPU box fails at the workload; one that wanted a cheap
+  downloader and got a 4090 costs fifteen times what it meant to. Neither may
+  happen by default, so a CPU offer matches only a CPU filter and a GPU offer
+  only a GPU one.
+- **Offer.VCPU tells the two kinds apart, and is the number the create call
+  needs.** A separate boolean would be a second source of truth for one fact,
+  and the two could disagree.
+- **A CPU pod refuses a container disk above 20 GiB.** GPU pods have no such
+  ceiling, and the schema publishes no maximum -- the API answers "Container
+  Disk must be less than or equal to 20" with a 400. Clamped rather than
+  refused, because the disk is incidental to what these are rented for: the
+  download lands on the mounted store, and the container's own disk only has
+  to hold the image.
 - **An incomplete multipart upload keeps every part that arrived, and bills
   for them.** It is not an object, so it does not appear in a listing -- the
   same shape as a leaked pod: nothing shows it and it charges by the month.

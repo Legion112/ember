@@ -2,6 +2,7 @@ package runpod
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Legion112/ember/internal/exposure"
@@ -427,4 +428,84 @@ func regionOffers(gpus []gpuType, cloud, region string) []node.Offer {
 		}
 	}
 	return mapOffers(kept, cloud)
+}
+
+// defaultVCPU is how many cores a CPU offer asks for when nothing says.
+//
+// Two, which is every family's minimum. The job these are rented for is
+// downloading a file onto a volume: it is bound by the network and the disk,
+// and paying for cores that wait on them is paying for nothing.
+const defaultVCPU = 2
+
+// mapCPUOffers turns the CPU catalogue into offers.
+//
+// Priced per machine rather than per core, because that is what a budget
+// ceiling compares against and what every other offer in this program means
+// by Price.
+func mapCPUOffers(cpus []cpuType, region string, vcpu int) []node.Offer {
+	if vcpu <= 0 {
+		vcpu = defaultVCPU
+	}
+	var out []node.Offer
+	for _, c := range cpus {
+		avail := c.Availability
+		if region != "" {
+			avail = ""
+			for _, dc := range c.DataCenters {
+				if dc.ID == region {
+					avail = dc.Availability
+					break
+				}
+			}
+		}
+		if rank(avail) <= 0 {
+			continue
+		}
+		per := c.Price.SecurePerVcpu
+		if per <= 0 {
+			continue
+		}
+		cores := vcpu
+		if c.Vcpu.Min > 0 && cores < c.Vcpu.Min {
+			cores = c.Vcpu.Min
+		}
+		if c.Vcpu.Max > 0 && cores > c.Vcpu.Max {
+			continue
+		}
+		out = append(out, node.Offer{
+			Provider: Name,
+			Token:    node.OfferToken(c.ID),
+			// No GPU and no VRAM: IsCPU is what tells the kinds apart, and
+			// filling either in would make a CPU box match a filter that
+			// wanted a card.
+			GPU:      node.GPUModel(c.ID),
+			GPUCount: 0,
+			VCPU:     cores,
+			Price:    node.RateFromUSD(per * float64(cores)),
+			Region:   regionOrBest(c, region),
+			Label:    fmt.Sprintf("%s, %d vCPU, %.0f GB RAM per core (%s)", c.Name, cores, c.RAMPerVCPU, availabilityOrUnknown(avail)),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Price < out[j].Price })
+	return out
+}
+
+func regionOrBest(c cpuType, want string) string {
+	if want != "" {
+		return want
+	}
+	best, bestRank := "", -1
+	for _, dc := range c.DataCenters {
+		if r := rank(dc.Availability); r > bestRank {
+			best, bestRank = dc.ID, r
+		}
+	}
+	return best
+}
+
+func availabilityOrUnknown(a string) string {
+	if a == "" {
+		return "unknown"
+	}
+	return a
 }

@@ -73,3 +73,54 @@ func TestFilter_Match(t *testing.T) {
 		}
 	}
 }
+
+func TestFilter_CPUOnlyIsExclusiveBothWays(t *testing.T) {
+	// A run that wanted a card and silently got a CPU box fails at the
+	// workload; one that wanted a cheap downloader and got a 4090 costs
+	// fifteen times what it meant to. Neither may happen by default.
+	cpu := Offer{Provider: "runpod", Token: "cpu3c", GPU: "cpu3c", VCPU: 2, Price: 60000}
+	gpu := Offer{Provider: "runpod", Token: "t", GPU: NormalizeGPU("rtx4090"), GPUCount: 1, VRAM: GiB(24), Price: 890000}
+
+	if (Filter{}).Match(cpu) {
+		t.Error("an ordinary filter matched a CPU machine")
+	}
+	if !(Filter{}).Match(gpu) {
+		t.Error("an ordinary filter did not match a GPU")
+	}
+	if !(Filter{CPUOnly: true}).Match(cpu) {
+		t.Error("CPUOnly did not match a CPU machine")
+	}
+	if (Filter{CPUOnly: true}).Match(gpu) {
+		t.Error("CPUOnly matched a GPU")
+	}
+}
+
+func TestFilter_CPUOnlyStillHonoursPriceRegionAndInterruptible(t *testing.T) {
+	cpu := Offer{Provider: "runpod", Token: "cpu3c", VCPU: 2, Price: 60000, Region: "EU-RO-1"}
+
+	if (Filter{CPUOnly: true, MaxPrice: 50000}).Match(cpu) {
+		t.Error("a CPU machine over the ceiling matched")
+	}
+	if !(Filter{CPUOnly: true, MaxPrice: 70000}).Match(cpu) {
+		t.Error("a CPU machine under the ceiling did not match")
+	}
+	if (Filter{CPUOnly: true, Region: "US-KS-2"}).Match(cpu) {
+		t.Error("a CPU machine in the wrong datacentre matched; a store pins placement")
+	}
+	spot := cpu
+	spot.Interruptible = true
+	if (Filter{CPUOnly: true}).Match(spot) {
+		t.Error("an interruptible CPU machine matched without AllowInterruptible")
+	}
+}
+
+func TestFilter_CPUOnlyIgnoresGPUCriteria(t *testing.T) {
+	// A CPU offer has no card, no VRAM and no count. Comparing them would
+	// mean a GPU model name matched against a processor family, which is how
+	// a filter stops matching anything for a reason nobody can see.
+	cpu := Offer{Provider: "runpod", Token: "cpu3c", GPU: "cpu3c", VCPU: 2, Price: 60000}
+	f := Filter{CPUOnly: true, GPU: NormalizeGPU("rtx4090"), MinVRAM: GiB(80), MinCount: 4}
+	if !f.Match(cpu) {
+		t.Error("CPU matching was blocked by GPU criteria that cannot apply to it")
+	}
+}

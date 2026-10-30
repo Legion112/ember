@@ -9,13 +9,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/Legion112/ember/internal/awssig"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
+	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/s3"
+	"github.com/Legion112/ember/internal/sshx/sshexec"
 )
 
 func cmdStore(args []string, out io.Writer) error { return runStore(args, out, deps{}) }
@@ -38,6 +42,8 @@ func runStore(args []string, out io.Writer, d deps) error {
 		return runStoreRm(args[1:], out, d)
 	case "push":
 		return runStorePush(args[1:], out, d)
+	case "sync":
+		return runStoreSync(args[1:], out, d)
 	case "-h", "--help", "help":
 		storeUsage(out)
 		return nil
@@ -52,6 +58,7 @@ func storeUsage(out io.Writer) {
 	outf(out, "A store is the one thing ember creates that no deadline, no reaper and\nno Ctrl-C ever ends. It bills by the month whether or not anything is\nattached to it, which is why nothing creates one as a side effect.\n\n")
 	outf(out, "  create   create the store named in ember.yaml\n")
 	outf(out, "  push     upload a local file to the store, without renting anything\n")
+	outf(out, "  sync     rent a cheap CPU machine to fetch the configured assets onto it\n")
 	outf(out, "  rm       destroy a store and everything on it\n\n")
 	outf(out, "`ember ls` reports every store and what it costs.\n")
 }
@@ -411,4 +418,107 @@ func mustConfigDir(cfg config.Config, d deps) string {
 		return ps.config
 	}
 	return cfg.ConfigDir
+}
+
+// runStoreSync fills the store from a rented CPU machine.
+//
+// The alternative to `push`, and which one is right depends entirely on
+// where the bytes are. Push sends them from here, over a home link, for
+// nothing: measured at 67 Mbps that is four minutes for a 2 GB checkpoint
+// and eighty-one for a 40 GB model set. Sync rents the cheapest machine
+// RunPod has -- $0.06/hour against $0.89 for a 4090 -- and has it download
+// the same files at datacentre bandwidth, which turns those eighty-one
+// minutes into a few and costs about a cent.
+//
+// So: push what is already on this disk, sync what is on the internet.
+//
+// It is the same `embernode fetch` the workload path runs, on the same
+// store, verified against the same digests. The only difference is that no
+// workload follows, and the machine has no GPU to waste while it downloads.
+func runStoreSync(args []string, out io.Writer, d deps) error {
+	fs := flag.NewFlagSet("store sync", flag.ContinueOnError)
+	fs.SetOutput(out)
+	cfgPath := fs.String("config", config.FileName, "path to ember.yaml")
+	vcpu := fs.Int("vcpu", 0, "cores to rent; the minimum for the family when unset")
+	dryRun := fs.Bool("dry-run", false, "say what would be rented and fetched, and do neither")
+	fs.Usage = func() {
+		outf(out, "ember store sync fetches the configured assets onto the store.\n\n")
+		outf(out, "It rents the cheapest machine with no GPU and has that download them,\nwhich is what you want when the files are on the internet rather than\non this disk. `ember store push` is the other direction.\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return usageError{err}
+	}
+	if fs.NArg() != 0 {
+		return usageError{fmt.Errorf("ember store sync takes no arguments; it fetches what %s lists", *cfgPath)}
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if len(cfg.Assets) == 0 {
+		return usageError{fmt.Errorf("no assets are listed in %s, so there is nothing to fetch", *cfgPath)}
+	}
+
+	paths, err := resolvePaths(cfg, d)
+	if err != nil {
+		return err
+	}
+	creds, err := d.credentials(paths.config)
+	if err != nil {
+		return err
+	}
+	reg, err := buildRegistry(d, creds, cfg)
+	if err != nil {
+		return err
+	}
+	p, err := reg.Get(node.ProviderID(cfg.Provider))
+	if err != nil {
+		return usageError{err}
+	}
+
+	store, err := attachStore(context.Background(), p, cfg)
+	if err != nil {
+		return err
+	}
+	spec, err := buildSpec(cfg, store)
+	if err != nil {
+		return usageError{err}
+	}
+
+	// No workload, and no GPU to idle while the download runs. The filter is
+	// exclusive in both directions, so this cannot quietly land on a card.
+	spec.Cmd = nil
+	spec.Outputs = nil
+	spec.Filter.CPUOnly = true
+	spec.Filter.GPU = ""
+	spec.Filter.MinVRAM = 0
+	spec.Filter.MinCount = *vcpu
+
+	opts, err := buildOptions(paths, cfg, out)
+	if err != nil {
+		return err
+	}
+
+	if *dryRun {
+		return dryRunUp(out, p, spec, opts)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	return provision.WithNode(ctx, p, spec, opts, func(ctx context.Context, s provision.Session) error {
+		client, so, err := dialNode(ctx, s, opts, 0)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+
+		if err := ensureAssets(ctx, out, sshexec.New(client.SSH()), spec, so); err != nil {
+			return err
+		}
+		outf(out, "the store now holds every asset %s lists.\n", *cfgPath)
+		return nil
+	})
 }

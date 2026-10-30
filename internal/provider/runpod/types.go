@@ -30,7 +30,12 @@ type createPodRequest struct {
 	Name  string `json:"name"`
 	Image string `json:"image"`
 
-	Gpu gpuConfig `json:"gpu"`
+	// Gpu and Cpu are mutually exclusive, and the API enforces it: exactly
+	// one must be set. Pointers so the unused one is omitted entirely --
+	// sending an empty `gpu` object alongside `cpu` is two configurations,
+	// which is refused.
+	Gpu *gpuConfig `json:"gpu,omitempty"`
+	Cpu *cpuConfig `json:"cpu,omitempty"`
 
 	// Env carries everything the node needs to configure itself, including
 	// the minted host key. It goes in the JSON body and never in Args or
@@ -78,6 +83,16 @@ type createPodRequest struct {
 type gpuConfig struct {
 	ID    string `json:"id"`
 	Count int    `json:"count"`
+}
+
+// cpuConfig asks for a machine with no GPU.
+//
+// vcpuCount is required and bounded by the catalogue's own min and max for
+// that family, which is why the offer carries it rather than this picking a
+// number.
+type cpuConfig struct {
+	ID        string `json:"id"`
+	VcpuCount int    `json:"vcpuCount"`
 }
 
 // pod is the Pod schema, trimmed to what ember reads.
@@ -284,4 +299,36 @@ type mounts struct {
 type networkMount struct {
 	VolumeID string `json:"volumeId"`
 	Path     string `json:"path"`
+}
+
+// cpuType is one entry of GET /v2/catalog/cpus.
+//
+// Separate from gpuType rather than shared, because almost nothing lines up:
+// there is no VRAM, the price is per vCPU rather than per machine, and the
+// core count is a range the caller picks from instead of a fixed number.
+type cpuType struct {
+	ID           string       `json:"id"`
+	Name         string       `json:"name"`
+	Group        string       `json:"group"`
+	RAMPerVCPU   float64      `json:"ramGbPerVcpu"`
+	Vcpu         cpuRange     `json:"vcpu"`
+	Price        cpuPrice     `json:"price"`
+	Availability string       `json:"availability"`
+	DataCenters  []dataCentre `json:"dataCenters,omitempty"`
+}
+
+type cpuRange struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
+}
+
+// cpuPrice is per vCPU per hour, not per machine -- so the offer's price is
+// this multiplied by the cores asked for.
+type cpuPrice struct {
+	SecurePerVcpu     float64 `json:"securePerVcpu"`
+	ServerlessPerVcpu float64 `json:"serverlessPerVcpu"`
+}
+
+type listCpuTypesResponse struct {
+	Cpus []cpuType `json:"cpus"`
 }
