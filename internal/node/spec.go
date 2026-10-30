@@ -38,8 +38,20 @@ type OutputPath struct {
 // image: NewSpec is the only constructor, and the fields it validates are the
 // ones whose wrong values cost money or make a measurement meaningless.
 type Spec struct {
-	Image   string
-	Cmd     []string
+	Image string
+
+	// Cmds are the workloads, run in sequence on one node.
+	//
+	// A list rather than one command because every per-rental cost -- waiting
+	// for the machine, pulling the image, reading and verifying the weights,
+	// loading them -- is paid once per `ember up` and not once per result.
+	// Measured on a rented A100 that overhead is about three minutes against
+	// roughly 100 seconds of actual generation, so ten images rented ten
+	// times spend more than half the bill re-doing setup.
+	//
+	// Empty holds the node open with its ports forwarded, which is the
+	// interactive shape.
+	Cmds    [][]string
 	Env     map[string]string
 	Ports   []PortMap
 	Outputs []OutputPath
@@ -101,6 +113,7 @@ type Spec struct {
 type SpecOptions struct {
 	Image   string
 	Cmd     []string
+	Cmds    [][]string
 	Env     map[string]string
 	Ports   []PortMap
 	Outputs []OutputPath
@@ -149,6 +162,22 @@ func NewSpec(o SpecOptions) (Spec, error) {
 	if o.GPUProbeTimeout < 0 {
 		return Spec{}, fmt.Errorf("negative gpu probe timeout")
 	}
+	// One spelling or the other, never both. A config carrying `cmd` and
+	// `cmds` has two answers to "what does this node run", and picking one
+	// silently is how an operator watches the wrong thing execute.
+	if len(o.Cmd) > 0 && len(o.Cmds) > 0 {
+		return Spec{}, fmt.Errorf("both cmd and cmds are set; use one")
+	}
+	cmds := make([][]string, 0, len(o.Cmds)+1)
+	if len(o.Cmd) > 0 {
+		cmds = append(cmds, append([]string(nil), o.Cmd...))
+	}
+	for i, c := range o.Cmds {
+		if len(c) == 0 {
+			return Spec{}, fmt.Errorf("cmds[%d] is empty", i)
+		}
+		cmds = append(cmds, append([]string(nil), c...))
+	}
 	if o.MinCUDA != "" {
 		if _, _, err := ParseCUDAVersion(o.MinCUDA); err != nil {
 			return Spec{}, err
@@ -171,7 +200,7 @@ func NewSpec(o SpecOptions) (Spec, error) {
 	}
 	return Spec{
 		Image:   o.Image,
-		Cmd:     append([]string(nil), o.Cmd...),
+		Cmds:    cmds,
 		Env:     cloneEnv(o.Env),
 		Ports:   append([]PortMap(nil), o.Ports...),
 		Outputs: append([]OutputPath(nil), o.Outputs...),

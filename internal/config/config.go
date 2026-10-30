@@ -81,6 +81,25 @@ type Config struct {
 	// Set, ember runs it, brings the outputs home and destroys the node.
 	Cmd []string `yaml:"cmd"`
 
+	// Cmds are several workloads run in sequence on one rental.
+	//
+	// Every per-rental cost is paid once per `ember up`, not once per
+	// result: waiting for the machine, pulling the image, reading and
+	// verifying the weights, loading them. On a rented A100 that is about
+	// three minutes against roughly 100 seconds of generation, so ten images
+	// rented ten times spend more than half the bill on setup.
+	//
+	// Still opaque argv, deliberately. ember does not know what sd-cli's
+	// flags mean and should not learn them -- that knowledge belongs in this
+	// file, beside the image it describes, for the same reason gpu_probe is
+	// a command rather than a built-in check.
+	//
+	// Outputs are fetched after each entry rather than once at the end, so a
+	// batch that dies on its deadline has already delivered what it finished.
+	//
+	// Use cmd or cmds, never both.
+	Cmds [][]string `yaml:"cmds"`
+
 	// Store names the persistent store this configuration uses, if any.
 	Store StoreConfig `yaml:"store"`
 

@@ -121,3 +121,33 @@ func TestRun_WrapsRunWithStdout(t *testing.T) {
 		t.Fatalf("Run with a bad subcommand returned %v", err)
 	}
 }
+
+// TestCommands_EveryEntryReachesItsCommand.
+//
+// The table is the only thing connecting a name an operator types to the code
+// that runs. Every test elsewhere calls runDown/runLs/runUp directly with
+// injected deps, so a table entry pointing at the wrong function -- or at a
+// function that panics before parsing -- would ship unnoticed.
+//
+// `-h` is used because it is answered by the flag parser before any provider
+// is contacted, so this touches no network and rents nothing.
+func TestCommands_EveryEntryReachesItsCommand(t *testing.T) {
+	for _, c := range commands() {
+		t.Run(c.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := c.run([]string{"-h"}, &out)
+
+			// version takes no flags and simply prints; everything else
+			// answers -h with a usage error. Either is a command that ran.
+			if err != nil && ExitCode(err) != ExitUsage {
+				t.Errorf("%s -h = %v (exit %d), want success or a usage error", c.name, err, ExitCode(err))
+			}
+			if out.Len() == 0 {
+				t.Errorf("%s -h printed nothing, so the table entry may not reach a command", c.name)
+			}
+			if c.summary == "" {
+				t.Errorf("%s has no summary, so `ember` with no subcommand cannot describe it", c.name)
+			}
+		})
+	}
+}

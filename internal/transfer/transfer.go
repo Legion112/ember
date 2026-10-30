@@ -58,7 +58,7 @@ type Result struct {
 // renders and a log should not lose the renders because the log was missing.
 // The errors are joined and returned after everything that could be fetched
 // has been.
-func Fetch(ctx context.Context, r sshx.Runner, outputs []node.OutputPath, dir string) (Result, error) {
+func Fetch(ctx context.Context, r sshx.Runner, outputs []node.OutputPath, dir, since string) (Result, error) {
 	if len(outputs) == 0 {
 		return Result{}, nil
 	}
@@ -74,7 +74,7 @@ func Fetch(ctx context.Context, r sshx.Runner, outputs []node.OutputPath, dir st
 	var total Result
 	var errs []error
 	for _, o := range outputs {
-		res, err := fetchOne(ctx, r, o, root)
+		res, err := fetchOne(ctx, r, o, root, since)
 		total.Files += res.Files
 		total.Bytes += res.Bytes
 		if err != nil {
@@ -93,23 +93,36 @@ func Fetch(ctx context.Context, r sshx.Runner, outputs []node.OutputPath, dir st
 //
 // Compression is on the node, where the CPU is rented and the bottleneck is
 // the operator's home upload link.
-func TarCommand(remote string) (sshx.Command, error) {
+// since, when set, is a path on the node whose modification time bounds what
+// is sent: only files newer than it are included. It is a file and not a
+// timestamp on purpose. ember's clock and the node's are not the same clock,
+// and a run that fetched by "--newer=@<unix computed here>" would silently
+// send too much or too little whenever they disagreed. A marker touched on
+// the node is compared against mtimes from that same clock, so skew cannot
+// enter.
+func TarCommand(remote, since string) (sshx.Command, error) {
 	if !path.IsAbs(remote) || path.Clean(remote) != remote || remote == "/" {
 		return sshx.Command{}, fmt.Errorf("output path %q must be absolute, clean and not the root", remote)
 	}
-	cmd := sshx.Cmd("tar",
-		"-czf", "-",
-		"-C", path.Dir(remote),
-		"--", path.Base(remote),
-	)
+	if since != "" && (!path.IsAbs(since) || path.Clean(since) != since) {
+		return sshx.Command{}, fmt.Errorf("marker path %q must be absolute and clean", since)
+	}
+	args := []string{"-czf", "-", "-C", path.Dir(remote)}
+	if since != "" {
+		// GNU tar spells this --newer; --newer-than is not a flag and fails
+		// the whole command. The node image carries GNU tar 1.35.
+		args = append(args, "--newer="+since)
+	}
+	args = append(args, "--", path.Base(remote))
+	cmd := sshx.Cmd("tar", args...)
 	if err := cmd.Validate(); err != nil {
 		return sshx.Command{}, err
 	}
 	return cmd, nil
 }
 
-func fetchOne(ctx context.Context, r sshx.Runner, o node.OutputPath, root *os.Root) (Result, error) {
-	cmd, err := TarCommand(o.Remote)
+func fetchOne(ctx context.Context, r sshx.Runner, o node.OutputPath, root *os.Root, since string) (Result, error) {
+	cmd, err := TarCommand(o.Remote, since)
 	if err != nil {
 		return Result{}, err
 	}

@@ -489,7 +489,7 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 
 	// No workload, and no GPU to idle while the download runs. The filter is
 	// exclusive in both directions, so this cannot quietly land on a card.
-	spec.Cmd = nil
+	spec.Cmds = nil
 	spec.Outputs = nil
 	spec.Filter.CPUOnly = true
 	spec.Filter.GPU = ""
