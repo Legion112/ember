@@ -204,3 +204,48 @@ func TestNormalizeGPU_AMIGSliceStaysDistinct(t *testing.T) {
 		t.Errorf("the slice does not say it is one: %q", slice)
 	}
 }
+
+func TestOffer_IsCPU(t *testing.T) {
+	// The discriminator is the vCPU count, not a flag, because the count is
+	// data the provider needs anyway -- a separate boolean would be a second
+	// source of truth for one fact, and the two could disagree.
+	for _, tc := range []struct {
+		name string
+		o    Offer
+		want bool
+	}{
+		{"a cpu machine", Offer{VCPU: 2}, true},
+		{"a gpu", Offer{GPU: "rtx4090", GPUCount: 1}, false},
+		{"the zero offer is not a cpu machine", Offer{}, false},
+		{
+			// Belt and braces: an offer carrying both is not a CPU machine,
+			// because something with a card must never match a filter asking
+			// for the cheap downloader.
+			name: "a gpu that also reports cores", o: Offer{GPU: "rtx4090", GPUCount: 1, VCPU: 8}, want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.o.IsCPU(); got != tc.want {
+				t.Errorf("IsCPU() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOffer_ValidateRefusesNegativeVCPU(t *testing.T) {
+	o := Offer{Provider: "runpod", Token: "cpu3c", VCPU: -1}
+	if err := o.Validate(); err == nil {
+		t.Error("a negative vCPU count was accepted")
+	}
+}
+
+func TestOffer_StringDescribesEachKind(t *testing.T) {
+	cpu := Offer{Provider: "runpod", Token: "cpu3c", VCPU: 2, Price: 60000}
+	if got := cpu.String(); !strings.Contains(got, "2 vCPU") {
+		t.Errorf("String() = %q, want it to say how many cores", got)
+	}
+	gpu := Offer{Provider: "runpod", Token: "t", GPU: "rtx4090", GPUCount: 1, Price: 890000}
+	if got := gpu.String(); !strings.Contains(got, "rtx4090") {
+		t.Errorf("String() = %q", got)
+	}
+}

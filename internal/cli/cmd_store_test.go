@@ -583,3 +583,119 @@ func TestAttached_IsZero(t *testing.T) {
 		t.Error("a populated Attached reported zero")
 	}
 }
+
+func TestStoreSync_PicksTheCheapestMachineWithNoGPU(t *testing.T) {
+	// The whole argument for this command: $0.06/hour against $0.89 for a
+	// 4090, for a job that is bound by the network and the disk. Checked
+	// through --dry-run, which creates nothing.
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.URL.Path, "network-volumes"):
+			_, _ = fmt.Fprint(w, `{"networkVolumes":[{"id":"vol_abc","name":"ember-store-models",`+
+				`"size":40,"dataCenter":"EU-RO-1"}],"pagination":{"hasNextPage":false}}`)
+		case strings.Contains(req.URL.Path, "catalog/cpus"):
+			_, _ = fmt.Fprint(w, `{"cpus":[{"id":"cpu3c","name":"Compute-Optimized",`+
+				`"vcpu":{"min":2,"max":32},"ramGbPerVcpu":2,`+
+				`"price":{"securePerVcpu":0.03},"availability":"HIGH",`+
+				`"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}]}]}`)
+		case strings.Contains(req.URL.Path, "catalog/gpus"):
+			t.Error("sync asked for the GPU catalogue")
+			_, _ = fmt.Fprint(w, `{"gpus":[]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	d := labDeps(t)
+	d.CloudBaseURL = api.URL
+	d.Creds = &config.Credentials{RunPod: node.NewSecret([]byte("rp-token"))}
+
+	cfg := storeConfigFor(t, d, "runpod", storeBlock+"\n"+assetBlock)
+	var out bytes.Buffer
+	if err := runStore([]string{"sync", "-config", cfg, "--dry-run"}, &out, d); err != nil {
+		t.Fatalf("sync = %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "cpu3c") {
+		t.Errorf("sync did not pick the CPU machine:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "nothing was created") {
+		t.Errorf("--dry-run did not say it created nothing:\n%s", out.String())
+	}
+}
+
+func TestStoreSync_RefusesWithNothingToFetch(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, storeBlock)
+	var out bytes.Buffer
+	err := runStore([]string{"sync", "-config", cfg}, &out, d)
+	if err == nil {
+		t.Fatal("sync ran with no assets listed")
+	}
+	if !strings.Contains(err.Error(), "nothing to fetch") {
+		t.Errorf("err = %q", err)
+	}
+	if ExitCode(err) != ExitUsage {
+		t.Errorf("exit = %d, want %d", ExitCode(err), ExitUsage)
+	}
+}
+
+func TestStoreSync_TakesNoArguments(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, storeBlock)
+	var out bytes.Buffer
+	if err := runStore([]string{"sync", "-config", cfg, "extra"}, &out, d); err == nil {
+		t.Error("sync accepted an argument")
+	}
+}
+
+const assetBlock = "assets:\n  - url: https://h/x.gguf\n" +
+	"    sha256: bea213124ab48b5e44b03c7fa3377740a87aa7b44f798050d9ea16be9de14b58\n" +
+	"    as: sd15.gguf"
+
+func TestStoreSync_Usage(t *testing.T) {
+	d := labDeps(t)
+	var out bytes.Buffer
+	if err := runStore([]string{"sync", "-h"}, &out, d); err == nil {
+		t.Error("-h did not return a usage error")
+	}
+	if !strings.Contains(out.String(), "cheapest machine with no GPU") {
+		t.Errorf("usage does not explain what it rents:\n%s", out.String())
+	}
+}
+
+func TestStoreSync_RefusesAnUnreadableConfig(t *testing.T) {
+	d := labDeps(t)
+	if err := runStore([]string{"sync", "-config", "/nope/absent.yaml"}, &bytes.Buffer{}, d); err != nil {
+		// A missing config is the defaults, which name no assets -- so this
+		// is the "nothing to fetch" refusal rather than a read error.
+		if !strings.Contains(err.Error(), "nothing to fetch") {
+			t.Errorf("err = %q", err)
+		}
+		return
+	}
+	t.Error("sync ran against a config that does not exist")
+}
+
+func TestStoreSync_RefusesAStoreThatDoesNotExist(t *testing.T) {
+	// Same refusal `up` gives, and for the same reason: naming a store does
+	// not create one, and a command that rents a machine before finding that
+	// out has already started paying.
+	d := labDeps(t)
+	cfg := storeConfig(t, d, storeBlock+"\n"+assetBlock)
+	var out bytes.Buffer
+	err := runStore([]string{"sync", "-config", cfg}, &out, d)
+	if err == nil {
+		t.Fatal("sync ran against a store that does not exist")
+	}
+	if !strings.Contains(err.Error(), "ember store create") {
+		t.Errorf("err = %q, want it to name the command that makes one", err)
+	}
+	e := d.Engine.(*dockerengine.RecordingEngine)
+	for _, c := range e.Calls {
+		if strings.HasPrefix(c, "ContainerCreate") {
+			t.Errorf("a machine was rented before the store was resolved: %v", e.Calls)
+		}
+	}
+}

@@ -179,16 +179,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 // retry a dial, when to refuse one -- live in internal/session, where they
 // can be tested against an in-process SSH server instead of a rented machine.
 func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts provision.Options, spec node.Spec, hold time.Duration, outDir string) error {
-	signers := []ssh.Signer{opts.Identity.Signer}
-	if agentSigners, err := keys.AgentSigners(); err == nil {
-		signers = append(signers, agentSigners...)
-	}
-
-	so := session.Options{Log: opts.Log, Hold: hold}
-	client, err := session.Dial(ctx, sshdial.Target{
-		NodeID:   s.Node.Handle().ID,
-		Endpoint: s.Node.Endpoint(),
-	}, s.Trust, signers, so)
+	client, so, err := dialNode(ctx, s, opts, hold)
 	if err != nil {
 		return err
 	}
@@ -537,4 +528,26 @@ func ensureAssets(ctx context.Context, out io.Writer, r sshx.Runner, spec node.S
 		so.Log.Debug("asset ready", "as", a.As, "took", res.Duration)
 	}
 	return nil
+}
+
+// dialNode opens the SSH connection to a ready node.
+//
+// Shared by `up` and `store sync` rather than written twice: the host key is
+// pinned the same way for both, and a second copy is a second place for the
+// one security decision in this program to drift.
+func dialNode(ctx context.Context, s provision.Session, opts provision.Options, hold time.Duration) (*sshdial.Client, session.Options, error) {
+	signers := []ssh.Signer{opts.Identity.Signer}
+	if agentSigners, err := keys.AgentSigners(); err == nil {
+		signers = append(signers, agentSigners...)
+	}
+
+	so := session.Options{Log: opts.Log, Hold: hold}
+	client, err := session.Dial(ctx, sshdial.Target{
+		NodeID:   s.Node.Handle().ID,
+		Endpoint: s.Node.Endpoint(),
+	}, s.Trust, signers, so)
+	if err != nil {
+		return nil, so, err
+	}
+	return client, so, nil
 }

@@ -127,12 +127,32 @@ func (p *Provider) cloud() string {
 	return cloudSecure
 }
 
-func (p *Provider) disk() int {
-	if p.DiskGiB > 0 {
-		return p.DiskGiB
+func (p *Provider) disk(o node.Offer) int {
+	want := p.DiskGiB
+	if want <= 0 {
+		want = DefaultDiskGiB
 	}
-	return DefaultDiskGiB
+	// CPU machines take at most 20 GiB of container disk, and the API
+	// refuses the pod outright above it: "Container Disk must be less than
+	// or equal to 20". GPU pods have no such ceiling, so this is not a
+	// default that could be lowered for both -- it is a property of the
+	// product being rented.
+	//
+	// Clamping rather than refusing, because the disk size is incidental to
+	// what a CPU machine is rented for here: the download lands on the
+	// mounted store, not on the container's own disk, which only has to hold
+	// the image.
+	if o.IsCPU() && want > CPUMaxDiskGiB {
+		return CPUMaxDiskGiB
+	}
+	return want
 }
+
+// CPUMaxDiskGiB is the largest container disk a CPU pod will accept.
+//
+// Measured, not documented: the schema gives the field a minimum of 1 and no
+// maximum, and the limit is enforced at the handler with a 400.
+const CPUMaxDiskGiB = 20
 
 // Offers lists what can be rented.
 //
@@ -140,6 +160,13 @@ func (p *Provider) disk() int {
 // returns is one RunPod says it has rather than one it merely has a price
 // for. provision re-filters regardless of what this asked.
 func (p *Provider) Offers(ctx context.Context, f node.Filter) ([]node.Offer, error) {
+	// A different catalogue entirely, on a different endpoint. Asked for
+	// only when a CPU machine is what is wanted, so the common case still
+	// makes one request.
+	if f.CPUOnly {
+		return p.cpuOffers(ctx, f)
+	}
+
 	q := url.Values{}
 	q.Set("include", "AVAILABILITY")
 	q.Set("product", "POD")
@@ -183,15 +210,13 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 
 	body := createPodRequest{
 		// The pod name carries ember's label, because RunPod has no tag API.
-		Name:  provider.Label(req.RunID, req.Deadline),
-		Image: req.Spec.Image,
-		Gpu: gpuConfig{
-			ID:    string(req.Offer.Token),
-			Count: max(req.Offer.GPUCount, 1),
-		},
+		Name:          provider.Label(req.RunID, req.Deadline),
+		Image:         req.Spec.Image,
+		Gpu:           gpuFor(req.Offer),
+		Cpu:           cpuFor(req.Offer),
 		Env:           p.env(req),
 		Ports:         ports,
-		Disk:          p.disk(),
+		Disk:          p.disk(req.Offer),
 		Cloud:         p.cloud(),
 		DataCenterIds: p.dataCenters(req),
 		Mounts:        mountsFor(req),
@@ -335,4 +360,49 @@ func mountsFor(req node.CreateRequest) *mounts {
 		VolumeID: string(req.Spec.Store.ID),
 		Path:     req.Spec.Mount.Path(),
 	}}}
+}
+
+// gpuFor and cpuFor fill exactly one of the create body's two machine
+// fields, because the API refuses a pod that asks for both.
+//
+// The offer decides, not a flag: a CPU offer carries its vCPU count and no
+// card, so there is one answer and nothing to keep in step.
+func gpuFor(o node.Offer) *gpuConfig {
+	if o.IsCPU() {
+		return nil
+	}
+	return &gpuConfig{ID: string(o.Token), Count: max(o.GPUCount, 1)}
+}
+
+func cpuFor(o node.Offer) *cpuConfig {
+	if !o.IsCPU() {
+		return nil
+	}
+	return &cpuConfig{ID: string(o.Token), VcpuCount: o.VCPU}
+}
+
+// cpuOffers lists CPU-only machines.
+//
+// A separate call from the GPU catalogue because it is a separate endpoint
+// with a different shape, and a separate request because asking for both on
+// every Offers call would double the latency of the common case to serve the
+// rare one.
+func (p *Provider) cpuOffers(ctx context.Context, f node.Filter) ([]node.Offer, error) {
+	q := url.Values{}
+	q.Set("include", "AVAILABILITY")
+	// Required: the endpoint refuses include=AVAILABILITY without it,
+	// because availability differs between pods and serverless.
+	q.Set("product", "POD")
+
+	var resp listCpuTypesResponse
+	if err := p.HTTP.Get(ctx, "/v2/catalog/cpus?"+q.Encode(), &resp); err != nil {
+		return nil, fmt.Errorf("list runpod cpu types: %w", err)
+	}
+
+	offers := mapCPUOffers(resp.Cpus, f.Region, f.MinCount)
+	if f.Region != "" && len(offers) == 0 && len(resp.Cpus) > 0 {
+		return nil, fmt.Errorf("%w: no CPU machine is available in %s, where the store lives",
+			node.ErrNoCapacity, f.Region)
+	}
+	return provider.FilterOffers(f, offers), nil
 }

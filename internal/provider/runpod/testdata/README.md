@@ -195,3 +195,19 @@ pull is about 11.9 minutes either way, so dropping the volume read from a
 documented 133 s to a measured 40 s moves the break-even from roughly six
 runs a month to five. The conclusion was robust because the pull dominates,
 which is worth knowing even when a measurement agrees with you.
+
+### `cpus.json`
+
+The CPU catalogue, captured live on 2026-10-30, trimmed to two families.
+`GET /v2/catalog/cpus` refuses `include=AVAILABILITY` without `product=POD` --
+"availability differs by product context" -- which is why the request carries
+both.
+
+Note the price: `securePerVcpu`, per core and per hour, not per machine. The
+cheapest family is $0.03, so the two-core minimum is **$0.06/hour against
+$0.89 for an RTX 4090** -- which is the whole argument for renting one of
+these to fill a store.
+
+And a limit that is enforced but not published: a CPU pod refuses a container
+disk above 20 GiB ("Container Disk must be less than or equal to 20"). GPU
+pods have no such ceiling. `node.CPUMaxDiskGiB` holds the measured figure.

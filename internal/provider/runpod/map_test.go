@@ -723,3 +723,86 @@ func TestRegionOffers_SkipsASiteWithNoCapacity(t *testing.T) {
 		t.Errorf("a site reporting NONE produced %+v", got)
 	}
 }
+
+func cpuCatalogue() []cpuType {
+	return []cpuType{
+		{
+			ID: "cpu3c", Name: "Compute-Optimized", RAMPerVCPU: 2,
+			Vcpu: cpuRange{Min: 2, Max: 32}, Price: cpuPrice{SecurePerVcpu: 0.03},
+			Availability: "HIGH",
+			DataCenters:  []dataCentre{{ID: "EU-RO-1", Availability: "HIGH"}, {ID: "US-KS-2", Availability: "LOW"}},
+		},
+		{
+			ID: "cpu3m", Name: "Memory-Optimized", RAMPerVCPU: 8,
+			Vcpu: cpuRange{Min: 2, Max: 32}, Price: cpuPrice{SecurePerVcpu: 0.055},
+			Availability: "HIGH",
+			DataCenters:  []dataCentre{{ID: "EU-RO-1", Availability: "HIGH"}},
+		},
+		{
+			// Nothing anywhere: must not be offered.
+			ID: "cpu9x", Name: "Phantom", RAMPerVCPU: 4,
+			Vcpu: cpuRange{Min: 2, Max: 8}, Price: cpuPrice{SecurePerVcpu: 0.02},
+			Availability: "NONE",
+			DataCenters:  []dataCentre{{ID: "EU-RO-1", Availability: "NONE"}},
+		},
+	}
+}
+
+func TestMapCPUOffers_PricesPerMachineAndSortsCheapestFirst(t *testing.T) {
+	got := mapCPUOffers(cpuCatalogue(), "EU-RO-1", 0)
+	if len(got) != 2 {
+		t.Fatalf("got %d offers, want the two with capacity: %+v", len(got), got)
+	}
+	// Cheapest first, because the whole point of renting one of these is
+	// that it is the cheapest thing that can download a file.
+	if got[0].Token != "cpu3c" {
+		t.Errorf("order = %v", []node.OfferToken{got[0].Token, got[1].Token})
+	}
+	// Per machine, not per core: that is what a budget ceiling compares
+	// against and what Price means everywhere else in this program.
+	if want := node.RateFromUSD(0.06); got[0].Price != want {
+		t.Errorf("price = %v, want %v for 2 cores at $0.03", got[0].Price, want)
+	}
+	if !got[0].IsCPU() {
+		t.Error("a CPU offer did not report IsCPU")
+	}
+	if got[0].GPUCount != 0 || got[0].VRAM != 0 {
+		t.Errorf("a CPU offer carries GPU fields: %+v", got[0])
+	}
+	if got[0].Region != "EU-RO-1" {
+		t.Errorf("region = %q", got[0].Region)
+	}
+}
+
+func TestMapCPUOffers_HonoursTheRequestedCores(t *testing.T) {
+	got := mapCPUOffers(cpuCatalogue(), "EU-RO-1", 8)
+	if got[0].VCPU != 8 {
+		t.Fatalf("vcpu = %d, want 8", got[0].VCPU)
+	}
+	if want := node.RateFromUSD(0.24); got[0].Price != want {
+		t.Errorf("price = %v, want %v for 8 cores", got[0].Price, want)
+	}
+
+	// Below the family minimum is raised to it rather than refused: asking
+	// for one core is asking for the cheapest machine, and that is what the
+	// minimum is.
+	if raised := mapCPUOffers(cpuCatalogue(), "EU-RO-1", 1); raised[0].VCPU != 2 {
+		t.Errorf("vcpu = %d, want the family minimum", raised[0].VCPU)
+	}
+	// Above the maximum is dropped, because the provider would refuse it.
+	if over := mapCPUOffers(cpuCatalogue(), "EU-RO-1", 64); len(over) != 0 {
+		t.Errorf("got %+v for more cores than any family has", over)
+	}
+}
+
+func TestMapCPUOffers_SkipsASiteWithNoCapacity(t *testing.T) {
+	// A store pins placement, so a family listed everywhere but unavailable
+	// where the weights are is not an offer.
+	if got := mapCPUOffers(cpuCatalogue(), "XX-NOWHERE-9", 0); len(got) != 0 {
+		t.Errorf("got %+v for a datacentre nothing is in", got)
+	}
+	// Without a region the global availability is what counts.
+	if got := mapCPUOffers(cpuCatalogue(), "", 0); len(got) != 2 {
+		t.Errorf("got %d offers unfiltered, want 2", len(got))
+	}
+}
