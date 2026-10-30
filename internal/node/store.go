@@ -68,7 +68,21 @@ type Store struct {
 	// datacentre a node that mounts it can be placed in. Empty means the
 	// provider does not pin stores to a region.
 	Region string
+
+	// Price is what this provider charges per GiB per month, filled in by the
+	// provider exactly as Offer.Price is.
+	//
+	// It travels with the store rather than being looked up where it is
+	// printed, because the rate is the provider's fact and differs by tier:
+	// RunPod charges $0.07/GiB/month below a terabyte, $0.05 above it and
+	// $0.14 for high-performance, and the local provider charges nothing. A
+	// caller that had to know which was which to print a cost would be a
+	// caller that could print the wrong one.
+	Price StorePrice
 }
+
+// Monthly is what this store costs every month for as long as it exists.
+func (s Store) Monthly() MicroUSD { return s.Price.Monthly(s.SizeGiB) }
 
 func (s Store) String() string {
 	r := s.Region

@@ -48,6 +48,27 @@ const (
 	// KindUnreachable means a provider could not be asked. "I could not check
 	// RunPod" must never render as a clean bill of health.
 	KindUnreachable
+
+	// KindStore is a persistent store and what it costs per month.
+	//
+	// Informational, and deliberately not attention-worthy. A store existing
+	// is the expected state -- it was created on purpose, by a command the
+	// operator had to type -- and ember cannot tell one that is finished with
+	// from one being kept between runs. Making every store exit `ember ls`
+	// non-zero would teach the operator to ignore exit 2, which is worse than
+	// not flagging: the same reasoning that leaves an untracked *node*
+	// reported but unreaped.
+	//
+	// What this kind does guarantee is that the charge is said out loud on
+	// every run. Visibility is the control here, not classification.
+	//
+	// It is last in this list, which gives it the highest value, and Scan
+	// sorts worst-first by that value -- so a store would sort above a
+	// destroy-failed node if the two lists were ever merged and sorted
+	// together. Scan never emits this kind and ScanStores sorts by
+	// NeedsAttention rather than by value, so today nothing does; anyone
+	// merging them later has to sort deliberately.
+	KindStore
 )
 
 var kindNames = map[Kind]string{
@@ -57,6 +78,7 @@ var kindNames = map[Kind]string{
 	KindExpired:       "expired",
 	KindDestroyFailed: "destroy-failed",
 	KindUnreachable:   "unreachable",
+	KindStore:         "store",
 }
 
 func (k Kind) String() string {
@@ -68,7 +90,19 @@ func (k Kind) String() string {
 
 // NeedsAttention reports whether a finding of this kind should make
 // `ember ls` exit non-zero.
-func (k Kind) NeedsAttention() bool { return k != KindOK }
+//
+// A switch rather than `k != KindOK`, so that a kind added later needs
+// attention by default and its author has to decide otherwise in writing.
+// The exemptions are the two states that are not problems: a node behaving,
+// and a store existing.
+func (k Kind) NeedsAttention() bool {
+	switch k {
+	case KindOK, KindStore:
+		return false
+	default:
+		return true
+	}
+}
 
 // Finding is one thing worth saying about one node or provider.
 type Finding struct {
@@ -83,16 +117,38 @@ type Finding struct {
 	// has the provider's rate only if the listing carried one, and no idea
 	// when it started unless the label's deadline implies it.
 	Accrued *node.Billing
+
+	// Store is the store this finding is about, where it is about one.
+	Store *node.Store
+
+	// Monthly is what that store costs every month.
+	//
+	// Separate from Accrued because the two are different claims and reading
+	// one as the other would be the wrong kind of wrong. Accrued is money
+	// already spent, and it stops when the node is destroyed. Monthly is
+	// money that keeps being spent until somebody removes the store -- there
+	// is no deadline, no reaper and no Ctrl-C that ends it.
+	Monthly node.MicroUSD
 }
 
 func (f Finding) String() string {
 	id := "-"
-	if !f.Node.Handle.IsZero() {
+	switch {
+	case f.Store != nil:
+		id = f.Store.Handle.String()
+	case !f.Node.Handle.IsZero():
 		id = f.Node.Handle.String()
-	} else if f.Record != nil {
+	case f.Record != nil:
 		id = string(f.Provider) + "/" + string(f.Record.RunID)
 	}
 	s := fmt.Sprintf("%-14s %-28s %s", f.Kind, id, f.Reason)
+	if f.Store != nil && f.Monthly > 0 {
+		// Per month, and said so, because every other figure this command
+		// prints is a total already spent. A reader who skimmed "$2.80" off
+		// a store line and off an orphan line would have read two very
+		// different numbers the same way.
+		s += fmt.Sprintf(" [%s/month]", f.Monthly)
+	}
 	if f.Accrued != nil && !f.Accrued.Free() {
 		// What it has cost so far, on the same line. "An orphaned H100 burns
 		// 175 roubles an hour in silence" is the whole reason this command
@@ -329,6 +385,17 @@ func Reap(ctx context.Context, reg *provider.Registry, store *statestore.Store, 
 
 	for _, f := range fs {
 		if f.Kind != KindExpired {
+			continue
+		}
+		// A store is never reaped, whatever kind it somehow arrived as.
+		// Destroy here takes a node.Handle, and a store finding carries a
+		// zero one -- so without this the call would be made against an empty
+		// handle and the error blamed on the provider. The guard is cheap and
+		// the failure it prevents is the expensive one: these are the two
+		// resources with different lifetimes, and the whole reason StoreAPI
+		// is a separate interface is that nothing which destroys a node
+		// should ever be handed a store.
+		if f.Store != nil {
 			continue
 		}
 		p, err := reg.Get(f.Provider)

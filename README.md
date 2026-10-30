@@ -222,6 +222,42 @@ Nothing secret is ever passed as a command-line flag, because
 `/proc/<pid>/cmdline` is world-readable — on a rented machine, readable by
 whoever else is on that host.
 
+### Stores
+
+A **store** is persistent storage that outlives the node that mounts it —
+RunPod calls it a network volume. It exists so model weights stop being baked
+into the workload image: a `COPY`'d checkpoint gets a layer digest that is
+yours alone and can never hit a shared cache on any host, and at 14 GB per
+expert a modern video model exceeds the registry's per-layer limit outright.
+
+```yaml
+store:
+  name: models          # the provider sees `ember-store-models`
+  size_gib: 40          # minimum 10, which is what the API enforces
+  region: EU-RO-1       # a store pins every node that mounts it to its own datacentre
+  mount: /models        # default; /workspace and /root are refused
+```
+
+Naming a store here does **not** create it — `ember store create` does, and
+nothing that rents a node will bring one into existence as a side effect. A
+store is a standing monthly charge with no deadline, no reaper and no Ctrl-C
+that ends it, so it takes a command somebody typed.
+
+`ember ls` prints every store ember owns and what it costs per month, on every
+run, including the run where there are no nodes at all — the clean-bill-of-
+health case is exactly the one a charge with nothing attached would otherwise
+hide in. It does not call an unused store a leak: ember cannot tell one that
+is finished with from one being kept between runs, and a line that said
+"leaked" about weights you deliberately uploaded invites an `ember store rm`
+that costs a re-upload. It names the command and leaves the decision alone.
+
+`mount` is refused if it would shadow `/root` or `/etc`, which hold the
+authorized_keys and host key `embernode` writes at startup — a store there
+leaves sshd with neither and a handshake failure that reads exactly like an
+attack. `/workspace` is refused too: it is the provider's default mount path
+*and* where ember writes outputs, so a store there bills for every render for
+as long as the store exists.
+
 ## Licence
 
 MIT.

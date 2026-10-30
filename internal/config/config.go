@@ -80,7 +80,60 @@ type Config struct {
 	// node open with its ports forwarded, which is the interactive shape.
 	// Set, ember runs it, brings the outputs home and destroys the node.
 	Cmd []string `yaml:"cmd"`
+
+	// Store names the persistent store this configuration uses, if any.
+	Store StoreConfig `yaml:"store"`
 }
+
+// StoreConfig names a persistent store and where it is mounted.
+//
+// Called StoreConfig and not Store because this package already refers to
+// node.Store, and two types a line apart with the same name and different
+// meanings is how the wrong one gets passed.
+//
+// Naming a store here does not create it. A store is a standing monthly
+// charge, so bringing one into existence takes `ember store create` and an
+// operator who typed it; a config that silently created one would be a config
+// that bills for a typo.
+type StoreConfig struct {
+	// Name is ember's name for the store, without the label prefix.
+	Name string `yaml:"name"`
+
+	// SizeGiB is what `ember store create` asks for. It is not enforced
+	// against an existing store: providers let a volume grow and never
+	// shrink, so a number here that disagrees with reality is reported
+	// rather than acted on.
+	SizeGiB int `yaml:"size_gib"`
+
+	// Region is the datacentre the store lives in. A store pins every node
+	// that mounts it to its own datacentre, so this is read when choosing an
+	// offer and not only when creating.
+	Region string `yaml:"region"`
+
+	// Mount is where the store is attached inside the node. Empty means
+	// DefaultMount.
+	Mount string `yaml:"mount"`
+}
+
+// DefaultMount is where a store is attached when the config does not say.
+//
+// Not /workspace, which is the provider default and also where ember writes
+// outputs: a store mounted there would bill for every render for as long as
+// the store exists. node.MountAt refuses that path outright; this is the
+// value that keeps anyone from having to find out.
+const DefaultMount = "/models"
+
+// StoreMount is where this configuration attaches its store.
+func (c Config) StoreMount() (node.Mount, error) {
+	p := c.Store.Mount
+	if p == "" {
+		p = DefaultMount
+	}
+	return node.MountAt(p)
+}
+
+// HasStore reports whether this configuration names a store.
+func (c Config) HasStore() bool { return c.Store.Name != "" }
 
 // Default is what ember uses with no file and no flags.
 func Default() Config {
