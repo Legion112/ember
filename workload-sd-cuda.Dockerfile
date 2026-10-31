@@ -94,10 +94,38 @@ RUN test -n "${CUDA_ARCH}" || { \
     cd /src \
  && cmake -B build -DSD_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}-real" \
+      -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
  && cmake --build build --config Release -j"$(nproc)" \
  && mkdir -p /out \
  && find build -name 'sd-cli' -type f -exec cp {} /out/ \; \
  && find build -name '*.so*' -type f -exec cp -P {} /out/ \;
+
+# GGML_NATIVE=OFF, because ON compiles -march=native -- for the machine doing
+# the build.
+#
+# ggml defaults it ON, so the published image was compiled for whatever CPU the
+# GitHub runner happened to have. Measured from the same Dockerfile and the
+# same source:
+#
+#   built on a Zen 3 5950X (no AVX-512)   0 zmm references
+#   built on a GitHub runner              23,458 zmm references
+#
+# A binary full of AVX-512 runs on the hosts that have it and dies on the ones
+# that do not. On a rented RTX A4000 this was:
+#
+#   ggml_cuda_init: found 1 CUDA devices ... compute capability 8.6
+#   Illegal instruction (core dumped)
+#
+# which is a SIGILL on the host CPU and has nothing to do with CUDA -- an
+# earlier run of the same tag on a different host had worked. So the same
+# digest behaved differently on two machines, which is worse than the :latest
+# problem pinning exists to prevent: there, two runs ran different software;
+# here, the identical bytes do different things and nothing in the reference
+# can warn you.
+#
+# AVX2, FMA and F16C are Haswell, 2013, and universal on anything rentable.
+# The CPU path barely matters here anyway -- the work is on the GPU -- so a
+# baseline that runs everywhere is the right trade.
 
 # What nvcc actually emitted, checked here rather than asserted later.
 #
@@ -122,6 +150,21 @@ RUN set -eu; \
       echo "this image was asked for sm_${CUDA_ARCH} and the binary carries [${elf:-none}]."; \
       echo "A card with no matching kernel does not fail -- it runs on the CPU backend"; \
       echo "at the GPU's price -- so the image is not published."; \
+      exit 1; \
+    fi; \
+    command -v objdump >/dev/null 2>&1 || { \
+      echo "objdump is missing, so the AVX-512 check cannot run."; \
+      echo "It is not optional: a check that skips itself reports success for something"; \
+      echo "that never ran, and what it guards is a binary that dies with SIGILL on"; \
+      echo "hosts the build machine does not resemble."; \
+      exit 1; }; \
+    zmm=$(objdump -d --no-show-raw-insn /out/sd-cli | grep -coE '%zmm[0-9]+' || true); \
+    echo "AVX-512: ${zmm} zmm references"; \
+    if [ "${zmm}" != "0" ]; then \
+      echo "the binary uses AVX-512, which not every host that rents a GPU has."; \
+      echo "A host without it does not run slowly, it dies: SIGILL, 'Illegal instruction',"; \
+      echo "after CUDA has already initialised and with nothing naming the CPU as the cause."; \
+      echo "GGML_NATIVE must be OFF: ON means -march=native, for the build machine."; \
       exit 1; \
     fi; \
     if [ -n "$ptx" ]; then \
