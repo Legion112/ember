@@ -364,9 +364,12 @@ costs when the weights cross PCIe per layer. `sd-cli` will stream them
 (`--offload-to-cpu`) and its auto-fit planner already does when VRAM is short,
 so it is slow rather than impossible; how slow is unmeasured.
 
-Running the published image on an unsupported card does **not** fail. It finds
-no usable kernel, falls back to the CPU backend, and looks like a very slow
-success — which is what `images:` and `gpu_probe` below are both for.
+Running the published image on an unsupported card aborts: ggml raises `no
+kernel image is available for execution on the device` and sd-cli dies about a
+second into the first generation. Loud, but late — the node exists, the image
+is pulled and the weights are fetched before it happens, and all of that is
+billed. `images:` is what moves the refusal to before the rental, and
+`gpu_probe` is what catches a hand-pinned mismatch the map cannot see.
 
 The local provider reports a real offer when it finds a card, so `ember
 offers` and `min_vram_gib` work the way they do against a cloud provider.
@@ -427,9 +430,18 @@ not tight anyway: a rented RTX 4090 reported driver 595.91.07 with
 
 ### Choosing the image by the card
 
-An image built for one CUDA architecture does not fail on a card it has no
-kernel for. It falls back to the CPU backend and bills a GPU to run there, so
-the cheapest moment to catch a mismatch is before anything is rented.
+An image built for one CUDA architecture does not run on a card it has no
+kernel for. Measured, on a rented RTX 2000 Ada carrying an `sm_75` image:
+
+```
+[E] ggml: CUDA error: no kernel image is available for execution on the device
+/src/ggml/src/ggml-cuda/ggml-cuda.cu:113: CUDA error
+Aborted (core dumped)
+```
+
+It aborts about a second into the first generation — but only after the node
+exists, the image is pulled and the weights are fetched, which is all billed.
+So the cheapest moment to catch a mismatch is before anything is rented.
 
 `images:` maps a compute capability to the image built for it, and ember picks
 the entry for the card it is about to rent:

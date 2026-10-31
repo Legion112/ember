@@ -538,11 +538,12 @@ type resolved struct {
 //     had and always will: the CPU workload variant and the node image have no
 //     architecture either.
 //   - An images: map with no entry for this card REFUSES. It does not fall
-//     back to image:. Falling back would run an image built for another
-//     architecture, and that does not fail -- sd-cli finds no usable kernel,
-//     drops to the CPU backend, and bills a GPU to do it. That is the failure
-//     internal/gpucheck exists to catch, and catching it here costs nothing
-//     because nothing has been rented yet.
+//     back to image:. A wrong-architecture image aborts -- measured: ggml
+//     raises "no kernel image is available for execution on the device" and
+//     sd-cli dies with SIGABRT about a second into the first generation --
+//     but it aborts after the node exists, the image is pulled and the
+//     weights are fetched, all of which is billed. Refusing here costs
+//     nothing, because nothing has been rented yet.
 func resolveImage(cfg config.Config, offer node.Offer) (string, string, error) {
 	images, err := cfg.ParseImages()
 	if err != nil {
@@ -594,8 +595,9 @@ func resolveImage(cfg config.Config, offer node.Offer) (string, string, error) {
 		}
 		sort.Strings(have)
 		return "", "", fmt.Errorf("no image for %s, which is what %s is; images: has %v.\n"+
-			"ember will not fall back to image: here: an image built for another architecture does "+
-			"not fail on this card, it runs on the CPU backend and bills the GPU for it.\n"+
+			"ember will not fall back to image: here. A wrong-architecture image aborts on this "+
+			"card -- \"no kernel image is available for execution on the device\" -- but only "+
+			"after the node exists, the image is pulled and the weights are fetched, all billed.\n"+
 			"Publish one with `make publish-sd-cuda CUDA_ARCH=%d` and add its digest under %s",
 			cap, offer.GPU, have, int(cap), cap.Key())
 	}

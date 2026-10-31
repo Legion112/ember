@@ -275,8 +275,9 @@ func TestWorkloadImage_CarriesOneArchitectureAndNoPTX(t *testing.T) {
 	if got := l.ImageLabel(ctx, image, "ember.cuda-arch"); got != strconv.Itoa(want) {
 		t.Errorf("%s is labelled ember.cuda-arch=%q but this run asked for sm_%d.\n"+
 			"The label is what a published image says about itself, so a wrong one is a digest "+
-			"an operator files under the wrong images: key -- and ember would then run it on a "+
-			"card it has no kernel for, which does not fail, it runs on the CPU at the GPU's price.",
+			"an operator files under the wrong images: key -- and ember would then rent a card "+
+			"this image has no kernel for, pull it, fetch the weights, and abort with \"no kernel "+
+			"image is available for execution on the device\", all of it billed.",
 			image, got, want)
 	}
 

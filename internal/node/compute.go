@@ -24,11 +24,21 @@ type ComputeCap int
 // answers rather than two.
 //
 // NormalizeGPU promises never to reject a card it has not heard of, so a
-// lookup miss cannot be an error. It must not be a guess either: an image
-// built for the wrong architecture does not fail on a card, it finds no usable
-// kernel and falls back to the CPU backend at the GPU's price -- the same
-// failure internal/gpucheck exists to catch, arrived at before the node is
-// even created, which is where it is free to catch.
+// lookup miss cannot be an error. It must not be a guess either, and what a
+// guess costs was measured rather than assumed: an image built for the wrong
+// architecture aborts. ggml raises "no kernel image is available for
+// execution on the device" and sd-cli dies with SIGABRT about a second in,
+// after the pull and after any weights have been fetched.
+//
+// That is louder than this comment used to claim -- it said the run falls
+// back to the CPU backend and bills a GPU to sit there. Measured on two
+// cards, with and without PTX in the binary, it does not: it crashes. The
+// CPU-fallback story belongs to a different failure, the one
+// internal/gpucheck was written for, where CUDA never initialises at all.
+//
+// Refusing here is still worth it, for the reason that survives: the abort
+// happens after a node exists and has been paid for, and this happens before
+// one is asked for.
 //
 // And a card with no CUDA capability at all is a different answer from one
 // ember has never heard of. RunPod really lists AMD Instinct MI300X; the

@@ -148,8 +148,9 @@ RUN set -eu; \
     echo "PTX:  ${ptx:-none}"; \
     if [ "$elf" != "sm_${CUDA_ARCH}" ]; then \
       echo "this image was asked for sm_${CUDA_ARCH} and the binary carries [${elf:-none}]."; \
-      echo "A card with no matching kernel does not fail -- it runs on the CPU backend"; \
-      echo "at the GPU's price -- so the image is not published."; \
+      echo "A card with no matching kernel aborts on the first launch -- \"no kernel"; \
+      echo "image is available for execution on the device\" -- but only after a node has"; \
+      echo "been rented, the image pulled and the weights fetched. So it is not published."; \
       exit 1; \
     fi; \
     command -v objdump >/dev/null 2>&1 || { \

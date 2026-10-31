@@ -24,8 +24,9 @@ type GPU struct {
 
 	// ComputeCap is "7.5" as nvidia-smi spells it. Carried because it is the
 	// number that decides whether the image can run here at all: a binary
-	// built without this architecture and without PTX below it does not fail
-	// on such a card, it falls back to the CPU backend.
+	// built without this architecture aborts on such a card, with "no kernel
+	// image is available for execution on the device", once something launches
+	// a kernel. node.Offer.MeasuredCap is where it goes.
 	ComputeCap string
 }
 
