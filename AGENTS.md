@@ -540,6 +540,63 @@ A leaked node bills by the hour in silence. These are not style preferences.
   came from one free `GET` and one deliberately-invalid `POST` made before any
   client code existed — which is the cheapest calibration in this repository
   and the model for the rest. See `internal/provider/runpod/testdata/README.md`.
+  It happened a second time, with `allowedCudaVersions`: `rest.runpod.io/v1/pods`
+  accepts it, `api.runpod.io/v2/pods` — where ember creates — declares eighteen
+  properties with `unevaluatedProperties: false` and answers `422` to anything
+  else. `min_cuda` was built from the published schema and made every create
+  fail. The lesson did not stick the first time because the field was read from
+  a *schema* rather than from a *response*.
+- **Nothing is compiled on a rented machine.** The program that runs on a node
+  was compiled before the rental began. `CUDA_ARCHS` is gone and
+  `CMAKE_CUDA_ARCHITECTURES` is `NN-real`, so the binary carries machine code
+  for exactly one architecture and no PTX: PTX JITs forward only, so it can
+  never help an older card, and on a newer one it means the driver compiling
+  150 kernel modules at first launch, on a cold cache, on every pod, billed by
+  the second and reported by nothing. Same rule and same reason as the ban on
+  Python and other scripting languages — a runtime that compiles or interprets
+  on arrival is buying a compiler with GPU time. If a toolchain cannot emit
+  code for a card ahead of time, the answer is a newer toolchain.
+- **A wrong-architecture image aborts, loudly and too late.** Measured on two
+  rented cards and once locally: ggml raises `no kernel image is available for
+  execution on the device` and sd-cli dies with SIGABRT about a second into the
+  first generation. It does *not* silently run on the CPU — seven comments in
+  this repository used to say it did, and they were wrong; that story belongs
+  to `internal/gpucheck`, where CUDA never initialises at all. But the abort
+  happens after a node exists, the image is pulled and the weights are fetched,
+  all of it billed — so `images:` refuses a card it has no entry for before
+  renting, and never falls back to `image:`.
+- **The image is not built for the machine that builds it.** ggml defaults
+  `GGML_NATIVE` to on, which is `-march=native`. From the same Dockerfile and
+  the same source: 0 AVX-512 instructions built on a Zen 3 desktop, 23,458
+  built on a GitHub runner. A rented RTX A4000 answered `Illegal instruction
+  (core dumped)` after CUDA had already initialised, while the same tag had
+  generated an image on another host twenty minutes earlier. The identical
+  digest doing different things on different machines is worse than the
+  `:latest` problem pinning exists to prevent, because nothing in the reference
+  can warn you. `GGML_NATIVE=OFF`, and the build refuses a single `zmm`.
+- **An entry in the card table is a claim about hardware, so rent the card.**
+  The old lab table grouped `"NVIDIA B200 / B300 SXM6"` at `sm_100`. A B300
+  reports compute capability **10.3**. Twenty-four cents of a $8.99/hour card
+  settled it, against every future rental of one aborting on a missing kernel.
+  The two RTX PRO 6000 MIG partitions went the other way: excluded because
+  nobody had tried `sd-cli` on a slice, and one rendered at 9.73 it/s. Both
+  answers cost two minutes.
+- **The image's `ENV` does not reach anything sshd starts.** ember runs the
+  probe and the workload as `ssh host command`, and sshd builds a fresh
+  environment per session: `EMBER_CUDA_ARCH=89` is in the image, visible to
+  `docker run`, and empty over SSH. This Dockerfile already knew it about
+  `LD_LIBRARY_PATH` three lines away. So the architecture is written to
+  `/etc/ember-cuda-arch` as well, and the image lab asserts the *file* through
+  `ExecOut` — the question is what a workload can see, not what the image
+  declares. A probe comparing a card against an empty string refuses every run,
+  including the correct ones.
+- **`gpu_probe` as documented does not catch a wrong architecture.**
+  `sd-cli --list-devices | grep -qi cuda` exits zero on an image built for
+  another card, because listing devices asks the driver what hardware exists
+  and launches no kernel. Measured: the probe passed, the workload started, and
+  it aborted after a 1.6 GB weight fetch. A probe that compares
+  `/etc/ember-cuda-arch` to the card's own `compute_cap` refuses it — verified
+  in both directions, rejecting sm_75-on-sm_89 and admitting sm_120-on-sm_120.
 
 ## Style
 
