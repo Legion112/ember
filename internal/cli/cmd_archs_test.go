@@ -67,7 +67,12 @@ func TestArchs_RefusesAnArchitectureNoCardNeeds(t *testing.T) {
 	// what the workflow passes when its dispatch box is left blank. "," is,
 	// because that is a list with nothing in it rather than no list. Whitespace
 	// is trimmed to blank for the same reason: a dispatch box can hold a space.
-	for _, bad := range []string{"sm_103", "103", "90;100", "ninety", ","} {
+	// sm_70 and sm_61 are real NVIDIA architectures that ember has no card
+	// for, which is the case this refuses. They are not arbitrary: sm_103 was
+	// the example here until a rented B300 turned out to be sm_103, at which
+	// point this test was asserting that a published architecture was
+	// unpublishable. Pick something no catalogue will grow into.
+	for _, bad := range []string{"sm_70", "70", "61", "90;100", "ninety", ","} {
 		var out bytes.Buffer
 		err := runArchs([]string{"--only", bad}, &out)
 		if err == nil {
