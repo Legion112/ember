@@ -1,43 +1,109 @@
-# Publishes the CUDA workload image: a node that can generate on a GPU.
+# Publishes the CUDA workload images: one per GPU architecture.
 #
 # Built in CI rather than on a laptop for two reasons. The token already has
-# the scope, so nobody holds a registry credential locally; and the image is
-# several gigabytes, which a home upload link makes painful while a runner
-# pushes it inside GitHub's own network.
+# the scope, so nobody holds a registry credential locally; and the images are
+# several gigabytes each, which a home upload link makes painful while a runner
+# pushes inside GitHub's own network.
 #
 # Manual only. Compiling stable-diffusion.cpp against the CUDA toolkit takes
 # tens of minutes, and nothing in it changes when a Go file does.
 #
-# It no longer bakes in a checkpoint. Weights go on a store, which is why this
-# workflow stopped needing a model URL, a digest to verify it with, and the
-# disk to hold all three copies.
+# One image per architecture, not one fat image. A card outside a fat image's
+# architecture list does not fail on it -- it finds no usable kernel, runs on
+# the CPU backend and bills the GPU for it -- and the list was kept narrow
+# precisely because every entry cost build time. A matrix dissolves that: the
+# wall clock is one compile rather than seven. ember then picks the image for
+# the card it rented, from the `images:` map this workflow prints at the end.
 name: workload image
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: image tag
+        description: tag prefix for the published images
         required: true
         default: sd-cuda
+      archs:
+        description: >
+          architectures to build, comma separated. Empty builds every one ember
+          publishes. A single one is how a failed architecture is republished
+          without rebuilding the six that were fine.
+        required: false
+        default: ""
+
+# One dispatch at a time, and never cancelled.
+#
+# Seven jobs pushing into one repository is already a fan-out; two dispatches
+# would interleave, and the aggregate report of the first would name digests
+# the second had moved its tags off. cancel-in-progress is false because what
+# gets cancelled here is a push: a job killed between its two `docker push`
+# calls leaves one tag on the new digest and one on the old.
+concurrency:
+  group: workload-image
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  # What to build, read out of the Go that also justifies it.
+  #
+  # The architecture list is node.KnownCaps, which sits beside the table of
+  # cards that is the only reason any architecture is in it -- and a unit test
+  # fails when a card has no architecture or an architecture no card. Actions
+  # cannot read Go, so the list is printed rather than repeated here. A literal
+  # [75, 80, ...] in this file would be the defect PUBLISH_LABS was moved to
+  # the Makefile for: a list that drifted from the one it mirrored, where the
+  # single publish it guarded was the one place it did not run.
+  plan:
     runs-on: ubuntu-latest
-    # Measured, not guessed. A cold build of four architectures took 4264s
-    # -- 71 minutes -- of which 311s was the cache export. Against the old
-    # 90-minute ceiling that left 19 minutes, which is not a margin for a job
-    # that fails an hour in and has to start over.
+    timeout-minutes: 10
+    outputs:
+      archs: ${{ steps.archs.outputs.json }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # An architecture no card needs is refused here, by Go, naming the set it
+      # could have been. A typo in the dispatch box would otherwise buy twenty
+      # minutes of nvcc and an image nothing will ever run.
+      - name: decide what to build
+        id: archs
+        run: |
+          json=$(go run ./cmd/ember archs --json --only="${{ inputs.archs }}")
+          echo "building: $json"
+          echo "json=$json" >> "$GITHUB_OUTPUT"
+          go run ./cmd/ember archs --cards --only="${{ inputs.archs }}" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      # false, deliberately. With fail-fast one architecture failing cancels
+      # the six that were fine, and you learn about one per twenty-minute
+      # round. A partial set is also a safe state by construction: ember
+      # refuses a card with no `images:` entry before it rents anything, so six
+      # good images are six good images rather than a trap.
+      fail-fast: false
+      # No max-parallel. Each job has its own runner and its own disk, and the
+      # whole point of the matrix is that the wall clock is one architecture
+      # rather than seven.
+      matrix:
+        arch: ${{ fromJSON(needs.plan.outputs.archs) }}
+    # Measured per architecture, not for the whole set.
     #
-    # Cold is the uncommon case: it happens only when SD_COMMIT or CUDA_ARCHS
-    # changes, because the cache below keys on nothing else. A warm run should
-    # be the push and no compile at all, so a generous ceiling costs nothing
-    # on the runs that actually happen.
+    # The old ceiling was 180 minutes and the paragraph justifying it was
+    # arithmetic about building four architectures in one job: 1846s for two,
+    # 4264s for four, and "a fifth would not fit under 90". One architecture
+    # per job deletes that argument, and with it the claim that the list is
+    # bounded by the timeout -- which is the argument sm_75 was excluded by.
     #
-    # It is also the ceiling on how many architectures are affordable. Four
-    # cost 71 minutes; a fifth would not fit under 90 and would barely fit
-    # under this.
-    timeout-minutes: 180
+    # What is left to bound is one nvcc run. Those two measurements imply about
+    # 20 minutes of marginal cost per architecture on a four-vCPU runner, on
+    # top of a clone and a cmake configure; one architecture on a 32-thread
+    # workstation took 4m11s. 45 leaves room without being a ceiling that lets
+    # a wedged job burn an hour. The first matrix run is the real measurement
+    # and this number gets corrected from its log.
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -45,20 +111,22 @@ jobs:
       - uses: actions/checkout@v5
 
       # No "make room" step. It used to delete .NET, Android and GHC before
-      # building, because a CUDA devel base plus the build tree plus the
-      # final image plus a 1.76 GB checkpoint was thought not to fit.
+      # building, because a CUDA devel base plus the build tree plus the final
+      # image plus a 1.76 GB checkpoint was thought not to fit.
       #
       # The log says otherwise: the last run that did it reported 86 GB free
       # before the cleanup and 111 GB after, having spent two and a half
-      # minutes to free space nothing needed. Without the model baked in
-      # there is even less to hold. Removed rather than kept "just in case" --
-      # a precaution nobody can point at a failure for is one that just makes
-      # every build slower.
+      # minutes to free space nothing needed. A precaution nobody can point at
+      # a failure for is one that just makes every build slower.
 
-      - name: resolve the image name
+      - name: resolve the image and tag names
         run: |
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE=ghcr.io/$owner/ember-sd" >> "$GITHUB_ENV"
+          # Asked of make rather than spelled here. The local tag is also what
+          # the image lab and `make publish-sd-cuda` use, and two places
+          # computing "ember:sd-cuda-sm89" is one place to get it wrong.
+          echo "LOCAL_TAG=$(make -s print-SD_CUDA_IMAGE CUDA_ARCH=${{ matrix.arch }})" >> "$GITHUB_ENV"
 
       - uses: docker/login-action@v3
         with:
@@ -68,80 +136,136 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Built into the local daemon first, verified, and only then pushed.
+      # Built into the local daemon, verified, and only then pushed. Three
+      # claims from before the matrix survive it unchanged:
       #
-      # The assertions are about this image -- that it binds nothing but 22,
-      # that it carries no weights, that its embernode understands the
-      # subcommands ember invokes, and that its CUDA architectures cover the
-      # cards ember can rent -- so this is where they belong. Run in CI
-      # instead they would need a forty-minute compile on every pull request;
-      # run after the push they would find a bad image that had already
-      # shipped.
+      # Built exactly once. The image that gets tested is literally the image
+      # that gets pushed, rather than one a cache promises is identical.
       #
-      # Built exactly once. This used to build twice -- once to load and once
-      # to push -- and the measured cost of the second was 11 seconds, because
-      # it hit the builder cache. It is gone anyway: the image that gets
-      # tested is now literally the image that gets pushed, rather than one
-      # the cache promises is identical.
+      # The labs run here and not in CI. In CI they would need a twenty-minute
+      # compile on every pull request; after the push they would find a bad
+      # image that had already shipped.
       #
-      # cache-from/cache-to is the change that matters here. The sdbuild stage
-      # compiles stable-diffusion.cpp and all of ggml's CUDA kernels, keyed on
-      # nothing but SD_COMMIT and CUDA_ARCHS, and without a cache it ran from
-      # scratch on every dispatch: 1846 seconds, measured, against a 90-minute
-      # timeout. That cost is why the architecture list was kept too narrow to
-      # include the cards worth renting.
+      # The sdbuild stage keys on nothing but SD_COMMIT and CUDA_ARCH -- which
+      # is now also why each job needs its own cache scope. Seven jobs sharing
+      # one scope would not poison each other, because a cache key includes the
+      # build args and a wrong-architecture layer cannot be reused; they would
+      # simply overwrite each other's index, and every job would be cold
+      # forever.
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: workload-sd-cuda.Dockerfile
           load: true
           push: false
-          tags: ember:sd-cuda
-          cache-from: type=gha
-          # ignore-error because a cache is an optimisation. The export
-          # talking to the Actions cache service is not a reason to throw
-          # away a thirty-minute compile that succeeded.
-          cache-to: type=gha,mode=max,ignore-error=true
+          tags: ${{ env.LOCAL_TAG }}
+          # The Dockerfile's ARG has no default on purpose, so a path that
+          # forgot this line fails in the first RUN rather than producing a
+          # wrong-architecture image that looks correct.
+          build-args: |
+            CUDA_ARCH=${{ matrix.arch }}
+          cache-from: type=gha,scope=sd-cuda-sm${{ matrix.arch }}
+          # ignore-error because a cache is an optimisation. The export talking
+          # to the Actions cache service is not a reason to throw away a
+          # twenty-minute compile that succeeded.
+          cache-to: type=gha,scope=sd-cuda-sm${{ matrix.arch }},mode=max,ignore-error=true
 
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
-      # The lab set lives in the Makefile, not here.
+      # The lab set lives in the Makefile, not here -- it drifted once, and the
+      # one publish it guarded was the one place it did not run.
       #
-      # It used to be an expression in this file, and it drifted: a lab was
-      # added specifically to catch a published image whose embernode did not
-      # understand `embernode fetch`, and this `-run` never named it. The one
-      # publish it existed to guard was the one place it did not run. Both
-      # publish paths now ask make for the same set.
+      # docker-build first: the harness needs ember:lab for its own node, and
+      # the lab target checks for it rather than building it.
       #
-      # The video lab is not in it: it has to run sd-cli, and the CUDA binary
-      # needs libcuda.so.1 which this runner has no GPU to provide. It runs
-      # against the CPU build, which carries the same binary from the same
-      # pinned revision -- an agreement the ordinary lab suite checks on every
-      # pull request.
+      # CUDA_ARCH goes to the labs as well as to the build, and that is the
+      # point of it. The lab compares what this job *asked* for against the
+      # label the build baked, which is the only leg of the comparison the
+      # build itself cannot influence.
       - name: verify the image before publishing it
-        # docker-build first: the harness needs ember:lab for its own node, and
-        # the lab target checks for it rather than building it, the way every
-        # other image lab target does. `make publish-sd-cuda` gets it as a
-        # prerequisite; a runner has to ask for it.
-        run: make docker-build test-image-labs-publish
+        run: make docker-build test-image-labs-publish CUDA_ARCH=${{ matrix.arch }}
 
-      # Tagged and pushed, rather than built a second time. The bytes that
-      # were just tested are the bytes that ship.
+      # Tagged and pushed, rather than built a second time. The bytes that were
+      # just tested are the bytes that ship.
       - name: publish
-        id: build
+        id: publish
         run: |
-          docker tag ember:sd-cuda "$IMAGE:${{ inputs.tag }}"
-          docker tag ember:sd-cuda "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:${{ inputs.tag }}"
-          docker push "$IMAGE:${{ github.sha }}"
-          digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE:${{ inputs.tag }}")
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          moving="$IMAGE:${{ inputs.tag }}-sm${{ matrix.arch }}"
+          pinned="$IMAGE:${{ github.sha }}-sm${{ matrix.arch }}"
+          for t in "$moving" "$pinned"; do
+            docker tag "$LOCAL_TAG" "$t"
+            docker push "$t"
+          done
+
+          # The digest is cut out and the reference rebuilt from $IMAGE.
+          # RepoDigests is a list whose order nothing documents, and an image
+          # carrying two tags can report either first -- so a config built from
+          # element zero could name the wrong repository. Reading it back from
+          # the daemon after the push is still what proves the push landed: on
+          # an image that was never pushed the format errors rather than
+          # printing nothing.
+          ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$moving")
+          digest="sha256:${ref##*@sha256:}"
+          case "$digest" in
+            sha256:????????????????*) ;;
+            *) echo "::error::no digest for sm_${{ matrix.arch }} (read $ref)"; exit 1 ;;
+          esac
+
+          mkdir -p digests
+          printf '  sm_%s: %s@%s\n' "${{ matrix.arch }}" "$IMAGE" "$digest" \
+            > "digests/sm_${{ matrix.arch }}.yaml"
+          cat "digests/sm_${{ matrix.arch }}.yaml" >> "$GITHUB_STEP_SUMMARY"
+
+      # An artifact, because Actions does not merge matrix job outputs. A job
+      # output would be last-writer-wins: six digests silently gone, and an
+      # operator pasting the survivor over a complete map would take six cards
+      # away from themselves.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-sm_${{ matrix.arch }}
+          path: digests/sm_${{ matrix.arch }}.yaml
+          if-no-files-found: error
+
+  # One pasteable block, assembled by Go rather than by sort(1).
+  #
+  # if: always() so a run where one architecture failed still reports the six
+  # that published -- and still fails, naming the gap. "Published nothing" and
+  # "never reported" are different answers, and the exit status is how the
+  # difference is said out loud.
+  #
+  # The completeness check is Go because its failure branch is then unit
+  # tested. A shell `for` loop that errors on a missing file is a branch that
+  # never runs until the day it matters, and a snippet in a YAML file cannot be
+  # tested at all.
+  report:
+    needs: [plan, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-sm_*
+          path: digests
+          merge-multiple: true
 
       - name: report what to put in ember.yaml
         run: |
-          echo "### workload image published" >> "$GITHUB_STEP_SUMMARY"
-          echo '```yaml' >> "$GITHUB_STEP_SUMMARY"
-          echo "image: ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### workload images published"
+            echo '```yaml'
+          } >> "$GITHUB_STEP_SUMMARY"
+          go run ./cmd/ember images \
+            --from digests \
+            --archs '${{ join(fromJSON(needs.plan.outputs.archs), ",") }}' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          status=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
