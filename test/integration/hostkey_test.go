@@ -4,6 +4,7 @@ package integration
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -139,8 +140,53 @@ func assertListensOnlyOnSSH(t *testing.T, image string) {
 	// ss over the Docker API rather than over the tunnel: what is being
 	// tested is the image, and the question is what it binds before anything
 	// connects to it.
-	out := l.ExecOut(t.Context(), n.ID, "ss", "-H", "-ltn")
+	//
+	// Polled until sshd has bound, rather than read once. Reading once was a
+	// race: embernode starts sshd as a child, and on a loaded daemon the
+	// first ss can land before the bind -- which left `ports` empty and
+	// failed with "the parse is broken, not the image", a misleading message
+	// for a timing problem. Observed once while a 2.65 GB pull was in flight,
+	// and not reproducible afterwards, which is the worst shape a failure in
+	// a security lab can have: it teaches whoever sees it to run it again.
+	//
+	// The wait is for 22 specifically and not for "any listener", because
+	// "any" is satisfied by exactly the thing this lab exists to catch.
+	var out string
+	var ports []string
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		out = l.ExecOut(t.Context(), n.ID, "ss", "-H", "-ltn")
+		ports = listeningPorts(out)
+		if slices.Contains(ports, "22") || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if len(ports) == 0 {
+		t.Fatalf("nothing is listening after %v, not even sshd; embernode did not come up:\n%s",
+			15*time.Second, out)
+	}
+	if !slices.Contains(ports, "22") {
+		t.Fatalf("sshd never bound 22 within %v; found %v:\n%s", 15*time.Second, ports, out)
+	}
 
+	for _, p := range ports {
+		if p != "22" {
+			t.Errorf("the image listens on %s as well as 22; everything it binds is a candidate for a provider to publish. Listening sockets:\n%s", p, out)
+		}
+	}
+
+	// And specifically not the port RunPod proxies to the world.
+	if strings.Contains(out, "19123") {
+		t.Errorf("the image listens on RunPod's public proxy port:\n%s", out)
+	}
+}
+
+// listeningPorts reads the port column out of `ss -H -ltn`.
+//
+// Extracted so the poll above and the assertion below cannot disagree about
+// what counts as a listener.
+func listeningPorts(out string) []string {
 	var ports []string
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		f := strings.Fields(line)
@@ -154,18 +200,5 @@ func assertListensOnlyOnSSH(t *testing.T, image string) {
 		}
 		ports = append(ports, addr[i+1:])
 	}
-	if len(ports) == 0 {
-		t.Fatalf("no listening sockets found at all; the parse is broken, not the image:\n%s", out)
-	}
-
-	for _, p := range ports {
-		if p != "22" {
-			t.Errorf("the image listens on %s as well as 22; everything it binds is a candidate for a provider to publish. Listening sockets:\n%s", p, out)
-		}
-	}
-
-	// And specifically not the port RunPod proxies to the world.
-	if strings.Contains(out, "19123") {
-		t.Errorf("the image listens on RunPod's public proxy port:\n%s", out)
-	}
+	return ports
 }
