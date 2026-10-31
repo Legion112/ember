@@ -24,7 +24,7 @@ ENV CGO_ENABLED=0
 RUN go build -o /out/embernode ./cmd/embernode
 
 # ---- sd-cli, compiled with CUDA -------------------------------------------
-FROM nvidia/cuda:12.6.3-devel-ubuntu24.04@sha256:392c0df7b577ecae17a17f6ba7f2009c217bb4422f8431c053ae9af61a8c148a AS sdbuild
+FROM nvidia/cuda:13.0.1-devel-ubuntu24.04@sha256:7d2f6a8c2071d911524f95061a0db363e24d27aa51ec831fcccf9e76eb72bc92 AS sdbuild
 
 ARG SD_COMMIT=77b72a2
 
@@ -134,7 +134,30 @@ RUN set -eu; \
     fi
 
 # ---- the node itself -------------------------------------------------------
-FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04@sha256:92906d87596d638d35015c6353053121bd299d25943b875763321653884ba924
+# CUDA 13.0.1, and the version is a measurement rather than a preference.
+#
+# 12.6.3 could not emit code for Blackwell at all: CUDA_ARCH=100 and =120 both
+# fail in two seconds with "nvcc fatal: Unsupported gpu architecture", so the
+# B200 and the RTX PRO 6000 had no image that could run on them. sm_100 and
+# sm_120 need 12.8 at the earliest.
+#
+# 13.x rather than 12.8 because the host driver allows it, which is the only
+# thing that decides it. A CUDA 13 binary needs roughly a 580 driver, and a
+# probe of a rented RTX 4090 reported:
+#
+#   NVIDIA-SMI 595.91.07   Driver Version: 595.91.07   CUDA Version: 13.2
+#
+# so the fleet is ahead of the toolkit, with headroom. That probe cost
+# $0.004866. CUDA 13.0 also makes Turing the *minimum* supported architecture
+# -- it dropped Maxwell, Pascal and Volta -- so sm_75 is still buildable and
+# nothing ember publishes an image for was lost.
+#
+# The driver is not in this image and cannot be: the container runtime injects
+# libcuda.so.1 from the host, which is why that probe was the question. What
+# the image must carry is the CUDA *runtime*, and its sonames move with the
+# major version -- libcudart.so.13 now, not .so.12. Anything reasoning about
+# which libraries this image actually links has to be re-measured.
+FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04@sha256:c3fde347d52d578c84fd644bc177bc7ec333feaf11550d990da4084d7612e4c7
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
