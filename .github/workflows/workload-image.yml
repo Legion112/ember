@@ -106,12 +106,14 @@ jobs:
     # per job deletes that argument, and with it the claim that the list is
     # bounded by the timeout -- which is the argument sm_75 was excluded by.
     #
-    # What is left to bound is one nvcc run. Those two measurements imply about
-    # 20 minutes of marginal cost per architecture on a four-vCPU runner, on
-    # top of a clone and a cmake configure; one architecture on a 32-thread
-    # workstation took 4m11s. 45 leaves room without being a ceiling that lets
-    # a wedged job burn an hour. The first matrix run is the real measurement
-    # and this number gets corrected from its log.
+    # What is left to bound is one nvcc run, and the first matrix run measured
+    # it: sm_89 cold took 35m20s, of which 447.5s was a cache export that no
+    # longer happens -- see the build step. So about 28 minutes of compile on a
+    # four-vCPU runner, against 4m11s for the same architecture on a 32-thread
+    # workstation.
+    #
+    # 45 leaves a little over 60% headroom on the measured figure without
+    # being a ceiling that lets a wedged job burn an hour.
     timeout-minutes: 45
     permissions:
       contents: read
@@ -155,12 +157,9 @@ jobs:
       # compile on every pull request; after the push they would find a bad
       # image that had already shipped.
       #
-      # The sdbuild stage keys on nothing but SD_COMMIT and CUDA_ARCH -- which
-      # is now also why each job needs its own cache scope. Seven jobs sharing
-      # one scope would not poison each other, because a cache key includes the
-      # build args and a wrong-architecture layer cannot be reused; they would
-      # simply overwrite each other's index, and every job would be cold
-      # forever.
+      # The sdbuild stage keys on nothing but SD_COMMIT and CUDA_ARCH, so a
+      # re-dispatch recompiles rather than reusing anything -- which is a
+      # deliberate trade, measured and argued at the cache settings below.
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -173,11 +172,31 @@ jobs:
           # wrong-architecture image that looks correct.
           build-args: |
             CUDA_ARCH=${{ matrix.arch }}
-          cache-from: type=gha,scope=sd-cuda-sm${{ matrix.arch }}
-          # ignore-error because a cache is an optimisation. The export talking
-          # to the Actions cache service is not a reason to throw away a
-          # twenty-minute compile that succeeded.
-          cache-to: type=gha,scope=sd-cuda-sm${{ matrix.arch }},mode=max,ignore-error=true
+          # No cache, and this is a measurement rather than a preference.
+          #
+          # The first matrix run carried
+          # `cache-to: type=gha,scope=sd-cuda-sm<arch>,mode=max` and the single
+          # sm_89 job left the repository at:
+          #
+          #   active caches: 50   size: 9.52 GiB
+          #
+          # of a 10 GB per-repository budget, having spent `sending cache
+          # export 447.5s` -- seven and a half minutes, 21% of a 35m20s build
+          # -- to put it there. Seven scopes would want about 67 GiB.
+          #
+          # That does not merely fail to fit: the budget is LRU, so the scopes
+          # would evict each other and every run would be cold anyway, having
+          # paid the export each time. They would also evict node-image.yml's
+          # cache, which shares the same budget. mode=min does not help --
+          # it exports the final image's layers and not the sdbuild stage,
+          # which is the only expensive thing worth keeping.
+          #
+          # What made the cache worth its cost before was that a cold build of
+          # four architectures in one job took 71 minutes. The matrix already
+          # fixed that: one architecture compiles in about 28 minutes without
+          # the export, and seven of those happen at once. So the cache was
+          # buying back time the matrix had already bought, at the price of
+          # every other cache in the repository.
 
       - uses: actions/setup-go@v6
         with:
