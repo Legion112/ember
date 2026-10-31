@@ -163,6 +163,23 @@ func ComputeCapOf(m GPUModel) (ComputeCap, CapKnowledge) {
 	return 0, CapUnknown
 }
 
+// ParseComputeCap reads a capability as nvidia-smi prints it: "7.5" is sm_75.
+//
+// The input format, and the only one -- ComputeCap renders itself only as
+// sm_NN, so this is the single place the dotted spelling is understood. It
+// shares major.minor parsing with ParseCUDAVersion because the shape is the
+// same; what differs is that this is silicon and that is a driver.
+func ParseComputeCap(s string) (ComputeCap, error) {
+	maj, min, err := ParseCUDAVersion(s)
+	if err != nil {
+		return 0, fmt.Errorf("compute capability %q: %w", s, err)
+	}
+	if maj <= 0 {
+		return 0, fmt.Errorf("compute capability %q: there is no sm_0", s)
+	}
+	return ComputeCap(maj*10 + min), nil
+}
+
 // KnownCaps lists every architecture some card in the table needs, ascending.
 //
 // This is the list the published images have to cover, and the matrix that

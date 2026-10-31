@@ -838,6 +838,76 @@ func TestOffers_ReportsARealLocalGPU(t *testing.T) {
 	}
 }
 
+// TestOffers_CarriesTheCapabilityItMeasured.
+//
+// This provider is the only one that can read a card directly, and it had the
+// answer in hand and dropped it: nvidia-smi names the compute capability in
+// the same CSV row as the model, and only the model and the memory were
+// copied onto the offer. The consequence was that the 2080 Ti in this machine
+// -- named in full by its own driver -- could not select an image, because
+// nothing above the provider knew what architecture it was.
+func TestOffers_CarriesTheCapabilityItMeasured(t *testing.T) {
+	p, _ := newGPUProvider(t)
+
+	got, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d offers, want 1", len(got))
+	}
+	if got[0].MeasuredCap != 75 {
+		t.Errorf("MeasuredCap = %s, want sm_75: testGPU reports compute_cap %q",
+			got[0].MeasuredCap, testGPU.ComputeCap)
+	}
+	// And the offer resolves without consulting the table, which is the
+	// point -- an rtx2080ti happens to be in it, so assert the measurement is
+	// what answered by naming a card that is not.
+	q, e := newProvider(t)
+	q.Detect = func(context.Context) GPU {
+		return GPU{Model: "acmehypercard9000", VRAM: 24576, ComputeCap: "8.9"}
+	}
+	e.GPURuntime = true
+	got, err = q.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, how := got[0].ComputeCap()
+	if how != node.CapKnown || c != 89 {
+		t.Errorf("a card ember has never heard of resolved %s/%v, want sm_89/known from the "+
+			"measurement", c, how)
+	}
+}
+
+// TestOffers_AnUnreadableCapabilityStillOffersTheCard.
+//
+// Some drivers really print "[N/A]" in that column. The offer is still made:
+// ComputeCapOf's table can still answer for a card it knows, and refusing to
+// list a working GPU over one unreadable CSV field would break the machines
+// DetectGPU's quiet-failure rule exists to protect.
+func TestOffers_AnUnreadableCapabilityStillOffersTheCard(t *testing.T) {
+	p, e := newProvider(t)
+	p.Detect = func(context.Context) GPU {
+		return GPU{Model: "rtx4090", VRAM: 24564, ComputeCap: "[N/A]"}
+	}
+	e.GPURuntime = true
+
+	got, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatalf("an unreadable capability failed the whole listing: %v", err)
+	}
+	if len(got) != 1 || got[0].GPU != "rtx4090" {
+		t.Fatalf("got %+v, want one rtx4090 offer", got)
+	}
+	if got[0].MeasuredCap != 0 {
+		t.Errorf("MeasuredCap = %s, want zero: nothing measured it", got[0].MeasuredCap)
+	}
+	// The table still answers, so the card is usable.
+	if c, how := got[0].ComputeCap(); how != node.CapKnown || c != 89 {
+		t.Errorf("resolved %s/%v, want sm_89/known from the table", c, how)
+	}
+}
+
 // TestOffers_ADatacentreCardInThisMachineIsStillFilterable.
 //
 // The regression test for a second GPU-name normaliser. This package had one

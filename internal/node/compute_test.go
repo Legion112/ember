@@ -177,6 +177,108 @@ func TestKnownCaps_EveryArchitectureIsClaimedByACard(t *testing.T) {
 	}
 }
 
+// TestOfferComputeCap_AMeasurementBeatsTheTable.
+//
+// Not because a measurement is more likely to be right in general, but
+// because it is a reading of the card that will run the container where the
+// table is a reading of a name a provider chose. A disagreement means the
+// table is wrong about that card, and acting on the table would select an
+// image for silicon that is not there.
+func TestOfferComputeCap_AMeasurementBeatsTheTable(t *testing.T) {
+	o := Offer{GPU: "a100-80g", GPUCount: 1, MeasuredCap: 86}
+	got, how := o.ComputeCap()
+	if how != CapKnown {
+		t.Fatalf("a measured card is %v, want known", how)
+	}
+	if got != 86 {
+		t.Errorf("ComputeCap = %s, want sm_86 -- the table says sm_80 for this model and the "+
+			"measurement has to win", got)
+	}
+}
+
+// TestOfferComputeCap_AMeasuredCardEmberHasNeverHeardOf.
+//
+// The 2080 Ti in the machine this repository is developed on, and the whole
+// reason MeasuredCap exists: a card whose own driver has just named it in
+// full must not be unselectable because a table in this package is short.
+func TestOfferComputeCap_AMeasuredCardEmberHasNeverHeardOf(t *testing.T) {
+	o := Offer{GPU: "acmehypercard9000", GPUCount: 1, MeasuredCap: 75}
+	got, how := o.ComputeCap()
+	if how != CapKnown {
+		t.Errorf("a measured but unlisted card is %v, want known", how)
+	}
+	if got != 75 {
+		t.Errorf("ComputeCap = %s, want sm_75", got)
+	}
+}
+
+// TestOfferComputeCap_FallsBackToTheTable, which is every cloud provider:
+// no API ember has seen publishes the field.
+func TestOfferComputeCap_FallsBackToTheTable(t *testing.T) {
+	for _, tc := range []struct {
+		o   Offer
+		cap ComputeCap
+		how CapKnowledge
+	}{
+		{Offer{GPU: "h100-80g", GPUCount: 1}, 90, CapKnown},
+		{Offer{GPU: "mi300x", GPUCount: 1}, 0, CapNotCUDA},
+		{Offer{GPU: "acmehypercard9000", GPUCount: 1}, 0, CapUnknown},
+		{Offer{GPU: GPUNone, GPUCount: 1}, 0, CapUnknown},
+	} {
+		got, how := tc.o.ComputeCap()
+		if got != tc.cap || how != tc.how {
+			t.Errorf("Offer{GPU:%q}.ComputeCap() = %s/%v, want %s/%v",
+				tc.o.GPU, got, how, tc.cap, tc.how)
+		}
+	}
+}
+
+// TestOfferHasGPU_TheLocalNoCardOfferIsNotACard.
+//
+// The local provider reports one GPU of model "none" with no vCPUs when the
+// machine has no card, so IsCPU() is false and the offer looks like a card to
+// anything that only asks that question. Reading it as an unknown card would
+// tell an operator on a laptop to go and teach ember a new GPU.
+func TestOfferHasGPU_TheLocalNoCardOfferIsNotACard(t *testing.T) {
+	for _, tc := range []struct {
+		o    Offer
+		want bool
+	}{
+		{Offer{GPU: GPUNone, GPUCount: 1}, false},
+		{Offer{GPU: "", GPUCount: 1}, false},
+		{Offer{GPU: "rtx4090", GPUCount: 0}, false},
+		{Offer{VCPU: 8}, false},
+		{Offer{GPU: "rtx4090", GPUCount: 1}, true},
+	} {
+		if got := tc.o.HasGPU(); got != tc.want {
+			t.Errorf("Offer{GPU:%q, GPUCount:%d, VCPU:%d}.HasGPU() = %v, want %v",
+				tc.o.GPU, tc.o.GPUCount, tc.o.VCPU, got, tc.want)
+		}
+	}
+}
+
+func TestParseComputeCap(t *testing.T) {
+	for in, want := range map[string]ComputeCap{
+		"7.5": 75, "8.0": 80, "8.6": 86, "8.9": 89, "9.0": 90, "10.0": 100, "12.0": 120,
+	} {
+		got, err := ParseComputeCap(in)
+		if err != nil {
+			t.Errorf("ParseComputeCap(%q): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("ParseComputeCap(%q) = %s, want %s", in, got, want)
+		}
+	}
+	// "[N/A]" is what some drivers really print for this column, and it has
+	// to be an error rather than a zero that reads as a capability.
+	for _, bad := range []string{"", "7", "seven.five", "x.y", "[N/A]", "0.0"} {
+		if got, err := ParseComputeCap(bad); err == nil {
+			t.Errorf("ParseComputeCap(%q) accepted it as %s", bad, got)
+		}
+	}
+}
+
 func TestComputeCap_RendersOnlyAsAnImageKey(t *testing.T) {
 	for c, want := range map[ComputeCap]string{75: "sm_75", 80: "sm_80", 100: "sm_100", 120: "sm_120"} {
 		if got := c.Key(); got != want {

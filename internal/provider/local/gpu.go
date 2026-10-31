@@ -2,7 +2,6 @@ package local
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -91,18 +90,4 @@ func parseSMI(out string) GPU {
 		return GPU{Model: node.NormalizeGPU(name), VRAM: node.MiB(mib), ComputeCap: cap}
 	}
 	return GPU{}
-}
-
-// ComputeArch renders a compute capability as the number CUDA_ARCHS wants:
-// "7.5" becomes 75.
-//
-// Used only to tell an operator what to build, never to decide anything. The
-// authority on what a binary carries is the binary, which the image lab reads
-// directly.
-func ComputeArch(cap string) (int, error) {
-	maj, min, err := node.ParseCUDAVersion(cap)
-	if err != nil {
-		return 0, fmt.Errorf("compute capability %q: %w", cap, err)
-	}
-	return maj*10 + min, nil
 }
