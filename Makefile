@@ -300,7 +300,7 @@ publish-sd-cuda: workload-sd-cuda docker-build test-image-labs-publish
 	@echo
 	@echo "published. put this under images: in ember.yaml:"
 	@ref=$$(docker image inspect --format '{{index .RepoDigests 0}}' $(GHCR_IMAGE):$(TAG)-sm$(CUDA_ARCH)); \
-	echo "  sm_$(CUDA_ARCH): $(GHCR_IMAGE)@sha256:$${ref##*@sha256:}"
+	echo "  sm_$(CUDA_ARCH): $(GHCR_IMAGE):$(TAG)-sm$(CUDA_ARCH)@sha256:$${ref##*@sha256:}"
 
 # print-<VAR> so a workflow can ask make for a name instead of spelling it a
 # second time. No file is produced, so it always runs.
