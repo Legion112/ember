@@ -242,8 +242,17 @@ jobs:
             *) echo "::error::no digest for sm_${{ matrix.arch }} (read $ref)"; exit 1 ;;
           esac
 
+          # The tag is carried into the reference as well as the digest, and
+          # that is not redundancy. The digest decides what runs -- a tag can
+          # move and this one does -- but sixty-four characters of hex is not
+          # something anyone can read, and `images:` is seven lines of it. With
+          # the tag there, an operator can tell which architecture a reference
+          # is by looking at it instead of consulting the mapping, and ember
+          # refuses a reference whose tag disagrees with the key it is filed
+          # under (node.ValidateImageForArch), which only does anything if the
+          # tag is present.
           mkdir -p digests
-          printf '  sm_%s: %s@%s\n' "${{ matrix.arch }}" "$IMAGE" "$digest" \
+          printf '  sm_%s: %s@%s\n' "${{ matrix.arch }}" "$moving" "$digest" \
             > "digests/sm_${{ matrix.arch }}.yaml"
           cat "digests/sm_${{ matrix.arch }}.yaml" >> "$GITHUB_STEP_SUMMARY"
 
