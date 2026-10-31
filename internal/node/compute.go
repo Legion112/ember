@@ -117,8 +117,15 @@ var computeCaps = map[GPUModel]ComputeCap{
 	// Blackwell, GB100.
 	"b200": 100,
 
-	// Blackwell, GB202.
+	// Blackwell, GB20x. The whole RTX PRO Blackwell line is one architecture
+	// whatever the number after PRO is, and RunPod rents all of these -- they
+	// were missing from the first version of this table, which `ember offers`
+	// found by listing a live catalogue: three rentable cards with no entry,
+	// which under the no-fallback rule is three cards ember refuses.
 	"rtx5090":    120,
+	"rtxpro4000": 120,
+	"rtxpro4500": 120,
+	"rtxpro5000": 120,
 	"rtxpro6000": 120,
 }
 
@@ -147,6 +154,14 @@ var notCUDA = map[GPUModel]bool{
 //     claim is unverified and stays out. The one place ground truth exists is
 //     a rented B300 printing its own compute_cap, which is how any entry here
 //     should be confirmed.
+//
+//   - rtxpro6000mig1g.24gb and rtxpro6000mig2g.48gb: MIG partitions of an
+//     RTX PRO 6000, which RunPod rents at $0.69 and $1.29 against $2.49 for
+//     the whole card. The silicon is sm_120, so the architecture is not the
+//     question -- whether sd-cli runs on a MIG slice at all is, and nobody has
+//     tried. They are cheap enough to be worth confirming rather than
+//     guessing, and a guess that is wrong rents a slice and bills it to run on
+//     the CPU.
 
 // ComputeCapOf reports the architecture of a card, and how confidently.
 //
