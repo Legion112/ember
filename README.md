@@ -370,23 +370,32 @@ driver's own words were *not yet*: an SXM board waits for
 `nvidia-fabricmanager` on the host, and probing at the earliest possible moment
 turns a card that needed forty seconds into a refusal.
 
-```yaml
-min_cuda: "13.0"
+`min_cuda` exists and **RunPod refuses it**. Setting it is an error naming
+this paragraph, rather than a constraint that silently does nothing.
+
+It was added from RunPod's published schema, as `allowedCudaVersions`. The
+wrong schema: `rest.runpod.io/v1/pods` accepts that field, and
+`api.runpod.io/v2/pods` — which is where ember creates — declares eighteen
+properties with `unevaluatedProperties: false` and has no CUDA field at all.
+Every create with `min_cuda` set died at
+
+```
+status 422: additional properties 'allowedCudaVersions' not allowed
 ```
 
-`min_cuda` restricts placement to hosts whose CUDA runtime is at least this,
-which matters because the image carries a runtime and a host older than it
-cannot run the image at all. The published images are built against CUDA
-13.0.1, so `13.0` is the floor they need.
+Filtering offers instead is not available either: the v2 schema puts
+`cudaVersions` on `GpuType`, and the live catalogue does not return it. So the
+constraint cannot be expressed at create time or at selection time, and the
+honest answer is to say so — a constraint an operator believes is in force and
+is not would be worse than none.
 
-Empty sends no constraint — which is what ember did for its whole life before
-this key existed. It is still empty by default, because nothing has confirmed
-against the live API that the field actually *filters* placement, and a
-constraint that narrows capacity without doing anything would be worse than
-none. That is not as alarming as it sounds: a probe of a rented RTX 4090
-reported driver 595.91.07 with `CUDA Version: 13.2`, so RunPod's fleet is
-ahead of the toolkit — and a host that was somehow too old fails at
-`gpu_probe`, costing the probe rather than the run.
+This is the second time RunPod's two APIs have disagreed about a field; the
+first was `dataCenter` against `dataCenterId` on network volumes.
+
+**`gpu_probe` is what enforces a driver floor.** It runs on the node before
+the workload and costs the probe rather than the run. In practice the floor is
+not tight anyway: a rented RTX 4090 reported driver 595.91.07 with
+`CUDA Version: 13.2`, ahead of the 13.0.1 the images are built against.
 
 ### Choosing the image by the card
 

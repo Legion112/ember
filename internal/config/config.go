@@ -147,10 +147,21 @@ type Config struct {
 	// including hosts too old for the image about to run on them -- a
 	// failure that appears only after the pod is created and billing.
 	//
-	// Empty by default because the field is unmeasured. RunPod publishes it
-	// and its enum, but nothing here has confirmed that it actually filters
-	// placement, and a constraint that silently narrows capacity without
-	// doing anything would be worse than none.
+	// It is now measured, and the measurement is that RunPod refuses it.
+	// ember sent it as allowedCudaVersions, from RunPod's published schema --
+	// the wrong one. rest.runpod.io/v1/pods accepts that field;
+	// api.runpod.io/v2/pods, where ember creates, declares eighteen
+	// properties with unevaluatedProperties: false and no CUDA field, and
+	// answered every create with
+	//
+	//   status 422: additional properties 'allowedCudaVersions' not allowed
+	//
+	// Filtering offers is not available either: the v2 schema puts
+	// cudaVersions on GpuType and the live catalogue does not return it.
+	//
+	// So the runpod provider refuses a non-empty value rather than dropping
+	// it, because a constraint an operator believes is in force and is not
+	// would be worse than none. gpu_probe is what enforces a driver floor.
 	MinCUDA string `yaml:"min_cuda"`
 }
 

@@ -208,12 +208,37 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 		return node.Handle{}, err
 	}
 
-	// Rendered before the request is built, so a MinCUDA RunPod cannot
-	// satisfy is a refusal rather than a create that silently drops the
-	// constraint.
-	allowedCuda, err := allowedCudaFrom(req.Spec.MinCUDA)
-	if err != nil {
-		return node.Handle{}, err
+	// min_cuda cannot be expressed against this API, and saying so is better
+	// than dropping it.
+	//
+	// ember used to send it as allowedCudaVersions, which came from RunPod's
+	// published schema. The wrong one: rest.runpod.io/v1/pods accepts that
+	// field, and api.runpod.io/v2/pods -- the endpoint below -- declares 18
+	// properties with unevaluatedProperties: false and no CUDA field at all.
+	// Every create with min_cuda set therefore died at:
+	//
+	//   status 422: additional properties 'allowedCudaVersions' not allowed
+	//
+	// Filtering offers instead is not available either: the v2 schema puts
+	// cudaVersions on GpuType, and the live catalogue does not return it.
+	//
+	// So this is a refusal rather than a silent drop. A constraint the
+	// operator believes is in force and is not would be worse than none --
+	// the same reason the field was added with a comment admitting nobody had
+	// confirmed it filtered. What does enforce a driver floor is gpu_probe,
+	// which runs on the node and costs the probe rather than the run.
+	//
+	// The second time this provider's two APIs have disagreed about a field.
+	// The first was network volumes, dataCenter against dataCenterId.
+	if strings.TrimSpace(req.Spec.MinCUDA) != "" {
+		return node.Handle{}, fmt.Errorf(
+			"min_cuda is set to %q and RunPod's pod API does not accept it: "+
+				"api.runpod.io/v2/pods has no CUDA field, and its catalogue does not report one "+
+				"per GPU type either, so ember cannot narrow placement by CUDA version at all.\n"+
+				"Remove min_cuda. To refuse a host that cannot run the image, use gpu_probe: it "+
+				"runs on the node and fails before any workload does, costing the probe rather "+
+				"than the run",
+			req.Spec.MinCUDA)
 	}
 
 	body := createPodRequest{
@@ -229,7 +254,6 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 		DataCenterIds: p.dataCenters(req),
 		Mounts:        mountsFor(req),
 
-		AllowedCudaVersions: allowedCuda,
 		// ember runs its own sshd with the host key it minted. RunPod's own
 		// sshd would present a key ember cannot predict, forcing
 		// trust-on-first-use against a brand-new IP.
