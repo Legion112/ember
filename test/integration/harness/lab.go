@@ -36,6 +36,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	dockerimage "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
@@ -1018,4 +1019,39 @@ func (l *Lab) HaveImage(ctx context.Context, name string) bool {
 	l.t.Helper()
 	_, err := l.cli.ImageInspect(ctx, name)
 	return err == nil
+}
+
+// TagImage points a second name at an image that already exists, and removes
+// the name again when the lab finishes.
+//
+// For labs about which image ember *chose*, where what the bytes are does not
+// matter. `docker tag` copies nothing and costs nothing, and ember:lab is
+// already a hard prerequisite of every lab here -- so several architectures'
+// worth of stand-ins is a few milliseconds rather than a CUDA compile.
+//
+// The cleanup removes the tag and nothing else. A forced remove would delete
+// the underlying image, which is ember:lab, out from under every lab that runs
+// after this one. It also has to be a cleanup rather than a reap: AssertNoStray
+// polices containers, networks and volumes by label, and a tag inherits its
+// source's labels -- so a stray tag is indistinguishable from ember:lab by
+// label, and ownership is the only mechanism available. A lab helper owns what
+// it creates.
+func (l *Lab) TagImage(ctx context.Context, src, dst string) string {
+	l.t.Helper()
+	if _, err := l.cli.ImageInspect(ctx, src); err != nil {
+		l.t.Fatalf("cannot tag %s as %s: the source is not on this daemon.\n"+
+			"  make docker-build", src, dst)
+	}
+	if err := l.cli.ImageTag(ctx, src, dst); err != nil {
+		l.t.Fatalf("tag %s as %s: %v", src, dst, err)
+	}
+	l.t.Cleanup(func() {
+		// PruneChildren false and Force false: this removes the name, not the
+		// image. The source keeps every other tag it had.
+		if _, err := l.cli.ImageRemove(context.WithoutCancel(ctx), dst,
+			dockerimage.RemoveOptions{Force: false, PruneChildren: false}); err != nil {
+			l.t.Logf("could not untag %s: %v", dst, err)
+		}
+	})
+	return dst
 }
