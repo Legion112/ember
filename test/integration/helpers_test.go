@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/keys"
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/session"
 	"github.com/Legion112/ember/internal/statestore"
@@ -171,4 +173,25 @@ func allPodIDs(f *runpodfake.Fake) []string {
 		}
 	}
 	return out
+}
+
+// withNode picks an offer and rents it, the way runUp does.
+//
+// Two steps rather than one because provision.WithNode no longer lists offers
+// itself: the workload image is chosen from the architecture of the card in
+// the offer, so a second listing inside WithNode could rent a different card
+// than the image was chosen for. A lab about which offer gets picked calls
+// provision.PickOffer directly.
+func withNode(
+	ctx context.Context,
+	p provider.Provider,
+	spec node.Spec,
+	o provision.Options,
+	fn func(context.Context, provision.Session) error,
+) error {
+	offer, err := provision.PickOffer(ctx, p, spec.Filter, spec.TTL, o)
+	if err != nil {
+		return err
+	}
+	return provision.WithNode(ctx, p, spec, offer, o, fn)
 }

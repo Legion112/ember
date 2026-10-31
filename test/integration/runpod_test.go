@@ -88,7 +88,7 @@ func TestRunPod_FullLifecycleAgainstTheFake(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "outputs")
 	var fetched transfer.Result
 
-	err := provision.WithNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
 		func(ctx context.Context, s provision.Session) error {
 			client := dialSession(t, l, s)
 			defer func() { _ = client.Close() }()
@@ -126,7 +126,7 @@ func TestRunPod_DeclaresOnly22TCPToTheAPI(t *testing.T) {
 	spec := runpodSpec(t, port)
 	spec.Ports = append(spec.Ports, node.PortMap{Name: "comfyui", Remote: 8188, Local: uint16(harness.FreePort(t))})
 
-	err := provision.WithNode(t.Context(), p, spec, labOptions(t, l),
+	err := withNode(t.Context(), p, spec, labOptions(t, l),
 		func(context.Context, provision.Session) error { return nil })
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -154,7 +154,7 @@ func TestRunPod_KeyMaterialReachesTheNodeThroughTheAPIBody(t *testing.T) {
 	port := harness.FreePort(t)
 	p, f, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 
-	err := provision.WithNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
 		func(context.Context, provision.Session) error { return nil })
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -201,7 +201,7 @@ func TestRunPod_RefusesAndDestroysANodeExposedBeyondThePlatformPort(t *testing.T
 		ExtraPublicPort: 8188,
 	})
 
-	err := provision.WithNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
 		func(context.Context, provision.Session) error {
 			t.Error("the workload ran on a publicly exposed node")
 			return nil
@@ -230,7 +230,7 @@ func TestRunPod_ToleratesThePlatformPortAlone(t *testing.T) {
 	p, _, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 
 	ran := false
-	err := provision.WithNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
 		func(context.Context, provision.Session) error {
 			ran = true
 			return nil
@@ -258,7 +258,7 @@ func TestRunPod_PinsTheMintedKeyRatherThanTrustingOnFirstUse(t *testing.T) {
 	var logged strings.Builder
 	o.Log = testLogger(&logged)
 
-	err := provision.WithNode(t.Context(), p, runpodSpec(t, port), o,
+	err := withNode(t.Context(), p, runpodSpec(t, port), o,
 		func(ctx context.Context, s provision.Session) error {
 			// The dial itself is the proof: it verifies against the pinned
 			// key, and a mismatch would fail here rather than be recorded.

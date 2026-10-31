@@ -699,3 +699,89 @@ func TestStoreSync_RefusesAStoreThatDoesNotExist(t *testing.T) {
 		}
 	}
 }
+
+// TestStoreSync_RefusesWithOnlyAPerArchitectureMap.
+//
+// A CPU machine has no architecture, so an images: map cannot answer for it.
+// The refusal names image: rather than reporting a card ember could not
+// identify, because the second would send the operator to add a table entry
+// for a machine that has no GPU at all.
+//
+// This is also why image: and images: are a precedence and not a mutual
+// exclusion: `ember store sync` runs against the same config as the workload,
+// and excluding one would leave this command with no image at all.
+func TestStoreSync_RefusesWithOnlyAPerArchitectureMap(t *testing.T) {
+	api := cpuOnlyRunPod(t)
+	d := labDeps(t)
+	d.CloudBaseURL = api
+	d.Creds = &config.Credentials{RunPod: node.NewSecret([]byte("rp-token"))}
+
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, config.FileName)
+	body := "provider: runpod\nttl: 10m\n" +
+		"config_dir: " + dir + "\n" +
+		"state_dir: " + filepath.Join(dir, "state") + "\n" +
+		"output_dir: " + filepath.Join(dir, "out") + "\n" +
+		"images:\n  sm_90: ember:lab-sm90\n" +
+		storeBlock + "\n" + assetBlock + "\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := runStore([]string{"sync", "-config", cfg, "--dry-run"}, &out, d)
+	if err == nil {
+		t.Fatalf("store sync resolved an image from a map on a CPU run:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "image:") {
+		t.Errorf("the refusal should name image:, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no GPU") {
+		t.Errorf("the refusal should say why the map cannot answer, got %v", err)
+	}
+}
+
+// TestStoreSync_IgnoresTheMapWhenAScalarIsSet: the table is never consulted
+// for a run that asks for no card, so a map covering nothing is harmless here.
+func TestStoreSync_IgnoresTheMapWhenAScalarIsSet(t *testing.T) {
+	api := cpuOnlyRunPod(t)
+	d := labDeps(t)
+	d.CloudBaseURL = api
+	d.Creds = &config.Credentials{RunPod: node.NewSecret([]byte("rp-token"))}
+
+	cfg := storeConfigFor(t, d, "runpod",
+		"images:\n  sm_90: ember:lab-sm90\n"+storeBlock+"\n"+assetBlock)
+	var out bytes.Buffer
+	if err := runStore([]string{"sync", "-config", cfg, "--dry-run"}, &out, d); err != nil {
+		t.Fatalf("sync = %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), local.DefaultImage) {
+		t.Errorf("the scalar image was not used:\n%s", out.String())
+	}
+}
+
+// cpuOnlyRunPod is a RunPod that has one store and a CPU catalogue, and fails
+// the test if anything asks it for GPUs.
+func cpuOnlyRunPod(t *testing.T) string {
+	t.Helper()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.URL.Path, "network-volumes"):
+			_, _ = fmt.Fprint(w, `{"networkVolumes":[{"id":"vol_abc","name":"ember-store-models",`+
+				`"size":40,"dataCenter":"EU-RO-1"}],"pagination":{"hasNextPage":false}}`)
+		case strings.Contains(req.URL.Path, "catalog/cpus"):
+			_, _ = fmt.Fprint(w, `{"cpus":[{"id":"cpu3c","name":"Compute-Optimized",`+
+				`"vcpu":{"min":2,"max":32},"ramGbPerVcpu":2,`+
+				`"price":{"securePerVcpu":0.03},"availability":"HIGH",`+
+				`"dataCenters":[{"id":"EU-RO-1","availability":"HIGH"}]}]}`)
+		case strings.Contains(req.URL.Path, "catalog/gpus"):
+			t.Error("a CPU-only run asked for the GPU catalogue")
+			_, _ = fmt.Fprint(w, `{"gpus":[]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+	return api.URL
+}
