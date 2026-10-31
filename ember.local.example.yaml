@@ -68,10 +68,31 @@ verify: present
 # The same probe as the rented config, and it matters more here. The published
 # image genuinely cannot run on this card; this is what turns that into a
 # refusal instead of a silent CPU fallback.
+# Two questions, because one probe used to answer only one of them.
+#
+# `sd-cli --list-devices | grep -qi cuda` catches a card that cannot
+# initialise -- the failure internal/gpucheck was written for, where CUDA
+# never comes up and sd-cli quietly becomes a slow CPU at the GPU's price.
+#
+# It does NOT catch a wrong-architecture image. Measured: with an sm_75 image
+# on an sm_89 card, --list-devices exits zero and names the card, because
+# listing devices asks the driver what hardware exists and launches no kernel.
+# The probe passed, the workload started, and it aborted a second into the
+# first generation with "no kernel image is available for execution on the
+# device" -- after the pull and a 1.6 GB weight fetch, all billed.
+#
+# So the probe compares the image to the card first. The published images
+# write their architecture to /etc/ember-cuda-arch for exactly this; an empty
+# or missing file fails the test rather than passing it, because a comparison
+# against nothing would admit everything.
+#
+# `images:` already refuses a card it has no entry for, before renting. This
+# catches what a map cannot see: the right digest filed under the wrong key,
+# or a scalar image: pinned by hand while debugging.
 gpu_probe:
   - sh
   - -c
-  - "sd-cli --list-devices | grep -qi cuda"
+  - "arch=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ' .'); img=$(cat /etc/ember-cuda-arch 2>/dev/null); echo \"card is sm_$arch, image is sm_$img\"; test -n \"$img\" && test \"$arch\" = \"$img\" && sd-cli --list-devices | grep -qi cuda"
 gpu_probe_timeout: 1m
 
 cmd:
