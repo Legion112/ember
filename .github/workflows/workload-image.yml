@@ -56,7 +56,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
+      # Two spellings of one list, because the consumers want different ones:
+      # a matrix needs a JSON array and `ember images --archs` a comma list.
+      # Both are printed by the same command rather than one being derived from
+      # the other in an expression -- join(fromJSON(...)) is a parser this file
+      # does not need to be correct about, and the first attempt at it was
+      # rejected by Actions for quoting the separator the way YAML does.
       archs: ${{ steps.archs.outputs.json }}
+      csv: ${{ steps.archs.outputs.csv }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -70,8 +77,10 @@ jobs:
         id: archs
         run: |
           json=$(go run ./cmd/ember archs --json --only="${{ inputs.archs }}")
+          csv=$(go run ./cmd/ember archs --only="${{ inputs.archs }}" | paste -sd, -)
           echo "building: $json"
           echo "json=$json" >> "$GITHUB_OUTPUT"
+          echo "csv=$csv" >> "$GITHUB_OUTPUT"
           go run ./cmd/ember archs --cards --only="${{ inputs.archs }}" >> "$GITHUB_STEP_SUMMARY"
 
   publish:
@@ -264,7 +273,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           go run ./cmd/ember images \
             --from digests \
-            --archs '${{ join(fromJSON(needs.plan.outputs.archs), ",") }}' \
+            --archs '${{ needs.plan.outputs.csv }}' \
             | tee -a "$GITHUB_STEP_SUMMARY"
           status=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
