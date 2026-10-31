@@ -560,11 +560,21 @@ A leaked node bills by the hour in silence. These are not style preferences.
   rented cards and once locally: ggml raises `no kernel image is available for
   execution on the device` and sd-cli dies with SIGABRT about a second into the
   first generation. It does *not* silently run on the CPU — seven comments in
-  this repository used to say it did, and they were wrong; that story belongs
-  to `internal/gpucheck`, where CUDA never initialises at all. But the abort
-  happens after a node exists, the image is pulled and the weights are fetched,
-  all of it billed — so `images:` refuses a card it has no entry for before
-  renting, and never falls back to `image:`.
+  this repository used to say it did, and they were wrong. Three failure modes
+  were being treated as one, and they are not — measured on the same card with
+  the same model:
+
+  | what is wrong | what happens | exit |
+  |---|---|---|
+  | no GPU passed to the container | succeeds, silently, on the CPU | 0 |
+  | GPU present, matching architecture | works | 0 |
+  | GPU present, wrong architecture | aborts on the first kernel launch | 134 |
+
+  Only the first is the silent-CPU story, and it is the one `internal/gpucheck`
+  and `dockerengine.RecordingEngine` are written about — correctly. The third
+  aborts, but it aborts after a node exists, the image is pulled and the
+  weights are fetched, all of it billed. So `images:` refuses a card it has no
+  entry for before renting, and never falls back to `image:`.
 - **The image is not built for the machine that builds it.** ggml defaults
   `GGML_NATIVE` to on, which is `-march=native`. From the same Dockerfile and
   the same source: 0 AVX-512 instructions built on a Zen 3 desktop, 23,458
