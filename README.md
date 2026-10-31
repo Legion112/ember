@@ -373,6 +373,16 @@ set — a run that needs no card at all, such as `ember store sync` on a CPU
 machine, has no architecture to choose by and uses `image:`. `-image` on the
 command line replaces the map for that run.
 
+`ember archs` prints the architectures an image is published for, and
+`ember archs --cards` says which cards each one is for — so finding the key a
+card needs costs nothing and rents nothing:
+
+```
+$ ember archs --cards
+89      sm_89   l4 l40 l40s rtx4080 rtx4090
+90      sm_90   h100 h100-80g h200
+```
+
 ember knows which architecture a card is from a table in
 [`internal/node/compute.go`](internal/node/compute.go), except where a
 provider's name for two different cards normalises to the same thing — a
