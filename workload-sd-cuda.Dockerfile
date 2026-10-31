@@ -210,6 +210,28 @@ COPY --from=sdbuild /out/ /opt/sd/
 ARG CUDA_ARCH
 LABEL ember.cuda-arch="${CUDA_ARCH}"
 ENV EMBER_CUDA_ARCH="${CUDA_ARCH}"
+RUN printf '%s\n' "${CUDA_ARCH}" > /etc/ember-cuda-arch
+
+# Three places, and the third is the only one a workload can read.
+#
+# The LABEL travels with the image into a registry, so a published artifact can
+# be asked what it is without being run; the image lab compares it against what
+# the build was asked for.
+#
+# The ENV is visible to this image's entrypoint and to `docker run`.
+#
+# The FILE is what a gpu_probe or a workload can actually see, and it exists
+# because the ENV is not enough -- which this Dockerfile already knew three
+# lines further down, about LD_LIBRARY_PATH. ember runs the probe and the
+# workload as `ssh host command`, and sshd builds a fresh environment for each
+# session: the image's ENV reaches PID 1 and nothing sshd forks. Measured on a
+# rented RTX 2000 Ada, where the image carries EMBER_CUDA_ARCH=89 and the
+# workload printed "image says EMBER_CUDA_ARCH=".
+#
+# That mattered more than a blank line of output. A probe comparing the card
+# to an empty string refuses *every* run, including correct ones -- so the
+# mechanism meant to catch a wrong-architecture image would instead have
+# rejected the right one.
 
 # The loader is told where the shared objects are rather than relying on
 # LD_LIBRARY_PATH: a non-interactive `ssh host command` gets a very small

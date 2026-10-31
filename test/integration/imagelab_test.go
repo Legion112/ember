@@ -290,6 +290,27 @@ func TestWorkloadImage_CarriesOneArchitectureAndNoPTX(t *testing.T) {
 
 	n := mintAndStartImage(t, l, "cudaarch", image)
 
+	// The file, read the way a gpu_probe reads it: over SSH.
+	//
+	// This is not redundant with the label. The image also carries
+	// EMBER_CUDA_ARCH as an ENV, and over SSH that is *empty* -- sshd builds a
+	// fresh environment per session, so the image's ENV reaches PID 1 and
+	// nothing sshd forks. Measured on a rented RTX 2000 Ada, where the image
+	// carries EMBER_CUDA_ARCH=89 and the workload printed
+	// "image says EMBER_CUDA_ARCH=".
+	//
+	// A probe comparing the card against an empty string refuses every run,
+	// including correct ones, so the mechanism meant to catch a
+	// wrong-architecture image would have rejected the right one. Asserted
+	// through ExecOut rather than from Config.Env for exactly that reason: the
+	// question is what a workload can see, not what the image declares.
+	if got := strings.TrimSpace(l.ExecOut(ctx, n.ID, "cat", "/etc/ember-cuda-arch")); got != strconv.Itoa(want) {
+		t.Errorf("/etc/ember-cuda-arch is %q over SSH but this run asked for sm_%d. "+
+			"This file is the only one of the image's three claims a probe or a workload can "+
+			"read -- the ENV is not visible to an `ssh host command` and the label is not "+
+			"visible from inside the node at all", got, want)
+	}
+
 	// grep rather than `strings`, which the runtime base does not carry. -a
 	// treats the binary as text; PTX, when there is any, is text.
 	out := l.ExecOut(ctx, n.ID, "sh", "-c",
