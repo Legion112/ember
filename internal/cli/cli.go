@@ -83,6 +83,8 @@ func commands() []command {
 		{"reap", "destroy every node past its deadline", cmdReap},
 		{"offers", "list rentable offers matching a filter", cmdOffers},
 		{"store", "create or destroy persistent storage that outlives a node", cmdStore},
+		{"archs", "print the CUDA architectures ember publishes an image for", cmdArchs},
+		{"images", "assemble an images: block from the digests a build published", cmdImages},
 	}
 }
 
