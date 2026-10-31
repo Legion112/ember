@@ -1055,3 +1055,20 @@ func (l *Lab) TagImage(ctx context.Context, src, dst string) string {
 	})
 	return dst
 }
+
+// ImageLabel reads one label off an image, or "" when it is not set.
+//
+// Read from the daemon rather than from a running container, because a label
+// is a property of the image and travels with it into a registry -- which is
+// what makes it worth comparing against what a build was asked for.
+func (l *Lab) ImageLabel(ctx context.Context, image, key string) string {
+	l.t.Helper()
+	insp, err := l.cli.ImageInspect(ctx, image)
+	if err != nil {
+		l.t.Fatalf("inspect %s: %v", image, err)
+	}
+	if insp.Config == nil {
+		return ""
+	}
+	return insp.Config.Labels[key]
+}

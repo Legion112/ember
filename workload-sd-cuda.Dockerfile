@@ -41,60 +41,97 @@ RUN git clone --recursive https://github.com/leejet/stable-diffusion.cpp /src \
  && git checkout ${SD_COMMIT} \
  && git submodule update --init --recursive
 
-# The architectures to emit machine code for, and the list is load-bearing.
+# The architecture to emit machine code for: exactly one, named by the caller.
 #
-# It used to be "86;89" -- 3090/A10/A5000 and 4090/L40S -- chosen because
-# naming a few keeps the compile to minutes instead of an hour. The trouble is
-# that every card worth renting for a large model was outside it. An A100 is
-# sm_80, an H100 sm_90, Blackwell sm_100 or sm_120, and this repository's own
-# dev machine is a 2080 Ti at sm_75: the image could not run on the machine
-# that built it.
+# One image per architecture, and no default here. Both halves are deliberate.
 #
-# PTX does not save you. CMake emits virtual code for the highest entry only,
-# and PTX JITs *forward*, never back -- so compute_89 covers Blackwell and
-# cannot touch an A100. A run on an 80 GiB A100 therefore did not fail. It
-# fell back to the CPU backend and started a 32-billion-parameter model on 128
-# threads, at the GPU's price. See internal/gpucheck.
+# This used to be a list, `CUDA_ARCHS="80;86;89;90"`, producing one fat image.
+# Two things were wrong with that. Every card outside the list ran on the CPU
+# backend at the GPU's price rather than failing -- an 80 GiB A100 did exactly
+# that, starting a 32-billion-parameter model on 128 threads (see
+# internal/gpucheck) -- and the list was kept narrow because every entry costs
+# build time: measured on a four-vCPU runner, two architectures took 1846s and
+# four took 4264s. So the narrow list and the slow build held each other in
+# place, and the cards worth renting were the ones left out.
 #
-# 80 is here for the A100 and 90 for the H100; 86 and 89 stay for Ampere
-# consumer and Ada.
+# A build matrix breaks that: one architecture per job, so the wall clock is
+# one compile rather than seven, and the list stops being bounded by a
+# timeout. What arrives on a node is then chosen by ember from the `images:`
+# map, for the architecture of the card it actually rented, and a card with no
+# entry is refused before anything is billed.
 #
-# sm_75 is not here, and the reason is narrower than it first looked. The
-# first version of this comment said an 11 GiB 2080 Ti "cannot hold the models
-# this image exists to run", which is false: sd-cli will keep weights in
-# system RAM and stream them into VRAM per layer (--offload-to-cpu), and its
-# auto-fit planner already does so when VRAM is short. 56 GiB of weights on an
-# 11 GiB card is slow, not impossible.
+# No default, because a default is how a path that forgot the build arg
+# produces a wrong-architecture image that looks correct. Unset fails in the
+# RUN below, naming the make target that sets it. `CUDA_ARCHS` plural is gone
+# rather than kept for compatibility: a stale caller passing it gets docker's
+# unconsumed-build-arg warning and then this guard, which is the behaviour you
+# want from a renamed knob.
+ARG CUDA_ARCH
+
+# "-real", which is what emits no PTX at all.
 #
-# What is true is that every architecture costs build time. Measured on a
-# four-vCPU runner: two architectures took 1846s, four took 4264s. A fifth is
-# affordable under the raised timeout but nobody has yet shown the image is
-# usable on such a card -- whether 1536x1536 even fits beside a 4412 MiB
-# compute buffer, and what a step costs when 35 GB crosses PCIe to reach it.
+# A bare "89" tells CMake to emit virtual code for the entry as well, so the
+# binary carried compute_NN PTX. That PTX is not a safety net worth having: it
+# JITs forward only, so it could never help an older card, and on a newer one
+# it means the driver compiles 150 kernel modules at first launch, on a cold
+# cache, on the most expensive hardware in the catalogue, every single pod --
+# unmeasured, and reported by nothing.
 #
-# So this is deferred pending that measurement rather than ruled out, and
-# issue #5 is where it gets decided. The image still will not run on the
-# machine that builds it. CMake also emits virtual code for the highest entry, so
-# the binary carries compute_90 PTX -- which is what leaves Blackwell a
-# forward-JIT path until the base image is new enough to build sm_120
-# natively (that needs CUDA 12.8+; this is 12.6.3). The lab reads the markers
-# back out of the binary rather than trusting that sentence.
+# Nothing is compiled on a rented machine. A card this image cannot run is
+# refused by ember before the rental rather than JITed through, and dropping
+# the PTX is what makes that the only outcome. It also lets the image lab
+# assert a sharp property -- exactly one sm_NN and no compute_* -- instead of
+# the t.Logf it used to forgive the JIT case with.
 #
-# Adding architectures costs build time, which is why this was narrow for so
-# long. The GitHub cache added in .github/workflows/workload-image.yml is what
-# makes the list affordable: unchanged, this whole stage comes back from cache.
-#
-# test/integration/imagelab_test.go asserts that what ends up in the binary
-# actually covers the cards ember can select, so this cannot quietly drift
-# again.
-ARG CUDA_ARCHS="80;86;89;90"
-RUN cd /src \
+# test/integration/imagelab_test.go reads both back out of the binary rather
+# than trusting this comment.
+RUN test -n "${CUDA_ARCH}" || { \
+      echo "CUDA_ARCH is not set: this image is built for exactly one architecture."; \
+      echo "  make workload-sd-cuda CUDA_ARCH=89      # 4090 / L40S"; \
+      echo "  make workload-sd-cuda-local             # whatever is in this machine"; \
+      echo "ember archs --cards lists every one ember publishes."; \
+      exit 1; }; \
+    cd /src \
  && cmake -B build -DSD_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
+      -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}-real" \
  && cmake --build build --config Release -j"$(nproc)" \
  && mkdir -p /out \
  && find build -name 'sd-cli' -type f -exec cp {} /out/ \; \
  && find build -name '*.so*' -type f -exec cp -P {} /out/ \;
+
+# What nvcc actually emitted, checked here rather than asserted later.
+#
+# The architecture markers used to be readable as ASCII in the binary, and the
+# image lab grepped for them. They were there because embedded PTX is *text*:
+# a PTX module carries ".target sm_75" in plain characters. With -real there is
+# no PTX, so there are no strings -- the absence is the evidence that the PTX
+# is gone, and it is also why grep can no longer say which architecture the
+# SASS is for.
+#
+# cuobjdump can, and it is in this stage because this stage has the toolkit.
+# So the check happens where the answer is available and the failure is free:
+# a wrong-architecture image cannot be built rather than being built and then
+# caught. The image lab still compares the label against what the caller asked
+# for, because a label can drift from the binary it describes.
+RUN set -eu; \
+    elf=$(cuobjdump --list-elf /out/sd-cli | grep -oE 'sm_[0-9]+' | sort -u | paste -sd' ' -); \
+    ptx=$(cuobjdump --list-ptx /out/sd-cli | grep -oE 'sm_[0-9]+' | sort -u | paste -sd' ' - || true); \
+    echo "SASS: ${elf:-none}"; \
+    echo "PTX:  ${ptx:-none}"; \
+    if [ "$elf" != "sm_${CUDA_ARCH}" ]; then \
+      echo "this image was asked for sm_${CUDA_ARCH} and the binary carries [${elf:-none}]."; \
+      echo "A card with no matching kernel does not fail -- it runs on the CPU backend"; \
+      echo "at the GPU's price -- so the image is not published."; \
+      exit 1; \
+    fi; \
+    if [ -n "$ptx" ]; then \
+      echo "the binary carries PTX for [${ptx}] and this image ships none."; \
+      echo "PTX JITs forward only: it cannot help an older card, and on a newer one it"; \
+      echo "means the driver compiles every kernel at first launch, on a cold cache,"; \
+      echo "on every pod. Nothing is compiled on a rented machine."; \
+      echo "CMAKE_CUDA_ARCHITECTURES must be \"NN-real\"; a bare NN emits PTX too."; \
+      exit 1; \
+    fi
 
 # ---- the node itself -------------------------------------------------------
 FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04@sha256:92906d87596d638d35015c6353053121bd299d25943b875763321653884ba924
@@ -129,6 +166,27 @@ RUN rm -f /etc/ssh/ssh_host_*
 
 COPY --from=gobuild /out/embernode /usr/local/bin/embernode
 COPY --from=sdbuild /out/ /opt/sd/
+
+# What architecture this image is for, said by the image itself.
+#
+# Repeated in the runtime stage because an ARG does not cross a FROM. Both
+# spellings, for two different readers:
+#
+# The LABEL travels with the image into the registry, so a published artifact
+# can be asked what it is without being run. The image lab compares it against
+# the architecture the build was *asked* for, which arrives from outside the
+# build as an environment variable -- so a build arg that silently stopped
+# taking effect is caught by a disagreement rather than by nobody noticing.
+#
+# The ENV is readable from inside a running container, which makes it
+# something gpu_probe can compare against the card it finds. That closes the
+# one failure an `images:` map cannot prevent: an operator pasting the right
+# digest under the wrong key. ember would then run a wrong-architecture image
+# believing it correct, and the probe is the only thing left that can say so
+# -- for the price of the probe and no GPU time.
+ARG CUDA_ARCH
+LABEL ember.cuda-arch="${CUDA_ARCH}"
+ENV EMBER_CUDA_ARCH="${CUDA_ARCH}"
 
 # The loader is told where the shared objects are rather than relying on
 # LD_LIBRARY_PATH: a non-interactive `ssh host command` gets a very small

@@ -22,7 +22,6 @@ package integration
 
 import (
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,7 +47,8 @@ import (
 // ran -- so a missing image is a hard failure naming the command that builds
 // it.
 func TestWorkloadImage_ListensOnNothingButSSH(t *testing.T) {
-	assertListensOnlyOnSSH(t, "ember:sd-cuda")
+	image, _ := sdCUDAUnderTest(t)
+	assertListensOnlyOnSSH(t, image)
 }
 
 // TestWorkloadImage_SupportsVideoGeneration.
@@ -106,7 +106,7 @@ func TestWorkloadImage_CarriesNoWeights(t *testing.T) {
 	l := harness.New(t)
 	ctx := t.Context()
 
-	const image = "ember:sd-cuda"
+	image, _ := sdCUDAUnderTest(t)
 	if !l.HaveImage(ctx, image) {
 		t.Fatalf("%s is not built, and this asserts about that image:\n  make workload-sd-cuda", image)
 	}
@@ -162,7 +162,7 @@ func TestWorkloadImage_UnderstandsTheFetchCommand(t *testing.T) {
 	l := harness.New(t)
 	ctx := t.Context()
 
-	const image = "ember:sd-cuda"
+	image, _ := sdCUDAUnderTest(t)
 	if !l.HaveImage(ctx, image) {
 		t.Fatalf("%s is not built, and this asserts about the embernode in it:\n  make workload-sd-cuda", image)
 	}
@@ -207,151 +207,100 @@ func TestWorkloadImage_UnderstandsTheFetchCommand(t *testing.T) {
 	}
 }
 
-// cudaCard is a GPU ember can select, and what compute capability it has.
+// sdCUDAUnderTest names the per-architecture image this run is about, and the
+// architecture it was asked for.
 //
-// The capability is what decides whether the binary can run on it at all, and
-// it is not derivable from anything in this repository -- so it is written
-// down, with the catalogue entry it came from. Every one of these has appeared
-// in `ember offers` against RunPod.
-type cudaCard struct {
-	name string
-	// cc is the compute capability times ten: sm_80 is 80.
-	cc int
+// Both from the environment, because both have to come from outside the build.
+// EMBER_CUDA_ARCH is what the caller asked for -- a matrix job, or a developer
+// typing CUDA_ARCH=75 -- and it is the only leg of the comparison below that
+// the build itself cannot influence. A build arg that silently stopped taking
+// effect would otherwise look exactly like a correct build.
+//
+// Missing is a hard failure naming the command, not a default and not a skip.
+// A default would make this lab assert about whatever happened to be under the
+// tag, and a skip reports success for something that never ran.
+func sdCUDAUnderTest(t *testing.T) (image string, arch int) {
+	t.Helper()
+
+	image = strings.TrimSpace(os.Getenv("EMBER_SD_CUDA_IMAGE"))
+	raw := strings.TrimSpace(os.Getenv("EMBER_CUDA_ARCH"))
+	if image == "" || raw == "" {
+		t.Fatalf("EMBER_SD_CUDA_IMAGE and EMBER_CUDA_ARCH must both be set: one image per\n"+
+			"architecture, so a lab about one has to be told which.\n"+
+			"  make test-image-labs-publish CUDA_ARCH=75\n"+
+			"got image=%q arch=%q", image, raw)
+	}
+	arch, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("EMBER_CUDA_ARCH=%q is not a number", raw)
+	}
+	return image, arch
 }
 
-// cardsEmberCanRent is the table this lab checks the image against.
+// TestWorkloadImage_CarriesOneArchitectureAndNoPTX.
 //
-// sm_75 cards (2080 Ti and friends) are absent on purpose. They have 11 GiB,
-// which cannot hold the model sets this image exists to run, and the CPU
-// variant covers working locally. Their absence is a decision recorded in
-// workload-sd-cuda.Dockerfile, not an oversight.
-var cardsEmberCanRent = []cudaCard{
-	{"NVIDIA A100 80GB PCIe", 80},
-	{"NVIDIA A100-SXM4-80GB", 80},
-	{"NVIDIA RTX A5000 / A10 / RTX 3090", 86},
-	{"NVIDIA RTX 4090 / L40S", 89},
-	{"NVIDIA H100 80GB HBM3 / H100 NVL", 90},
-	{"NVIDIA B200 / B300 SXM6", 100},
-	{"NVIDIA RTX PRO 6000 Blackwell", 120},
-}
-
-// TestWorkloadImage_CoversTheCardsEmberCanRent reads the architectures out of
-// the built binary and checks them against the cards that can be rented.
+// This replaced a lab that asserted the binary covered every rentable card,
+// which a single-architecture image cannot do by construction. That property
+// did not disappear -- it moved to internal/node, where every card having an
+// architecture and every architecture having a card is a free unit test, and
+// to the build matrix, which reads the list from `ember archs` and fails
+// naming any architecture that published nothing.
 //
-// This exists because the list was wrong and nothing noticed. CUDA_ARCHS was
-// "86;89" -- 3090/A10/A5000 and 4090/L40S -- and every card with enough VRAM
-// for a large model was outside it. An `ember.yaml` selecting on VRAM rather
-// than naming a card therefore picked the cheapest 80 GiB offer, got an A100
-// at sm_80, and did not fail: sd-cli fell back to the CPU backend and ran a
-// 32-billion-parameter model on 128 threads at the GPU's price.
+// What is left here is what only an image can answer, and it is three
+// statements compared against each other:
 //
-// The markers are read out of the binary rather than taken from the
-// Dockerfile, because the Dockerfile is the input and this is about the
-// output. They are also compared against the Dockerfile, so the two cannot
-// drift apart silently in either direction.
-func TestWorkloadImage_CoversTheCardsEmberCanRent(t *testing.T) {
+//	EMBER_CUDA_ARCH          what the caller asked for    -- outside the build
+//	LABEL ember.cuda-arch    what the build thought        -- baked by it
+//	the absence of PTX       what nvcc emitted             -- read from the bytes
+//
+// The SASS architecture itself is checked inside the build, by cuobjdump,
+// where the toolkit exists and the failure costs nothing: see
+// workload-sd-cuda.Dockerfile. It cannot be checked here, because the markers
+// that used to be greppable were the text of the embedded PTX -- a PTX module
+// carries ".target sm_75" in plain characters -- and dropping the PTX took
+// them with it. Their absence is now the evidence rather than the obstacle.
+func TestWorkloadImage_CarriesOneArchitectureAndNoPTX(t *testing.T) {
 	l := harness.New(t)
 	ctx := t.Context()
+	image, want := sdCUDAUnderTest(t)
 
-	const image = "ember:sd-cuda"
 	if !l.HaveImage(ctx, image) {
-		t.Fatalf("%s is not built, and this asserts about the binary in it:\n  make workload-sd-cuda", image)
+		t.Fatalf("%s is not built, and this asserts about the binary in it:\n"+
+			"  make workload-sd-cuda CUDA_ARCH=%d", image, want)
+	}
+
+	// The label travels with the image into a registry, so a published
+	// artifact can say what it is without being run -- which is what makes it
+	// worth comparing against the request.
+	if got := l.ImageLabel(ctx, image, "ember.cuda-arch"); got != strconv.Itoa(want) {
+		t.Errorf("%s is labelled ember.cuda-arch=%q but this run asked for sm_%d.\n"+
+			"The label is what a published image says about itself, so a wrong one is a digest "+
+			"an operator files under the wrong images: key -- and ember would then run it on a "+
+			"card it has no kernel for, which does not fail, it runs on the CPU at the GPU's price.",
+			image, got, want)
+	}
+
+	// An architecture no card needs is a matrix job, twenty minutes of a
+	// runner and a line in every operator's config, for an image nothing will
+	// ever run.
+	if cards := node.CardsFor(node.ComputeCap(want)); len(cards) == 0 {
+		t.Errorf("sm_%d is not the architecture of any card ember can select; it publishes %v",
+			want, node.KnownCaps())
 	}
 
 	n := mintAndStartImage(t, l, "cudaarch", image)
 
 	// grep rather than `strings`, which the runtime base does not carry. -a
-	// treats the binary as text; the markers are plain ASCII inside the
-	// fatbin.
+	// treats the binary as text; PTX, when there is any, is text.
 	out := l.ExecOut(ctx, n.ID, "sh", "-c",
-		"grep -aoE 'sm_[0-9]+|compute_[0-9]+' /opt/sd/sd-cli | sort -u || true")
-
-	native := map[int]bool{}  // sm_NN  -- machine code
-	virtual := map[int]bool{} // compute_NN -- PTX, JITs forward only
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(line, "sm_"):
-			if n, err := strconv.Atoi(strings.TrimPrefix(line, "sm_")); err == nil {
-				native[n] = true
-			}
-		case strings.HasPrefix(line, "compute_"):
-			if n, err := strconv.Atoi(strings.TrimPrefix(line, "compute_")); err == nil {
-				virtual[n] = true
-			}
-		}
+		"grep -aoE 'compute_[0-9]+|[.]target sm_[0-9]+' /opt/sd/sd-cli | sort -u || true")
+	if got := strings.TrimSpace(out); got != "" {
+		t.Errorf("/opt/sd/sd-cli carries PTX, and this image ships none:\n%s\n"+
+			"PTX JITs forward only, so it can never help an older card; on a newer one it means "+
+			"the driver compiles every kernel at first launch, on a cold cache, on every pod, "+
+			"unmeasured. Nothing is compiled on a rented machine. "+
+			"CMAKE_CUDA_ARCHITECTURES must be \"NN-real\" -- a bare NN emits PTX too.", got)
 	}
-	if len(native) == 0 {
-		t.Fatalf("no sm_* markers in /opt/sd/sd-cli; the binary may not be a CUDA build at all:\n%s", out)
-	}
-
-	// What the Dockerfile asked for is what the binary must contain. A build
-	// arg that silently stopped taking effect would otherwise look exactly
-	// like a correct build.
-	for _, want := range dockerfileCUDAArchs(t) {
-		if !native[want] {
-			t.Errorf("the Dockerfile asks for sm_%d but the binary does not carry it; "+
-				"CUDA_ARCHS is not reaching the compiler. Found: %v", want, sortedKeys(native))
-		}
-	}
-
-	// lowestPTX is what a newer card can JIT from. PTX is forward-compatible
-	// only: compute_90 runs on Blackwell and can do nothing for an A100.
-	lowestPTX := -1
-	for v := range virtual {
-		if lowestPTX == -1 || v < lowestPTX {
-			lowestPTX = v
-		}
-	}
-
-	for _, c := range cardsEmberCanRent {
-		if native[c.cc] {
-			continue
-		}
-		if lowestPTX != -1 && lowestPTX <= c.cc {
-			// Usable, but it pays a JIT compile on every cold start, and
-			// nothing here has measured what that costs.
-			t.Logf("%s (sm_%d) has no native code and will JIT from compute_%d", c.name, c.cc, lowestPTX)
-			continue
-		}
-		t.Errorf("%s is sm_%d and this image cannot run on it: no native sm_%d and no PTX at or below it "+
-			"(native %v, ptx %v).\nA run on this card will not fail -- it will fall back to the CPU backend "+
-			"and bill at the GPU's rate. Add %d to CUDA_ARCHS in workload-sd-cuda.Dockerfile.",
-			c.name, c.cc, c.cc, sortedKeys(native), sortedKeys(virtual), c.cc)
-	}
-}
-
-// dockerfileCUDAArchs reads the CUDA_ARCHS default out of the Dockerfile.
-//
-// Parsed rather than duplicated here: a copy would be a second place to
-// forget.
-func dockerfileCUDAArchs(t *testing.T) []int {
-	t.Helper()
-
-	b, err := os.ReadFile(filepath.Join("..", "..", "workload-sd-cuda.Dockerfile"))
-	if err != nil {
-		t.Fatalf("read the Dockerfile: %v", err)
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG CUDA_ARCHS=")
-		if !ok {
-			continue
-		}
-		var out []int
-		for _, part := range strings.Split(strings.Trim(rest, `"`), ";") {
-			n, err := strconv.Atoi(strings.TrimSpace(part))
-			if err != nil {
-				t.Fatalf("CUDA_ARCHS entry %q is not a number", part)
-			}
-			out = append(out, n)
-		}
-		if len(out) == 0 {
-			t.Fatal("CUDA_ARCHS is empty")
-		}
-		return out
-	}
-	t.Fatal("no ARG CUDA_ARCHS line in workload-sd-cuda.Dockerfile")
-	return nil
 }
 
 func sortedKeys(m map[int]bool) []int {
