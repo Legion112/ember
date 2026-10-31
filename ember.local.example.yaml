@@ -13,15 +13,22 @@
 
 provider: local
 
-# NOT the published image. `make workload-sd-cuda-local` reads this machine's
-# compute capability from nvidia-smi and builds for exactly that.
+# Built for the card in this machine. `make workload-sd-cuda-local` reads the
+# compute capability from nvidia-smi and builds for exactly that, under the
+# ordinary per-architecture tag -- so adjust the number below if the card here
+# is not an sm_75.
 #
-# The published ember-sd carries the architectures of cards worth renting --
-# sm_80, 86, 89, 90 -- and this machine's card is not one of them. Running the
-# published image here would not fail: it would find no usable kernel, fall
-# back to the CPU backend, and look like a very slow success. That is the
-# failure internal/gpucheck exists to catch, and the probe below catches it.
-image: ember:sd-cuda-local
+# There used to be a separate ember:sd-cuda-local tag, because the published
+# set excluded this machine's card. It does not any more: sm_75 is one of the
+# architectures ember publishes, so a local build and a published one are the
+# same artifact under the same naming, and two names for one thing is how they
+# drift.
+#
+# A scalar image: rather than an images: map, because a local run has exactly
+# one card and knows which. The map is for a run that selects on VRAM or price
+# and does not know what it will get -- see "Choosing the image by the card"
+# in README.md.
+image: ember:sd-cuda-sm75
 
 ttl: 4h
 

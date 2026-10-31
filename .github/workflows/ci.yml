@@ -45,6 +45,12 @@ jobs:
           # the condition is "is there Go here", not "is there a directory".
           if ls test/integration/*.go >/dev/null 2>&1; then
             go vet -tags=integration ./test/...
+            # And behind the second tag. Nothing else compiles the image labs:
+            # the job below runs only -tags=integration, and the workflow that
+            # uses them is dispatch-only -- so a file that stopped compiling
+            # would not be noticed until a publish, after a twenty-minute
+            # build. That is exactly how "ember:lab is missing" reached one.
+            go vet -tags='integration imagelab' ./test/...
           else
             echo "no lab sources yet; skipping the tagged vet"
           fi
@@ -105,7 +111,9 @@ jobs:
       # never looks at code behind a build tag: go-tun learned that the hard
       # way, with a lab that had not compiled for weeks.
       - name: vet the tagged tree
-        run: go vet -tags=integration ./test/...
+        run: |
+          go vet -tags=integration ./test/...
+          go vet -tags='integration imagelab' ./test/...
 
       - name: build the lab image
         run: make docker-build

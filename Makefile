@@ -66,7 +66,7 @@ COVER_OVERALL := 94
 # labs and a rented pod run the same bytes.
 LAB_IMAGE := ember:lab
 
-.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean
+.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
 
 all: fmt vet test build
 
@@ -98,6 +98,12 @@ cover-check: cover
 vet:
 	$(GO) vet ./...
 	$(GO) vet -tags=integration ./test/...
+	# And behind the second tag. Nothing else compiles the image labs: CI runs
+	# only -tags=integration, and the workflow that uses them is dispatch-only,
+	# so a file that stopped compiling would not be noticed until a publish --
+	# after a twenty-minute build, which is exactly how `ember:lab is missing`
+	# reached a publish once.
+	$(GO) vet -tags='integration imagelab' ./test/...
 
 fmt:
 	$(GO) fmt ./...
@@ -121,10 +127,36 @@ docker-build:
 # needed by the CPU variant, which exists to prove a pipeline locally for
 # nothing and has no store to mount.
 SD_IMAGE := ember:sd
-SD_CUDA_IMAGE := ember:sd-cuda
-# Built for this machine's card only, never published.
-SD_CUDA_LOCAL_IMAGE := ember:sd-cuda-local
+
+# One image per architecture, so the tag carries it.
+#
+# Recursive (=), not simple (:=): the tag has to follow CUDA_ARCH when it is
+# set on the command line. A single ember:sd-cuda with no architecture in the
+# name is how two local builds overwrite each other and the image lab asserts
+# against whichever ran last.
+#
+# CUDA_ARCH is singular and has no default here or in the Dockerfile. A
+# default is how a path that forgot to pass it produces a wrong-architecture
+# image that looks correct.
+CUDA_ARCH ?=
+SD_CUDA_IMAGE = ember:sd-cuda-sm$(CUDA_ARCH)
 MODEL ?=
+
+# require-arch fails with the command that fixes it rather than twenty minutes
+# into nvcc, the same shape as require-model below.
+#
+# The set comes from `ember archs` rather than being listed here, because a
+# copy of it in a Makefile is a copy that is wrong the day a card is added.
+define require-arch
+	@if [ -z "$(CUDA_ARCH)" ]; then \
+		echo "CUDA_ARCH is not set. One image per architecture, so the build has to be told which:"; \
+		echo "  make $@ CUDA_ARCH=89      # 4090 / L40S"; \
+		echo; \
+		echo "architectures ember publishes an image for:"; \
+		$(GO) run ./cmd/ember archs --cards 2>/dev/null | sed 's/^/  /'; \
+		exit 1; \
+	fi
+endef
 
 # require-model fails with the command that fixes it rather than a build error
 # three minutes in.
@@ -150,37 +182,32 @@ workload-sd:
 # CUDA binary, so this compiles stable-diffusion.cpp against the toolkit --
 # minutes, not seconds.
 #
-# CUDA_ARCHS overrides the Dockerfile's default, which is the set of cards
-# worth renting.
+# CUDA_ARCH is required and names exactly one architecture. The Dockerfile
+# verifies with cuobjdump that the binary carries that one and no PTX, so a
+# wrong image fails the build rather than being published and noticed later.
 workload-sd-cuda:
+	$(require-arch)
 	docker build -t $(SD_CUDA_IMAGE) -f workload-sd-cuda.Dockerfile \
-		$(if $(CUDA_ARCHS),--build-arg CUDA_ARCHS="$(CUDA_ARCHS)",) .
+		--build-arg CUDA_ARCH="$(CUDA_ARCH)" .
 
 # The same image, built for the card in *this* machine.
 #
-# Deliberately not in CI and not in the published image. The published one
-# carries the architectures of cards ember can rent; this machine's card is
-# not one of them, and a 2080 Ti at sm_75 would add minutes to every cold
-# build in CI to serve exactly one computer.
+# A thin wrapper now. It still reads the architecture off the card rather than
+# taking it as an argument, because a number typed by hand is a number that is
+# wrong after a hardware change -- and wrong here does not fail, it falls back
+# to the CPU backend and looks like a slow success.
 #
-# The architecture is read from the card rather than configured, because a
-# number typed into a Makefile is a number that is wrong after a hardware
-# change -- and wrong here does not fail, it falls back to the CPU backend
-# and looks like a slow success.
-#
-# Tagged separately so it cannot be mistaken for the image a rented node
-# runs. `ember.local.example.yaml` names this tag.
+# What it produces is an ordinary per-architecture image under the ordinary
+# per-architecture tag. The separate ember:sd-cuda-local tag is gone: it
+# existed because the published set excluded this machine's card, sm_75 is in
+# that set now, and two names for one artifact is how they drift.
 workload-sd-cuda-local:
 	@command -v nvidia-smi >/dev/null 2>&1 || { \
 		echo "nvidia-smi not found: this target builds for the GPU in this machine"; exit 1; }
 	@arch=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '. '); \
 	test -n "$$arch" || { echo "could not read a compute capability from nvidia-smi"; exit 1; }; \
 	echo "building for sm_$$arch ($$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1))"; \
-	docker build -t $(SD_CUDA_LOCAL_IMAGE) -f workload-sd-cuda.Dockerfile \
-		--build-arg CUDA_ARCHS="$$arch" .
-	@echo
-	@echo "built $(SD_CUDA_LOCAL_IMAGE). Run it with:"
-	@echo "  ember up --config ember.local.yaml"
+	$(MAKE) workload-sd-cuda CUDA_ARCH=$$arch
 
 # Assertions about the published workload images, behind their own tag.
 #
@@ -193,15 +220,17 @@ workload-sd-cuda-local:
 # are here. A lab that skips itself reports success for something that never
 # ran.
 test-image-labs:
+	$(require-arch)
 	@docker image inspect $(SD_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(SD_IMAGE) is missing. Build it with:"; \
 		echo "  make workload-sd MODEL=/path/to/a.gguf"; exit 1; }
 	@docker image inspect $(SD_CUDA_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(SD_CUDA_IMAGE) is missing. Build it with:"; \
-		echo "  make workload-sd-cuda"; exit 1; }
+		echo "  make workload-sd-cuda CUDA_ARCH=$(CUDA_ARCH)"; exit 1; }
+	EMBER_SD_CUDA_IMAGE=$(SD_CUDA_IMAGE) EMBER_CUDA_ARCH=$(CUDA_ARCH) \
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
-		-run 'TestWorkloadImage_' | tee /tmp/ember-image-labs.log
-	@if grep -q -- '--- SKIP' /tmp/ember-image-labs.log; then \
+		-run 'TestWorkloadImage_' | tee /tmp/ember-image-labs-sm$(CUDA_ARCH).log
+	@if grep -q -- '--- SKIP' /tmp/ember-image-labs-sm$(CUDA_ARCH).log; then \
 		echo "a lab skipped itself"; exit 1; fi
 
 # The labs a publish must pass, named once so CI and a laptop run the same set.
@@ -214,19 +243,21 @@ test-image-labs:
 # The video lab is deliberately absent. It needs ember:sd, the CPU build, and
 # a publish of the CUDA image should not require an unrelated image to exist.
 # TestWorkloadImages_PinTheSameUpstreamRevision is what keeps the two honest.
-PUBLISH_LABS := 'TestWorkloadImage_(ListensOnNothingButSSH|CarriesNoWeights|UnderstandsTheFetchCommand|CoversTheCardsEmberCanRent)'
+PUBLISH_LABS := 'TestWorkloadImage_(ListensOnNothingButSSH|CarriesNoWeights|UnderstandsTheFetchCommand|CarriesOneArchitectureAndNoPTX)'
 
 # The subset of the image labs that needs only the CUDA image and ember:lab.
 test-image-labs-publish:
+	$(require-arch)
 	@docker image inspect $(SD_CUDA_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(SD_CUDA_IMAGE) is missing. Build it with:"; \
-		echo "  make workload-sd-cuda"; exit 1; }
+		echo "  make workload-sd-cuda CUDA_ARCH=$(CUDA_ARCH)"; exit 1; }
 	@docker image inspect $(LAB_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(LAB_IMAGE) is missing. Build it with:"; \
 		echo "  make docker-build"; exit 1; }
+	EMBER_SD_CUDA_IMAGE=$(SD_CUDA_IMAGE) EMBER_CUDA_ARCH=$(CUDA_ARCH) \
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
-		-run $(PUBLISH_LABS) | tee /tmp/ember-publish-labs.log
-	@if grep -q -- '--- SKIP' /tmp/ember-publish-labs.log; then \
+		-run $(PUBLISH_LABS) | tee /tmp/ember-publish-labs-sm$(CUDA_ARCH).log
+	@if grep -q -- '--- SKIP' /tmp/ember-publish-labs-sm$(CUDA_ARCH).log; then \
 		echo "a lab skipped itself"; exit 1; fi
 
 # Publishing the CUDA image from this machine, as an equal of the CI workflow.
@@ -254,12 +285,27 @@ GHCR_OWNER ?= legion112
 GHCR_IMAGE := ghcr.io/$(GHCR_OWNER)/ember-sd
 TAG ?= sd-cuda
 
+# Publishing one architecture's image from this machine, as an equal of one
+# matrix job. Both still run the labs named once as PUBLISH_LABS above.
+#
+# Usage:  make publish-sd-cuda CUDA_ARCH=75 TAG=sd-cuda
+#
+# The reference is rebuilt from GHCR_IMAGE and the digest rather than printed
+# straight from RepoDigests, because that is a list whose order nothing
+# documents -- an image carrying two tags can report either one first, and a
+# config naming the wrong repository is a pull that fails at create.
 publish-sd-cuda: workload-sd-cuda docker-build test-image-labs-publish
-	docker tag $(SD_CUDA_IMAGE) $(GHCR_IMAGE):$(TAG)
-	docker push $(GHCR_IMAGE):$(TAG)
+	docker tag $(SD_CUDA_IMAGE) $(GHCR_IMAGE):$(TAG)-sm$(CUDA_ARCH)
+	docker push $(GHCR_IMAGE):$(TAG)-sm$(CUDA_ARCH)
 	@echo
-	@echo "published. put this in ember.yaml:"
-	@echo "  image: $$(docker image inspect --format '{{index .RepoDigests 0}}' $(GHCR_IMAGE):$(TAG))"
+	@echo "published. put this under images: in ember.yaml:"
+	@ref=$$(docker image inspect --format '{{index .RepoDigests 0}}' $(GHCR_IMAGE):$(TAG)-sm$(CUDA_ARCH)); \
+	echo "  sm_$(CUDA_ARCH): $(GHCR_IMAGE)@sha256:$${ref##*@sha256:}"
+
+# print-<VAR> so a workflow can ask make for a name instead of spelling it a
+# second time. No file is produced, so it always runs.
+print-%:
+	@echo $($*)
 
 # The labs refuse to skip themselves: a missing image is a hard failure with
 # the command to fix it, never a t.Skip. A silently skipped lab is worse than

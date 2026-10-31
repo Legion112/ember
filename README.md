@@ -162,8 +162,8 @@ ember up --config sd.yaml     # provider: local — free, CPU, a few seconds
 Either machine can publish it, and both run the same checks first.
 
 ```bash
-gh workflow run "workload image" -f tag=sd-cuda --ref master   # in CI
-make publish-sd-cuda TAG=sd-cuda                               # from here
+gh workflow run "workload image" -f tag=sd-cuda --ref master   # in CI, every architecture
+make publish-sd-cuda CUDA_ARCH=89 TAG=sd-cuda                   # from here
 ```
 
 The local path needs `docker login ghcr.io -u <user>` with a classic token
@@ -288,13 +288,16 @@ configuration as the rented one with the provider changed and
 `--offload-to-cpu` added. The store is a Docker named volume — the same code
 path a rented network volume uses, costing nothing and surviving between runs.
 
-**The image is built separately on purpose.** The published `ember-sd` carries
-the architectures of cards worth renting — `sm_80`, `86`, `89`, `90`. A
-desktop card is usually none of them, and adding one would lengthen every cold
-build in CI to serve a single computer. `make workload-sd-cuda-local` reads
-this machine's compute capability from `nvidia-smi` and builds for exactly it,
-under a separate tag so it cannot be mistaken for the image a rented node
-runs.
+`make workload-sd-cuda-local` reads this machine's compute capability from
+`nvidia-smi` and builds for exactly it. There is nothing special about the
+result: one image per architecture is how every image is built now, so a local
+build and a published one are the same artifact under the same naming.
+
+That used to be false. The published image carried a *list* of architectures —
+chosen narrowly, because each one cost build time — and a desktop card was
+usually outside it, so the local build needed its own tag. A build matrix
+removed the reason: one architecture per job means the wall clock is one
+compile rather than seven, and `sm_75` is in the published set.
 
 Running the published image on an unsupported card does **not** fail. It finds
 no usable kernel, falls back to the CPU backend, and looks like a very slow
