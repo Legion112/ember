@@ -48,7 +48,15 @@ provider: runpod
 # compute_89 PTX "for forward JIT onto Blackwell". That is gone: nothing is
 # compiled on a rented machine, so the published images carry native code for
 # one architecture and no PTX at all. See AGENTS.md.
-image: ghcr.io/legion112/ember-sd@sha256:95789a8e2e85850afcbadb95a116dfa7bd682ef61d15aaeaf3eab4d0815bdf87
+images:
+  sm_75: ghcr.io/legion112/ember-sd:sd-cuda-sm75@sha256:2da9f94d608d2f757dbf2f38f309ce73a6a41b872257c88eb9c2aadd822e20c9
+  sm_80: ghcr.io/legion112/ember-sd:sd-cuda-sm80@sha256:468cbde2fdbec8d83e403b32cda8aa4db214c1fd555ddab182225cab7d442f20
+  sm_86: ghcr.io/legion112/ember-sd:sd-cuda-sm86@sha256:e7d1e42c94b29146425c134d4d91da646854b8325e5229b790739ecf9f1e8709
+  sm_89: ghcr.io/legion112/ember-sd:sd-cuda-sm89@sha256:e4654d841c966b042493d81757feb397817a7e3ff5da8e2bdd397885e901f0c5
+  sm_90: ghcr.io/legion112/ember-sd:sd-cuda-sm90@sha256:01be5129dbfc61936bb4c4dff5d3a571838b9e1257dc736427c79324a9c3b69e
+  sm_100: ghcr.io/legion112/ember-sd:sd-cuda-sm100@sha256:ef93ef0ee1e6097473a2b36af9ae4066a3ea98912cfde38d4768d8ab60c7883f
+  sm_103: ghcr.io/legion112/ember-sd:sd-cuda-sm103@sha256:8ff5fd43523f999a116afe5821bef067290e8d2c2416a13b24a1fef9f4899c88
+  sm_120: ghcr.io/legion112/ember-sd:sd-cuda-sm120@sha256:e2447c2d0e884da44c1d33b09abb4366354e606903f2f1dcd8fe2bd835d87f7f
 
 ttl: 1h
 

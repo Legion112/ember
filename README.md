@@ -244,16 +244,23 @@ estimate.
 | `sm_89` | RTX 2000 Ada | 0.24 | 6.56 | 4.30 s | $0.014 |
 | `sm_90` | H100 NVL | 2.89 | 17.76 | 2.38 s | $0.076 |
 | `sm_100` | B200 | 7.99 | 21.81 | 2.18 s | $0.151 |
+| `sm_103` | B300 SXM6 | 8.99 | 21.19 | 11.09 s | $0.346 |
 | `sm_120` | RTX PRO 4000 Blackwell | 0.57 | 14.28 | 2.64 s | $0.016 |
 | `sm_120` | RTX PRO 6000 MIG 1g.24gb | 0.69 | 9.73 | 1.92 s | $0.023 |
 
-Two things in that table are worth more than the confirmation.
+Three things in that table are worth more than the confirmation.
 
 **The cheapest card is not the slowest.** An RTX 2000 Ada at $0.24/hr and an
 H100 NVL at $2.89 differ by 2.7× in sampling rate and 12× in price. For a
 workload this size the fixed costs — provisioning, the image pull, the weight
 fetch — dominate, so the expensive card mostly buys a shorter tail. Pick on
 VRAM and price; `images:` makes either safe.
+
+**The B300 row is why `sm_103` exists at all.** The old lab table grouped it
+with the B200 at `sm_100`; the card reports compute capability 10.3. Renting
+one for two minutes cost $0.24 and replaced a guess that would have had ember
+pull a 2.65 GB image onto an $8.99/hour card and abort on a missing kernel,
+every time.
 
 **A MIG slice is a real option.** A 24 GiB partition of an RTX PRO 6000 rents
 at $0.69/hr against $2.49 for the whole card, runs the same `sm_120` image,
