@@ -45,8 +45,8 @@ var noiseWords = map[string]bool{
 	// liquid-cooled are the same chip, and without these an operator typing
 	// `--gpu b300` matches nothing at all.
 	"ac": true, "lc": true,
-	// "NVIDIA RTX 6000 Ada Generation" -- "ada" was already here and
-	// "generation" was not, which left "rtx6000generation".
+	// "NVIDIA RTX 6000 Ada Generation" -- "generation" was missing, which
+	// left "rtx6000generation".
 	"generation": true,
 	// Memory *type*, which is not memory *capacity* and does not change
 	// which card you get. RunPod spells the card "NVIDIA H100 80GB HBM3",
@@ -54,8 +54,23 @@ var noiseWords = map[string]bool{
 	// "h100-80ghbm3" -- a spelling no filter would ever match.
 	"hbm": true, "hbm2": true, "hbm2e": true, "hbm3": true, "hbm3e": true,
 	"gddr6": true, "gddr6x": true, "gddr7": true,
-	"blackwell": true, "hopper": true, "ampere": true, "ada": true,
+	"blackwell": true, "hopper": true, "ampere": true,
 	"lovelace": true, "turing": true, "volta": true,
+	// "ada" is NOT a noise word, and that is the one exception in this list.
+	//
+	// It is the only architecture name NVIDIA puts in a product name to tell
+	// two different cards apart. "Quadro RTX 6000" is Turing at sm_75 and
+	// "NVIDIA RTX 6000 Ada Generation" is Ada at sm_89, and with "ada"
+	// dropped both normalised to "rtx6000" -- so the name could not say which
+	// silicon it was, and ComputeCapOf had to refuse all three of rtx4000,
+	// rtx5000 and rtx6000 rather than guess. Refusing is the safe direction
+	// and it was still costing the cheapest card RunPod rents: an RTX 4000
+	// Ada at $0.28/hr, against $0.89 for a 4090.
+	//
+	// Kept because the distinction is real, not because the string is
+	// interesting. Every other entry here is a word that does not change
+	// which card you get; this one does.
+	"ada":         false,
 	"workstation": true, "server": true, "edition": true, "gpu": true,
 }
 

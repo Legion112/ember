@@ -80,10 +80,18 @@ func (k CapKnowledge) String() string {
 // naming sm_70, which is a useful answer; leaving it out would say "ember does
 // not know a V100", which is false.
 var computeCaps = map[GPUModel]ComputeCap{
-	// Turing. The card in the machine this repository is developed on, which
-	// is why it is here: the local provider offers it, so it is a card ember
-	// can select even though nobody rents one.
+	// Turing. The 2080 Ti is the card in the machine this repository is
+	// developed on, which is why it is here at all: the local provider offers
+	// it, so it is a card ember can select even though nobody rents one.
+	//
+	// The Quadro RTX line is Turing too, and these four used to be
+	// unrepresentable: with "ada" treated as a noise word, "Quadro RTX 6000"
+	// and "NVIDIA RTX 6000 Ada Generation" both normalised to "rtx6000", so
+	// an entry would have claimed one architecture for two. See offer.go.
 	"rtx2080ti": 75,
+	"rtx4000":   75,
+	"rtx5000":   75,
+	"rtx6000":   75,
 	"rtx8000":   75,
 
 	// Ampere, GA100.
@@ -100,12 +108,25 @@ var computeCaps = map[GPUModel]ComputeCap{
 	"rtxa5000": 86,
 	"rtxa6000": 86,
 
-	// Ada Lovelace.
-	"l4":      89,
-	"l40":     89,
-	"l40s":    89,
-	"rtx4080": 89,
-	"rtx4090": 89,
+	// Ada Lovelace. The professional line carries "Ada" in its product name,
+	// which is the only reason these can be told from the Turing Quadros
+	// above -- RunPod rents the RTX 4000 Ada at $0.28/hr, the cheapest offer
+	// in its catalogue.
+	// The whole "RTX NNNN Ada Generation" line is one architecture, so these
+	// are listed by the line rather than one at a time as a catalogue happens
+	// to show them: rtx2000ada was found live after rtx4000ada, rtx5000ada
+	// and rtx6000ada had already been added from the ones on offer that day.
+	"l4":         89,
+	"l40":        89,
+	"l40s":       89,
+	"rtx2000ada": 89,
+	"rtx4000ada": 89,
+	"rtx4080":    89,
+	"rtx4090":    89,
+	"rtx4500ada": 89,
+	"rtx5000ada": 89,
+	"rtx5880ada": 89,
+	"rtx6000ada": 89,
 
 	// Hopper. "NVIDIA H100 NVL" normalises to a bare "h100" because NVL is a
 	// form factor and 94GB is not one of the capacity suffixes NormalizeGPU
@@ -141,12 +162,6 @@ var notCUDA = map[GPUModel]bool{
 // Cards deliberately absent, and why. Adding one of these without resolving
 // the ambiguity would select an image for the wrong silicon, which is the
 // whole failure this table exists to prevent.
-//
-//   - rtx4000, rtx5000, rtx6000: NormalizeGPU folds both the Turing Quadro and
-//     the Ada refresh onto the same name, because "quadro", "ada" and
-//     "generation" are all noise words. "Quadro RTX 6000" is sm_75 and
-//     "NVIDIA RTX 6000 Ada Generation" is sm_89, and from the normalised name
-//     alone there is no way to tell them apart. A miss refuses; a guess rents.
 //
 //   - b300: the repository's old table claimed 100, grouping it with the B200
 //     as "NVIDIA B200 / B300 SXM6". Blackwell Ultra is widely described as a

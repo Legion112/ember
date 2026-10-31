@@ -167,8 +167,12 @@ func TestNormalizeGPU_RealRunPodCatalogueNames(t *testing.T) {
 
 		// Cooling is not silicon.
 		"NVIDIA B300 SXM6 AC": "b300",
-		// "ada" was a noise word and "generation" was not.
-		"NVIDIA RTX 6000 Ada Generation": "rtx6000",
+		// "ada" is deliberately NOT a noise word: it is the only architecture
+		// name NVIDIA puts in a product name to tell two cards apart, and
+		// folding it away made the Turing Quadro RTX 6000 (sm_75) and this
+		// one (sm_89) the same string. "generation" is noise.
+		"NVIDIA RTX 6000 Ada Generation": "rtx6000ada",
+		"Quadro RTX 6000":                "rtx6000",
 	} {
 		if got := NormalizeGPU(in); got != want {
 			t.Errorf("NormalizeGPU(%q) = %q, want %q", in, got, want)

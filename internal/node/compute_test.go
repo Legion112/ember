@@ -76,31 +76,60 @@ func TestComputeCapOf_ACardWithNoCUDACapability(t *testing.T) {
 	}
 }
 
-// TestComputeCapOf_TheAmbiguousRTXNamesAreAbsent.
+// TestComputeCapOf_TuringAndAdaOfTheSameNumberAreDifferentCards.
 //
-// NormalizeGPU folds the Turing Quadro and the Ada refresh onto one name,
-// because "quadro", "ada" and "generation" are all noise words: "Quadro RTX
-// 6000" is sm_75 and "NVIDIA RTX 6000 Ada Generation" is sm_89, and both
-// normalise to "rtx6000". From the normalised name there is no way to tell
-// them apart, so the table must not claim to.
+// This replaced a test asserting that rtx4000, rtx5000 and rtx6000 were all
+// absent from the table, which is what they had to be while "ada" was a noise
+// word: "Quadro RTX 6000" is Turing at sm_75 and "NVIDIA RTX 6000 Ada
+// Generation" is Ada at sm_89, and both normalised to "rtx6000". The name
+// could not say which silicon it was, so the table could not either, and
+// ComputeCapOf refused all three rather than guessing.
 //
-// Asserted rather than left implicit, so a later commit cannot helpfully add
-// an entry and silently start renting the wrong silicon.
-func TestComputeCapOf_TheAmbiguousRTXNamesAreAbsent(t *testing.T) {
-	// The collision itself, first: if NormalizeGPU ever learned to tell these
-	// apart, this test is the wrong shape and should be deleted rather than
-	// updated.
-	turing, ada := NormalizeGPU("Quadro RTX 6000"), NormalizeGPU("NVIDIA RTX 6000 Ada Generation")
-	if turing != ada {
-		t.Fatalf("the Turing and Ada RTX 6000 now normalise apart (%q and %q); "+
-			"the table can tell them apart and this test is obsolete", turing, ada)
+// That refusal was costing the cheapest card RunPod rents -- an RTX 4000 Ada
+// at $0.28/hr against $0.89 for a 4090 -- so "ada" stopped being noise. These
+// six entries are the ones that became representable.
+//
+// The old test carried a guard that fired the day this changed: it checked the
+// two still normalised alike and said "the table can tell them apart and this
+// test is obsolete" if they did not. It did fire, which is why this one exists
+// rather than the old one having been quietly edited to pass.
+func TestComputeCapOf_TuringAndAdaOfTheSameNumberAreDifferentCards(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want ComputeCap
+	}{
+		{"Quadro RTX 4000", 75},
+		{"Quadro RTX 5000", 75},
+		{"Quadro RTX 6000", 75},
+		{"Quadro RTX 8000", 75},
+		{"NVIDIA RTX 4000 Ada Generation", 89},
+		{"NVIDIA RTX 5000 Ada Generation", 89},
+		{"NVIDIA RTX 6000 Ada Generation", 89},
+	} {
+		m := NormalizeGPU(tc.name)
+		got, how := ComputeCapOf(m)
+		if how != CapKnown {
+			t.Errorf("%q normalises to %q, which is %v", tc.name, m, how)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%q (%q) = %s, want %s", tc.name, m, got, tc.want)
+		}
 	}
 
-	for _, m := range []GPUModel{"rtx4000", "rtx5000", "rtx6000"} {
-		if _, how := ComputeCapOf(m); how != CapUnknown {
-			t.Errorf("%q has a capability in the table, but the Turing and Ada cards of that "+
-				"name are different architectures and normalise the same; a guess here rents "+
-				"the wrong silicon", m)
+	// And they are not the same name, which is the whole point. Asserted
+	// directly so a later change to noiseWords that re-merged them fails here
+	// rather than silently claiming one architecture for two cards.
+	for _, pair := range [][2]string{
+		{"Quadro RTX 4000", "NVIDIA RTX 4000 Ada Generation"},
+		{"Quadro RTX 5000", "NVIDIA RTX 5000 Ada Generation"},
+		{"Quadro RTX 6000", "NVIDIA RTX 6000 Ada Generation"},
+	} {
+		turing, ada := NormalizeGPU(pair[0]), NormalizeGPU(pair[1])
+		if turing == ada {
+			t.Errorf("%q and %q both normalise to %q; one is sm_75 and the other sm_89, and an "+
+				"image for the wrong one does not fail -- it runs on the CPU backend at the "+
+				"GPU's price", pair[0], pair[1], turing)
 		}
 	}
 }

@@ -430,11 +430,18 @@ $ ember archs --cards
 ```
 
 ember knows which architecture a card is from a table in
-[`internal/node/compute.go`](internal/node/compute.go), except where a
-provider's name for two different cards normalises to the same thing — a
-Turing Quadro RTX 6000 and an RTX 6000 Ada are `sm_75` and `sm_89` and both
-read as `rtx6000`, so that name is deliberately absent and refuses. A card
-ember has never heard of is refused too, for the same reason: a guess rents.
+[`internal/node/compute.go`](internal/node/compute.go). A card it has never
+heard of is refused rather than guessed at, for the same reason as everything
+else here: a guess rents.
+
+One naming detail follows from that. `ada` is **not** treated as noise in a
+GPU name, unlike every other architecture word — because it is the only one
+NVIDIA puts in a product name to tell two different cards apart. A Turing
+Quadro RTX 6000 is `sm_75` and an RTX 6000 Ada Generation is `sm_89`, so they
+normalise to `rtx6000` and `rtx6000ada` and `--gpu rtx6000` matches only the
+Turing one. Folding them together made the name unable to say which silicon it
+was, which cost the cheapest card RunPod rents — an RTX 4000 Ada at $0.28/hr.
+
 On the local provider none of this applies, because `nvidia-smi` reports the
 capability of the card in the machine directly.
 
