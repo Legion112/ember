@@ -138,6 +138,17 @@ var computeCaps = map[GPUModel]ComputeCap{
 	// Blackwell, GB100.
 	"b200": 100,
 
+	// Blackwell Ultra, and a different architecture from the B200 -- which is
+	// the entry this table refused to write until a B300 was rented to settle
+	// it. The old lab table had grouped them as "NVIDIA B200 / B300 SXM6" at
+	// sm_100; the card itself says otherwise:
+	//
+	//   NVIDIA B300 SXM6 AC, 595.91.07, 10.3, 275040 MiB
+	//
+	// $0.24 to learn, against an $8.99/hour card aborting on a missing kernel
+	// every time somebody rented one on the old table's word.
+	"b300": 103,
+
 	// Blackwell, GB20x. The whole RTX PRO Blackwell line is one architecture
 	// whatever the number after PRO is, and RunPod rents all of these -- they
 	// were missing from the first version of this table, which `ember offers`
@@ -148,6 +159,17 @@ var computeCaps = map[GPUModel]ComputeCap{
 	"rtxpro4500": 120,
 	"rtxpro5000": 120,
 	"rtxpro6000": 120,
+
+	// MIG partitions of an RTX PRO 6000, which were also an exclusion until
+	// one was rented. The silicon was never the question -- a partition is the
+	// same chip -- but whether sd-cli runs on one was, and it does: a 512x512
+	// SD 1.5 render at 9.73 it/s, exit 0, on the 24 GiB slice.
+	//
+	// Worth having rather than tidy to omit. RunPod rents the 1g slice at
+	// $0.69/hour and the whole card at $2.49, and 24 GiB is more than most
+	// of what ember is pointed at needs.
+	"rtxpro6000mig1g.24gb": 120,
+	"rtxpro6000mig2g.48gb": 120,
 }
 
 // notCUDA are cards ember can see that have no CUDA compute capability at all.
@@ -159,24 +181,21 @@ var notCUDA = map[GPUModel]bool{
 	"mi300x": true,
 }
 
-// Cards deliberately absent, and why. Adding one of these without resolving
-// the ambiguity would select an image for the wrong silicon, which is the
-// whole failure this table exists to prevent.
+// Nothing is deliberately absent any more, and the three things that were got
+// settled by measurement rather than by argument:
 //
-//   - b300: the repository's old table claimed 100, grouping it with the B200
-//     as "NVIDIA B200 / B300 SXM6". Blackwell Ultra is widely described as a
-//     distinct target and the published sources do not settle which, so the
-//     claim is unverified and stays out. The one place ground truth exists is
-//     a rented B300 printing its own compute_cap, which is how any entry here
-//     should be confirmed.
+//   - rtx4000, rtx5000 and rtx6000 were ambiguous while "ada" was a noise
+//     word, because the Turing Quadro and the Ada refresh normalised alike.
+//     offer.go stopped folding "ada" away, so they are eleven entries now.
 //
-//   - rtxpro6000mig1g.24gb and rtxpro6000mig2g.48gb: MIG partitions of an
-//     RTX PRO 6000, which RunPod rents at $0.69 and $1.29 against $2.49 for
-//     the whole card. The silicon is sm_120, so the architecture is not the
-//     question -- whether sd-cli runs on a MIG slice at all is, and nobody has
-//     tried. They are cheap enough to be worth confirming rather than
-//     guessing, and a guess that is wrong rents a slice and bills it to run on
-//     the CPU.
+//   - b300 was claimed as sm_100 by the old lab table. A rented one reports
+//     compute capability 10.3, so it is sm_103 and its own architecture.
+//
+//   - the two RTX PRO 6000 MIG partitions were out because nobody had tried
+//     running sd-cli on a slice. One rendered at 9.73 it/s.
+//
+// The pattern is worth keeping: an entry here is a claim about hardware, and
+// the cheapest way to be sure of one is to rent the card for two minutes.
 
 // ComputeCapOf reports the architecture of a card, and how confidently.
 //
