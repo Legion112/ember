@@ -176,6 +176,40 @@ func TestImages_RefusesAnIncompleteSetButStillPrintsIt(t *testing.T) {
 	}
 }
 
+// TestImages_FindsFragmentsInPerArtifactSubdirectories.
+//
+// The two ways these arrive on disk put them at different depths. The
+// workflow downloads with merge-multiple, which flattens everything into one
+// directory; `gh run download` gives each artifact its own, so a file lands
+// at digests/digest-sm_90/sm_90.yaml.
+//
+// The first version of readFragments only listed the top level. It worked in
+// CI and found nothing at all on a laptop -- printing an empty block and
+// reporting every architecture missing, which is the most misleading output
+// this command has: it reads as "the build published nothing" when the build
+// published everything. Found by running it against a real run's artifacts.
+func TestImages_FindsFragmentsInPerArtifactSubdirectories(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range []string{"sm_75", "sm_90"} {
+		sub := filepath.Join(dir, "digest-"+a)
+		if err := os.Mkdir(sub, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		frag(t, sub, a, pinnedRef("sd-cuda-"+a))
+	}
+
+	var out bytes.Buffer
+	if err := runImages([]string{"--from", dir, "--archs", "75,90"}, &out); err != nil {
+		t.Fatalf("runImages = %v\n%s", err, out.String())
+	}
+	for _, want := range []string{"sm_75: ", "sm_90: "} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("a fragment in a per-artifact subdirectory was not found; missing %q in:\n%s",
+				want, out.String())
+		}
+	}
+}
+
 func TestImages_RefusesABadFragment(t *testing.T) {
 	for name, line := range map[string]string{
 		"a tag naming another architecture": "  sm_90: " + pinnedRef("sd-cuda-sm89"),

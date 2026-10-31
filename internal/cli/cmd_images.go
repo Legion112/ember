@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,23 +101,39 @@ func runImages(args []string, out io.Writer) error {
 // from a push, or a tag naming an architecture other than its key, is a
 // mis-paste that is cheaper to catch here than in the config it ends up in.
 func readFragments(dir string) (map[node.ComputeCap]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	if _, err := os.Stat(dir); err != nil {
+		return nil, fmt.Errorf("read the fragment directory: %w", err)
+	}
+
+	// Walked rather than listed, because the two ways these arrive on disk
+	// put them at different depths. The workflow's download-artifact step
+	// uses merge-multiple, which flattens them into one directory; `gh run
+	// download` gives each artifact a directory of its own, so the files land
+	// at digests/digest-sm_90/sm_90.yaml.
+	//
+	// The first version only listed the top level. It worked in CI and found
+	// nothing at all on a laptop -- printing an empty block and reporting
+	// every architecture missing, which is the most misleading output this
+	// command has: it reads as "the build published nothing" when the build
+	// published everything.
+	var names []string
+	if err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			names = append(names, path)
+		}
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("read the fragment directory: %w", err)
 	}
 
 	out := map[node.ComputeCap]string{}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		names = append(names, e.Name())
-	}
 	sort.Strings(names)
 
 	for _, name := range names {
-		raw, err := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // a directory the operator named
+		raw, err := os.ReadFile(name) //nolint:gosec // a directory the operator named
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
