@@ -122,20 +122,25 @@ type Session struct {
 // This is the only ordinary way to obtain a node, and the reason is the defer
 // below: the node's lifetime is the closure's, so there is no path through
 // this function that returns while a machine is still running.
+//
+// The offer is passed in rather than chosen here, and that is load-bearing.
+// spec.Image is selected from the architecture of the card in the offer, so if
+// this function listed offers again it would be choosing a *second* time --
+// two listings can give two answers, and the image would then have been picked
+// for a card that is not the one rented. Which offer to rent is a decision
+// made in exactly one place in the program, for the same reason the deadline
+// is derived in exactly one place: three copies can disagree, and the one that
+// disagrees is the one that does not stop the bill.
 func WithNode(
 	ctx context.Context,
 	p provider.Provider,
 	spec node.Spec,
+	offer node.Offer,
 	o Options,
 	fn func(context.Context, Session) error,
 ) (err error) {
 	if o.Store == nil {
 		return errors.New("provision needs a state store: a node nobody recorded is a node nobody can reap")
-	}
-
-	offer, err := PickOffer(ctx, p, spec, o)
-	if err != nil {
-		return err
 	}
 
 	pair, err := hostkey.Mint()
@@ -252,14 +257,25 @@ func assertExposure(p provider.Provider, n node.Node) error {
 }
 
 // PickOffer chooses what to rent.
-func PickOffer(ctx context.Context, p provider.Provider, spec node.Spec, o Options) (node.Offer, error) {
-	offers, err := p.Offers(ctx, spec.Filter)
+//
+// A Filter and a TTL rather than the whole Spec, which is the only two fields
+// it ever read. The narrowing is the point: the image is now chosen from the
+// offer this returns, so a PickOffer that could see spec.Image would close a
+// loop between the two -- and the compiler is what keeps it open.
+func PickOffer(
+	ctx context.Context,
+	p provider.Provider,
+	f node.Filter,
+	ttl time.Duration,
+	o Options,
+) (node.Offer, error) {
+	offers, err := p.Offers(ctx, f)
 	if err != nil {
 		return node.Offer{}, fmt.Errorf("list offers from %s: %w", p.Name(), err)
 	}
 	// Re-filtered our side regardless of what the API was asked: see
 	// provider.FilterOffers for why that is a cost control.
-	offers = provider.FilterOffers(spec.Filter, offers)
+	offers = provider.FilterOffers(f, offers)
 	if len(offers) == 0 {
 		return node.Offer{}, fmt.Errorf("%w: %s has nothing matching the filter", node.ErrNoCapacity, p.Name())
 	}
@@ -268,7 +284,7 @@ func PickOffer(ctx context.Context, p provider.Provider, spec node.Spec, o Optio
 	var budgetErr error
 	for _, candidate := range offers {
 		if !free {
-			if err := o.Budget.Allow(candidate, spec.TTL); err != nil {
+			if err := o.Budget.Allow(candidate, ttl); err != nil {
 				if budgetErr == nil {
 					budgetErr = err
 				}

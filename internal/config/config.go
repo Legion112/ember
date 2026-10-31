@@ -31,6 +31,25 @@ type Config struct {
 	// Image is the workload's OCI reference. It must be pinned.
 	Image string `yaml:"image"`
 
+	// Images maps a CUDA compute capability to the image built for it, keyed
+	// the way every other place writes an architecture down: sm_75, sm_90.
+	//
+	// A map rather than a list of {arch, ref} pairs -- which is the shape
+	// Assets uses -- because here the architecture *is* the lookup key, and a
+	// map cannot represent two entries both claiming sm_80 while a list can.
+	//
+	// The values are pinned references, and repo:tag@sha256:... is the
+	// intended form: the digest is what actually runs and the tag is there to
+	// be read, which is why a tag naming a different architecture than its
+	// key is refused rather than ignored. One image is a wrong-architecture
+	// image for every card but one, and that does not fail -- it finds no
+	// usable kernel and bills a GPU to run on the CPU.
+	//
+	// image: and images: are both honoured and they are not alternatives.
+	// ParseImages has the precedence, and the rule that matters: a run whose
+	// card has no entry here refuses, and never falls back to image:.
+	Images map[string]string `yaml:"images"`
+
 	// TTL bounds a node's life.
 	TTL time.Duration `yaml:"ttl"`
 
@@ -224,6 +243,38 @@ func (c Config) ParseAssets() ([]node.Asset, error) {
 	return node.ValidateAssets(out)
 }
 
+// ParseImages validates the per-architecture image map, keyed by capability.
+//
+// Every entry is checked, not just the one a given run will use. A config with
+// six images and one bad digest would otherwise sit committed until the day
+// the sixth card is the cheapest offer, and the refusal would arrive in the
+// one place it is useless -- after the offer was chosen, with the operator
+// looking at a card they did not ask for.
+//
+// Empty is not an error: a single pinned image: is the supported shape and
+// always will be, because the CPU variant and the node image have no
+// architecture to key on.
+func (c Config) ParseImages() (map[node.ComputeCap]string, error) {
+	if len(c.Images) == 0 {
+		return nil, nil
+	}
+	out := make(map[node.ComputeCap]string, len(c.Images))
+	for k, ref := range c.Images {
+		cap, err := node.ParseImageKey(k)
+		if err != nil {
+			return nil, err
+		}
+		if err := node.ValidateImage(ref); err != nil {
+			return nil, fmt.Errorf("images[%s]: %w", k, err)
+		}
+		if err := node.ValidateImageForArch(ref, cap); err != nil {
+			return nil, fmt.Errorf("images[%s]: %w", k, err)
+		}
+		out[cap] = ref
+	}
+	return out, nil
+}
+
 // Default is what ember uses with no file and no flags.
 func Default() Config {
 	return Config{
@@ -265,9 +316,19 @@ func Load(path string) (Config, error) {
 // deleting the line later, so the first run after the mistake is the right
 // time to say so.
 func (c Config) rejectSecrets() error {
-	for name, v := range map[string]string{
+	// Built rather than written as a literal, because the literal was the
+	// whole set of free-text scalars and `images:` adds a map of them. A
+	// reference pasted there would otherwise be the one place in a committed
+	// file that is not scanned, and the keys name the entry so the error can
+	// point at it.
+	fields := map[string]string{
 		"image": c.Image, "provider": c.Provider, "gpu": c.GPU, "region": c.Region,
-	} {
+	}
+	for k, v := range c.Images {
+		fields["images["+k+"]"] = v
+	}
+
+	for name, v := range fields {
 		l := strings.ToLower(v)
 		for _, marker := range []string{"api_key", "apikey", "secret", "token", "password", "-----begin"} {
 			if strings.Contains(l, marker) {

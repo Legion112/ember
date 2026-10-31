@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 
@@ -158,18 +159,47 @@ func runUp(args []string, out io.Writer, d deps) error {
 		return err
 	}
 
-	spec, err := buildSpec(cfg, store)
+	filter, err := buildFilter(cfg, store)
 	if err != nil {
 		return usageError{err}
 	}
 
+	// Options before the offer, because PickOffer needs the budget.
 	opts, err := buildOptions(paths, cfg, out)
 	if err != nil {
 		return err
 	}
 
+	// The offer is chosen here, for the same reasons the store is resolved
+	// above: only the provider knows what it has, and the image depends on the
+	// answer. An `images:` map is keyed by the architecture of the card, so
+	// which card was picked has to be known before a Spec can be built -- and
+	// a Spec built first would carry an image chosen for nothing in particular
+	// and have to be patched afterwards, which is an invariant that holds only
+	// if everybody remembers to patch.
+	//
+	// It is also the only place in the program where an offer is chosen. The
+	// provisioner is handed this one rather than listing again, so the image
+	// cannot have been selected for a different card than the one rented.
+	offer, err := provision.PickOffer(context.Background(), p, filter, cfg.TTL, opts)
+	if err != nil {
+		return err
+	}
+
+	ref, from, err := resolveImage(cfg, offer)
+	if err != nil {
+		return usageError{err}
+	}
+
+	spec, err := buildSpec(cfg, resolved{
+		Store: store, Filter: filter, Offer: offer, Image: ref, ImageFrom: from,
+	})
+	if err != nil {
+		return usageError{err}
+	}
+
 	if *dryRun {
-		return dryRunUp(fs.Output(), p, spec, opts)
+		return dryRunUp(fs.Output(), p, offer, spec, from)
 	}
 
 	// The first Ctrl-C unwinds through WithNode's deferred destroy, which
@@ -178,7 +208,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	return provision.WithNode(ctx, p, spec, opts, func(ctx context.Context, s provision.Session) error {
+	return provision.WithNode(ctx, p, spec, offer, opts, func(ctx context.Context, s provision.Session) error {
 		return serveSession(ctx, out, s, opts, spec, *holdFor, paths.outputs)
 	})
 }
@@ -321,13 +351,15 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", v, "KMGT"[exp-1])
 }
 
-func dryRunUp(out io.Writer, p provider.Provider, spec node.Spec, opts provision.Options) error {
-	offer, err := provision.PickOffer(context.Background(), p, spec, opts)
-	if err != nil {
-		return err
-	}
+// dryRunUp prints what would happen and creates nothing.
+//
+// A pure print now: the offer was chosen by runUp, because the image depends
+// on it. So the budget refusal that TestUp_DryRunStillEnforcesTheBudget
+// exercises now happens in PickOffer at runUp's call site rather than inside
+// this function -- same exit, earlier line.
+func dryRunUp(out io.Writer, p provider.Provider, offer node.Offer, spec node.Spec, imageFrom string) error {
 	outf(out, "dry-run: would rent %s from %s at %v for %v\n", offer.Token, p.Name(), offer.Price, spec.TTL)
-	outf(out, "dry-run: would run %s and forward %d port(s)\n", spec.Image, len(spec.Ports))
+	outf(out, "dry-run: would run %s (%s) and forward %d port(s)\n", spec.Image, imageFrom, len(spec.Ports))
 	if len(spec.Cmd) > 0 {
 		outf(out, "dry-run: would execute: %s\n", workload.Describe(spec.Cmd))
 	}
@@ -435,6 +467,12 @@ func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, 
 	}
 	if image != "" {
 		cfg.Image = image
+		// And the map goes with it. An operator pinning one image for one run
+		// is the first thing anybody reaches for when a run misbehaves, and
+		// leaving the map in place would mean -image silently did nothing on
+		// every config that has one. One field holds the answer, so there is
+		// no "which wins" rule at the decision site.
+		cfg.Images = nil
 	}
 	if gpu != "" {
 		cfg.GPU = gpu
@@ -450,12 +488,122 @@ func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, 
 	}
 }
 
-func buildSpec(cfg config.Config, store Attached) (node.Spec, error) {
-	ports, err := cfg.ParsePorts()
-	if err != nil {
-		return node.Spec{}, err
-	}
+// buildFilter is the offer filter this config and store describe.
+//
+// Extracted from buildSpec because the filter is now needed before the spec
+// exists: PickOffer runs first, so the image can be chosen for the card that
+// was actually picked. Computed once and passed to both, because two filters
+// built from the same config is two things that can disagree -- and the one
+// that would disagree is the one that chose the offer.
+func buildFilter(cfg config.Config, store Attached) (node.Filter, error) {
 	filter, err := cfg.Filter()
+	if err != nil {
+		return node.Filter{}, err
+	}
+	// The store's own datacentre wins over whatever the config asked for.
+	// They can only disagree by mistake, and the store is the half that
+	// cannot move: the volume is where it is, and a node that mounts it has
+	// to be created there.
+	if store.Region != "" {
+		filter.Region = store.Region
+	}
+	return filter, nil
+}
+
+// resolved is what runUp has to learn before a Spec can be validated.
+//
+// The store, because only the provider knows its id; the offer, because the
+// image depends on which card it is for; and the image, because NewSpec will
+// not accept a Spec without one. Written down as data so the ordering is a
+// thing a reader can see rather than infer from the order of statements.
+type resolved struct {
+	Store  Attached
+	Filter node.Filter
+	Offer  node.Offer
+	Image  string
+
+	// ImageFrom says where Image came from, for `--dry-run`. An operator
+	// staring at a digest needs to know which key produced it.
+	ImageFrom string
+}
+
+// resolveImage picks the workload image for the card that will run it.
+//
+// The rules, and the one that matters is the third:
+//
+//   - A run that needs no card -- `ember store sync` on a CPU box -- uses
+//     image: and never consults the map. There is no architecture to key on,
+//     and a CPU machine is not a card ember failed to identify.
+//   - No images: map at all means image:, which is the shape ember has always
+//     had and always will: the CPU workload variant and the node image have no
+//     architecture either.
+//   - An images: map with no entry for this card REFUSES. It does not fall
+//     back to image:. Falling back would run an image built for another
+//     architecture, and that does not fail -- sd-cli finds no usable kernel,
+//     drops to the CPU backend, and bills a GPU to do it. That is the failure
+//     internal/gpucheck exists to catch, and catching it here costs nothing
+//     because nothing has been rented yet.
+func resolveImage(cfg config.Config, offer node.Offer) (string, string, error) {
+	images, err := cfg.ParseImages()
+	if err != nil {
+		return "", "", err
+	}
+
+	scalar := func() (string, string, error) {
+		if cfg.Image == "" {
+			return "", "", fmt.Errorf("no image: pass -image or set it in %s", config.FileName)
+		}
+		return cfg.Image, "image:", nil
+	}
+
+	switch {
+	case len(images) == 0:
+		return scalar()
+
+	case !offer.HasGPU():
+		// A CPU offer, or the local provider's no-card offer. The map cannot
+		// answer and is not consulted, so say which key is needed instead of
+		// reporting a card ember could not identify.
+		if cfg.Image == "" {
+			return "", "", fmt.Errorf("this run needs no GPU, so there is no architecture to choose an "+
+				"image by; images: cannot answer and image: is not set. Add image: to %s, or pass -image",
+				config.FileName)
+		}
+		return cfg.Image, "image:", nil
+	}
+
+	cap, how := offer.ComputeCap()
+	switch how {
+	case node.CapNotCUDA:
+		return "", "", fmt.Errorf("%s is not a CUDA card, so images: cannot choose for it. "+
+			"Set image: to one built for it, or filter to a card ember has an image for: %v",
+			offer.GPU, node.KnownCaps())
+	case node.CapUnknown:
+		return "", "", fmt.Errorf("ember does not know which CUDA architecture %q is, so it cannot "+
+			"choose an image for it.\nA wrong-architecture image does not fail -- it runs on the CPU "+
+			"backend at the GPU's price -- so this is a refusal rather than a guess.\n"+
+			"Add the card to internal/node/compute.go, or filter to one of: %v",
+			offer.GPU, node.KnownCards())
+	}
+
+	ref, ok := images[cap]
+	if !ok {
+		var have []string
+		for c := range images {
+			have = append(have, c.Key())
+		}
+		sort.Strings(have)
+		return "", "", fmt.Errorf("no image for %s, which is what %s is; images: has %v.\n"+
+			"ember will not fall back to image: here: an image built for another architecture does "+
+			"not fail on this card, it runs on the CPU backend and bills the GPU for it.\n"+
+			"Publish one with `make publish-sd-cuda CUDA_ARCH=%d` and add its digest under %s",
+			cap, offer.GPU, have, int(cap), cap.Key())
+	}
+	return ref, fmt.Sprintf("images.%s, for %s", cap.Key(), offer.GPU), nil
+}
+
+func buildSpec(cfg config.Config, r resolved) (node.Spec, error) {
+	ports, err := cfg.ParsePorts()
 	if err != nil {
 		return node.Spec{}, err
 	}
@@ -463,8 +611,10 @@ func buildSpec(cfg config.Config, store Attached) (node.Spec, error) {
 	if err != nil {
 		return node.Spec{}, err
 	}
-	if cfg.Image == "" {
-		return node.Spec{}, fmt.Errorf("no image: pass -image or set it in %s", config.FileName)
+
+	probe := cfg.GPUProbe
+	if r.Filter.CPUOnly {
+		probe = nil
 	}
 	// Checked before anything is rented. A command ember cannot send is a
 	// config error, and finding a config error after the create call is
@@ -482,30 +632,31 @@ func buildSpec(cfg config.Config, store Attached) (node.Spec, error) {
 		return node.Spec{}, err
 	}
 
-	// The store's own datacentre wins over whatever the config asked for.
-	// They can only disagree by mistake, and the store is the half that
-	// cannot move: the volume is where it is, and a node that mounts it has
-	// to be created there.
-	if store.Region != "" {
-		filter.Region = store.Region
-	}
-
 	return node.NewSpec(node.SpecOptions{
 		Assets: assetList,
 		Verify: cfg.Verify,
 
-		GPUProbe:        cfg.GPUProbe,
+		// A run that asks for no card has nothing to probe, and NewSpec
+		// refuses the combination. `ember store sync` configures CPUOnly and
+		// may be pointed at a config whose gpu_probe exists for the workload
+		// runs, so the probe is dropped here rather than making the operator
+		// keep two configs.
+		GPUProbe:        probe,
 		GPUProbeTimeout: cfg.GPUProbeTimeout,
 		MinCUDA:         cfg.MinCUDA,
 
-		Image:   cfg.Image,
+		// Already resolved, and already the one reference this run will use.
+		// NewSpec is still the only way to obtain a validated Spec, and it
+		// still applies the pin rule -- now to the entry that was chosen
+		// rather than to a scalar that might not have been the one that ran.
+		Image:   r.Image,
 		Cmd:     cfg.Cmd,
 		Ports:   ports,
-		Filter:  filter,
+		Filter:  r.Filter,
 		TTL:     cfg.TTL,
 		Outputs: outputs,
-		Store:   store.Handle,
-		Mount:   store.Mount,
+		Store:   r.Store.Handle,
+		Mount:   r.Store.Mount,
 	})
 }
 

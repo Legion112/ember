@@ -298,7 +298,7 @@ runs.
 
 Running the published image on an unsupported card does **not** fail. It finds
 no usable kernel, falls back to the CPU backend, and looks like a very slow
-success — which is what `gpu_probe` below is for.
+success — which is what `images:` and `gpu_probe` below are both for.
 
 The local provider reports a real offer when it finds a card, so `ember
 offers` and `min_vram_gib` work the way they do against a cloud provider.
@@ -341,6 +341,46 @@ did for its whole life before this key existed. It is empty by default because
 nothing has yet confirmed against the live API that the field actually filters
 placement, and a constraint that narrows capacity without doing anything would
 be worse than none.
+
+### Choosing the image by the card
+
+An image built for one CUDA architecture does not fail on a card it has no
+kernel for. It falls back to the CPU backend and bills a GPU to run there, so
+the cheapest moment to catch a mismatch is before anything is rented.
+
+`images:` maps a compute capability to the image built for it, and ember picks
+the entry for the card it is about to rent:
+
+```yaml
+images:
+  sm_80:  ghcr.io/you/ember-sd:sd-cuda-sm80@sha256:…   # A100
+  sm_89:  ghcr.io/you/ember-sd:sd-cuda-sm89@sha256:…   # 4090, L40S
+  sm_90:  ghcr.io/you/ember-sd:sd-cuda-sm90@sha256:…   # H100, H200
+```
+
+The key is the architecture as `nvcc` spells it: compute capability 9.0 is
+`sm_90`. The tag is there to be read and the digest is what runs, so a tag
+naming a different architecture than its key is refused rather than ignored —
+six lines of hex under six keys is somewhere a mis-paste is invisible.
+
+**A card with no entry is refused, and ember will not fall back to `image:`.**
+That is the whole point: falling back would run a wrong-architecture image,
+which is the silent CPU run this key exists to prevent. The refusal names the
+architecture, the card and the command that builds one.
+
+`image:` is still the supported shape for a single image, and both keys may be
+set — a run that needs no card at all, such as `ember store sync` on a CPU
+machine, has no architecture to choose by and uses `image:`. `-image` on the
+command line replaces the map for that run.
+
+ember knows which architecture a card is from a table in
+[`internal/node/compute.go`](internal/node/compute.go), except where a
+provider's name for two different cards normalises to the same thing — a
+Turing Quadro RTX 6000 and an RTX 6000 Ada are `sm_75` and `sm_89` and both
+read as `rtx6000`, so that name is deliberately absent and refuses. A card
+ember has never heard of is refused too, for the same reason: a guess rents.
+On the local provider none of this applies, because `nvidia-smi` reports the
+capability of the card in the machine directly.
 
 ### Stores
 

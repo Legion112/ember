@@ -449,3 +449,108 @@ func TestLoad_ReadsAssetsAndVerify(t *testing.T) {
 		t.Fatalf("assets = %+v, %v", as, err)
 	}
 }
+
+// pinned is a digest-pinned reference, which is what every images: value has
+// to be.
+func pinned(tag string) string {
+	ref := "ghcr.io/legion112/ember-sd"
+	if tag != "" {
+		ref += ":" + tag
+	}
+	return ref + "@sha256:" + strings.Repeat("a", 64)
+}
+
+func TestConfig_ParseImages(t *testing.T) {
+	// Empty is not an error. One pinned image: is the supported shape and
+	// always will be, because the CPU variant has no architecture to key on.
+	if got, err := (Config{}).ParseImages(); err != nil || got != nil {
+		t.Errorf("no images: = %v, %v; want nil, nil", got, err)
+	}
+
+	good := Config{Images: map[string]string{
+		"sm_75":  pinned("sd-cuda-sm75"),
+		"sm_90":  pinned("sd-cuda-sm90"),
+		"sm_120": pinned(""),
+	}}
+	got, err := good.ParseImages()
+	if err != nil {
+		t.Fatalf("ParseImages = %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d entries, want 3: %v", len(got), got)
+	}
+	if got[75] != pinned("sd-cuda-sm75") {
+		t.Errorf("images[sm_75] = %q", got[75])
+	}
+	if got[120] != pinned("") {
+		t.Errorf("images[sm_120] = %q", got[120])
+	}
+}
+
+// TestConfig_ParseImages_RefusesEveryBadEntry.
+//
+// Checked as a set rather than one at a time: a config with six images and one
+// bad digest would otherwise sit committed until the day the sixth card is
+// the cheapest offer, and the refusal would arrive after the offer was chosen.
+func TestConfig_ParseImages_RefusesEveryBadEntry(t *testing.T) {
+	for name, c := range map[string]Config{
+		"a key that is not an architecture": {Images: map[string]string{"sm75": pinned("")}},
+		"an uppercase key":                  {Images: map[string]string{"SM_75": pinned("")}},
+		"a dotted key":                      {Images: map[string]string{"sm_7.5": pinned("")}},
+		"no architecture at all":            {Images: map[string]string{"default": pinned("")}},
+		"an unpinned value":                 {Images: map[string]string{"sm_75": "ghcr.io/x/ember-sd"}},
+		"a latest value":                    {Images: map[string]string{"sm_75": "ghcr.io/x/ember-sd:latest"}},
+		"an empty value":                    {Images: map[string]string{"sm_75": ""}},
+		"a tag naming another architecture": {Images: map[string]string{"sm_75": pinned("sd-cuda-sm90")}},
+		// One good entry and one bad: the bad one still has to be found.
+		"one bad entry among good ones": {Images: map[string]string{
+			"sm_75": pinned("sd-cuda-sm75"),
+			"sm_90": pinned("sd-cuda-sm89"),
+		}},
+	} {
+		if got, err := c.ParseImages(); err == nil {
+			t.Errorf("%s: accepted as %v", name, got)
+		}
+	}
+}
+
+// TestLoad_RefusesACredentialInAnImagesEntry.
+//
+// rejectSecrets used to iterate a literal map of the free-text scalars, so a
+// token pasted into a per-architecture reference would have been the one value
+// in a committed file that nothing scanned.
+func TestLoad_RefusesACredentialInAnImagesEntry(t *testing.T) {
+	_, err := Load(write(t, "images:\n  sm_90: \"registry/x:v1?api_key=abc\"\n"))
+	if err == nil {
+		t.Fatal("a credential in an images: entry was accepted")
+	}
+	if !strings.Contains(err.Error(), "credential") {
+		t.Errorf("the error should explain why, got %v", err)
+	}
+	// And it names the entry, not just "images".
+	if !strings.Contains(err.Error(), "images[sm_90]") {
+		t.Errorf("the error should name the entry, got %v", err)
+	}
+}
+
+// TestLoad_RefusesADuplicateArchitecture.
+//
+// A map cannot hold two entries for one architecture, but a YAML file can
+// spell one twice -- and if the decoder took the last writer, half the config
+// would be a comment. Verified rather than assumed: yaml.v3 refuses it.
+func TestLoad_RefusesADuplicateArchitecture(t *testing.T) {
+	_, err := Load(write(t, "images:\n  sm_80: a:v1\n  sm_80: b:v1\n"))
+	if err == nil {
+		t.Fatal("a duplicate architecture key was accepted; one of the two entries was silently dropped")
+	}
+}
+
+func TestLoad_ReadsTheImagesMap(t *testing.T) {
+	cfg, err := Load(write(t, "images:\n  sm_89: ember:lab-sm89\n  sm_90: ember:lab-sm90\n"))
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if len(cfg.Images) != 2 || cfg.Images["sm_89"] != "ember:lab-sm89" {
+		t.Errorf("images = %v", cfg.Images)
+	}
+}

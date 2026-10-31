@@ -482,33 +482,59 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 	if err != nil {
 		return err
 	}
-	spec, err := buildSpec(cfg, store)
+	filter, err := buildFilter(cfg, store)
 	if err != nil {
 		return usageError{err}
 	}
 
 	// No workload, and no GPU to idle while the download runs. The filter is
 	// exclusive in both directions, so this cannot quietly land on a card.
-	spec.Cmd = nil
-	spec.Outputs = nil
-	spec.Filter.CPUOnly = true
-	spec.Filter.GPU = ""
-	spec.Filter.MinVRAM = 0
-	spec.Filter.MinCount = *vcpu
+	//
+	// Built before the spec rather than patched into it afterwards. Patching
+	// meant NewSpec validated a filter this command never used -- and the one
+	// check that cared, "a gpu probe is configured but this run asks for no
+	// GPU", could therefore never fire, although ember.flux2.yaml configures
+	// exactly that. A seal nothing could trip is a seal that was not there.
+	filter.CPUOnly = true
+	filter.GPU = ""
+	filter.MinVRAM = 0
+	filter.MinCount = *vcpu
 
 	opts, err := buildOptions(paths, cfg, out)
 	if err != nil {
 		return err
 	}
 
+	// A CPU machine has no architecture, so resolveImage uses image: and never
+	// consults an images: map. Choosing the offer first is what lets it know
+	// that -- the answer depends on what was rented.
+	offer, err := provision.PickOffer(context.Background(), p, filter, cfg.TTL, opts)
+	if err != nil {
+		return err
+	}
+
+	ref, from, err := resolveImage(cfg, offer)
+	if err != nil {
+		return usageError{err}
+	}
+
+	spec, err := buildSpec(cfg, resolved{
+		Store: store, Filter: filter, Offer: offer, Image: ref, ImageFrom: from,
+	})
+	if err != nil {
+		return usageError{err}
+	}
+	spec.Cmd = nil
+	spec.Outputs = nil
+
 	if *dryRun {
-		return dryRunUp(out, p, spec, opts)
+		return dryRunUp(out, p, offer, spec, from)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	return provision.WithNode(ctx, p, spec, opts, func(ctx context.Context, s provision.Session) error {
+	return provision.WithNode(ctx, p, spec, offer, opts, func(ctx context.Context, s provision.Session) error {
 		client, so, err := dialNode(ctx, s, opts, 0)
 		if err != nil {
 			return err

@@ -70,7 +70,7 @@ func TestWithNode_RunsTheClosureAndDestroysAfterwards(t *testing.T) {
 	o := opts(t)
 
 	var sawEndpoint string
-	err := WithNode(t.Context(), p, spec(t), o, func(_ context.Context, s Session) error {
+	err := withNode(t.Context(), p, spec(t), o, func(_ context.Context, s Session) error {
 		sawEndpoint = s.Node.Endpoint().String()
 		if s.Trust == nil {
 			t.Error("the session carries no host key policy")
@@ -102,7 +102,7 @@ func TestWithNode_DestroysEvenWhenTheClosureFails(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
 
 	boom := errors.New("the workload exploded")
-	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+	err := withNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
 		return boom
 	})
 	if !errors.Is(err, boom) {
@@ -121,7 +121,7 @@ func TestWithNode_DestroysAfterCancellation(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
 
 	ctx, cancel := context.WithCancel(t.Context())
-	err := WithNode(ctx, p, spec(t), opts(t), func(context.Context, Session) error {
+	err := withNode(ctx, p, spec(t), opts(t), func(context.Context, Session) error {
 		cancel() // the operator hits Ctrl-C mid-run
 		return ctx.Err()
 	})
@@ -140,7 +140,7 @@ func TestWithNode_RecordsIntentBeforeCreating(t *testing.T) {
 	p.FailOn = "Create"
 	o := opts(t)
 
-	if err := WithNode(t.Context(), p, spec(t), o, func(context.Context, Session) error {
+	if err := withNode(t.Context(), p, spec(t), o, func(context.Context, Session) error {
 		t.Error("the closure ran despite a failed create")
 		return nil
 	}); err == nil {
@@ -176,7 +176,7 @@ func TestWithNode_DestroyFailureIsSticky(t *testing.T) {
 	p.Errors["Destroy n1"] = errors.New("provider unreachable")
 	o := opts(t)
 
-	err := WithNode(t.Context(), p, spec(t), o, func(context.Context, Session) error { return nil })
+	err := withNode(t.Context(), p, spec(t), o, func(context.Context, Session) error { return nil })
 	if err == nil {
 		t.Fatal("a failed destroy reported success")
 	}
@@ -203,7 +203,7 @@ func TestWithNode_AMissingNodeDestroysCleanly(t *testing.T) {
 	p.Errors["Destroy n1"] = node.ErrNotFound
 	o := opts(t)
 
-	if err := WithNode(t.Context(), p, spec(t), o, func(context.Context, Session) error { return nil }); err != nil {
+	if err := withNode(t.Context(), p, spec(t), o, func(context.Context, Session) error { return nil }); err != nil {
 		t.Fatalf("a node that was already gone should destroy cleanly: %v", err)
 	}
 	recs, _ := o.Store.List()
@@ -228,7 +228,7 @@ func TestWithNode_PinsTheKeyEmberMintedNotTheOneTheProviderReports(t *testing.T)
 	o := opts(t)
 	o.Log = slog.New(slog.NewTextHandler(&sawWarning, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	err := WithNode(t.Context(), p, spec(t), o, func(_ context.Context, s Session) error {
+	err := withNode(t.Context(), p, spec(t), o, func(_ context.Context, s Session) error {
 		injected := p.InjectedKey("n1")
 		if injected.IsZero() {
 			t.Fatal("the fake recorded no injected key")
@@ -263,7 +263,7 @@ func TestWithNode_RefusesAProviderThatSubstitutesTheHostKey(t *testing.T) {
 	// An unrelated key, reported as though it were the node's.
 	p.HostKey = mintedKey(t)
 
-	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+	err := withNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
 		t.Error("the workload ran against a substituted host key")
 		return nil
 	})
@@ -292,7 +292,7 @@ func TestWithNode_RefusesAnUnparseableHostKey(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
 	p.HostKey = node.HostKey{Source: node.HostKeyMinted, Algo: "ssh-ed25519", Base64: "!!!"}
 
-	if err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+	if err := withNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
 		t.Error("the closure ran with an unusable host key")
 		return nil
 	}); err == nil {
@@ -303,11 +303,17 @@ func TestWithNode_RefusesAnUnparseableHostKey(t *testing.T) {
 	}
 }
 
+// TestWithNode_RefusesWithoutAStore calls WithNode directly rather than
+// through withNode, because what it asserts is this function's own ordering:
+// the store check comes before anything is said to the provider. Going through
+// the helper would list offers first and the assertion would be about the
+// helper instead.
 func TestWithNode_RefusesWithoutAStore(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
 	o := opts(t)
 	o.Store = nil
-	if err := WithNode(t.Context(), p, spec(t), o, func(context.Context, Session) error { return nil }); err == nil {
+	err := WithNode(t.Context(), p, spec(t), node.Offer{}, o, func(context.Context, Session) error { return nil })
+	if err == nil {
 		t.Fatal("WithNode ran with nowhere to record the node")
 	}
 	if len(p.Recorded()) != 0 {
@@ -425,7 +431,7 @@ func TestPickOffer_RefusesWhatIsOverBudget(t *testing.T) {
 	o := opts(t)
 	o.Budget = Budget{MaxRate: 200000}
 
-	got, err := PickOffer(t.Context(), p, spec(t), o)
+	got, err := PickOffer(t.Context(), p, spec(t).Filter, spec(t).TTL, o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +440,7 @@ func TestPickOffer_RefusesWhatIsOverBudget(t *testing.T) {
 	}
 
 	o.Budget = Budget{MaxRate: 1}
-	if _, err := PickOffer(t.Context(), p, spec(t), o); !errors.Is(err, node.ErrBudget) {
+	if _, err := PickOffer(t.Context(), p, spec(t).Filter, spec(t).TTL, o); !errors.Is(err, node.ErrBudget) {
 		t.Errorf("got %v, want ErrBudget", err)
 	}
 }
@@ -447,7 +453,7 @@ func TestPickOffer_EnforcesTheWholeRunCeiling(t *testing.T) {
 	// though the hourly rate is fine.
 	o.Budget = Budget{MaxRate: 2000000, MaxRun: 500000}
 
-	if _, err := PickOffer(t.Context(), p, spec(t), o); !errors.Is(err, node.ErrBudget) {
+	if _, err := PickOffer(t.Context(), p, spec(t).Filter, spec(t).TTL, o); !errors.Is(err, node.ErrBudget) {
 		t.Errorf("got %v, want ErrBudget", err)
 	}
 }
@@ -461,7 +467,7 @@ func TestPickOffer_SkipsTheBudgetWhenTheProviderIsFree(t *testing.T) {
 	o := opts(t)
 	o.Budget = Budget{MaxRate: 1, MaxRun: 1}
 
-	if _, err := PickOffer(t.Context(), p, spec(t), o); err != nil {
+	if _, err := PickOffer(t.Context(), p, spec(t).Filter, spec(t).TTL, o); err != nil {
 		t.Fatalf("a free provider was refused on budget: %v", err)
 	}
 }
@@ -469,12 +475,12 @@ func TestPickOffer_SkipsTheBudgetWhenTheProviderIsFree(t *testing.T) {
 func TestPickOffer_ReportsNoCapacity(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
 	p.OfferList = nil
-	if _, err := PickOffer(t.Context(), p, spec(t), opts(t)); !errors.Is(err, node.ErrNoCapacity) {
+	if _, err := PickOffer(t.Context(), p, spec(t).Filter, spec(t).TTL, opts(t)); !errors.Is(err, node.ErrNoCapacity) {
 		t.Errorf("got %v, want ErrNoCapacity", err)
 	}
 
 	p.FailOn = "Offers"
-	if _, err := PickOffer(t.Context(), p, spec(t), opts(t)); err == nil {
+	if _, err := PickOffer(t.Context(), p, spec(t).Filter, spec(t).TTL, opts(t)); err == nil {
 		t.Error("a failed Offers call was treated as no capacity")
 	}
 }
@@ -532,7 +538,7 @@ func TestWithNode_LogsReadinessAndDestruction(t *testing.T) {
 	o := opts(t)
 	o.Log = slog.New(slog.NewTextHandler(&sb, nil))
 
-	if err := WithNode(t.Context(), p, spec(t), o, func(context.Context, Session) error { return nil }); err != nil {
+	if err := withNode(t.Context(), p, spec(t), o, func(context.Context, Session) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	out := sb.String()
@@ -554,7 +560,7 @@ func TestWithNode_SurvivesAStoreThatCannotRecordReadiness(t *testing.T) {
 	o := opts(t)
 
 	ran := false
-	err := WithNode(t.Context(), p, spec(t), o, func(context.Context, Session) error {
+	err := withNode(t.Context(), p, spec(t), o, func(context.Context, Session) error {
 		ran = true
 		// Make every later write fail, including the destroy bookkeeping.
 		if err := os.Chmod(o.Store.Dir(), 0o500); err != nil {
@@ -591,7 +597,7 @@ func TestWithNode_DestroysANodeExposedMoreWidelyThanAsked(t *testing.T) {
 	}
 
 	ran := false
-	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+	err := withNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
 		ran = true
 		return nil
 	})
@@ -625,7 +631,7 @@ func TestWithNode_DestroysANodeWithNoExposureReport(t *testing.T) {
 	// Force the unreported case: a node built without WithExposed at all.
 	p.SuppressExposure = true
 
-	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+	err := withNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
 		t.Error("the workload ran on an unverifiable node")
 		return nil
 	})
@@ -644,7 +650,7 @@ func TestWithNode_AProviderThatPublishesNothingPassesTheStrictCheck(t *testing.T
 	p := providertest.NewRecordingProvider("test")
 
 	ran := false
-	if err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+	if err := withNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
 		ran = true
 		return nil
 	}); err != nil {
@@ -663,7 +669,7 @@ func TestWithNode_RefusesAPublicSSHProviderThatPublishesNothing(t *testing.T) {
 	p.Capabilities = provider.Caps{HostKeyFromAPI: true, PublicSSH: true, Free: true}
 	p.Exposed = []node.Exposed{}
 
-	err := WithNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+	err := withNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
 		t.Error("the workload ran on an unreachable node")
 		return nil
 	})
@@ -732,7 +738,7 @@ func TestWithNode_ReportsTheCostOnTeardown(t *testing.T) {
 	o.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	o.Budget = Budget{}
 
-	if err := WithNode(t.Context(), p, spec(t), o, func(context.Context, Session) error {
+	if err := withNode(t.Context(), p, spec(t), o, func(context.Context, Session) error {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -812,4 +818,24 @@ func TestTrustFor_PrefersTheMintedKeyOverTheProvidersWhenTheyAgree(t *testing.T)
 	if cbErr := hostkey.Callback(trust, "n1")("h", nil, pair.Public); cbErr != nil {
 		t.Errorf("the agreed key was refused: %v", cbErr)
 	}
+}
+
+// withNode picks an offer the way runUp does, then rents it.
+//
+// Two steps rather than one because WithNode no longer lists offers itself:
+// the workload image is chosen from the architecture of the card in the offer,
+// so a second listing inside WithNode could rent a different card than the one
+// the image was picked for. Tests about the choosing call PickOffer directly.
+func withNode(
+	ctx context.Context,
+	p provider.Provider,
+	spec node.Spec,
+	o Options,
+	fn func(context.Context, Session) error,
+) error {
+	offer, err := PickOffer(ctx, p, spec.Filter, spec.TTL, o)
+	if err != nil {
+		return err
+	}
+	return WithNode(ctx, p, spec, offer, o, fn)
 }
