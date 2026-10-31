@@ -501,6 +501,13 @@ That is the whole point: falling back would run a wrong-architecture image,
 which is the silent CPU run this key exists to prevent. The refusal names the
 architecture, the card and the command that builds one.
 
+**This is not Docker multi-arch.** In Docker, "arch" means CPU platform, and a
+manifest list lets one reference resolve to `amd64` or `arm64` automatically.
+There is no such field for a GPU compute capability, so `docker pull` cannot
+pick `sm_90` over `sm_89` and a manifest list would select nothing useful.
+Eight tags plus a map in the config is the shape that is actually available —
+which is also why ember has to do the choosing.
+
 `image:` is still the supported shape for a single image, and both keys may be
 set — a run that needs no card at all, such as `ember store sync` on a CPU
 machine, has no architecture to choose by and uses `image:`. `-image` on the
