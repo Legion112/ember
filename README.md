@@ -316,6 +316,26 @@ usually outside it, so the local build needed its own tag. A build matrix
 removed the reason: one architecture per job means the wall clock is one
 compile rather than seven, and `sm_75` is in the published set.
 
+Measured on a 2080 Ti, driver 580.126.09 reporting CUDA 13.0, against the
+single-architecture `sm_75` image:
+
+```
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 10813 MiB):
+  Device 0: NVIDIA GeForce RTX 2080 Ti, compute capability 7.5, VMM: yes
+CUDA0   NVIDIA GeForce RTX 2080 Ti
+```
+
+It selects the CUDA backend rather than falling back to the CPU — which is
+the whole claim, since falling back is what a wrong-architecture image does
+without failing. Note the driver version: CUDA 13.0 is the floor the 13.0.1
+base needs, so this machine is exactly at it.
+
+What that does **not** answer is whether a 35 GB model set is usable on 11 GiB
+— whether 1536×1536 fits beside a 4412 MiB compute buffer, and what a step
+costs when the weights cross PCIe per layer. `sd-cli` will stream them
+(`--offload-to-cpu`) and its auto-fit planner already does when VRAM is short,
+so it is slow rather than impossible; how slow is unmeasured.
+
 Running the published image on an unsupported card does **not** fail. It finds
 no usable kernel, falls back to the CPU backend, and looks like a very slow
 success — which is what `images:` and `gpu_probe` below are both for.
