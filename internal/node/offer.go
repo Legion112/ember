@@ -81,11 +81,37 @@ func NormalizeGPU(s string) GPUModel {
 	// Memory suffixes are the part operators actually filter on: an A100 40G
 	// and an A100 80G are not substitutes, and a pool that mixes them is a
 	// pool where half the offers cannot hold the model.
-	joined = strings.ReplaceAll(joined, "80gb", "-80g")
-	joined = strings.ReplaceAll(joined, "40gb", "-40g")
-	joined = strings.ReplaceAll(joined, "96gb", "-96g")
-	joined = strings.ReplaceAll(joined, "141gb", "-141g")
-	joined = strings.ReplaceAll(joined, "188gb", "-188g")
+	//
+	// Both the provider's spelling ("80GB") and ember's own ("-80g") are
+	// recognised, which is what makes this function idempotent. It was not:
+	// the separator stripping above turned "a100-80g" back into "a10080g",
+	// and the rewrite only looked for "80gb", so normalising an
+	// already-normalised name mangled it. That is not a theoretical concern,
+	// because config.Filter runs an operator's typed string through here --
+	// so `--gpu a100-80g`, the spelling every offer carries and the one
+	// Accepts documents, produced a filter of "a10080g" and matched nothing
+	// at all. `--gpu a100` worked, which is how it went unnoticed.
+	//
+	// Longest capacity first, so "141gb" is not read as a shorter suffix, and
+	// CutSuffix rather than ReplaceAll because the capacity is the tail of
+	// the name once the noise words are gone -- a replacement anywhere in the
+	// string would rewrite a model number that happened to contain one.
+	for _, c := range []string{"188", "141", "96", "80", "40"} {
+		rest, ok := strings.CutSuffix(joined, c+"gb")
+		if !ok {
+			rest, ok = strings.CutSuffix(joined, c+"g")
+		}
+		if !ok {
+			continue
+		}
+		rest = strings.TrimSuffix(rest, "-")
+		if rest == "" {
+			// A capacity with no model in front of it is not a model name.
+			break
+		}
+		joined = rest + "-" + c + "g"
+		break
+	}
 	return GPUModel(joined)
 }
 

@@ -190,6 +190,66 @@ func TestNormalizeGPU_TwoSpellingsOfOneCardAgree(t *testing.T) {
 	}
 }
 
+// TestNormalizeGPU_IsIdempotent.
+//
+// config.Filter runs the operator's typed string through NormalizeGPU, and
+// Offer.GPU is already a normalised name -- so the function is applied to its
+// own output as a matter of course, and it has to be stable there.
+//
+// It was not. The separator stripping turned "a100-80g" back into "a10080g"
+// and the capacity rewrite only looked for the provider spelling "80gb", so
+// `--gpu a100-80g` -- the spelling every offer carries, and the one Accepts
+// uses as its worked example -- normalised to something no offer matches.
+// `--gpu a100` worked, which is why nobody noticed; the symptom was a filter
+// that silently found nothing, identical to a provider with no capacity.
+//
+// Checked by restoring the ReplaceAll version and watching this go red.
+func TestNormalizeGPU_IsIdempotent(t *testing.T) {
+	for _, in := range []string{
+		"NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB", "A100 PCIe 40GB",
+		"NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL", "NVIDIA H200 NVL",
+		"NVIDIA GeForce RTX 4090", "NVIDIA L40S", "NVIDIA B300 SXM6 AC",
+		"NVIDIA RTX PRO 6000 Blackwell Server Edition", "AMD Instinct MI300X",
+		"NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb",
+		// A capacity with no model in front of it. Not a card name, and the
+		// rewrite has to leave it alone rather than produce a leading dash.
+		"80GB",
+	} {
+		once := NormalizeGPU(in)
+		twice := NormalizeGPU(string(once))
+		if once != twice {
+			t.Errorf("NormalizeGPU(%q) = %q, but normalising that again gives %q", in, once, twice)
+		}
+	}
+}
+
+// TestNormalizeGPU_TheCapacitySpellingIsAcceptedAsAFilter is the other half of
+// idempotency, stated as the thing an operator actually does: typing the model
+// name as the documentation and `ember offers` both print it.
+func TestNormalizeGPU_TheCapacitySpellingIsAcceptedAsAFilter(t *testing.T) {
+	for _, tc := range []struct {
+		offer GPUModel
+		typed string
+	}{
+		{"a100-80g", "a100"},
+		{"a100-80g", "a100-80g"},
+		{"a100-40g", "a100-40g"},
+		{"h100-80g", "h100-80g"},
+		{"h100-80g", "h100"},
+		{"rtx4090", "rtx4090"},
+	} {
+		if !tc.offer.Accepts(NormalizeGPU(tc.typed)) {
+			t.Errorf("an offer of %q is not matched by `--gpu %s` (which normalises to %q)",
+				tc.offer, tc.typed, NormalizeGPU(tc.typed))
+		}
+	}
+	// And the capacity still has to agree, which is the reason the suffix is
+	// kept at all.
+	if GPUModel("a100-40g").Accepts(NormalizeGPU("a100-80g")) {
+		t.Error("`--gpu a100-80g` matched a 40 GiB card")
+	}
+}
+
 // TestNormalizeGPU_AMIGSliceStaysDistinct. "RTX PRO 6000 ... MIG 1g.24gb" is a
 // partition of a card, not the card: it has a fraction of the memory, and
 // folding it into the full model would have ember rent a slice for a job
