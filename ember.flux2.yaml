@@ -33,20 +33,21 @@ provider: runpod
 # subcommand -- the published image before this one predated it, and read
 # `embernode fetch ...` as "be a node" instead.
 #
-# 1.59 GiB on the wire, down from 3.23 GiB: no checkpoint baked in.
+# No checkpoint baked in: the weights are on the store named below.
 #
-# Built with CUDA_ARCHS="80;86;89" -- native sm_80, sm_86, sm_89, plus
-# compute_89 PTX for forward JIT onto Blackwell. The fatbin was read back to
-# confirm it:
+# One image per architecture, and the map rather than a single reference,
+# because this configuration does not name a card -- see min_vram_gib. ember
+# reads the architecture of whichever offer the filter wins and uses that
+# entry; a card with no entry is refused before anything is rented.
 #
-#   strings -a /opt/sd/sd-cli | grep -oE 'sm_[0-9]+|compute_[0-9]+' | sort -u
-#   -> compute_89 sm_80 sm_86 sm_89
+# The tag in each reference is there to be read and the digest is what runs.
+# ember refuses a reference whose tag names a different architecture than its
+# key, which is the only guard against a mis-paste among eight lines of hex.
 #
-# Built on the dev machine (9m1s for three architectures, against 30m46s in CI
-# for two) and pushed from there in 29 seconds, because the runtime base is
-# pinned by digest so only the rebuilt sd-cli and embernode layers were new.
-# Tagged sd-cuda-arch80 rather than overwriting sd-cuda, so CI's image is still
-# there to compare against. See issue #2.
+# This used to be one fat image carrying sm_80, sm_86 and sm_89 plus
+# compute_89 PTX "for forward JIT onto Blackwell". That is gone: nothing is
+# compiled on a rented machine, so the published images carry native code for
+# one architecture and no PTX at all. See AGENTS.md.
 image: ghcr.io/legion112/ember-sd@sha256:95789a8e2e85850afcbadb95a116dfa7bd682ef61d15aaeaf3eab4d0815bdf87
 
 ttl: 1h
@@ -62,8 +63,14 @@ ttl: 1h
 # run the image. It would have failed with "no kernel image is available for
 # execution on the device" after paying for the pull and the 56 GiB store read.
 #
-# The image this now pins carries native sm_80, so the filter can say what it
-# means again. See issue #2.
+# That sentence turned out to be the accurate one in this repository. Seven
+# comments elsewhere claimed such a run falls back to the CPU backend instead;
+# measured on rented hardware, it aborts with exactly the error written above.
+#
+# The filter can say what it means again, and for a better reason than a wider
+# fatbin: `images:` above covers every architecture ember can select, so the
+# cheapest qualifying card is always one there is an image for -- or the run
+# refuses before renting it.
 min_vram_gib: 80
 max_hourly_usd: "2.60"
 max_run_usd: "3.00"
