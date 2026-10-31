@@ -176,9 +176,26 @@ catch a published image whose `embernode` did not understand `embernode fetch`
 was not in it, so the one publish it existed to guard was the one place it
 never ran.
 
-Locally the compile takes about nine minutes on sixteen cores against thirty
-on a four-vCPU runner, and the push is seconds rather than minutes: the runtime
-base is pinned by digest, so only the layers that actually changed go up.
+**One image per architecture, built in parallel.** The workflow is a matrix:
+one job per architecture, each compiling for exactly one, so the wall clock is
+one compile rather than seven. The architecture list is not written in the
+YAML — a `plan` job asks `ember archs --json` for it, because a list in a
+workflow that drifts from the list it mirrors is the defect `PUBLISH_LABS`
+exists to prevent. `fail-fast` is off: one architecture failing must not cancel
+six that were fine, and a partial set is safe by construction, since ember
+refuses a card with no `images:` entry before it rents anything.
+
+A final `report` job prints one pasteable `images:` block and **exits non-zero
+naming any architecture that published nothing** — a map missing a key is a
+card ember will refuse to rent, so a block pasted over a complete map would
+take those cards away silently.
+
+Dispatch one architecture with `-f archs=89` to republish just that one.
+
+Locally one architecture takes about four minutes on thirty-two threads
+against roughly twenty on a four-vCPU runner, and the push is seconds rather
+than minutes: the runtime base is pinned by digest, so only the layers that
+actually changed go up.
 
 stable-diffusion.cpp rather than ComfyUI or diffusers, deliberately: no Python
 and no PyTorch anywhere, and 2.45 GB rather than a dozen. On a rented GPU that
