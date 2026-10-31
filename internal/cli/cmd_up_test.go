@@ -389,6 +389,30 @@ func TestUp_TheImageFlagClearsTheMap(t *testing.T) {
 	}
 }
 
+// TestUp_ListsTheKeysItHasInNumericOrder.
+//
+// The keys look like text and are numbers. sort.Strings put sm_100 before
+// sm_75, so the list in the refusal read as unordered to anyone scanning for
+// the gap -- which is the one thing that message is for.
+func TestUp_ListsTheKeysItHasInNumericOrder(t *testing.T) {
+	d := labDepsWithCard(t, a2080Ti) // sm_75, deliberately not in the map
+	cfg := imagesCfg(t, "images:\n"+
+		"  sm_100: ember:lab-sm100\n"+
+		"  sm_80: ember:lab-sm80\n"+
+		"  sm_120: ember:lab-sm120\n"+
+		"  sm_90: ember:lab-sm90\n")
+
+	var out bytes.Buffer
+	err := runUp([]string{"--config", cfg, "--dry-run"}, &out, d)
+	if err == nil {
+		t.Fatal("sm_75 is not in the map and was accepted")
+	}
+	want := "[sm_80 sm_90 sm_100 sm_120]"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("the keys are not listed in numeric order; want %s in:\n%v", want, err)
+	}
+}
+
 // TestUp_RefusesABadImagesEntryEvenForAnotherCard.
 //
 // Validated as a set. A config with a bad digest under a card this run will

@@ -581,19 +581,26 @@ func resolveImage(cfg config.Config, offer node.Offer) (string, string, error) {
 			offer.GPU, node.KnownCaps())
 	case node.CapUnknown:
 		return "", "", fmt.Errorf("ember does not know which CUDA architecture %q is, so it cannot "+
-			"choose an image for it.\nA wrong-architecture image does not fail -- it runs on the CPU "+
-			"backend at the GPU's price -- so this is a refusal rather than a guess.\n"+
-			"Add the card to internal/node/compute.go, or filter to one of: %v",
+			"choose an image for it.\nGuessing would rent the card and abort on it -- \"no kernel "+
+			"image is available for execution on the device\", after the pull and the weights -- so "+
+			"this is a refusal.\nAdd the card to internal/node/compute.go, or filter to one of: %v",
 			offer.GPU, node.KnownCards())
 	}
 
 	ref, ok := images[cap]
 	if !ok {
-		var have []string
+		// Sorted numerically and then rendered, not sorted as strings: the
+		// keys look like text and are numbers, so sort.Strings would list
+		// sm_100 before sm_75 and the operator would read it as unordered.
+		caps := make([]node.ComputeCap, 0, len(images))
 		for c := range images {
+			caps = append(caps, c)
+		}
+		sort.Slice(caps, func(i, j int) bool { return caps[i] < caps[j] })
+		have := make([]string, 0, len(caps))
+		for _, c := range caps {
 			have = append(have, c.Key())
 		}
-		sort.Strings(have)
 		return "", "", fmt.Errorf("no image for %s, which is what %s is; images: has %v.\n"+
 			"ember will not fall back to image: here. A wrong-architecture image aborts on this "+
 			"card -- \"no kernel image is available for execution on the device\" -- but only "+
