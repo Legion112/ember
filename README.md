@@ -230,6 +230,34 @@ do anything.
 The CPU variant still bakes one in. It exists to prove a pipeline locally for
 nothing and has no store to mount.
 
+### Why the image is not built for the machine that builds it
+
+ggml defaults `GGML_NATIVE` to **on**, which is `-march=native` — the CPU doing
+the build. From the same Dockerfile and the same source:
+
+| built on | AVX-512 instructions |
+|---|---|
+| a Zen 3 desktop | 0 |
+| a GitHub runner | 23,458 |
+
+A binary full of AVX-512 runs on the hosts that have it and dies on the ones
+that do not. On a rented RTX A4000 that was
+
+```
+ggml_cuda_init: found 1 CUDA devices ... compute capability 8.6
+Illegal instruction (core dumped)
+```
+
+a `SIGILL` on the host CPU with nothing naming the CPU as the cause — and an
+earlier run of the *same tag* on a different host had worked. The identical
+digest behaving differently on two machines is worse than the `:latest`
+problem pinning exists to prevent, because nothing in the reference can warn
+you.
+
+So `GGML_NATIVE=OFF`, with AVX2, FMA and F16C — Haswell, 2013, universal on
+anything rentable — and the build refuses a binary containing a single AVX-512
+instruction. The CPU path barely matters here anyway; the work is on the GPU.
+
 ## Build
 
 ```
