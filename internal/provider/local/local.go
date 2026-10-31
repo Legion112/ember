@@ -159,7 +159,7 @@ func (p *Provider) Offers(ctx context.Context, f node.Filter) ([]node.Offer, err
 	o := node.Offer{
 		Provider: Name,
 		Token:    "local",
-		GPU:      "none",
+		GPU:      node.GPUNone,
 		GPUCount: 1,
 		VRAM:     0,
 		Price:    0,
@@ -191,6 +191,20 @@ func (p *Provider) Offers(ctx context.Context, f node.Filter) ([]node.Offer, err
 			o.GPU = g.Model
 			o.VRAM = g.VRAM
 			o.Label = fmt.Sprintf("%s on this machine's docker daemon, free", g.Model)
+
+			// The capability nvidia-smi printed, carried through rather than
+			// looked up. This provider is the only one that can read a card
+			// directly, and it had the answer in hand and dropped it on the
+			// floor here -- which left the 2080 Ti in this machine, named in
+			// full by its own driver, unable to select an image. A capability
+			// nvidia-smi could not read ([N/A] on some drivers) leaves this
+			// zero and the offer is still made: ComputeCapOf's table can
+			// still answer, and refusing to list a card over one unreadable
+			// CSV column would break the machines DetectGPU's quiet-failure
+			// rule exists to protect.
+			if c, err := node.ParseComputeCap(g.ComputeCap); err == nil {
+				o.MeasuredCap = c
+			}
 		}
 	}
 
@@ -379,7 +393,7 @@ func withKind(common map[string]string, kind string) map[string]string {
 func mapContainer(c dockerengine.Container, prov node.ProviderID) (node.Node, error) {
 	n := node.Node{
 		Handle: node.Handle{Provider: prov, ID: c.ID},
-		Offer:  node.Offer{Provider: prov, Token: "local", GPU: "none", GPUCount: 1},
+		Offer:  node.Offer{Provider: prov, Token: "local", GPU: node.GPUNone, GPUCount: 1},
 	}
 	// Reported unconditionally, including for a container that publishes
 	// nothing. An unreported node fails every exposure assertion, which is

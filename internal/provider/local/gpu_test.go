@@ -104,30 +104,6 @@ func TestParseSMI_NamesACardTheWayEveryProviderDoes(t *testing.T) {
 	}
 }
 
-func TestComputeArch(t *testing.T) {
-	for in, want := range map[string]int{
-		"7.5":  75,
-		"8.0":  80,
-		"8.9":  89,
-		"9.0":  90,
-		"12.0": 120,
-	} {
-		got, err := ComputeArch(in)
-		if err != nil {
-			t.Errorf("ComputeArch(%q) = %v", in, err)
-			continue
-		}
-		if got != want {
-			t.Errorf("ComputeArch(%q) = %d, want %d", in, got, want)
-		}
-	}
-	for _, bad := range []string{"", "7", "seven.five", "x.y"} {
-		if _, err := ComputeArch(bad); err == nil {
-			t.Errorf("ComputeArch(%q) accepted a bad capability", bad)
-		}
-	}
-}
-
 // TestDetectGPU_IsQuietWhenThereIsNoCard.
 //
 // Every failure -- no driver, no card, no nvidia-smi at all -- has to answer

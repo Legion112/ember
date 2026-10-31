@@ -161,9 +161,62 @@ type Offer struct {
 	// source of truth for the same fact, and the two could disagree.
 	VCPU int
 
+	// MeasuredCap is the compute capability a provider read off the card
+	// itself, and zero when nothing did.
+	//
+	// Only the local provider can fill this in: it runs nvidia-smi on the
+	// machine the container will run on. No cloud API ember has seen
+	// publishes the field -- RunPod's catalogue entry carries a name, a
+	// memory size, a price and per-site availability and nothing else -- so a
+	// rented card's architecture comes from ComputeCapOf's table instead.
+	//
+	// The asymmetry is the point rather than a defect. Making the local
+	// provider look the answer up as well would throw away the only piece of
+	// ground truth in the program and leave a card nvidia-smi has just named
+	// in full unable to select an image. Exposure is derived from what the
+	// daemon reports and never from what the request asked for, for the same
+	// reason; this is that rule where the reporting happens to exist.
+	//
+	// Zero is unambiguous because there is no sm_0, the same way VCPU is zero
+	// on a GPU offer.
+	MeasuredCap ComputeCap
+
 	Region        string
 	Interruptible bool
 	Label         string // one human line for `ember offers`
+}
+
+// GPUNone is the model a provider reports when a machine has no card.
+//
+// One name rather than a literal in the provider and a second in whatever
+// reads it back. The two would drift, and the drift reads as a card ember has
+// never heard of -- which sends an operator to add a table entry for a
+// machine that has no GPU at all.
+const GPUNone GPUModel = "none"
+
+// HasGPU reports whether this offer carries a card at all.
+//
+// Not !IsCPU(). The local provider's no-card offer claims one GPU of model
+// "none" and no vCPUs, so it is neither a CPU offer nor a card, and anything
+// choosing an image by architecture has to be able to say "there is no card
+// here" as a third answer. Reading that as an unknown card would tell an
+// operator on a laptop to go and learn ember a new GPU.
+func (o Offer) HasGPU() bool {
+	return o.GPUCount > 0 && o.GPU != "" && o.GPU != GPUNone
+}
+
+// ComputeCap resolves the architecture of the card in this offer.
+//
+// A measurement wins when there is one, and not because it is more likely to
+// be right in general: it is a reading of the card that will actually run the
+// container, where the table is a reading of a name a provider chose. A
+// disagreement between them means the table is wrong about that card, and
+// acting on the table would select an image for silicon that is not there.
+func (o Offer) ComputeCap() (ComputeCap, CapKnowledge) {
+	if o.MeasuredCap > 0 {
+		return o.MeasuredCap, CapKnown
+	}
+	return ComputeCapOf(o.GPU)
 }
 
 // Validate rejects an Offer that could not be acted on.
