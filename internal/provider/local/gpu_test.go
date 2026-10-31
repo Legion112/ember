@@ -16,9 +16,18 @@ func TestParseSMI(t *testing.T) {
 			"NVIDIA GeForce RTX 2080 Ti, 11264, 7.5\n",
 			GPU{Model: "rtx2080ti", VRAM: 11264, ComputeCap: "7.5"},
 		},
+		// "a100-80g" and not "a100sxm480gb", which is what this package's own
+		// normaliser used to answer. The form factor is a noise word and the
+		// capacity is not; getting that wrong made the card unfilterable.
 		"a datacentre card": {
 			"NVIDIA A100-SXM4-80GB, 81920, 8.0\n",
-			GPU{Model: "a100sxm480gb", VRAM: 81920, ComputeCap: "8.0"},
+			GPU{Model: "a100-80g", VRAM: 81920, ComputeCap: "8.0"},
+		},
+		// The same card under the other spelling RunPod uses for it, to the
+		// same model: a local A100 and a rented one are one name.
+		"the same card, named the other way": {
+			"NVIDIA A100 80GB PCIe, 81920, 8.0\n",
+			GPU{Model: "a100-80g", VRAM: 81920, ComputeCap: "8.0"},
 		},
 		// Several cards give one offer: ember rents one node and sd-cli is
 		// pointed at one device, so advertising more would be an offer
@@ -62,19 +71,35 @@ func TestGPU_IsZero(t *testing.T) {
 	}
 }
 
-func TestNormaliseModel(t *testing.T) {
+// TestParseSMI_NamesACardTheWayEveryProviderDoes.
+//
+// This package used to carry its own normaliser, which stripped the vendor
+// words and every separator and stopped there. It disagreed with
+// node.NormalizeGPU for five of these eleven, and the disagreement was not
+// cosmetic: GPUModel.Accepts requires the character after a prefix to be the
+// capacity separator, so "a100sxm480gb" is not accepted by `--gpu a100` and
+// the card could not be selected at all.
+//
+// Spelled out here rather than left to node's own tests, because what has to
+// hold is that *this* path produces that spelling -- the bug was a second
+// speller, and a test that only checked the first could not see it.
+func TestParseSMI_NamesACardTheWayEveryProviderDoes(t *testing.T) {
 	for in, want := range map[string]node.GPUModel{
-		"NVIDIA GeForce RTX 2080 Ti":    "rtx2080ti",
-		"NVIDIA GeForce RTX 4090":       "rtx4090",
-		"NVIDIA A100-SXM4-80GB":         "a100sxm480gb",
-		"NVIDIA RTX A5000":              "rtxa5000",
-		"Tesla V100-SXM2-16GB":          "v100sxm216gb",
-		"NVIDIA H100 80GB HBM3":         "h10080gbhbm3",
-		"Quadro RTX 8000":               "rtx8000",
-		"NVIDIA RTX PRO 6000 Blackwell": "rtxpro6000blackwell",
+		"NVIDIA GeForce RTX 2080 Ti":                   "rtx2080ti",
+		"NVIDIA GeForce RTX 4090":                      "rtx4090",
+		"NVIDIA RTX A5000":                             "rtxa5000",
+		"NVIDIA L40S":                                  "l40s",
+		"Quadro RTX 8000":                              "rtx8000",
+		"NVIDIA A100-SXM4-80GB":                        "a100-80g",
+		"NVIDIA A100 80GB PCIe":                        "a100-80g",
+		"NVIDIA A100-PCIE-40GB":                        "a100-40g",
+		"NVIDIA H100 80GB HBM3":                        "h100-80g",
+		"NVIDIA B200":                                  "b200",
+		"NVIDIA RTX PRO 6000 Blackwell Server Edition": "rtxpro6000",
 	} {
-		if got := NormaliseModel(in); got != want {
-			t.Errorf("NormaliseModel(%q) = %q, want %q", in, got, want)
+		got := parseSMI(in + ", 11264, 7.5\n")
+		if got.Model != want {
+			t.Errorf("parseSMI(%q).Model = %q, want %q", in, got.Model, want)
 		}
 	}
 }

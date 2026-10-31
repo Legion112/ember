@@ -77,29 +77,20 @@ func parseSMI(out string) GPU {
 		if name == "" {
 			continue
 		}
-		return GPU{Model: NormaliseModel(name), VRAM: node.MiB(mib), ComputeCap: cap}
+		// node.NormalizeGPU, and not a speller of this package's own.
+		//
+		// There used to be one here, and it produced a different answer for
+		// the same card: "NVIDIA A100-SXM4-80GB" became "a100sxm480gb" where
+		// every other provider calls it "a100-80g". GPUModel.Accepts requires
+		// the next character after a prefix to be the capacity separator, so
+		// `--gpu a100` matched nothing at all for a datacentre card in a
+		// local machine -- and `--gpu h100` and `--gpu rtxpro6000` likewise,
+		// five of the eleven real nvidia-smi names checked. The filter
+		// compares one spelling, so there is one speller, and it is the one
+		// that knows about noise words and capacity suffixes.
+		return GPU{Model: node.NormalizeGPU(name), VRAM: node.MiB(mib), ComputeCap: cap}
 	}
 	return GPU{}
-}
-
-// NormaliseModel turns nvidia-smi's name into the spelling an operator types.
-//
-// "NVIDIA GeForce RTX 2080 Ti" becomes "rtx2080ti". Lowercased, with the
-// vendor words and all separators removed, because those are the parts that
-// differ between a card's marketing name and what anybody would put in a
-// config file.
-func NormaliseModel(name string) node.GPUModel {
-	s := strings.ToLower(name)
-	for _, drop := range []string{"nvidia", "geforce", "quadro", "tesla"} {
-		s = strings.ReplaceAll(s, drop, "")
-	}
-	var b strings.Builder
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-		}
-	}
-	return node.GPUModel(b.String())
 }
 
 // ComputeArch renders a compute capability as the number CUDA_ARCHS wants:

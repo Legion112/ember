@@ -838,6 +838,53 @@ func TestOffers_ReportsARealLocalGPU(t *testing.T) {
 	}
 }
 
+// TestOffers_ADatacentreCardInThisMachineIsStillFilterable.
+//
+// The regression test for a second GPU-name normaliser. This package had one
+// that stripped the vendor words and every separator, so nvidia-smi's
+// "NVIDIA A100-SXM4-80GB" reached the offer as "a100sxm480gb" while RunPod
+// called the identical card "a100-80g". GPUModel.Accepts needs the character
+// after a prefix to be the capacity separator, so `--gpu a100` matched
+// nothing: an A100 plugged into the machine ember runs on could not be
+// selected, and the symptom was "no capacity" from a provider looking
+// straight at the card.
+//
+// Checked by restoring the old normaliser and watching this go red.
+func TestOffers_ADatacentreCardInThisMachineIsStillFilterable(t *testing.T) {
+	p, e := newProvider(t)
+	// An A100, named the way the driver names it rather than the way the
+	// filter does. Through parseSMI, so the test exercises the path the real
+	// detector takes instead of asserting about a model it chose itself.
+	p.Detect = func(context.Context) GPU { return parseSMI("NVIDIA A100-SXM4-80GB, 81920, 8.0\n") }
+	e.GPURuntime = true
+
+	// Every spelling an operator could reasonably write for this card. The
+	// capacity-less prefix is the one that was broken.
+	for _, f := range []node.Filter{
+		{GPU: "a100"},
+		{GPU: "a100-80g"},
+		{MinVRAM: 81920},
+	} {
+		got, err := p.Offers(t.Context(), f)
+		if err != nil {
+			t.Errorf("--gpu %q: %v", f.GPU, err)
+			continue
+		}
+		if len(got) != 1 {
+			t.Errorf("filter %+v matched %d offers, want 1: the card is in this machine and the "+
+				"provider can pass it through, so a miss here means the name it was given is not "+
+				"the name the filter compares", f, len(got))
+		}
+	}
+
+	// And the capacity still has to agree: an A100 40G is not a substitute
+	// for an 80G, which is the whole reason NormalizeGPU keeps the suffix.
+	got, err := p.Offers(t.Context(), node.Filter{GPU: "a100-40g"})
+	if err == nil && len(got) != 0 {
+		t.Errorf("--gpu a100-40g matched an 80 GiB card")
+	}
+}
+
 // TestOffers_MatchesOnlyWhatTheCardCanActuallyDo.
 //
 // Handing back a 2080 Ti for `--gpu rtx4090` would be worse than handing back
