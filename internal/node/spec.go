@@ -196,6 +196,12 @@ func NewSpec(o SpecOptions) (Spec, error) {
 // here: the entire point of ember is to measure what a model costs and how
 // long it takes, and two runs a week apart that say "latest" may not have run
 // the same software. A result nobody can reproduce is not a measurement.
+// Exported because internal/config has to apply the same rule to every entry
+// of an `images:` map, and the alternative is a second copy of it. It refuses;
+// it does not construct, so NewSpec remains the only way to obtain a validated
+// Spec and this is not a way around that seal.
+func ValidateImage(s string) error { return validateImage(s) }
+
 func validateImage(s string) error {
 	s = strings.TrimSpace(s)
 	if s == "" {
