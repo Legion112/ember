@@ -290,10 +290,13 @@ func TestUp_RefusesWhenNoImageCoversTheCard(t *testing.T) {
 
 // TestUp_NeverFallsBackToTheScalarImage is the most important test here.
 //
-// The fallback it forbids is not a crash, which is why it has to be forbidden
-// explicitly: an image built for another architecture finds no usable kernel,
-// drops to the CPU backend, and bills a GPU to run there. It looks like a
-// slow success, and the only cheap moment to catch it is before the rental.
+// The fallback it forbids is not caught by anything else, which is why it has
+// to be forbidden explicitly. A wrong-architecture image does abort -- ggml
+// raises "no kernel image is available for execution on the device" and
+// sd-cli dies with SIGABRT, measured on two rented cards -- but it aborts
+// after the node exists, the image is pulled and the weights are fetched, and
+// all of that is billed. The only cheap moment to catch it is before the
+// rental, which is here.
 func TestUp_NeverFallsBackToTheScalarImage(t *testing.T) {
 	d := labDepsWithCard(t, a2080Ti)
 	cfg := imagesCfg(t, "image: ember:lab\nimages:\n  sm_90: ember:lab-sm90\n")

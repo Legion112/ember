@@ -128,8 +128,8 @@ func TestComputeCapOf_TuringAndAdaOfTheSameNumberAreDifferentCards(t *testing.T)
 		turing, ada := NormalizeGPU(pair[0]), NormalizeGPU(pair[1])
 		if turing == ada {
 			t.Errorf("%q and %q both normalise to %q; one is sm_75 and the other sm_89, and an "+
-				"image for the wrong one does not fail -- it runs on the CPU backend at the "+
-				"GPU's price", pair[0], pair[1], turing)
+				"image for the wrong one aborts on the first kernel launch, after a node has "+
+				"been rented and paid for", pair[0], pair[1], turing)
 		}
 	}
 }

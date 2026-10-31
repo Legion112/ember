@@ -86,8 +86,9 @@ func TestImageSelect_TheChosenImageIsTheOneAPodRuns(t *testing.T) {
 
 	if ran != want {
 		t.Errorf("the pod ran %q, want %q: the image is chosen from the architecture of the card "+
-			"in the offer, and an sm_90 image on an sm_80 card does not fail -- it finds no usable "+
-			"kernel, runs on the CPU backend, and bills the GPU for it", ran, want)
+			"in the offer, and an sm_90 image on an sm_80 card aborts with \"no kernel image is "+
+			"available for execution on the device\" -- after the pull and the weights, all "+
+			"billed", ran, want)
 	}
 	if ran == wrong {
 		t.Errorf("the pod ran the image for another architecture (%q)", wrong)

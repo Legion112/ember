@@ -42,8 +42,9 @@ type Config struct {
 	// intended form: the digest is what actually runs and the tag is there to
 	// be read, which is why a tag naming a different architecture than its
 	// key is refused rather than ignored. One image is a wrong-architecture
-	// image for every card but one, and that does not fail -- it finds no
-	// usable kernel and bills a GPU to run on the CPU.
+	// image for every card but one, and running it aborts -- "no kernel image
+	// is available for execution on the device" -- after the node has been
+	// rented and the weights fetched.
 	//
 	// image: and images: are both honoured and they are not alternatives.
 	// ParseImages has the precedence, and the rule that matters: a run whose
@@ -124,6 +125,26 @@ type Config struct {
 	// belongs to the image. For this repository's CUDA image:
 	//
 	//	gpu_probe: ["sh", "-c", "sd-cli --list-devices | grep -qi cuda"]
+	//
+	// That probe catches the failure above and *not* a wrong-architecture
+	// image. Measured: with an sm_75 image on an sm_89 card, --list-devices
+	// exits zero and names the card, because listing devices asks the driver
+	// what hardware exists and launches no kernel. The probe passed, the
+	// workload started, and it aborted a second into the first generation
+	// with "no kernel image is available for execution on the device" --
+	// after the pull and a 1.6 GB weight fetch.
+	//
+	// The published images carry /etc/ember-cuda-arch for that, so a probe
+	// can compare the image to the card:
+	//
+	//	gpu_probe: ["sh", "-c", "arch=$(nvidia-smi --query-gpu=compute_cap \
+	//	  --format=csv,noheader | head -1 | tr -d ' .'); \
+	//	  img=$(cat /etc/ember-cuda-arch); test \"$arch\" = \"$img\" && \
+	//	  sd-cli --list-devices | grep -qi cuda"]
+	//
+	// Belt and braces: `images:` already refuses a card it has no entry for,
+	// before renting. This catches what a map cannot -- the right digest
+	// filed under the wrong key, or a scalar image: pinned by hand.
 	//
 	// Empty runs no probe.
 	GPUProbe []string `yaml:"gpu_probe"`
