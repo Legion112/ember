@@ -19,6 +19,7 @@ import (
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/s3"
+	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/internal/sshx/sshexec"
 )
 
@@ -528,7 +529,9 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 	spec.Outputs = nil
 
 	if *dryRun {
-		return dryRunUp(out, p, offer, spec, from)
+		// No served run here: store sync is CPU-only and buildSpec drops
+		// the server for the same reason it drops the gpu probe.
+		return dryRunUp(out, p, offer, spec, from, sdserver.Run{})
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
