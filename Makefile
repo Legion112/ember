@@ -71,7 +71,7 @@ COVERPROFILE := coverage.out
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/assets=91,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=82,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/sdserver=99
+COVER_PKGS := internal/assets=91,internal/blob=97,internal/genstore=93,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=82,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/sdserver=99
 COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,internal/dockerengine/dockerclient
 # internal/assets is below the rest because the paths it cannot reach are
 # filesystem failures with no portable way to provoke: a rename that fails
@@ -80,6 +80,16 @@ COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/c
 # response and a read-only store -- are tested; the rest would need a fake
 # filesystem, and an interface introduced to raise a coverage number is an
 # interface the production code did not need.
+# internal/genstore is at 93 against a measured 94.6 for internal/assets'
+# reason, one layer down: what it cannot reach are row-scan failures and
+# rows.Err() returns, which need a database that answers a query and then lies
+# about a column type. Every path that *decides* anything is covered, and so is
+# every error return reachable by closing the database under it -- which is not
+# a contrivance, since `ember serve` shuts down by closing what it owns while a
+# run may still be finishing. internal/blob is at 97 and the one thing it
+# cannot reach is an os.OpenRoot that fails after the MkdirAll beside it
+# succeeded, which needs a race.
+#
 # internal/sdserver is at 99 and not 100 for internal/assets' reason: what it
 # cannot reach are the two filesystem failures in WriteImages, a write that
 # fails after the file was created and a close that fails after a successful

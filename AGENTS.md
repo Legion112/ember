@@ -6,9 +6,30 @@ This project is **Go-first**, like `go-tun`, `transcription` and `sms-gateway`.
   Makefile prefers `~/sdk/go1.27.0` so the compiler cannot drift from the
   declaration just because a system package updated.
 - Prefer the standard library and the dependencies already here over new ones.
-  The whole dependency list is `golang.org/x/crypto`, `github.com/docker/docker`,
-  `gopkg.in/yaml.v3` and `golang.org/x/tools` (the coverage gate). Adding a
-  fifth needs a reason written down.
+  The list is `golang.org/x/crypto`, `github.com/docker/docker`,
+  `gopkg.in/yaml.v3`, `golang.org/x/tools` (the coverage gate) and
+  `modernc.org/sqlite`. **Adding one needs a reason written down**, which is
+  what the rest of this bullet is.
+
+  `modernc.org/sqlite` is the queue and the generation history. ember had no
+  state that outlives a process: `internal/statestore` is a journal of *live*
+  nodes, deliberately empty after a clean run, which is the right shape for
+  "what is billing right now" and the wrong one for "what was asked for, what
+  came back, and what did it cost". A queue outlives the process that filled
+  it, a request has a history worth keeping after its node is gone, and a
+  reconnecting client has to be told what it missed from a cursor -- which a
+  ring buffer cannot answer once it has wrapped.
+
+  It is the **pure-Go** driver and not `mattn/go-sqlite3`, because cgo would
+  mean `CGO_ENABLED=0` no longer builds ember and `go test ./...` would need a
+  C toolchain, which is the kind of requirement that turns "it just works on a
+  clean clone" into a paragraph of instructions. `internal/genstore` puts it
+  behind a narrow interface with a `RecordingStore` fake, as every other
+  external system here is, so the engine is swappable and the layers above it
+  are testable with no file on disk. Flat JSON files -- what `statestore`
+  does -- were the alternative and would have meant hand-rolling the one
+  operation the queue cannot do without: claim the next request atomically,
+  in a single statement.
 - **Do not add** Bash, Python or another scripting language for project
   tooling. Non-trivial logic is a Go subcommand. `make setup` calls
   `ember setup`, never a shell script — `transcription` already took this
