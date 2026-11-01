@@ -7,9 +7,9 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/node"
-	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/statestore"
 )
 
@@ -44,7 +44,7 @@ func runDown(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
-	reg, store, _, err := registryAndStore(*cfgPath, d)
+	reg, store, _, err := app.RegistryAndStore(*cfgPath, d)
 	if err != nil {
 		return err
 	}
@@ -134,44 +134,35 @@ func runOffers(args []string, out io.Writer, d deps) error {
 	if err != nil {
 		return usageError{err}
 	}
-	ps, err := resolvePaths(cfg, d)
+	ps, err := app.ResolvePaths(cfg, d)
 	if err != nil {
 		return err
 	}
-	creds, err := d.credentials(ps.config)
+	creds, err := d.Credentials(ps.Config)
 	if err != nil {
 		return err
 	}
-	reg, err := buildRegistry(d, creds, cfg)
+	reg, err := app.BuildRegistry(d, creds, cfg)
 	if err != nil {
 		return err
 	}
 
-	targets := reg.All()
-	if *providerName != "" {
-		p, err := reg.Get(node.ProviderID(*providerName))
-		if err != nil {
-			return usageError{err}
-		}
-		targets = []provider.Provider{p}
+	listings, err := app.Offers(context.Background(), reg, filter, *providerName)
+	if err != nil {
+		return err
 	}
 
-	ctx := context.Background()
 	shown, failed := 0, 0
-	for _, p := range targets {
-		offers, err := p.Offers(ctx, filter)
-		if err != nil {
+	for _, l := range listings {
+		if l.Err != nil {
 			// Reported, not returned: one unreachable provider must not hide
 			// what the others quoted, and must not look like success either.
-			outf(out, "%-10s could not be asked: %v\n", p.Name(), err)
+			outf(out, "%-10s could not be asked: %v\n", l.Provider, l.Err)
 			failed++
 			continue
 		}
-		// Re-filtered our side regardless of what the API was asked: a
-		// provider that ignores a price filter must not have its dearest
-		// offer printed as though ember would rent it.
-		for _, o := range provider.FilterOffers(filter, offers) {
-			outf(out, "%-10s %-24s %-12s %s\n", p.Name(), o.Token, o.GPU, o.Price)
+		for _, o := range l.Offers {
+			outf(out, "%-10s %-24s %-12s %s\n", l.Provider, o.Token, o.GPU, o.Price)
 			shown++
 		}
 	}

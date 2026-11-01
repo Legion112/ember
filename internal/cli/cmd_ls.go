@@ -4,13 +4,10 @@ import (
 	"context"
 	"flag"
 	"io"
-	"time"
 
+	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/config"
-	"github.com/Legion112/ember/internal/node"
-	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/reconcile"
-	"github.com/Legion112/ember/internal/statestore"
 )
 
 func cmdLs(args []string, out io.Writer) error   { return runLs(args, out, deps{}) }
@@ -35,10 +32,11 @@ func runLs(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
-	findings, stores, _, err := scan(*cfgPath, out, d)
+	sc, err := app.Scan(context.Background(), *cfgPath, d)
 	if err != nil {
 		return err
 	}
+	findings, stores := sc.Nodes, sc.Stores
 
 	if len(findings) == 0 {
 		outf(out, "no nodes.\n")
@@ -81,10 +79,12 @@ func runReap(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
-	findings, _, ctx, err := scan(*cfgPath, out, d)
+	ctx := context.Background()
+	sc, err := app.Scan(ctx, *cfgPath, d)
 	if err != nil {
 		return err
 	}
+	findings := sc.Nodes
 
 	expired := 0
 	for _, f := range findings {
@@ -102,11 +102,12 @@ func runReap(args []string, out io.Writer, d deps) error {
 		return nil
 	}
 
-	reg, store, _, err := registryAndStore(*cfgPath, d)
-	if err != nil {
-		return err
-	}
-	destroyed, rerr := reconcile.Reap(ctx, reg, store, findings)
+	// Reaped against the registry and the journal the scan used, not a
+	// second pair built from a second config read. Two reads are two chances
+	// for the two copies to disagree about which provider a finding belongs
+	// to, and the one that disagrees is the one that does not destroy the
+	// node.
+	destroyed, rerr := reconcile.Reap(ctx, sc.Registry, sc.Store, findings)
 	outf(out, "destroyed %d of %d expired node(s)\n", destroyed, expired)
 	if rerr != nil {
 		return rerr
@@ -115,63 +116,4 @@ func runReap(args []string, out io.Writer, d deps) error {
 		return &FindingsError{N: expired - destroyed}
 	}
 	return nil
-}
-
-// scan collects from every provider and classifies the result.
-//
-// Nodes and stores come back separately because they are acted on
-// differently: reap destroys expired nodes and must never be handed a store,
-// and the two cost shapes print differently. One registry serves both, so a
-// caller that needs the stores does not pay for a second round of config
-// loading and credential reading.
-func scan(cfgPath string, out io.Writer, d deps) ([]reconcile.Finding, []reconcile.Finding, context.Context, error) {
-	reg, store, cfg, err := registryAndStore(cfgPath, d)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	records, err := store.List()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	ctx := context.Background()
-	listings, errs := reconcile.Collect(ctx, reg)
-	nodes := reconcile.Scan(listings, errs, records, time.Now())
-
-	stores, storeErrs := reconcile.CollectStores(ctx, reg)
-	configured := map[node.ProviderID]string{}
-	if cfg.HasStore() {
-		configured[node.ProviderID(cfg.Provider)] = cfg.Store.Name
-	}
-	return nodes, reconcile.ScanStores(stores, storeErrs, configured), ctx, nil
-}
-
-// registryAndStore builds everything a scan needs from one config read.
-//
-// The config comes back with them because the caller needs it too, and a
-// second config.Load would be a second chance for the two copies to disagree
-// about which store this run is talking about.
-func registryAndStore(cfgPath string, d deps) (*provider.Registry, *statestore.Store, config.Config, error) {
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		return nil, nil, cfg, err
-	}
-	ps, err := resolvePaths(cfg, d)
-	if err != nil {
-		return nil, nil, cfg, err
-	}
-	creds, err := d.credentials(ps.config)
-	if err != nil {
-		return nil, nil, cfg, err
-	}
-	reg, err := buildRegistry(d, creds, cfg)
-	if err != nil {
-		return nil, nil, cfg, err
-	}
-	store, err := openStore(ps.state)
-	if err != nil {
-		return nil, nil, cfg, err
-	}
-	return reg, store, cfg, nil
 }

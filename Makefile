@@ -30,12 +30,35 @@ COVERPROFILE := coverage.out
 # to land a change, that is the signal to split the logic out of the I/O
 # rather than to edit this line.
 #
-# internal/cli is at 77 and is the honest exception: what is left uncovered
-# there is the wiring that constructs a real Docker client and resolves a real
-# home directory, which the labs exercise. When a *decision* lived there --
-# when to retry an SSH dial, when to refuse one -- it was moved to
+# internal/app and internal/cli are the honest exception: what is left
+# uncovered is the wiring that constructs a real Docker client and resolves a
+# real home directory, which the labs exercise. When a *decision* lived in the
+# CLI -- when to retry an SSH dial, when to refuse one -- it was moved to
 # internal/session, which is at 96 and tests against a real SSH server. That
 # is the rule above being followed rather than the floor being lowered.
+#
+# The pipeline moved out of internal/cli into internal/app, and the floors
+# moved with it rather than being inherited. Coverage is attributed to the
+# package the code lives in -- `go test` runs with -coverpkg over the whole
+# tree -- so moving ~470 statements lost nothing: internal/app's 83.6 comes
+# out of tests that still largely live in internal/cli, and the gated overall
+# did not move.
+#
+# internal/cli is RAISED from 83 to 88 in the same change, and that is the
+# point of mentioning it. It measures 90.8 now that the untested wiring is
+# only part of what is left, and leaving the floor at 83 would have been seven
+# points of slack -- room for an entire new subcommand to arrive untested
+# without the gate noticing. A floor that no longer tracks the package is not
+# a floor.
+#
+# internal/app is at 82 against a measured 83.4-83.6, and the gap is
+# deliberate for internal/tunnel's reason rather than from generosity: orExited
+# races an operation against the server's exit, and when ember stops the server
+# by cancelling the context both arms of that select are ready at once, so
+# which one runs is up to the scheduler. Two consecutive runs of this gate
+# measured 83.6 and 83.4. Pinning the floor to the lucky number would make the
+# build flake, and a gate that fails for no reason is a gate people learn to
+# re-run rather than read.
 #
 # internal/tunnel is the one exception to that rule and is at 94 rather than
 # its isolated 96.6: when the forwarder is torn down, pipe's select has both
@@ -48,7 +71,7 @@ COVERPROFILE := coverage.out
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/assets=91,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/cli=83,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/sdserver=99
+COVER_PKGS := internal/assets=91,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=82,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/sdserver=99
 COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,internal/dockerengine/dockerclient
 # internal/assets is below the rest because the paths it cannot reach are
 # filesystem failures with no portable way to provoke: a rename that fails

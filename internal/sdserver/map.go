@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -328,6 +329,40 @@ type Job struct {
 	// collides with one ember set is refused rather than resolved -- see
 	// Body.
 	Extra map[string]any
+}
+
+// Describe is the one line an operator reads to know which image this is.
+//
+// A method on Job rather than a function beside its caller, because it has two
+// callers -- the line printed as a job starts, and the dry run that shows a
+// batch before anything is rented -- and a job description that differed
+// between the two would be the same batch described two ways.
+func (j Job) Describe() string {
+	var b strings.Builder
+	p := j.Prompt
+	if p == "" {
+		if v, ok := j.Extra["prompt"].(string); ok {
+			p = v
+		}
+	}
+	// Truncated: a FLUX.2 prompt is a thousand characters and the first few
+	// words are what identifies it in a log.
+	if len(p) > 60 {
+		p = p[:57] + "..."
+	}
+	b.WriteString(strconv.Quote(p))
+	// Only when both sides are set. The other would come from the server's
+	// own default, and "512x" would be a guess printed as a fact.
+	if j.Width != 0 && j.Height != 0 {
+		fmt.Fprintf(&b, " %dx%d", j.Width, j.Height)
+	}
+	if j.Steps != 0 {
+		fmt.Fprintf(&b, " %d steps", j.Steps)
+	}
+	if j.Seed != 0 {
+		fmt.Fprintf(&b, " seed %d", j.Seed)
+	}
+	return b.String()
 }
 
 // The preview settings, and the default that is deliberately not upstream's.
