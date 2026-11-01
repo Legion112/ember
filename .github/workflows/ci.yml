@@ -92,6 +92,53 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
+  # The web UI, which is the one thing in this repository that is not Go.
+  #
+  # Its own job rather than steps in the unit one, so a Rust toolchain is not
+  # installed for a change that does not touch it -- and so a red frontend
+  # does not read as a red backend. `go build ./...` deliberately does not
+  # depend on any of this: internal/webapi/dist carries a committed
+  # placeholder, because //go:embed fails at compile time on a pattern that
+  # matches nothing.
+  web:
+    name: web ui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The pinned wasm-bindgen CLI, read out of web/Cargo.toml rather than
+      # written here: two copies of a version is two copies that drift, and
+      # the one that drifts produces glue the other cannot process.
+      - name: toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          rustup component add clippy rustfmt
+          version=$(make print-WASM_BINDGEN_VERSION)
+          echo "pinned wasm-bindgen: $version"
+          cargo install -f wasm-bindgen-cli --version "$version"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: web
+
+      # fmt, clippy and the host tests -- what vet, lint and test are to the
+      # Go half. The tests run on the HOST and not in a browser, which is why
+      # internal/model has no web_sys in it.
+      - name: checks
+        run: make web-test
+
+      - name: build
+        run: make web
+
+      # The Go build with the UI embedded, which is the combination a release
+      # actually ships and which nothing else here exercises: the unit job
+      # builds against the placeholder.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: build ember with the UI in it
+        run: go build -o bin/ember ./cmd/ember
+
   # The labs run ember's real binary against a real Docker daemon. That is
   # where the Docker client in internal/dockerengine/dockerclient runs at all
   # -- the coverage gate excludes it as a branchless adapter -- and it is the

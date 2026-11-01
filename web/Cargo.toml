@@ -1,0 +1,52 @@
+# ember's web UI.
+#
+# WHY THERE IS RUST IN A GO-FIRST REPOSITORY: it was asked for deliberately,
+# and AGENTS.md carries the written reason for every dependency added here.
+# What this file does is contain the cost -- nothing in internal/ imports
+# anything from web/, and `go build ./...` works on a clean clone with no Rust
+# installed, because internal/webapi/dist holds a committed placeholder.
+[package]
+name = "ember-web"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "ember's local web UI"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Fine-grained signals rather than a vdom, which is the reason for choosing
+# it: a sampling-step event updates one text node instead of diffing a tree,
+# and progress arrives several times a second on a watched generation.
+leptos = { version = "0.8", features = ["csr"] }
+
+# PINNED EXACTLY, because wasm-bindgen's generated glue has to match the
+# wasm-bindgen CLI that post-processes it -- a mismatch is a hard error at
+# build time, not a subtle one. `make web` checks the two agree and says which
+# to change. "Pin external inputs" is already the rule here.
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# fetch and WebSocket straight from web-sys rather than through a helper
+# crate: about eighty lines in api.rs against another dependency tree.
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "Window", "Location", "Document", "Element", "HtmlElement",
+  "Request", "RequestInit", "RequestMode", "Response", "Headers",
+  "WebSocket", "MessageEvent", "CloseEvent", "BinaryType", "Event",
+  "AbortController", "AbortSignal",
+]
+
+[profile.release]
+# Size, not speed: this is a few thousand lines of UI logic shipped over
+# loopback, and every millisecond of the browser's parse is paid on each
+# reload. opt-level "s" plus lto takes the wasm well under a megabyte.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -538,7 +538,13 @@ func TestOnce_JoinsTheFilesAJobWroteToTheRequest(t *testing.T) {
 // lives inside one iteration of this loop, waiting for Run to return is a
 // complete shutdown -- there is no set of goroutines to track.
 func TestRun_ReturnsOnlyAfterTheRentalIsDestroyed(t *testing.T) {
-	inFlight := make(chan struct{})
+	// BUFFERED BY ONE, and the non-blocking send below is why. An unbuffered
+	// channel with a `default:` arm drops the signal unless a receiver is
+	// already parked -- so under the load of the whole suite running in
+	// parallel, the loop started generating, the signal went nowhere, and
+	// this test waited out its own timeout. It failed about one run in
+	// twenty, which is the worst frequency a flake can have.
+	inFlight := make(chan struct{}, 1)
 	release := make(chan struct{})
 	served := &fakeServed{progress: func(report.Sink, int) {
 		select {

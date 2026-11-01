@@ -54,6 +54,7 @@ import (
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/queue"
+	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 )
 
@@ -516,6 +517,10 @@ func (s *Server) getEvents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, http.StatusInternalServerError, err)
 		return
+	}
+	// An empty list and never null; see the same line in ws.go.
+	if es == nil {
+		es = []report.Event{}
 	}
 	next := after
 	if n := len(es); n > 0 {

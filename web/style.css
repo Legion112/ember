@@ -1,0 +1,166 @@
+/* ember's UI.
+ *
+ * One file, no framework, no remote font. It is a local tool for one person,
+ * and a build step for CSS would be a second toolchain on top of the one this
+ * directory already added.
+ *
+ * Dark and light both come from the system, because an operator running this
+ * at midnight beside a terminal did not ask to be blinded. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #fff;
+  --fg: #16181d;
+  --dim: #6b7280;
+  --line: #e3e6ea;
+  --panel: #fafbfc;
+  --accent: #b4530a;
+  --bad: #b00020;
+  --good: #116d3a;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --fg: #e6e8ec;
+    --dim: #9aa3ae;
+    --line: #2a2e36;
+    --panel: #1a1d22;
+    --accent: #e8903c;
+    --bad: #ff6b6b;
+    --good: #5fd08a;
+  }
+}
+
+* { box-sizing: border-box }
+
+body {
+  margin: 0;
+  padding: 1.5rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.55 system-ui, -apple-system, sans-serif;
+  max-width: 68rem;
+  margin-inline: auto;
+}
+
+h1 { font-size: 1.3rem; margin: 0; letter-spacing: .02em }
+h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
+     color: var(--dim); margin: 1.4rem 0 .6rem }
+h2:first-child { margin-top: 0 }
+
+code, pre, .price, .status, input, select, textarea { font-family: var(--mono) }
+code { font-size: .92em; color: var(--accent) }
+
+header { border-bottom: 1px solid var(--line); padding-bottom: .8rem; margin-bottom: 1.2rem }
+.posture { margin: .35rem 0 0; color: var(--dim); font-size: .85rem }
+.posture .paid { color: var(--bad); font-weight: 600 }
+.posture .free { color: var(--good) }
+
+main { display: grid; gap: 1.2rem; grid-template-columns: 1fr }
+@media (min-width: 60rem) {
+  main { grid-template-columns: 1.3fr 1fr }
+  .panel:nth-child(3) { grid-column: 1 / -1 }
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  background: var(--panel);
+}
+.panel.idle { opacity: .6 }
+
+.row { display: flex; flex-wrap: wrap; gap: .7rem; align-items: flex-end; margin-bottom: .6rem }
+label { display: flex; flex-direction: column; gap: .2rem; font-size: .78rem; color: var(--dim) }
+label.wide { display: block; margin-bottom: .6rem }
+label.wide input, label.wide textarea { width: 100% }
+
+input, select, textarea {
+  font-size: .9rem;
+  padding: .35rem .5rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+}
+input[type=number] { width: 6rem }
+textarea { resize: vertical }
+
+button {
+  font: inherit;
+  padding: .4rem .8rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent) }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600 }
+button.link { border: 0; background: 0; padding: 0 .3rem; color: var(--accent); text-decoration: underline }
+
+table { border-collapse: collapse; width: 100%; font-size: .85rem }
+td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
+.offers tr { cursor: pointer }
+.offers tr:hover td { background: color-mix(in oklab, var(--accent) 10%, transparent) }
+.price { text-align: right; white-space: nowrap }
+.status { color: var(--dim) }
+.queue tr.running td { background: color-mix(in oklab, var(--good) 12%, transparent) }
+.queue tr.watching td { outline: 1px solid var(--accent); outline-offset: -1px }
+
+.hint { color: var(--dim); font-size: .78rem; margin: .4rem 0 }
+.error { color: var(--bad); font-size: .85rem }
+.fatal {
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  padding: .6rem .8rem;
+  font-size: .87rem;
+}
+
+.batch { margin: .4rem 0; padding-left: 1.4rem; font-size: .85rem }
+.batch li { margin: .2rem 0 }
+
+.rental { display: grid; grid-template-columns: max-content 1fr; gap: .15rem .8rem;
+          font-size: .85rem; margin: 0 0 .8rem }
+.rental dt { color: var(--dim) }
+.rental dd { margin: 0 }
+
+.jobs { list-style: none; padding: 0; margin: 0; font-size: .85rem }
+.jobs li { padding: .25rem 0; border-bottom: 1px solid var(--line) }
+.jobs .label { display: inline-block; min-width: 5rem; color: var(--dim) }
+.jobs .step { color: var(--accent) }
+.jobs .done { color: var(--good) }
+
+.gallery { display: flex; flex-wrap: wrap; gap: .8rem; margin-top: .8rem }
+.gallery figure { margin: 0; font-size: .75rem; color: var(--dim) }
+.gallery img {
+  display: block;
+  max-width: 14rem;
+  max-height: 14rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  /* A `proj` preview is the latent: an 8x8 PNG for a 64x64 generation. Scaled
+   * with no smoothing, so it reads as what it is rather than as a blurry
+   * photograph. */
+  image-rendering: pixelated;
+}
+.gallery figure:not(.preview) img { image-rendering: auto }
+.gallery .preview img { opacity: .85 }
+
+details { margin-top: .8rem; font-size: .85rem }
+summary { cursor: pointer; color: var(--dim) }
+.log {
+  max-height: 20rem;
+  overflow: auto;
+  font-size: .75rem;
+  line-height: 1.4;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: .6rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

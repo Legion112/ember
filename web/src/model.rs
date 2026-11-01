@@ -1,0 +1,989 @@
+//! The wire types and the state they fold into.
+//!
+//! NO `web_sys` IN THIS MODULE, deliberately. Everything here is a decision
+//! about data -- what an event means, how a request's progress accumulates,
+//! which money figure to show -- so it compiles for the host and `cargo test`
+//! exercises it with no browser and no headless Chrome. The parts that cannot
+//! be tested that way are in `api` and `views`, and they are deliberately
+//! thin.
+//!
+//! The field names mirror `internal/webapi/wire.go`. That file is the one
+//! place ember decides what a browser may see; this one is the one place the
+//! browser decides what to make of it. Neither marshals a domain type.
+
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// nullable accepts `null` where a value is expected, and uses the default.
+///
+/// `#[serde(default)]` covers a field that is MISSING and not one that is
+/// present and null -- which is a type error, and one that fails the whole
+/// decode rather than the field.
+///
+/// That is not hypothetical here: Go marshals a nil slice as `null`, so an
+/// envelope carrying no new events arrived as `{"events":null,...}` and was
+/// dropped entirely, taking the request state with it. The UI showed a job
+/// stuck at "starting" while the image was already on disk. The server sends
+/// `[]` now; this is the other half, because the rule has to hold for a field
+/// somebody adds later too.
+fn nullable<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::deserialize(d)?.unwrap_or_default())
+}
+
+/// Money, as ember sends it: twice.
+///
+/// The integer is what this UI sorts and compares on; the string is what it
+/// displays. `node.MicroUSD.String` in Go is `"$%.6g"`, which nothing here
+/// could reproduce by accident -- so formatting a price in Rust would create a
+/// second renderer that disagrees with the one `ember up` prints, in a
+/// language where the first one's tests cannot reach it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Money {
+    #[serde(default)]
+    pub micro_usd: i64,
+    #[serde(default)]
+    pub display: String,
+}
+
+impl Money {
+    /// What to show. Never computed from `micro_usd`.
+    pub fn text(&self) -> &str {
+        if self.display.is_empty() {
+            "$0"
+        } else {
+            &self.display
+        }
+    }
+
+    pub fn is_free(&self) -> bool {
+        self.micro_usd == 0
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Provider {
+    pub name: String,
+    #[serde(default)]
+    pub free: bool,
+    #[serde(default)]
+    pub stores: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Ceilings {
+    #[serde(default)]
+    pub ttl: String,
+    #[serde(default)]
+    pub max_hourly: Money,
+    #[serde(default)]
+    pub max_run: Money,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Limits {
+    #[serde(default)]
+    pub min_width: i32,
+    #[serde(default)]
+    pub max_width: i32,
+    #[serde(default)]
+    pub min_height: i32,
+    #[serde(default)]
+    pub max_height: i32,
+    #[serde(default)]
+    pub max_batch_count: i32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Caps {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default, deserialize_with = "nullable")]
+    pub samplers: Vec<String>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub schedulers: Vec<String>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub preview_modes: Vec<String>,
+    #[serde(default)]
+    pub limits: Limits,
+}
+
+/// What the server will let this UI offer.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Config {
+    #[serde(default, deserialize_with = "nullable")]
+    pub providers: Vec<Provider>,
+    #[serde(default)]
+    pub ceilings: Ceilings,
+    #[serde(default)]
+    pub allow_paid: bool,
+    #[serde(default)]
+    pub servable: bool,
+    #[serde(default)]
+    pub store: String,
+    #[serde(default)]
+    pub mount: String,
+    #[serde(default)]
+    pub preview: String,
+    #[serde(default)]
+    pub preview_interval: i32,
+
+    /// Absent until something has asked a generation server.
+    ///
+    /// `Option` and not an empty `Caps`, because "nothing has asked yet" and
+    /// "the server reported no samplers" are different answers -- and a UI
+    /// treating the first as the second would grey out every control before
+    /// the operator's first rental.
+    #[serde(default, deserialize_with = "nullable")]
+    pub caps: Option<Caps>,
+}
+
+impl Config {
+    /// Whether a provider can be rented from at all.
+    ///
+    /// A UI that offered a paid card on a server started without
+    /// `--allow-paid` would be offering a button that cannot work, and the
+    /// refusal would arrive after the operator chose.
+    pub fn can_rent(&self, name: &str) -> bool {
+        self.providers
+            .iter()
+            .any(|p| p.name == name && (p.free || self.allow_paid))
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Offer {
+    pub provider: String,
+    pub token: String,
+    #[serde(default)]
+    pub gpu: String,
+    #[serde(default)]
+    pub gpu_count: i32,
+    #[serde(default)]
+    pub vram_gib: i32,
+    #[serde(default)]
+    pub price: Money,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub interruptible: bool,
+    #[serde(default)]
+    pub vcpu: i32,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// One provider's answer, with its failure beside it.
+///
+/// "I could not ask RunPod" must never render as "RunPod has nothing" -- the
+/// same rule `ember ls` exits 2 for. A flat list of offers could not say it.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Listing {
+    pub provider: String,
+    #[serde(default, deserialize_with = "nullable")]
+    pub offers: Vec<Offer>,
+    #[serde(default)]
+    pub error: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Offers {
+    #[serde(default, deserialize_with = "nullable")]
+    pub listings: Vec<Listing>,
+}
+
+/// One image to generate. The same shape ember accepts.
+///
+/// There is no `extra`, and the absence is the point: that field reaches
+/// everything in sd-server's request body ember does not type, including the
+/// ones naming file paths on the node. The server has nowhere to put one
+/// either, so a UI that tried to send one would be refused as an unknown
+/// field.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct Job {
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub negative_prompt: String,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub width: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub height: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub steps: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub batch_count: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub seed: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sampler: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scheduler: String,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub cfg: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub guidance: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+}
+
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
+}
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
+}
+
+impl Job {
+    /// One line identifying this job, the way ember's own output does.
+    ///
+    /// Deliberately the same shape as `sdserver.Job.Describe` in Go: a prompt
+    /// in quotes, truncated, then the geometry only when both sides are set --
+    /// because the other would come from the server's default and "512x" would
+    /// be a guess printed as a fact.
+    pub fn describe(&self) -> String {
+        let mut p = self.prompt.clone();
+        if p.chars().count() > 60 {
+            p = p.chars().take(57).collect::<String>() + "...";
+        }
+        let mut out = format!("{p:?}");
+        if self.width != 0 && self.height != 0 {
+            out += &format!(" {}x{}", self.width, self.height);
+        }
+        if self.steps != 0 {
+            out += &format!(" {} steps", self.steps);
+        }
+        if self.seed != 0 {
+            out += &format!(" seed {}", self.seed);
+        }
+        out
+    }
+}
+
+/// What a POST sends.
+///
+/// `ttl` and the budgets are strings. A JSON number is a float on both sides
+/// of this wire, and in Go `ParseFloat("0.29")*1e6` is 289999 -- which is the
+/// whole reason `node.ParseUSD` is hand-written. A ceiling that changed in
+/// transit is a ceiling nobody trusts.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct NewRequest {
+    pub provider: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub gpu: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ttl: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub max_hourly_usd: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub max_run_usd: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub preview: String,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    pub preview_interval: i32,
+    pub jobs: Vec<Job>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ImageRef {
+    #[serde(default)]
+    pub job: i32,
+    #[serde(default)]
+    pub index: i32,
+    #[serde(default)]
+    pub bytes: i64,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub preview: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Request {
+    pub id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub created: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub gpu: String,
+    #[serde(default)]
+    pub offer: String,
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub ttl: String,
+    #[serde(default)]
+    pub started: String,
+    #[serde(default)]
+    pub ended: String,
+    #[serde(default)]
+    pub cost: Money,
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub preview: String,
+    #[serde(default)]
+    pub preview_interval: i32,
+    #[serde(default, deserialize_with = "nullable")]
+    pub jobs: Vec<Job>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub images: Vec<ImageRef>,
+}
+
+impl Request {
+    /// Whether anything more will happen to it.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "done" | "failed" | "cancelled" | "interrupted"
+        )
+    }
+
+    /// Whether the cancel button does anything.
+    ///
+    /// Only a queued request. Cancelling one that is generating would mean
+    /// destroying its node, which takes every other request on the same
+    /// rental with it -- so the button is absent rather than present and
+    /// refused.
+    pub fn is_cancellable(&self) -> bool {
+        self.status == "queued"
+    }
+
+    /// The results, without the progress frames.
+    ///
+    /// A `proj` preview of a 64x64 generation is an 8x8 PNG of about 250
+    /// bytes: it is the latent, not a thumbnail of the output, so a gallery
+    /// must not open on one.
+    pub fn results(&self) -> impl Iterator<Item = &ImageRef> {
+        self.images.iter().filter(|i| !i.preview)
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RequestList {
+    #[serde(default, deserialize_with = "nullable")]
+    pub requests: Vec<Request>,
+    #[serde(default)]
+    pub running: String,
+}
+
+/// One event, as `internal/report` writes it.
+///
+/// Flat, with everything optional, because that is how it crosses the wire:
+/// one serde type here instead of thirteen, and the `kind` says which fields
+/// mean anything.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Event {
+    #[serde(default)]
+    pub seq: i64,
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub cmd: String,
+    #[serde(default)]
+    pub unit: String,
+    #[serde(default)]
+    pub index: i32,
+    #[serde(default)]
+    pub total: i32,
+    #[serde(default)]
+    pub desc: String,
+    #[serde(default)]
+    pub pass: i32,
+    #[serde(default)]
+    pub step: i32,
+    #[serde(default)]
+    pub total_steps: i32,
+    #[serde(default)]
+    pub files: i32,
+    #[serde(default)]
+    pub bytes: i64,
+    #[serde(default)]
+    pub cost_micro_usd: i64,
+    #[serde(default)]
+    pub spent_micro_usd: i64,
+    #[serde(default)]
+    pub measured_ns: i64,
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub error: String,
+}
+
+/// What the socket sends.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Envelope {
+    #[serde(default)]
+    pub next: i64,
+    #[serde(default, deserialize_with = "nullable")]
+    pub events: Vec<Event>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub request: Option<Request>,
+    #[serde(default)]
+    pub running: String,
+}
+
+/// Where one job has got to.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JobProgress {
+    pub index: i32,
+    pub total: i32,
+    pub desc: String,
+
+    /// A PASS AND A STEP WITHIN IT, never a percentage.
+    ///
+    /// sd-server's `step` and `total_steps` describe the current sampling
+    /// pass, not the whole job, and passes restart for each batch item, each
+    /// high- and low-noise stage and each highres pass. A bar built from them
+    /// runs to the end and then starts again, which reads as a hang -- so this
+    /// UI shows the three numbers and no bar.
+    pub pass: i32,
+    pub step: i32,
+    pub total_steps: i32,
+
+    pub files: i32,
+    pub bytes: i64,
+    pub done: bool,
+}
+
+/// What a watcher has folded out of the event stream.
+#[derive(Clone, Debug, Default)]
+pub struct Progress {
+    /// The last sequence number seen, which is the cursor a reconnect resumes
+    /// from.
+    pub cursor: i64,
+
+    pub node: String,
+    pub endpoint: String,
+
+    /// What the resident weights cost to load, once, said in the one line an
+    /// operator would size a batch from.
+    pub resident: String,
+
+    pub server: String,
+    pub jobs: Vec<JobProgress>,
+
+    /// The accumulating card time, from the last cost event.
+    pub spent: i64,
+
+    /// The whole rental, once it has been destroyed.
+    pub rental_cost: i64,
+
+    /// Lines the node itself wrote, newest last.
+    pub log: Vec<String>,
+
+    pub failure: String,
+}
+
+/// maxLog bounds what is kept.
+///
+/// A model load prints hundreds of lines and a `-v` sd-server prints one per
+/// tensor, so an unbounded log is a tab that grows until the browser stops.
+const MAX_LOG: usize = 400;
+
+impl Progress {
+    /// apply folds one event in.
+    ///
+    /// IDEMPOTENT PER SEQUENCE NUMBER, because a reconnect can re-deliver:
+    /// the socket resumes from a cursor the client chose, and a client that
+    /// had already applied an event must not count it twice. Anything at or
+    /// below the cursor is ignored.
+    pub fn apply(&mut self, e: &Event) {
+        if e.seq != 0 && e.seq <= self.cursor {
+            return;
+        }
+        if e.seq > self.cursor {
+            self.cursor = e.seq;
+        }
+
+        match e.kind.as_str() {
+            "log" => {
+                self.log.push(e.text.clone());
+                if self.log.len() > MAX_LOG {
+                    let drop = self.log.len() - MAX_LOG;
+                    self.log.drain(0..drop);
+                }
+            }
+            "node_ready" => {
+                self.node = e.node.clone();
+                self.endpoint = e.endpoint.clone();
+            }
+            "server_starting" => self.server = e.cmd.clone(),
+            "model_resident" => {
+                // ember's own measurement, not the server's reported figure.
+                // sd-server said 551ms for weights that are 56 GiB, so the
+                // span ember times itself is the honest one.
+                self.resident = human_duration(e.measured_ns);
+            }
+            "unit_started" => {
+                let j = self.job_mut(e.index, e.total);
+                j.desc = e.desc.clone();
+            }
+            "job_progress" => {
+                let j = self.job_mut(e.index, e.total);
+                j.pass = e.pass;
+                j.step = e.step;
+                j.total_steps = e.total_steps;
+            }
+            "job_images" => {
+                let j = self.job_mut(e.index, e.total);
+                j.files = e.files;
+                j.bytes = e.bytes;
+                j.done = true;
+            }
+            "unit_cost" => {
+                self.spent = e.spent_micro_usd;
+            }
+            "run_cost" => {
+                self.rental_cost = e.cost_micro_usd;
+                self.node = e.node.clone();
+            }
+            "destroy_failed" | "run_failed" => {
+                // THE ONE AN OPERATOR MUST NOT MISS: the node may still be
+                // running, and running means billing.
+                self.failure = e.error.clone();
+            }
+            _ => {}
+        }
+    }
+
+    fn job_mut(&mut self, index: i32, total: i32) -> &mut JobProgress {
+        if let Some(pos) = self.jobs.iter().position(|j| j.index == index) {
+            return &mut self.jobs[pos];
+        }
+        self.jobs.push(JobProgress {
+            index,
+            total,
+            ..Default::default()
+        });
+        self.jobs.sort_by_key(|j| j.index);
+        let pos = self.jobs.iter().position(|j| j.index == index).unwrap();
+        &mut self.jobs[pos]
+    }
+
+    /// The whole log as one string, for a `<pre>`.
+    pub fn log_text(&self) -> String {
+        self.log.concat()
+    }
+}
+
+/// human_duration renders nanoseconds the way Go's `time.Duration` does,
+/// roughly.
+///
+/// Only roughly: exactness is not needed because every figure that MATTERS --
+/// a price, a cost -- arrives pre-rendered from Go, for the reason `Money`
+/// explains. This is for the one line about how long the weights took.
+pub fn human_duration(ns: i64) -> String {
+    if ns <= 0 {
+        return "0s".into();
+    }
+    let secs = ns as f64 / 1e9;
+    if secs < 1.0 {
+        return format!("{}ms", (secs * 1000.0).round() as i64);
+    }
+    if secs < 60.0 {
+        return format!("{:.1}s", secs);
+    }
+    let m = (secs / 60.0).floor() as i64;
+    let s = secs - (m as f64) * 60.0;
+    format!("{m}m{s:.0}s")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(seq: i64, kind: &str) -> Event {
+        Event {
+            seq,
+            kind: kind.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A reconnect re-delivers, and an event applied twice must not count
+    /// twice.
+    ///
+    /// The socket resumes from a cursor the client chose, so the first
+    /// envelope after a reconnect can overlap with what was already folded
+    /// in. Without the cursor check, a cost would accumulate on every
+    /// reconnect and the UI would report a rental costing more each time the
+    /// operator's laptop woke up.
+    #[test]
+    fn ignores_what_it_has_already_seen() {
+        let mut p = Progress::default();
+        let mut e = ev(1, "unit_cost");
+        e.spent_micro_usd = 30_000;
+        p.apply(&e);
+        p.apply(&e);
+        p.apply(&e);
+
+        assert_eq!(p.cursor, 1);
+        assert_eq!(p.spent, 30_000, "a re-delivered event was applied again");
+    }
+
+    /// The same frame arrives on several polls, which is what a real server
+    /// does.
+    ///
+    /// ember's own `awaitJob` deduplicates on the step before it emits, and
+    /// the preview lab measured eleven of sixteen consecutive frame pairs
+    /// identical -- so by the time events reach here the steps are distinct.
+    /// What this checks is that re-applying one anyway is harmless, because a
+    /// reconnect is exactly that.
+    #[test]
+    fn progress_is_the_latest_step_and_not_a_sum() {
+        let mut p = Progress::default();
+        for (seq, step) in [(1, 1), (2, 2), (3, 3)] {
+            let mut e = ev(seq, "job_progress");
+            e.index = 1;
+            e.total = 2;
+            e.pass = 1;
+            e.step = step;
+            e.total_steps = 4;
+            p.apply(&e);
+        }
+        assert_eq!(p.jobs.len(), 1);
+        assert_eq!(p.jobs[0].step, 3);
+        assert_eq!(p.jobs[0].total_steps, 4);
+        assert_eq!(p.jobs[0].pass, 1);
+    }
+
+    /// Jobs come back in order whatever order their events arrive in, because
+    /// "job 2/6" is the label on a file the operator will go and look at.
+    #[test]
+    fn jobs_are_ordered_by_index() {
+        let mut p = Progress::default();
+        for (seq, index) in [(1, 3), (2, 1), (3, 2)] {
+            let mut e = ev(seq, "unit_started");
+            e.index = index;
+            e.total = 3;
+            e.desc = format!("job {index}");
+            p.apply(&e);
+        }
+        assert_eq!(
+            p.jobs.iter().map(|j| j.index).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn folds_a_whole_rental() {
+        let mut p = Progress::default();
+
+        let mut ready = ev(1, "node_ready");
+        ready.node = "local/n1".into();
+        ready.endpoint = "root@127.0.0.1:2222".into();
+        p.apply(&ready);
+
+        let mut starting = ev(2, "server_starting");
+        starting.cmd = "sd-server --model /m.gguf".into();
+        p.apply(&starting);
+
+        let mut resident = ev(3, "model_resident");
+        resident.measured_ns = 6_040_000_000;
+        resident.total = 2;
+        p.apply(&resident);
+
+        let mut started = ev(4, "unit_started");
+        started.index = 1;
+        started.total = 1;
+        started.desc = "\"a cat\" 512x512".into();
+        p.apply(&started);
+
+        let mut images = ev(5, "job_images");
+        images.index = 1;
+        images.total = 1;
+        images.files = 2;
+        images.bytes = 4096;
+        p.apply(&images);
+
+        let mut cost = ev(6, "unit_cost");
+        cost.spent_micro_usd = 55_000;
+        p.apply(&cost);
+
+        let mut rental = ev(7, "run_cost");
+        rental.cost_micro_usd = 120_000;
+        rental.node = "local/n1".into();
+        p.apply(&rental);
+
+        assert_eq!(p.node, "local/n1");
+        assert_eq!(p.endpoint, "root@127.0.0.1:2222");
+        assert_eq!(p.resident, "6.0s");
+        assert!(p.server.contains("sd-server"));
+        assert_eq!(p.jobs.len(), 1);
+        assert!(p.jobs[0].done);
+        assert_eq!(p.jobs[0].files, 2);
+        assert_eq!(p.spent, 55_000);
+        // The rental's own total, which is larger than the sum of its jobs by
+        // exactly the per-rental overhead the served shape pays once.
+        assert_eq!(p.rental_cost, 120_000);
+        assert!(p.failure.is_empty());
+    }
+
+    /// "destroy failed; the node may still be running and billing" is the one
+    /// line an operator must not miss, so it is kept where the UI can shout.
+    #[test]
+    fn keeps_a_destroy_that_failed() {
+        let mut p = Progress::default();
+        let mut e = ev(1, "destroy_failed");
+        e.error = "provider unreachable".into();
+        e.node = "local/n1".into();
+        p.apply(&e);
+        assert_eq!(p.failure, "provider unreachable");
+    }
+
+    /// An unbounded log is a tab that grows until the browser stops: a `-v`
+    /// sd-server prints a line per tensor.
+    #[test]
+    fn the_log_is_bounded() {
+        let mut p = Progress::default();
+        for i in 0..(MAX_LOG * 2) {
+            let mut e = ev(i as i64 + 1, "log");
+            e.text = format!("line {i}\n");
+            p.apply(&e);
+        }
+        assert_eq!(p.log.len(), MAX_LOG);
+        // The newest are kept: the last thing the node said is the thing that
+        // explains a failure.
+        assert!(p.log_text().contains(&format!("line {}", MAX_LOG * 2 - 1)));
+        assert!(!p.log_text().contains("line 0\n"));
+    }
+
+    /// A kind this build has never heard of is ignored, not a panic.
+    ///
+    /// Events are persisted, so a database written by a newer ember can hand
+    /// this one a kind that did not exist when it was compiled -- and reading
+    /// old history is exactly when an operator least wants a crash.
+    #[test]
+    fn ignores_a_kind_from_a_newer_ember() {
+        let mut p = Progress::default();
+        p.apply(&ev(1, "something_a_later_ember_added"));
+        assert_eq!(p.cursor, 1);
+    }
+
+    /// Money is never formatted here. `node.MicroUSD.String` is `"$%.6g"`,
+    /// which nothing in Rust reproduces by accident.
+    #[test]
+    fn money_is_displayed_as_go_rendered_it() {
+        let m = Money {
+            micro_usd: 289_999,
+            display: "$0.289999".into(),
+        };
+        assert_eq!(m.text(), "$0.289999");
+        assert!(!m.is_free());
+        assert_eq!(Money::default().text(), "$0");
+        assert!(Money::default().is_free());
+    }
+
+    #[test]
+    fn describes_a_job_the_way_ember_does() {
+        let j = Job {
+            prompt: "a cat".into(),
+            width: 512,
+            height: 256,
+            steps: 4,
+            seed: 9,
+            ..Default::default()
+        };
+        let got = j.describe();
+        for want in ["\"a cat\"", "512x256", "4 steps", "seed 9"] {
+            assert!(got.contains(want), "{got:?} is missing {want:?}");
+        }
+
+        // Only one side set: the other would come from the server's default,
+        // and "512x" would be a guess printed as a fact.
+        let half = Job {
+            prompt: "a".into(),
+            width: 512,
+            ..Default::default()
+        };
+        assert!(!half.describe().contains("512"));
+
+        // A FLUX.2 prompt is a thousand characters and the first words are
+        // what identifies it.
+        let long = Job {
+            prompt: "x".repeat(200),
+            ..Default::default()
+        };
+        assert!(long.describe().len() < 80);
+        assert!(long.describe().contains("..."));
+    }
+
+    /// A UI must not offer a paid card on a server that will refuse it: the
+    /// refusal would arrive after the operator chose.
+    #[test]
+    fn knows_which_providers_can_be_rented_from() {
+        let cfg = Config {
+            providers: vec![
+                Provider {
+                    name: "local".into(),
+                    free: true,
+                    stores: true,
+                },
+                Provider {
+                    name: "runpod".into(),
+                    free: false,
+                    stores: true,
+                },
+            ],
+            allow_paid: false,
+            ..Default::default()
+        };
+        assert!(cfg.can_rent("local"));
+        assert!(!cfg.can_rent("runpod"));
+        assert!(!cfg.can_rent("nowhere"));
+
+        let paid = Config {
+            allow_paid: true,
+            ..cfg.clone()
+        };
+        assert!(paid.can_rent("runpod"));
+    }
+
+    #[test]
+    fn a_request_knows_what_can_be_done_to_it() {
+        let queued = Request {
+            status: "queued".into(),
+            ..Default::default()
+        };
+        assert!(queued.is_cancellable());
+        assert!(!queued.is_terminal());
+
+        // Cancelling a running one would mean destroying its node, which
+        // takes every other request on the same rental with it.
+        let running = Request {
+            status: "running".into(),
+            ..Default::default()
+        };
+        assert!(!running.is_cancellable());
+        assert!(!running.is_terminal());
+
+        for s in ["done", "failed", "cancelled", "interrupted"] {
+            let r = Request {
+                status: s.into(),
+                ..Default::default()
+            };
+            assert!(r.is_terminal(), "{s} is not terminal");
+            assert!(!r.is_cancellable());
+        }
+    }
+
+    /// A gallery must not open on a latent: a `proj` preview of a 64x64
+    /// generation is an 8x8 PNG of about 250 bytes.
+    #[test]
+    fn results_leave_out_the_preview_frames() {
+        let r = Request {
+            images: vec![
+                ImageRef {
+                    job: 1,
+                    index: 0,
+                    path: "/a".into(),
+                    preview: false,
+                    bytes: 2048,
+                },
+                ImageRef {
+                    job: 1,
+                    index: 0,
+                    path: "/p".into(),
+                    preview: true,
+                    bytes: 250,
+                },
+            ],
+            ..Default::default()
+        };
+        let got: Vec<_> = r.results().map(|i| i.path.clone()).collect();
+        assert_eq!(got, vec!["/a".to_string()]);
+    }
+
+    /// A posted job leaves out what the operator did not set, so the server's
+    /// own defaults apply rather than a zero this UI invented.
+    #[test]
+    fn a_posted_job_omits_what_was_not_set() {
+        let body = serde_json::to_string(&NewRequest {
+            provider: "local".into(),
+            jobs: vec![Job {
+                prompt: "a cat".into(),
+                steps: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert!(body.contains("\"prompt\":\"a cat\""));
+        assert!(body.contains("\"steps\":4"));
+        // Not sent: the server would read a zero as a choice.
+        assert!(!body.contains("width"));
+        assert!(!body.contains("seed"));
+        assert!(!body.contains("sampler"));
+        // And nothing that could carry a file path on the node.
+        assert!(!body.contains("extra"));
+    }
+
+    /// The server sends fields this build may not know; decoding must not
+    /// fail on them, or a newer ember breaks an older page.
+    /// `null` where a list is expected must not drop the whole message.
+    ///
+    /// THIS WAS A REAL BUG AND ONLY A BROWSER FOUND IT. Go marshals a nil
+    /// slice as `null`, and `#[serde(default)]` covers a MISSING field rather
+    /// than a null one -- so the first envelope of every websocket
+    /// connection, which carries no events by design, failed to decode
+    /// entirely and took the request state with it. The UI showed a job stuck
+    /// at "starting" while the image was already on disk.
+    ///
+    /// The server sends `[]` now. This is the other half, because the rule
+    /// has to hold for a field somebody adds later too.
+    #[test]
+    fn a_null_list_is_an_empty_list() {
+        let env: Envelope =
+            serde_json::from_str(r#"{"next":0,"events":null,"request":null}"#).unwrap();
+        assert_eq!(env.next, 0);
+        assert!(env.events.is_empty());
+        assert!(env.request.is_none());
+
+        let r: Request = serde_json::from_str(r#"{"id":"a","jobs":null,"images":null}"#).unwrap();
+        assert!(r.jobs.is_empty());
+        assert!(r.images.is_empty());
+
+        let c: Config = serde_json::from_str(r#"{"providers":null,"caps":null}"#).unwrap();
+        assert!(c.providers.is_empty());
+        assert!(c.caps.is_none());
+
+        let o: Offers = serde_json::from_str(r#"{"listings":null}"#).unwrap();
+        assert!(o.listings.is_empty());
+
+        let l: Listing = serde_json::from_str(r#"{"provider":"local","offers":null}"#).unwrap();
+        assert!(l.offers.is_empty());
+    }
+
+    #[test]
+    fn decodes_a_response_with_fields_it_does_not_know() {
+        let json = r#"{"id":"abc","status":"done","cost":{"micro_usd":5,"display":"$5e-06"},
+            "something_new":{"nested":true},"jobs":[{"prompt":"a"}]}"#;
+        let r: Request = serde_json::from_str(json).unwrap();
+        assert_eq!(r.id, "abc");
+        assert_eq!(r.cost.text(), "$5e-06");
+        assert_eq!(r.jobs.len(), 1);
+    }
+
+    #[test]
+    fn durations_read_like_gos() {
+        assert_eq!(human_duration(0), "0s");
+        assert_eq!(human_duration(551_000_000), "551ms");
+        assert_eq!(human_duration(6_040_000_000), "6.0s");
+        assert_eq!(human_duration(140_800_000_000), "2m21s");
+    }
+}

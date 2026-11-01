@@ -129,7 +129,7 @@ COVER_OVERALL := 94
 # labs and a rented pod run the same bytes.
 LAB_IMAGE := ember:lab
 
-.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
+.PHONY: all build web web-check web-test test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
 
 all: fmt vet test build
 
@@ -182,6 +182,70 @@ lint:
 
 docker-build:
 	docker build -t $(LAB_IMAGE) -f node.Dockerfile .
+
+# The web UI: Rust compiled to WebAssembly.
+#
+# NO trunk AND NO wasm-pack. `cargo build --target wasm32-unknown-unknown`
+# followed by `wasm-bindgen --target web` is all either of those does here,
+# and the CLI is a tool the operator already has to install for any of this to
+# work -- so the choice is one tool or two.
+#
+# THE TWO VERSIONS MUST MATCH. wasm-bindgen generates glue that its own CLI
+# post-processes, and a mismatch between the crate and the binary is a hard
+# error with a message about a version nobody chose. Cargo.toml pins the crate
+# exactly; this target checks the binary agrees and says which to change,
+# rather than letting the build fail forty seconds later with somebody else's
+# wording. Same rule and same shape as require-arch.
+#
+# The output goes into internal/webapi/dist, beside a committed placeholder
+# index.html that exists so //go:embed -- which fails at COMPILE time on a
+# pattern matching nothing -- does not make `go build ./...` depend on a Rust
+# toolchain.
+WASM_BINDGEN_VERSION := $(shell sed -n 's/^wasm-bindgen = "=\(.*\)"$$/\1/p' web/Cargo.toml)
+WEB_DIST := internal/webapi/dist
+
+web: web-check
+	cargo build --manifest-path web/Cargo.toml --release --target wasm32-unknown-unknown
+	wasm-bindgen --target web --no-typescript \
+		--out-dir $(WEB_DIST) --out-name ember \
+		web/target/wasm32-unknown-unknown/release/ember_web.wasm
+	cp web/index.html web/style.css $(WEB_DIST)/
+	@echo
+	@echo "built $(WEB_DIST):"
+	@ls -la $(WEB_DIST) | awk 'NR>1 {printf "  %8d  %s\n", $$5, $$9}'
+	@echo
+	@echo 'ember serve will now serve it, and go build embeds it.'
+
+# The checks `make web` refuses to build without, each naming its own fix.
+web-check:
+	@command -v cargo >/dev/null 2>&1 || { \
+		echo "cargo is not installed. ember's web UI is Rust compiled to WebAssembly;"; \
+		echo "see https://rustup.rs. Everything else in this repository is Go and"; \
+		echo "needs none of it -- `make build` and `make test` work without cargo."; \
+		exit 1; }
+	@rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown || { \
+		echo "the wasm32-unknown-unknown target is not installed. Add it with:"; \
+		echo "  rustup target add wasm32-unknown-unknown"; \
+		exit 1; }
+	@command -v wasm-bindgen >/dev/null 2>&1 || { \
+		echo "wasm-bindgen is not installed. Install the version web/Cargo.toml pins:"; \
+		echo "  cargo install -f wasm-bindgen-cli --version $(WASM_BINDGEN_VERSION)"; \
+		exit 1; }
+	@have=$$(wasm-bindgen --version | awk '{print $$2}'); \
+	if [ "$$have" != "$(WASM_BINDGEN_VERSION)" ]; then \
+		echo "wasm-bindgen $$have is installed and web/Cargo.toml pins $(WASM_BINDGEN_VERSION)."; \
+		echo "The generated glue and the CLI that post-processes it have to be the"; \
+		echo "same version. Either install the pinned one:"; \
+		echo "  cargo install -f wasm-bindgen-cli --version $(WASM_BINDGEN_VERSION)"; \
+		echo "or change the pin in web/Cargo.toml to $$have and commit Cargo.lock."; \
+		exit 1; \
+	fi
+
+# The Rust checks, which are to web/ what vet, lint and test are to the Go.
+web-test:
+	cargo fmt --manifest-path web/Cargo.toml --check
+	cargo clippy --manifest-path web/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+	cargo test --manifest-path web/Cargo.toml
 
 # A workload image is the node image plus whatever it was rented to run.
 #

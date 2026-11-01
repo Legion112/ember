@@ -828,6 +828,15 @@ make web                 # builds the Rust/WASM frontend
 ember serve              # http://127.0.0.1:7777/
 ```
 
+The frontend is Rust compiled to WebAssembly, in [`web/`](web). It needs
+`cargo`, the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` at the
+version [`web/Cargo.toml`](web/Cargo.toml) pins — `make web` checks all three
+and names the command that fixes each. **Nothing else here needs any of it:**
+`make build`, `make test` and `make cover-check` work on a clean clone with no
+Rust installed, because `internal/webapi/dist` carries a committed placeholder
+page. Without `make web`, `ember serve` says so and the JSON API under
+`/api/` works anyway.
+
 ```
       --allow-paid   let the web UI rent from providers that cost money
       --config       path to ember.yaml (default "ember.yaml")

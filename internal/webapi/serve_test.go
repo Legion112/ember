@@ -183,10 +183,17 @@ func TestStatic_ServesABuiltUIFromDisk(t *testing.T) {
 		[]byte("<!doctype html><title>built</title>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The marker only `make web` produces, which is how Built() tells a real
-	// UI from the committed placeholder.
-	if err := os.WriteFile(filepath.Join(dir, builtMarker), []byte("\x00asm"), 0o600); err != nil {
-		t.Fatal(err)
+	// Everything only `make web` produces, which is how Built() tells a real
+	// UI from the committed placeholder. BOTH files, because one of each is
+	// not a build -- a test caught Built() and the page disagreeing about
+	// exactly that.
+	for _, name := range builtFiles {
+		if name == "index.html" {
+			continue // written above, with content this test asserts on
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("\x00asm"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	h := newHarness(t, func(o *Options) { o.Dist = dir })
@@ -210,11 +217,11 @@ func TestStatic_FallsBackWhenDistIsNotThere(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want the embedded copy", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "make web") {
-		t.Error("did not fall back to the built-in placeholder")
-	}
-	if h.Built() {
-		t.Error("Built() is true for a -dist that does not exist")
+	// The embedded copy, whichever it is -- which on a clean clone is the
+	// placeholder and after `make web` is the app. Asserting one would make
+	// this test depend on whether somebody had built the UI.
+	if !strings.Contains(w.Body.String(), "<title>ember</title>") {
+		t.Errorf("did not fall back to the built-in page:\n%s", w.Body.String())
 	}
 }
 

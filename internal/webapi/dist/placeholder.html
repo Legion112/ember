@@ -18,7 +18,12 @@ API under <code>/api/</code> works either way.</p>
   `make cover-check` and every step of CI would fail for anyone who had not
   first run a Rust build. The Go toolchain must not depend on the Rust one.
 
-  `make web` overwrites index.html and writes ember.js and ember_bg.wasm
-  beside it; those two are gitignored, because a compiled wasm blob in git is
-  a binary that changes on every build and that nobody can review.
+  IT IS NOT CALLED index.html, which is the part worth explaining. `make web`
+  writes a real index.html beside this file, and if that were the same name
+  then building the UI would leave the repository dirty and the tests about
+  this placeholder would pass or fail depending on whether somebody had run
+  `make web` -- which is exactly the "behaves differently from one machine to
+  the next" problem AGENTS.md is written against. So the server serves
+  index.html when there is one and this when there is not, and `make web`'s
+  output is gitignored.
 -->

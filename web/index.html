@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ember</title>
+<link rel="stylesheet" href="style.css">
+<!--
+  Served by `ember serve` from loopback, beside ember.js and ember_bg.wasm,
+  which `make web` produces. No CDN and no remote font: this page has to work
+  on a machine with no internet, and a script from somewhere else would be a
+  third party in a tool whose whole posture is that only sshd is reachable.
+-->
+</head>
+<body>
+<noscript>
+  <p>ember's UI is a WebAssembly module, so it needs JavaScript enabled.
+     The JSON API under <code>/api/</code> works without it.</p>
+</noscript>
+<script type="module">
+  import init from './ember.js';
+  init().catch((e) => {
+    // A failed init is a blank page, which looks exactly like a server that
+    // is not answering -- so it says which it is.
+    document.body.insertAdjacentHTML('afterbegin',
+      '<p class="fatal">ember\'s UI could not start: ' + e + '</p>');
+  });
+</script>
+</body>
+</html>
