@@ -877,3 +877,96 @@ func TestQueue_UsesItsInjectedCollaborators(t *testing.T) {
 		t.Error("log() is nil")
 	}
 }
+
+// TestOnce_RecordsThePreviewFrameAsAPreview is the wire that was missing for
+// the life of the feature.
+//
+// The frame was written to the run directory, the images table had a preview
+// column, the handler answered ?preview=1 and the page looked for it -- and
+// nothing ever inserted a row with it set, so the UI showed a step counter
+// advancing beside no picture. Everything agreed with itself and nothing had
+// been observed, which is the closed loop AGENTS.md records one layer down.
+func TestOnce_RecordsThePreviewFrameAsAPreview(t *testing.T) {
+	served := &fakeServed{
+		progress: func(sink report.Sink, _ int) {
+			// Two distinct steps writing the same file, which is what a real
+			// generation does: the frame is written over, so the row is
+			// overwritten rather than accumulated.
+			for _, step := range []int{2, 4} {
+				sink.Emit(report.Event{
+					Kind: report.KindJobProgress, Unit: report.UnitJob,
+					Index: 1, Total: 1, Pass: 1, Step: step, TotalSteps: 20,
+					Wrote: []report.File{{Name: "cat-preview-00.png", Bytes: 250}},
+				})
+			}
+			sink.Emit(report.Event{
+				Kind: report.KindJobImages, Unit: report.UnitJob,
+				Index: 1, Total: 1, Files: 1, Bytes: 2048,
+				Wrote: []report.File{{Name: "cat-00.png", Bytes: 2048}},
+			})
+		},
+	}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+	id := enqueue(t, st, "rtx2080ti", "a cat")
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	ims, err := st.Images(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previews, results []genstore.Image
+	for _, im := range ims {
+		if im.Preview {
+			previews = append(previews, im)
+		} else {
+			results = append(results, im)
+		}
+	}
+	if len(previews) != 1 {
+		t.Fatalf("recorded %d preview(s), want exactly 1 -- the frame is written "+
+			"over on every step, so the row is overwritten and not accumulated: %+v", len(previews), ims)
+	}
+	if want := string(id) + "/cat-preview-00.png"; previews[0].Key != want {
+		t.Errorf("preview key = %q, want %q", previews[0].Key, want)
+	}
+	if len(results) != 1 {
+		t.Fatalf("recorded %d result(s), want 1", len(results))
+	}
+	// The two must not collide: a result and a preview for the same job are
+	// different rows, or the gallery shows the latent where the output goes.
+	if results[0].Key == previews[0].Key {
+		t.Errorf("the result and the preview share key %q", results[0].Key)
+	}
+}
+
+// TestOnce_AProgressEventWithNoFrameRecordsNothing is the other half: with
+// previews off, every progress event carries no file and must not leave a row
+// behind pointing at nothing.
+func TestOnce_AProgressEventWithNoFrameRecordsNothing(t *testing.T) {
+	served := &fakeServed{
+		progress: func(sink report.Sink, _ int) {
+			sink.Emit(report.Event{
+				Kind: report.KindJobProgress, Unit: report.UnitJob,
+				Index: 1, Total: 1, Pass: 1, Step: 2, TotalSteps: 20,
+			})
+		},
+	}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+	id := enqueue(t, st, "rtx2080ti", "a cat")
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ims, err := st.Images(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ims) != 0 {
+		t.Fatalf("recorded %d image(s) for a run that wrote none: %+v", len(ims), ims)
+	}
+}

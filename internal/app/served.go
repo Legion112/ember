@@ -457,20 +457,40 @@ func awaitJob(ctx context.Context, sink report.Sink, c sdserver.Client, id strin
 		}
 		if p := st.Preview; p != nil && p.Step != lastStep {
 			lastStep = p.Step
+
+			// The frame is written BEFORE the event that reports its step,
+			// and travels ON that event rather than on one of its own.
+			//
+			// A reader recording where the bytes went needs the step and the
+			// filename in the same value: with the name on a second event, a
+			// UI learns there is a step 4 before it learns there is a frame
+			// for it, and shows step 4 beside step 3's picture. The name is
+			// not re-derived here either, for the reason Wrote exists --
+			// safeStem decides what a file is called, and a second spelling
+			// of that rule is a gallery pointing at names that are not on
+			// disk.
+			var wrote []report.File
+			var werr error
+			if len(p.PNG) > 0 {
+				var w sdserver.Written
+				w, werr = sdserver.WriteImages(root, stem+"-preview", []sdserver.Image{{Data: p.PNG}})
+				for _, f := range w.Each {
+					wrote = append(wrote, report.File{Name: f.Name, Bytes: f.Bytes})
+				}
+			}
 			sink.Emit(report.Event{
 				Kind: report.KindJobProgress, Unit: report.UnitJob,
 				Index: index, Total: total,
 				Pass: p.Pass, Step: p.Step, TotalSteps: p.TotalSteps,
+				Wrote: wrote,
 			})
-			if len(p.PNG) > 0 {
+			if werr != nil {
 				// Best effort: a preview that cannot be written is not a
 				// reason to abandon a generation that is already paid for.
-				if _, werr := sdserver.WriteImages(root, stem+"-preview", []sdserver.Image{{Data: p.PNG}}); werr != nil {
-					sink.Emit(report.Event{
-						Kind: report.KindPreviewFailed, Unit: report.UnitJob,
-						Index: index, Total: total, Err: werr.Error(),
-					})
-				}
+				sink.Emit(report.Event{
+					Kind: report.KindPreviewFailed, Unit: report.UnitJob,
+					Index: index, Total: total, Err: werr.Error(),
+				})
 			}
 		}
 		if st.Status.Done() {

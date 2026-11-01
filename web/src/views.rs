@@ -114,6 +114,12 @@ fn Compose(config: RwSignal<Config>, watching: RwSignal<String>) -> impl IntoVie
     let max_hourly = RwSignal::new(String::new());
     let error = RwSignal::new(String::new());
 
+    // Empty until the config arrives, and sent as the config's own value
+    // then: an empty string means "whatever ember.yaml says", so the form is
+    // correct before /api/config has answered.
+    let preview = RwSignal::new(String::new());
+    let preview_every = RwSignal::new(0);
+
     // The batch being assembled, and the job being edited.
     let batch: RwSignal<Vec<Job>> = RwSignal::new(Vec::new());
     let draft = RwSignal::new(Job {
@@ -167,8 +173,16 @@ fn Compose(config: RwSignal<Config>, watching: RwSignal<String>) -> impl IntoVie
             gpu: gpu.get(),
             ttl: ttl.get(),
             max_hourly_usd: max_hourly.get(),
-            preview: config.get().preview,
-            preview_interval: config.get().preview_interval,
+            preview: if preview.get().is_empty() {
+                config.get().preview
+            } else {
+                preview.get()
+            },
+            preview_interval: if preview_every.get() > 0 {
+                preview_every.get()
+            } else {
+                config.get().preview_interval
+            },
             jobs,
             ..Default::default()
         };
@@ -193,7 +207,7 @@ fn Compose(config: RwSignal<Config>, watching: RwSignal<String>) -> impl IntoVie
 
             <div class="row">
                 <label>
-                    "provider"
+                    <Help text="provider" title="Which account the card is rented from. A provider marked (needs --allow-paid) costs money and this server was started without that flag, so it is refused."/>
                     <select on:change=move |ev| {
                         provider.set(event_target_value(&ev));
                         offers.set(Offers::default());
@@ -219,7 +233,7 @@ fn Compose(config: RwSignal<Config>, watching: RwSignal<String>) -> impl IntoVie
                 </label>
 
                 <label>
-                    "card"
+                    <Help text="card" title="GPU model to rent, e.g. h100 or a100-80g. A prefix matches at the capacity boundary: a100 accepts a100-40g and a100-80g but not a1000. Empty means any card the provider has."/>
                     <input
                         placeholder="any"
                         prop:value=move || gpu.get()
@@ -234,7 +248,7 @@ fn Compose(config: RwSignal<Config>, watching: RwSignal<String>) -> impl IntoVie
 
             <div class="row">
                 <label>
-                    "ttl"
+                    <Help text="ttl" title="How long the rental may live before the node destroys itself, e.g. 30m. It is the ceiling on what a wedged run can cost. It may only narrow what ember.yaml allows; asking for longer gets the config's."/>
                     <input
                         placeholder=move || config.get().ceilings.ttl
                         prop:value=move || ttl.get()
@@ -242,7 +256,7 @@ fn Compose(config: RwSignal<Config>, watching: RwSignal<String>) -> impl IntoVie
                     />
                 </label>
                 <label>
-                    "max $/hr"
+                    <Help text="max $/hr" title="The most this rental may cost per hour. An offer above it is not selected. It may only narrow what ember.yaml allows."/>
                     <input
                         placeholder=move || config.get().ceilings.max_hourly.text().to_string()
                         prop:value=move || max_hourly.get()
@@ -259,6 +273,52 @@ fn Compose(config: RwSignal<Config>, watching: RwSignal<String>) -> impl IntoVie
 
             <h2>"what to generate"</h2>
             <JobForm config=config draft=draft />
+
+            <div class="row">
+                <label>
+                    <Help text="preview" title="How the in-progress frame is rendered. proj projects the latent and is nearly free, so a 512x512 generation previews as a 64x64 smear; tae and vae decode a real image every frame, which is a decode billed to the card. none turns previews off."/>
+                    <select on:change=move |ev| preview.set(event_target_value(&ev))>
+                        {move || {
+                            let c = config.get();
+                            // Before the first rental there are no
+                            // capabilities to read, so the four sd-server
+                            // publishes are offered and the server refuses
+                            // anything the running one does not have.
+                            let modes: Vec<String> = match &c.caps {
+                                Some(caps) if !caps.preview_modes.is_empty() => {
+                                    caps.preview_modes.clone()
+                                }
+                                _ => ["none", "proj", "tae", "vae"]
+                                    .iter().map(|s| s.to_string()).collect(),
+                            };
+                            let now = if preview.get().is_empty() { c.preview.clone() } else { preview.get() };
+                            modes.into_iter().map(|m: String| {
+                                let sel = m == now;
+                                let label = m.clone();
+                                view! { <option value=m selected=sel>{label}</option> }
+                            }).collect::<Vec<_>>()
+                        }}
+                    </select>
+                </label>
+                <label>
+                    <Help text="every N steps" title="How often a preview frame is produced, in sampling steps. Lower is smoother and costs more; upstream's default of 1 is a frame every step. A negative value is refused rather than clamped, because sd-server would read it as 1 -- the most expensive setting rather than the least."/>
+                    <input type="number" min="1"
+                        prop:value=move || {
+                            let n = preview_every.get();
+                            if n > 0 { n } else { config.get().preview_interval }
+                        }
+                        on:input=move |ev| preview_every.set(num(&ev)) />
+                </label>
+            </div>
+            <p class="hint">
+                // Said because it decides whether a step is worth watching
+                // and what it costs, and the two pull in opposite directions.
+                <code>"proj"</code> " is a projection of the latent -- cheap, and a
+                 512x512 generation previews as a 64x64 smear. " <code>"tae"</code> " and "
+                <code>"vae"</code> " decode a real image every frame, which is a decode
+                 billed to the card: on a rented GPU that is the expensive setting and
+                 on this machine it is free."
+            </p>
 
             <div class="row">
                 <button on:click=move |_| {
@@ -351,12 +411,25 @@ fn Listings(offers: RwSignal<Offers>, gpu: RwSignal<String>) -> impl IntoView {
     }
 }
 
+/// Help is a field's name with an explanation on hover.
+///
+/// On the TEXT and not on the whole `<label>`: a title on the label fires
+/// while the operator is inside the field it names, so the tooltip covers the
+/// value being typed. It is a plain `title`, which is the one tooltip that
+/// works on a page with no JavaScript of its own and that a screen reader
+/// already announces -- a hand-rolled one would be a popup to position, trap
+/// and dismiss for no gain.
+#[component]
+fn Help(text: &'static str, title: &'static str) -> impl IntoView {
+    view! { <span class="help" title=title>{text}</span> }
+}
+
 /// JobForm is one image's parameters.
 #[component]
 fn JobForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
     view! {
         <label class="wide">
-            "prompt"
+            <Help text="prompt" title="What to generate. Arbitrary text: it is sent in the request body and never on a command line, so nothing in it can be read as a flag."/>
             <textarea
                 rows="3"
                 prop:value=move || draft.get().prompt
@@ -364,7 +437,7 @@ fn JobForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
             />
         </label>
         <label class="wide">
-            "negative"
+            <Help text="negative" title="What to steer away from. Some models ignore it entirely -- FLUX.2 among them. Empty sends nothing."/>
             <input
                 prop:value=move || draft.get().negative_prompt
                 on:input=move |ev| draft.update(|j| j.negative_prompt = event_target_value(&ev))
@@ -372,23 +445,23 @@ fn JobForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
         </label>
 
         <div class="row">
-            <label>"width" <input type="number"
+            <label><Help text="width" title="Output width in pixels. Most checkpoints want a multiple of 64. Sampling cost grows with the area, so doubling both sides is four times the card time. 0 leaves it to the server."/> <input type="number"
                 prop:value=move || draft.get().width
                 on:input=move |ev| draft.update(|j| j.width = num(&ev))
             /></label>
-            <label>"height" <input type="number"
+            <label><Help text="height" title="Output height in pixels. Most checkpoints want a multiple of 64. 0 leaves it to the server."/> <input type="number"
                 prop:value=move || draft.get().height
                 on:input=move |ev| draft.update(|j| j.height = num(&ev))
             /></label>
-            <label>"steps" <input type="number"
+            <label><Help text="steps" title="Sampling steps per image. Card time is roughly linear in this, so it is the main price knob. 0 leaves it to the server."/> <input type="number"
                 prop:value=move || draft.get().steps
                 on:input=move |ev| draft.update(|j| j.steps = num(&ev))
             /></label>
-            <label>"batch" <input type="number"
+            <label><Help text="batch" title="How many images this one job generates from the same prompt. They share the rental and the resident weights; each gets its own file. 0 means the server's default of one."/> <input type="number"
                 prop:value=move || draft.get().batch_count
                 on:input=move |ev| draft.update(|j| j.batch_count = num(&ev))
             /></label>
-            <label>"seed" <input type="number"
+            <label><Help text="seed" title="The starting noise. The same seed with the same prompt and parameters reproduces the same image, which is what makes two runs comparable. 0 is not sent, so the server picks one."/> <input type="number"
                 prop:value=move || draft.get().seed
                 on:input=move |ev| draft.update(|j| j.seed = num64(&ev))
             /></label>
@@ -400,7 +473,7 @@ fn JobForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
             // greying out every control before the operator's first one would
             // make the first request impossible.
             <label>
-                "sampler"
+                <Help text="sampler" title="The algorithm that turns noise into an image. The menu is what the running server reported it supports; before the first rental there is nothing to check a name against, so it is free text."/>
                 {move || match config.get().caps {
                     Some(c) if !c.samplers.is_empty() => view! {
                         <select on:change=move |ev| draft.update(|j| j.sampler = event_target_value(&ev))>
@@ -418,18 +491,18 @@ fn JobForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
                     }.into_any(),
                 }}
             </label>
-            <label>"cfg" <input type="number" step="0.1"
+            <label><Help text="cfg" title="Classifier-free guidance: how hard the sampler is pushed toward the prompt. Not the same number as guidance -- the FLUX.2 recipe sets cfg 1 and guidance 4. 0 leaves it to the server."/> <input type="number" step="0.1"
                 prop:value=move || draft.get().cfg
                 on:input=move |ev| draft.update(|j| j.cfg = numf(&ev))
             /></label>
             // Two numbers that both get called "cfg" in conversation: the
             // flux2-dev recipe sets cfg-scale 1 and guidance 4, so conflating
             // them generates at the wrong one.
-            <label>"guidance" <input type="number" step="0.1"
+            <label><Help text="guidance" title="Distilled guidance, which distilled models such as FLUX.2 take instead of cfg. Both get called cfg in conversation and setting the wrong one generates at the wrong strength. 0 leaves it to the server."/> <input type="number" step="0.1"
                 prop:value=move || draft.get().guidance
                 on:input=move |ev| draft.update(|j| j.guidance = numf(&ev))
             /></label>
-            <label>"name" <input placeholder="cat"
+            <label><Help text="name" title="The filename stem for this job's images, written as name-00.png. Sanitised rather than refused, and a stem that cleans away to nothing is an error."/> <input placeholder="cat"
                 prop:value=move || draft.get().output
                 on:input=move |ev| draft.update(|j| j.output = event_target_value(&ev))
             /></label>
@@ -701,6 +774,13 @@ fn Gallery(request: RwSignal<Option<Request>>, progress: RwSignal<Progress>) -> 
             // the first frame for the whole generation.
             {move || {
                 let Some(r) = request.get() else { return Vec::new() };
+                // Said for `proj` and NOT for the two decoding modes, because
+                // it is only true of one of them: `proj` projects the latent
+                // and a 512x512 generation previews as a 64x64 smear, while
+                // `tae` and `vae` decode a real image at full size. One
+                // caption for both would be wrong half the time, and wrong in
+                // the direction that makes a working preview look broken.
+                let latent = r.preview == "proj";
                 progress.get().jobs.into_iter()
                     .filter(|j| !j.done && j.step > 0)
                     .filter_map(|j| {
@@ -712,10 +792,9 @@ fn Gallery(request: RwSignal<Option<Request>>, progress: RwSignal<Progress>) -> 
                             <img src=src alt=format!("job {job} in progress") />
                             <figcaption>
                                 {format!("job {job}, in progress")}
-                                // Said because it is surprising: a `proj`
-                                // frame is the latent, not a thumbnail, so a
-                                // 64x64 generation previews as an 8x8 image.
-                                <span class="hint">" (the latent, not the output)"</span>
+                                <Show when=move || latent>
+                                    <span class="hint">" (the latent, not the output)"</span>
+                                </Show>
                             </figcaption>
                         </figure>
                     })

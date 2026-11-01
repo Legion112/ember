@@ -828,6 +828,56 @@ make web                 # builds the Rust/WASM frontend
 ember serve              # http://127.0.0.1:7777/
 ```
 
+### How it fits together
+
+Everything below the dashed line is what `ember up` already did; `ember serve`
+adds a queue in front of it and a second reader of the progress it was already
+producing.
+
+```
+  browser                        ember serve (loopback only)
+ ┌──────────────┐   POST /api/requests   ┌──────────────────────────────────┐
+ │ web/ Leptos  │ ─────────────────────► │ internal/webapi                  │
+ │ → WASM       │                        │   own wire types, never a domain │
+ │              │ ◄───── GET /ws ─────── │   struct; Origin + Host checked  │
+ └──────────────┘    events after <seq>  └───────┬──────────────────────────┘
+        ▲                                        │ enqueue
+        │ images                                 ▼
+        │                  ┌──────────────────────────────────────────┐
+        │                  │ internal/genstore — SQLite               │
+        └────────────────► │   requests · events · images · caps      │
+          blob.Dir         └───────┬──────────────────────────────────┘
+          (one dir per req)        │ ClaimNext: one statement, claim or empty
+ - - - - - - - - - - - - - - - - - ▼ - - - - - - - - - - - - - - - - - - - - -
+                           ┌──────────────────────────────────┐
+                           │ internal/queue — ONE drain       │
+                           │ goroutine. A rental lives inside │
+                           │ one iteration, so two at once    │
+                           │ cannot be expressed.             │
+                           └───────┬──────────────────────────┘
+                   queue.Narrow(cfg, req): min() of the request and ember.yaml
+                                   ▼
+                           ┌──────────────────────────────────┐
+                           │ internal/app → provision.WithNode│
+                           │ mint host key · create · verify  │
+                           │ exposure · destroy on the way out│
+                           └───────┬──────────────────────────┘
+                                   │ ssh, host key pinned to the minted one
+                                   ▼
+   rented node ─────────────────────────────────────────────────────────────
+   sshd ─► sd-server --listen-ip 127.0.0.1, reached by direct-tcpip only
+           weights resident: loaded once for the whole batch
+```
+
+Progress travels one way and is stored once. Every emitter writes a
+`report.Event` into a `report.Stream`, which stamps the sequence number, and
+the stream fans out to the terminal renderer and to a recorder that appends to
+SQLite. **The socket reads those rows rather than subscribing to the stream**,
+so a reconnect and a page reload are literally the same code path and a client
+can never be told something a reconnect would not tell it. A preview frame is
+written to the run directory and recorded as an image row with `preview` set,
+which is how a step and its picture reach the page together.
+
 The frontend is Rust compiled to WebAssembly, in [`web/`](web). It needs
 `cargo`, the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` at the
 version [`web/Cargo.toml`](web/Cargo.toml) pins — `make web` checks all three
@@ -859,6 +909,15 @@ nothing for the second click to start.
 **It needs an `sd:` block**, because the serve argv names the weights and a
 request may not. `ember serve` refuses to start without one and says which
 example to copy.
+
+**Watching it sample.** A request carries a preview mode and an interval, and
+the page shows each frame as it arrives beside the step that produced it.
+`proj` projects the latent -- nearly free, and a 512x512 generation previews
+as a 64x64 smear; `tae` and `vae` decode a real image every frame, which is a
+decode billed to the card. The default is `proj` every 5 steps, not upstream's
+every step, and a negative interval is refused rather than clamped because
+sd-server would read it as 1 -- the most expensive setting rather than the
+least. Every field in the form explains itself on hover.
 
 ### What a request may and may not choose
 

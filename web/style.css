@@ -108,7 +108,12 @@ td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
 .price { text-align: right; white-space: nowrap }
 .status { color: var(--dim) }
 .queue tr.running td { background: color-mix(in oklab, var(--good) 12%, transparent) }
-.queue tr.watching td { outline: 1px solid var(--accent); outline-offset: -1px }
+/* THE ROW IS OUTLINED, NOT EACH CELL. Per-cell outlines drew a box around
+   every td, and the last two -- the price, empty on a free provider, and the
+   cancel button, absent unless a request is still queued -- rendered as two
+   empty boxes trailing the row with nothing in them. A row has one outline
+   and empty cells stay invisible. */
+.queue tr.watching { outline: 1px solid var(--accent); outline-offset: -1px }
 
 .hint { color: var(--dim); font-size: .78rem; margin: .4rem 0 }
 .error { color: var(--bad); font-size: .85rem }
@@ -164,3 +169,8 @@ summary { cursor: pointer; color: var(--dim) }
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* A label with an explanation behind it says so: a tooltip nobody knows is
+   there is a tooltip nobody reads. The dotted rule is the oldest convention
+   for it and costs no layout. */
+.help { border-bottom: 1px dotted var(--dim); cursor: help }
