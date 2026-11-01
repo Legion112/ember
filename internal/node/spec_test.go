@@ -414,3 +414,133 @@ func TestNewSpec_RefusesAnEmptyStep(t *testing.T) {
 		t.Error("a batch containing an empty command was accepted")
 	}
 }
+
+// A serve command is not a step: it is the thing the steps are sent to. A run
+// with both would hold the weights in VRAM for a resident server and then run
+// a separate sd-cli that loads them a second time -- paying for the resident
+// copy and not using it.
+func TestNewSpec_OneWorkloadSpellingNeverTwo(t *testing.T) {
+	serve := []string{"sd-server", "--diffusion-model", "/models/x.gguf"}
+	cmd := []string{"sd-cli", "-p", "a cat"}
+	cmds := [][]string{{"sd-cli", "-p", "one"}}
+
+	for _, tc := range []struct {
+		name  string
+		cmd   []string
+		cmds  [][]string
+		serve []string
+		want  string
+	}{
+		{"cmd and cmds", cmd, cmds, nil, "cmd and cmds are set"},
+		{"cmd and serve", cmd, nil, serve, "cmd and sd.serve are set"},
+		{"cmds and serve", nil, cmds, serve, "cmds and sd.serve are set"},
+		{"all three", cmd, cmds, serve, "cmd, cmds and sd.serve are set"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := validSpecOptions()
+			o.Cmd, o.Cmds, o.Serve = tc.cmd, tc.cmds, tc.serve
+			_, err := NewSpec(o)
+			if err == nil {
+				t.Fatal("want a refusal")
+			}
+			if got := err.Error(); !strings.Contains(got, tc.want) {
+				t.Errorf("err = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewSpec_ServeAloneIsCarriedThrough(t *testing.T) {
+	o := validSpecOptions()
+	o.Cmd = nil
+	o.Serve = []string{"sd-server", "--diffusion-model", "/models/x.gguf"}
+	o.ServeTimeout = 11 * time.Minute
+
+	s, err := NewSpec(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Serve) != 3 || s.Serve[2] != "/models/x.gguf" {
+		t.Fatalf("Serve = %v", s.Serve)
+	}
+	if s.ServeTimeout != 11*time.Minute {
+		t.Errorf("ServeTimeout = %v", s.ServeTimeout)
+	}
+	// No Cmds: the jobs do not reach the node as argv, so there is nothing
+	// for a step loop to find and run.
+	if len(s.Cmds) != 0 {
+		t.Errorf("Cmds = %v, want none for a served run", s.Cmds)
+	}
+
+	// Copied, not aliased, for the reason the command slices are.
+	o.Serve[2] = "mutated"
+	if s.Serve[2] != "/models/x.gguf" {
+		t.Error("the spec aliases the caller's serve slice")
+	}
+}
+
+// Zero is legal and means the package default, the same contract
+// GPUProbeTimeout has. Negative is a config error.
+func TestNewSpec_RefusesANegativeServeTimeout(t *testing.T) {
+	o := validSpecOptions()
+	o.ServeTimeout = -time.Second
+	if _, err := NewSpec(o); err == nil {
+		t.Fatal("want a refusal")
+	}
+
+	o2 := validSpecOptions()
+	o2.ServeTimeout = 0
+	if _, err := NewSpec(o2); err != nil {
+		t.Errorf("a zero serve timeout must mean the default, got %v", err)
+	}
+}
+
+func TestNewSpec_RefusesAnEmptyServeArgument(t *testing.T) {
+	for _, argv := range [][]string{
+		{"sd-server", ""},
+		{"sd-server", "   "},
+		{""},
+	} {
+		o := validSpecOptions()
+		o.Cmd = nil
+		o.Serve = argv
+		if _, err := NewSpec(o); err == nil {
+			t.Errorf("NewSpec accepted serve %q", argv)
+		}
+	}
+}
+
+// The same reasoning as the gpu probe on a CPU-only run: the only reason to
+// hold weights resident is to generate with them, and this would fail after
+// the machine was rented.
+func TestNewSpec_RefusesAServerOnACPUOnlyRun(t *testing.T) {
+	o := validSpecOptions()
+	o.Cmd = nil
+	o.GPUProbe = nil
+	o.Serve = []string{"sd-server"}
+	o.Filter = Filter{CPUOnly: true}
+
+	_, err := NewSpec(o)
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	if !strings.Contains(err.Error(), "no GPU") {
+		t.Errorf("err = %v, want it to name the contradiction", err)
+	}
+}
+
+func TestHumanList(t *testing.T) {
+	for _, tc := range []struct {
+		in   []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"a"}, "a"},
+		{[]string{"a", "b"}, "a and b"},
+		{[]string{"a", "b", "c"}, "a, b and c"},
+	} {
+		if got := humanList(tc.in); got != tc.want {
+			t.Errorf("humanList(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
