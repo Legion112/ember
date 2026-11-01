@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +30,7 @@ import (
 	"github.com/Legion112/ember/internal/provider/local"
 	"github.com/Legion112/ember/internal/provider/runpod"
 	"github.com/Legion112/ember/internal/provision"
+	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/internal/session"
 	"github.com/Legion112/ember/internal/sshx"
 	"github.com/Legion112/ember/internal/sshx/sshexec"
@@ -191,6 +195,14 @@ func runUp(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
+	// Parsed before the spec, because buildSpec refuses a served run whose
+	// jobs are unusable and this is where that is found out. Every refusal
+	// here happens before the create call.
+	run, err := cfg.ParseSD()
+	if err != nil {
+		return usageError{err}
+	}
+
 	spec, err := buildSpec(cfg, resolved{
 		Store: store, Filter: filter, Offer: offer, Image: ref, ImageFrom: from,
 	})
@@ -199,7 +211,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	}
 
 	if *dryRun {
-		return dryRunUp(fs.Output(), p, offer, spec, from)
+		return dryRunUp(fs.Output(), p, offer, spec, from, run)
 	}
 
 	// The first Ctrl-C unwinds through WithNode's deferred destroy, which
@@ -209,7 +221,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	defer stop()
 
 	return provision.WithNode(ctx, p, spec, offer, opts, func(ctx context.Context, s provision.Session) error {
-		return serveSession(ctx, out, s, opts, spec, *holdFor, paths.outputs, offer.Price)
+		return serveSession(ctx, out, s, opts, spec, *holdFor, paths.outputs, offer.Price, run)
 	})
 }
 
@@ -220,7 +232,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 // rate is the rented offer's hourly price, used to report what each step of a
 // batch cost. It is passed in rather than read off the Session, because the
 // price belongs to the offer that was chosen and a Session carries the node.
-func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts provision.Options, spec node.Spec, hold time.Duration, outDir string, rate node.Rate) error {
+func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts provision.Options, spec node.Spec, hold time.Duration, outDir string, rate node.Rate, run sdserver.Run) error {
 	client, so, err := dialNode(ctx, s, opts, hold)
 	if err != nil {
 		return err
@@ -258,6 +270,13 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 	// fetching -- one fetch per step, not one at the end.
 	if len(spec.Cmds) > 0 {
 		return runSteps(ctx, out, client, sshexec.New(client.SSH()), spec, so, runDir, rate)
+	}
+
+	// The served shape. Same rule as above -- a node rented to generate
+	// something stops when it has -- reached a different way: the weights
+	// stay in VRAM between jobs instead of being read again for each one.
+	if len(spec.Serve) > 0 {
+		return runServed(ctx, out, client, sshexec.New(client.SSH()), spec, run, so, runDir, rate)
 	}
 
 	serveErr := session.Serve(ctx, out, client, session.Forwards(spec.Ports), so)
@@ -478,7 +497,7 @@ func humanBytes(n int64) string {
 // on it. So the budget refusal that TestUp_DryRunStillEnforcesTheBudget
 // exercises now happens in PickOffer at runUp's call site rather than inside
 // this function -- same exit, earlier line.
-func dryRunUp(out io.Writer, p provider.Provider, offer node.Offer, spec node.Spec, imageFrom string) error {
+func dryRunUp(out io.Writer, p provider.Provider, offer node.Offer, spec node.Spec, imageFrom string, run sdserver.Run) error {
 	outf(out, "dry-run: would rent %s from %s at %v for %v\n", offer.Token, p.Name(), offer.Price, spec.TTL)
 	outf(out, "dry-run: would run %s (%s) and forward %d port(s)\n", spec.Image, imageFrom, len(spec.Ports))
 	for i, c := range spec.Cmds {
@@ -487,6 +506,16 @@ func dryRunUp(out io.Writer, p provider.Provider, offer node.Offer, spec node.Sp
 			continue
 		}
 		outf(out, "dry-run: would execute: %s\n", workload.Describe(c))
+	}
+	if len(spec.Serve) > 0 {
+		outf(out, "dry-run: would serve: %s\n", workload.Describe(spec.Serve))
+		// The listen address is printed because ember appended it rather than
+		// the config choosing it, and an operator reading a dry run should see
+		// what ember added as clearly as what they wrote.
+		for i, j := range run.Jobs {
+			outf(out, "dry-run: job %d/%d: %s\n", i+1, len(run.Jobs), describeJob(j))
+		}
+		outf(out, "dry-run: previews %s every %d step(s)\n", run.Preview, run.PreviewInterval)
 	}
 	outf(out, "dry-run: nothing was created\n")
 	return nil
@@ -764,6 +793,25 @@ func buildSpec(cfg config.Config, r resolved) (node.Spec, error) {
 			return node.Spec{}, fmt.Errorf("cmds[%d]: %w", i, err)
 		}
 	}
+	// And the server, for the same reason -- plus the listen address, which
+	// ember appends and refuses to let the config choose. A serve command
+	// passing --listen-ip 0.0.0.0 would put an unauthenticated generator,
+	// with arbitrary file paths in its request body, on a rented machine's
+	// public interface.
+	//
+	// Dropped on a CPU-only run for the reason the probe is: `ember store
+	// sync` shares a config with the runs that generate, and NewSpec refuses
+	// a server on a run that asks for no card.
+	var serve []string
+	if !r.Filter.CPUOnly {
+		if err := workload.Validate(cfg.SD.Serve); err != nil {
+			return node.Spec{}, fmt.Errorf("sd.serve: %w", err)
+		}
+		serve, err = sdserver.ServeCommand(cfg.SD.Serve)
+		if err != nil {
+			return node.Spec{}, err
+		}
+	}
 	assetList, err := cfg.ParseAssets()
 	if err != nil {
 		return node.Spec{}, err
@@ -785,6 +833,8 @@ func buildSpec(cfg config.Config, r resolved) (node.Spec, error) {
 		// keep two configs.
 		GPUProbe:        probe,
 		GPUProbeTimeout: cfg.GPUProbeTimeout,
+		Serve:           serve,
+		ServeTimeout:    cfg.SD.ReadyTimeout,
 		MinCUDA:         cfg.MinCUDA,
 
 		// Already resolved, and already the one reference this run will use.
@@ -875,4 +925,272 @@ func dialNode(ctx context.Context, s provision.Session, opts provision.Options, 
 		return nil, so, err
 	}
 	return client, so, nil
+}
+
+// jobPoll is how often a running job is asked for its progress.
+//
+// Every poll returns the current preview frame whether or not it is a new
+// one, because the job endpoint is the only place progress is reported -- so
+// this is a bandwidth knob as much as a latency one. Two seconds against a
+// sampling step that takes a second or more on the sizes these cards are
+// rented for.
+// A var and not a const so the tests can shrink it, the same move
+// internal/s3 makes with PartSize: otherwise every poll in every test waits
+// two real seconds and the unit suite stops being something anybody runs.
+var jobPoll = 2 * time.Second
+
+// runServed starts sd-server, waits for the weights, and drives the jobs.
+//
+// The order is the cheap-failure order the rest of serveSession already uses,
+// extended: the card, then the weights on the store, then the server, then
+// the weights in VRAM, then every job checked against what the server says it
+// can do -- and only then is anything generated. A mistyped sampler refuses
+// here, after about a minute of a rented card, rather than at job seven.
+func runServed(
+	ctx context.Context,
+	out io.Writer,
+	client tunnel.Dialer,
+	r sshx.Runner,
+	spec node.Spec,
+	run sdserver.Run,
+	so session.Options,
+	runDir string,
+	rate node.Rate,
+) error {
+	// The server dies with this context, and it is a child of the run's so
+	// that returning for any reason stops it. There is no value in a server
+	// outliving the connection: ember is about to destroy the node, and a
+	// node ember cannot reach is a node ember cannot destroy.
+	srvCtx, stopServer := context.WithCancel(ctx)
+	defer stopServer()
+
+	outf(out, "starting %s\n", workload.Describe(spec.Serve))
+	wait, err := startServer(srvCtx, out, r, spec.Serve)
+	if err != nil {
+		return err
+	}
+	// Collected rather than ignored: a server that exited is the explanation
+	// for every failure after this point, and its status is the only thing
+	// that distinguishes "the weights are missing" from "ember lost the
+	// connection".
+	defer func() {
+		stopServer()
+		if werr := wait(); werr != nil {
+			so.Log.Debug("sd-server exited", "err", werr)
+		}
+	}()
+
+	remote := tunnel.RemoteLoopback(sdserver.Port)
+	if err := tunnel.WaitReady(ctx, client, remote, time.Second); err != nil {
+		return fmt.Errorf("sd-server never accepted a connection on %v: %w", remote, err)
+	}
+
+	c := sdserver.New(client.DialContext)
+	load, err := sdserver.WaitModel(ctx, c, spec.ServeTimeout, out, so.Log)
+	if err != nil {
+		return err
+	}
+
+	caps, err := c.Capabilities(ctx)
+	if err != nil {
+		return err
+	}
+	// Every job before the first one runs. Checking job n just before
+	// submitting it would mean n-1 images already paid for when the typo in
+	// the last one surfaces.
+	for i, j := range run.Jobs {
+		if err := sdserver.Validate(j, caps); err != nil {
+			return usageError{fmt.Errorf("sd.jobs[%d]: %w", i, err)}
+		}
+	}
+
+	// The figure this whole shape exists to stop paying repeatedly, said out
+	// loud: with cmds it would be spent again for every job after the first.
+	if len(run.Jobs) > 1 && load > 0 {
+		outf(out, "the weights are resident; %v of loading is paid once rather than %d times\n",
+			load, len(run.Jobs))
+	}
+
+	return runJobs(ctx, out, c, run, runDir, rate)
+}
+
+// startServer starts a long-running process on the node and returns the
+// function that reaps it.
+//
+// The first thing in ember to use sshx.Runner asynchronously. Run already
+// calls Start rather than Run and hands back the stream plus a wait func, so
+// nothing new is needed on the seam -- but every other caller copies and
+// waits inline, so the pattern is worth naming: the stream is drained in a
+// goroutine, the process ends when ctx is cancelled, and wait must be called
+// or the SSH session leaks for as long as the connection lives.
+func startServer(ctx context.Context, out io.Writer, r sshx.Runner, argv []string) (func() error, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("no server command")
+	}
+	cmd := sshx.Cmd(argv[0], argv[1:]...)
+	// Both streams go to the operator's terminal, live. A model load that is
+	// going to fail says so here, forty seconds before the status endpoint
+	// admits it, and that output is the only explanation of why.
+	cmd.Stderr = out
+	if err := cmd.Validate(); err != nil {
+		return nil, fmt.Errorf("sd.serve: %w", err)
+	}
+
+	stdout, wait, err := r.Run(ctx, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("start sd-server: %w", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(out, stdout)
+	}()
+	return func() error {
+		err := wait()
+		_ = stdout.Close()
+		<-done
+		return err
+	}, nil
+}
+
+// runJobs submits one job at a time and collects its images before the next.
+//
+// ONE JOB IN FLIGHT, and the reason is in sd-server's own source rather than
+// its documentation. async_jobs.h sets completed_ttl_seconds = 600 and
+// async_jobs.cpp measures that from completed_at and purges from the worker --
+// when it wakes before popping the next job, and after each job finishes. So a
+// finished result is erased ten minutes after it completed, and api.md lists
+// 410 Gone for a job without ever saying why.
+//
+// Queueing ten jobs up front would therefore leave eight finished images, each
+// already paid for, one dropped connection away from being deleted. Submitting
+// one at a time costs nothing in throughput -- the generation context lock
+// serializes work on the device anyway -- and makes the TTL unreachable, the
+// 64-job pending cap irrelevant and queue_position moot.
+func runJobs(ctx context.Context, out io.Writer, c sdserver.Client, run sdserver.Run, runDir string, rate node.Rate) error {
+	// Created here, because nothing else on this path does. The fetching
+	// paths get it from transfer.Fetch's own MkdirAll; a served run never
+	// calls Fetch, since the images arrive in the HTTP response rather than
+	// as a tar. Without this, every served run failed at the first image with
+	// "no such file or directory" after the generation had been paid for.
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		return fmt.Errorf("create the run's output directory: %w", err)
+	}
+	root, err := os.OpenRoot(runDir)
+	if err != nil {
+		return fmt.Errorf("open the run's output directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	var spent node.MicroUSD
+	for i, j := range run.Jobs {
+		label := fmt.Sprintf("job %d/%d", i+1, len(run.Jobs))
+		stem := j.Output
+		if stem == "" {
+			// Numbered from the position in the list, so a config that names
+			// nothing still produces files an operator can tell apart.
+			stem = fmt.Sprintf("%03d", i+1)
+		}
+
+		start := time.Now()
+		outf(out, "%s: %s\n", label, describeJob(j))
+
+		id, err := c.Submit(ctx, j, run.Preview, run.PreviewInterval)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+
+		st, err := awaitJob(ctx, out, c, id, label, stem, root)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if st.Err != nil {
+			return fmt.Errorf("%s: sd-server refused it: %w", label, st.Err)
+		}
+		if st.Status != sdserver.StatusCompleted {
+			return fmt.Errorf("%s: ended as %s", label, st.Status)
+		}
+
+		w, err := sdserver.WriteImages(root, stem, st.Images)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		outf(out, "%s: %d file(s), %s\n", label, w.Files, humanBytes(w.Bytes))
+
+		// The accumulating price, the same reporting runSteps does and for the
+		// same reason: an operator watching a ten-job batch can stop paying
+		// for the rest. Card time, which is why it is timed across the
+		// collection and not only the sampling.
+		step := rate.Cost(time.Since(start))
+		spent += step
+		outf(out, "%s took %v of card time, %v so far\n", label, step, spent)
+	}
+	return nil
+}
+
+// awaitJob polls one job to a conclusion, reporting progress as it goes.
+//
+// Progress is reported as pass, step and total, never as a single percentage:
+// sd-server's step and total_steps describe the current sampling pass and not
+// the whole job, and passes restart for each batch item, each high- and
+// low-noise stage and each highres pass. A bar built from them runs to the end
+// and then starts again, which reads as a hang.
+//
+// Each distinct frame is written over the last one rather than accumulating,
+// because the useful thing is a file an operator can leave open in a viewer
+// and not three hundred PNGs of a half-finished cat.
+func awaitJob(ctx context.Context, out io.Writer, c sdserver.Client, id, label, stem string, root *os.Root) (sdserver.State, error) {
+	lastStep := -1
+	for {
+		st, err := c.Poll(ctx, id)
+		if err != nil {
+			return sdserver.State{}, err
+		}
+		if p := st.Preview; p != nil && p.Step != lastStep {
+			lastStep = p.Step
+			outf(out, "%s: pass %d, step %d/%d\n", label, p.Pass, p.Step, p.TotalSteps)
+			if len(p.PNG) > 0 {
+				// Best effort: a preview that cannot be written is not a
+				// reason to abandon a generation that is already paid for.
+				if _, werr := sdserver.WriteImages(root, stem+"-preview", []sdserver.Image{{Data: p.PNG}}); werr != nil {
+					outf(out, "%s: could not write the preview frame: %v\n", label, werr)
+				}
+			}
+		}
+		if st.Status.Done() {
+			return st, nil
+		}
+		select {
+		case <-ctx.Done():
+			return sdserver.State{}, ctx.Err()
+		case <-time.After(jobPoll):
+		}
+	}
+}
+
+// describeJob is the one line an operator reads to know which image this is.
+func describeJob(j sdserver.Job) string {
+	var b strings.Builder
+	p := j.Prompt
+	if p == "" {
+		if v, ok := j.Extra["prompt"].(string); ok {
+			p = v
+		}
+	}
+	// Truncated: a FLUX.2 prompt is a thousand characters and the first few
+	// words are what identifies it in a log.
+	if len(p) > 60 {
+		p = p[:57] + "..."
+	}
+	b.WriteString(strconv.Quote(p))
+	if j.Width != 0 && j.Height != 0 {
+		fmt.Fprintf(&b, " %dx%d", j.Width, j.Height)
+	}
+	if j.Steps != 0 {
+		fmt.Fprintf(&b, " %d steps", j.Steps)
+	}
+	if j.Seed != 0 {
+		fmt.Fprintf(&b, " seed %d", j.Seed)
+	}
+	return b.String()
 }
