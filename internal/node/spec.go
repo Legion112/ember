@@ -98,8 +98,8 @@ type Spec struct {
 	// The resident-server shape, and the reason it exists is the one cost
 	// Cmds cannot remove. Each entry in Cmds is a fresh process that reads
 	// the weights into VRAM again; a server started once holds them. On a
-	// rented A100 that is about twelve seconds per image that nothing is
-	// generating.
+	// rented RTX PRO 6000 running FLUX.2 at 2048x2048 that is 4.5s per image
+	// on a node that caches the weights and 86s on one that re-reads them.
 	//
 	// Still argv, because starting a process is the part ember has always
 	// done this way -- what is new is that ember then speaks the protocol

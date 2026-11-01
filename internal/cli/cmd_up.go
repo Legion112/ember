@@ -991,6 +991,9 @@ func runServed(
 	srvCtx, stopServer := context.WithCancel(ctx)
 	defer stopServer()
 
+	// Timed from here, not from the server's own report: see the resident
+	// line below for why ember cannot believe that field.
+	serveStart := time.Now()
 	outf(out, "starting %s\n", workload.Describe(spec.Serve))
 	proc, err := startServer(srvCtx, out, r, spec.Serve)
 	if err != nil {
@@ -1040,9 +1043,22 @@ func runServed(
 
 	// The figure this whole shape exists to stop paying repeatedly, said out
 	// loud: with cmds it would be spent again for every job after the first.
-	if len(run.Jobs) > 1 && load > 0 {
+	//
+	// Measured by ember rather than read from the server's own
+	// load_elapsed_seconds, because that field is not this number. The first
+	// FLUX.2 run reported 551ms for a model whose weights are 56 GiB, so
+	// ember printed "551ms of loading is paid once rather than 8 times"
+	// while the cmds arm of the same measurement spent 80-96s per image
+	// re-reading those weights off the store -- understating the saving by
+	// two orders of magnitude, in the one line an operator would size a
+	// batch from. sd-server does not open its port until the load has
+	// finished, so the span ember can time itself -- process start to
+	// models/status reporting ready -- is the honest one, and it is also
+	// exactly what a fresh sd-cli pays on every invocation.
+	so.Log.Debug("sd-server load", "measured", time.Since(serveStart), "server_reported", load)
+	if len(run.Jobs) > 1 {
 		outf(out, "the weights are resident; %v of loading is paid once rather than %d times\n",
-			load, len(run.Jobs))
+			time.Since(serveStart).Round(100*time.Millisecond), len(run.Jobs))
 	}
 
 	return runJobs(ctx, out, c, run, runDir, rate)

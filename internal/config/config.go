@@ -126,8 +126,9 @@ type Config struct {
 	//
 	// The difference from Cmds is one cost. Each entry in Cmds is a fresh
 	// sd-cli that reads the weights into VRAM again; a server loads them
-	// once. On a rented A100 that is about twelve seconds per image during
-	// which nothing is being generated.
+	// once. Measured on a rented RTX PRO 6000 running FLUX.2 at 2048x2048:
+	// 4.5s per image when the node caches the weights, 86s when it re-reads
+	// them off the store, and nothing tells ember which node it has.
 	//
 	// It is also the one place ember knows what a sampler is. Every other
 	// workload here is opaque argv on purpose, and that position does not
