@@ -79,7 +79,11 @@ func (f *fakeSD) handler() http.HandlerFunc {
 
 		case r.URL.Path == "/sdcpp/v1/capabilities":
 			b, _ := json.Marshal(map[string]any{
-				"model":         "test",
+				// An object, as the real server sends it. It was a string
+				// here until a live sd-server rejected that, which is the
+				// whole argument for capturing fixtures rather than writing
+				// them from a field list.
+				"model":         map[string]any{"name": "sd15.gguf", "path": "/models/sd15.gguf", "stem": "sd15"},
 				"samplers":      f.samplers,
 				"schedulers":    []string{"karras"},
 				"preview_modes": []string{"none", "proj"},
@@ -163,9 +167,9 @@ func (d *countingDialer) DialContext(ctx context.Context, network, addr string) 
 // for the same reason.
 func shrinkPoll(t *testing.T) {
 	t.Helper()
-	was := jobPoll
-	jobPoll = time.Millisecond
-	t.Cleanup(func() { jobPoll = was })
+	wasMin, wasMax := jobPollMin, jobPollMax
+	jobPollMin, jobPollMax = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { jobPollMin, jobPollMax = wasMin, wasMax })
 }
 
 func testRun(jobs ...sdserver.Job) sdserver.Run {
@@ -458,6 +462,66 @@ func TestAwaitJob_StopsOnCancel(t *testing.T) {
 	}
 }
 
+// fakeServerRunner stands in for a process that stays up.
+//
+// sshx.RecordingRunner cannot: its wait func returns at once, which is right
+// for a workload that runs to completion and wrong for a server. Every
+// existing caller of the seam copies-then-waits, so no fake in the repository
+// had reason to model a process that lingers -- and with one that returns
+// immediately, "the server died" fires before "the port opened" in every
+// healthy test. The same reason gpucheck has its own scriptedRunner.
+//
+// linger: wait blocks until the context ends, which is what ember's deferred
+// stopServer does. Otherwise wait returns exit straight away, which is a
+// server that rejected its own arguments and quit.
+type fakeServerRunner struct {
+	out    []byte
+	exit   error
+	linger bool
+	calls  []string
+}
+
+func (r *fakeServerRunner) Run(ctx context.Context, cmd sshx.Command) (io.ReadCloser, func() error, error) {
+	r.calls = append(r.calls, cmd.String())
+	body := io.NopCloser(bytes.NewReader(r.out))
+	return body, func() error {
+		if r.linger {
+			<-ctx.Done()
+		}
+		return r.exit
+	}, nil
+}
+
+// liveServer is a runner whose server stays up, which is what every test
+// about the happy path needs.
+func liveServer() *fakeServerRunner { return &fakeServerRunner{linger: true} }
+
+// The backoff exists because a flat two seconds measured slower than no
+// resident model at all: a 0.3s job noticed up to 2s late cost more than the
+// 0.8s of tensor loading being saved.
+func TestNextPoll_StartsFastAndCapsOut(t *testing.T) {
+	if got := nextPoll(0); got != jobPollMin {
+		t.Errorf("nextPoll(0) = %v, want the floor %v", got, jobPollMin)
+	}
+	if got := nextPoll(-time.Second); got != jobPollMin {
+		t.Errorf("nextPoll(negative) = %v, want the floor %v", got, jobPollMin)
+	}
+	if got := nextPoll(jobPollMin); got != 2*jobPollMin {
+		t.Errorf("nextPoll(%v) = %v, want it doubled", jobPollMin, got)
+	}
+	if got := nextPoll(jobPollMax); got != jobPollMax {
+		t.Errorf("nextPoll(%v) = %v, want it capped", jobPollMax, got)
+	}
+	// It must actually reach the cap rather than overshoot it.
+	d := jobPollMin
+	for i := 0; i < 100; i++ {
+		d = nextPoll(d)
+	}
+	if d != jobPollMax {
+		t.Errorf("after 100 doublings the interval is %v, want the %v cap", d, jobPollMax)
+	}
+}
+
 // startServer is the first asynchronous use of the sshx seam in ember: every
 // other caller copies the stream and waits inline.
 func TestStartServer_StreamsTheOutputAndReaps(t *testing.T) {
@@ -466,11 +530,11 @@ func TestStartServer_StreamsTheOutputAndReaps(t *testing.T) {
 	r.Outputs[sshx.Cmd(argv[0], argv[1:]...).String()] = []byte("loading weights\n")
 
 	var out strings.Builder
-	wait, err := startServer(t.Context(), &out, r, argv)
+	proc, err := startServer(t.Context(), &out, r, argv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wait(); err != nil {
+	if err := <-proc.Exited(); err != nil {
 		t.Fatal(err)
 	}
 	// The model load's own words reach the operator live, because a load that
@@ -505,12 +569,56 @@ func TestStartServer_ReportsAStartFailure(t *testing.T) {
 	}
 }
 
+// A server that died is noticed at once, not at ready_timeout.
+//
+// Measured before this existed: sd-server rejected a flag, printed its
+// complaint, exited after about a second, and ember polled the port for the
+// full ten-minute default before reporting "never accepted a connection". On
+// an A100 at $1.79/hour that is thirty cents for a program that was already
+// gone, and the explanation had scrolled past ten minutes earlier.
+func TestRunServed_ADeadServerIsNoticedAtOnce(t *testing.T) {
+	// A dialer that never connects, which is what a dead server looks like
+	// from here, and a runner whose command ends immediately.
+	d := &refusingDialer{}
+	argv := []string{"sd-server", "--diffusion-model", "/models/x.gguf"}
+	// Exactly what a real sd-server did when handed --diffusion-model for a
+	// monolithic checkpoint: it printed this and exited.
+	r := &fakeServerRunner{
+		out:  []byte("[E] get sd version from file failed: ''\n[E] new_sd_ctx_t failed\n"),
+		exit: &sshx.ExitError{Cmd: "sd-server", Code: 1},
+	}
+
+	// A generous timeout: the point is that it is not waited out.
+	spec := servedSpecWithTimeout(t, argv, time.Hour)
+
+	start := time.Now()
+	var out strings.Builder
+	err := runServed(t.Context(), &out, d, r, spec, testRun(sdserver.Job{Prompt: "a"}),
+		session.Options{Log: discardLog()}, filepath.Join(t.TempDir(), "r"), 0)
+	took := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if took > 30*time.Second {
+		t.Errorf("took %v to notice a dead server against a 1h timeout", took)
+	}
+	if !strings.Contains(err.Error(), "exited before it accepted a connection") {
+		t.Errorf("err = %v, want it to say the process ended rather than that the port never opened", err)
+	}
+	// The server's own words are what explain it, so they have to have
+	// reached the operator.
+	if !strings.Contains(out.String(), "get sd version from file failed") {
+		t.Errorf("output = %q, want the server's own complaint", out.String())
+	}
+}
+
 func TestRunServed_TheWholeLifecycle(t *testing.T) {
 	shrinkPoll(t)
 	f := newFakeSD(t)
 	_, d := f.start(t)
 
-	r := sshx.NewRecordingRunner()
+	r := liveServer()
 	spec := servedSpec(t, []string{"sd-server", "--diffusion-model", "/models/x.gguf"})
 	dir := filepath.Join(t.TempDir(), "run")
 
@@ -551,7 +659,7 @@ func TestRunServed_SaysWhatBeingResidentSaves(t *testing.T) {
 	spec := servedSpec(t, []string{"sd-server"})
 
 	var out strings.Builder
-	err := runServed(t.Context(), &out, d, sshx.NewRecordingRunner(), spec,
+	err := runServed(t.Context(), &out, d, liveServer(), spec,
 		testRun(sdserver.Job{Prompt: "a"}, sdserver.Job{Prompt: "b"}),
 		session.Options{Log: discardLog()}, filepath.Join(t.TempDir(), "r"), 0)
 	if err != nil {
@@ -565,7 +673,7 @@ func TestRunServed_SaysWhatBeingResidentSaves(t *testing.T) {
 	var single strings.Builder
 	f2 := newFakeSD(t)
 	_, d2 := f2.start(t)
-	if err := runServed(t.Context(), &single, d2, sshx.NewRecordingRunner(), spec,
+	if err := runServed(t.Context(), &single, d2, liveServer(), spec,
 		testRun(sdserver.Job{Prompt: "a"}),
 		session.Options{Log: discardLog()}, filepath.Join(t.TempDir(), "r2"), 0); err != nil {
 		t.Fatal(err)
@@ -583,7 +691,7 @@ func TestRunServed_RefusesEveryBadJobBeforeGeneratingAnything(t *testing.T) {
 	_, d := f.start(t)
 	spec := servedSpec(t, []string{"sd-server"})
 
-	err := runServed(t.Context(), io.Discard, d, sshx.NewRecordingRunner(), spec,
+	err := runServed(t.Context(), io.Discard, d, liveServer(), spec,
 		// The bad one is last, which is the point: it must still refuse
 		// before the first is submitted.
 		testRun(
@@ -611,7 +719,7 @@ func TestRunServed_RefusesWhenTheWeightsNeverLoad(t *testing.T) {
 	f.modelState = "error"
 	_, d := f.start(t)
 
-	err := runServed(t.Context(), io.Discard, d, sshx.NewRecordingRunner(),
+	err := runServed(t.Context(), io.Discard, d, liveServer(),
 		servedSpec(t, []string{"sd-server"}), testRun(sdserver.Job{Prompt: "a"}),
 		session.Options{Log: discardLog()}, filepath.Join(t.TempDir(), "r"), 0)
 	if err == nil {
@@ -632,14 +740,19 @@ func TestRunServed_ReportsAServerThatNeverListens(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
-	err := runServed(ctx, io.Discard, d, sshx.NewRecordingRunner(),
+	err := runServed(ctx, io.Discard, d, liveServer(),
 		servedSpec(t, []string{"sd-server"}), testRun(sdserver.Job{Prompt: "a"}),
 		session.Options{Log: discardLog()}, filepath.Join(t.TempDir(), "r"), 0)
 	if err == nil {
 		t.Fatal("want an error")
 	}
-	if !strings.Contains(err.Error(), "never accepted a connection") {
-		t.Errorf("err = %v, want it to name what failed", err)
+	if !strings.Contains(err.Error(), "is not listening on 127.0.0.1:1234") {
+		t.Errorf("err = %v, want it to name the address that never opened", err)
+	}
+	// And not blamed on the process: this server was alive the whole time,
+	// and ember only stopped it on the way out.
+	if strings.Contains(err.Error(), "exited before") {
+		t.Errorf("err = %v, blames a cancellation on the server dying", err)
 	}
 }
 
@@ -665,6 +778,11 @@ func (refusingDialer) DialContext(context.Context, string, string) (net.Conn, er
 
 func servedSpec(t *testing.T, serve []string) node.Spec {
 	t.Helper()
+	return servedSpecWithTimeout(t, serve, time.Minute)
+}
+
+func servedSpecWithTimeout(t *testing.T, serve []string, tmo time.Duration) node.Spec {
+	t.Helper()
 	finished, err := sdserver.ServeCommand(serve)
 	if err != nil {
 		t.Fatal(err)
@@ -673,7 +791,7 @@ func servedSpec(t *testing.T, serve []string) node.Spec {
 		Image:        "ghcr.io/example/x@sha256:" + strings.Repeat("a", 64),
 		TTL:          time.Hour,
 		Serve:        finished,
-		ServeTimeout: time.Minute,
+		ServeTimeout: tmo,
 	})
 	if err != nil {
 		t.Fatal(err)

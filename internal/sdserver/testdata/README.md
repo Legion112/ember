@@ -12,20 +12,34 @@ actually creates pods on declares `unevaluatedProperties: false` and answers
 422 to it. The lesson did not stick the first time because the field had been
 read from a **schema** rather than from a **response**.
 
+## Captured from a running sd-server
+
+`capabilities.json` and `model_status_ready.json` came off a real
+`sd-server` built from `workload-sd-cuda.Dockerfile` at `CUDA_ARCH=75`,
+serving sd15 Q8_0 on an RTX 2080 Ti. They are evidence.
+
+They also corrected the guesses, on the first run, after a node was already
+up: **`capabilities.model` is an object** -- `{"name","path","stem"}` -- and
+not the string api.md's field list implies, and `models/status` carries no
+`revision`. The guessed fixture said `"model": "flux2-dev"` and decoded
+happily, which is exactly how a doc-derived shape passes its own test and
+fails the service. Everything else held: `samplers`, `schedulers`,
+`preview_modes` and `limits` are shaped as documented, and `limits` carries
+two upscale bounds ember does not read.
+
 ## Source: `examples/server/api.md` at stable-diffusion.cpp `77b72a2`
 
-Every file below was written from the documented field lists at the revision
-both workload images pin. **None of them has been seen on the wire yet.** What
-they pin is that ember's wire structs decode the documented shape, which is
-weaker than it sounds: a field the server spells differently, omits, or sends
-as a different JSON type would decode to a zero value here and pass.
+Every file in the table below was written from the documented field lists at
+the revision both workload images pin, and **none of them has been seen on the
+wire.** What they pin is that ember's wire structs decode the *documented*
+shape, which is weaker than it sounds: a field the server spells differently,
+omits, or sends as a different JSON type decodes to a zero value here and
+passes. That is precisely what `capabilities.model` did.
 
 | file | endpoint | what it is meant to exercise |
 |---|---|---|
-| `capabilities.json` | `GET /sdcpp/v1/capabilities` | the trimmed read: samplers, schedulers, preview modes, limits |
-| `model_status_empty.json` | `GET /sdcpp/v1/models/status` | a server up with no weights — what `--diffusion-model` has not finished doing yet, and the state the image lab sees |
+| `model_status_empty.json` | `GET /sdcpp/v1/models/status` | a server up with no weights, the state it reports before a load finishes |
 | `model_status_loading.json` | same | the state `WaitModel` retries |
-| `model_status_ready.json` | same | the state it returns on, carrying `load_elapsed_seconds` |
 | `model_status_error.json` | same | the state it refuses on, with the server's own message |
 | `job_accepted.json` | `POST /sdcpp/v1/img_gen` | the 202, and that the id is read from `id` rather than parsed back out of `poll_url` |
 | `job_queued.json` | `GET /sdcpp/v1/jobs/{id}` | `queue_position` while queued |
@@ -42,16 +56,17 @@ reads both and these two files are what hold it to that.
 
 ## Replacing a guess with evidence
 
-`test/integration/sdserver_test.go` starts the published workload image, runs
-`sd-server` in it with no model, and reads `/sdcpp/v1/capabilities` and
-`/sdcpp/v1/models/status` over a real SSH connection. It needs no GPU and no
-weights, which makes it the cheapest way to turn the first two rows of that
-table into captured responses. When it runs, overwrite those two files from
-what it saw and move their rows down to a "captured" section here, naming the
-image digest.
+The three `model_status_*` files above are still written from the field list:
+a load that is in progress, and one that failed, are both states a healthy
+local run does not produce on demand. `model_status_error.json` is the one
+most worth replacing, because its `error` is a free-text string from
+somewhere in the loader and nothing has checked that it is a string in every
+case.
 
-The rest need a loaded model and therefore a rented card. Capture them on the
-first live run rather than leaving them doc-derived forever, and record the
-digest and the card alongside — a job response is the one place where what
-upstream documents and what upstream sends have had no opportunity to be
-checked against each other.
+The job fixtures are the other gap, and the bigger one. They were all written
+from api.md and none has been seen on the wire: a queued job, a preview frame,
+a completed result and a failed one. The orchestration has been driven against
+a real server end to end — sixteen jobs, byte-identical output — so the shapes
+are very likely right, but "very likely" is what `capabilities.model` was
+before it turned out to be an object. Capture them on the next live run and
+move their rows up.

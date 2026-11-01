@@ -663,15 +663,64 @@ A leaked node bills by the hour in silence. These are not style preferences.
 
 - **One cost `cmds` cannot remove, and the one place ember stops being
   workload-agnostic.** Each entry in `cmds` is a fresh `sd-cli` that reads the
-  weights into VRAM again -- about twelve seconds per image on a rented A100,
-  against roughly a hundred of sampling at 1024x1024. `sd.serve` holds one
-  `sd-server` and the weights stay resident. That is ~8% of a ten-image FLUX.2
-  batch and most of the time on short generations, which is the shape prompt
-  iteration has. The cost of getting it is that ember now knows what a sampler
-  is: progress streaming is impossible for a program that refuses to read its
-  own payload, and a `curl` in a config is the same knowledge maintained by
-  hand. `cmds` stays as the general mechanism, because a typed sd path cannot
-  run `ffmpeg`.
+  weights into VRAM again; `sd.serve` holds one `sd-server` and they stay
+  resident. Measured on an RTX 2080 Ti with sd15 Q8_0 at 256x256 and four
+  steps, same prompts and seeds both ways:
+
+  | jobs | `cmds` | `sd.jobs` |
+  |---|---|---|
+  | 1 | 3.68 s | 9.72 s |
+  | 3 | 7.37 s | 10.60 s |
+  | 8 | 16.40 s | 12.78 s |
+  | 16 | 30.82 s | 16.23 s |
+
+  Marginal cost per job: **1.81 s against 0.43 s**, consistent across 1→8 and
+  1→16, against a fixed **~6 s** to start the server. So the crossover is at
+  about **five jobs**, and above it the saving grows -- 22% at eight, 47% at
+  sixteen, approaching 4.2x per job. All sixteen images are byte-identical
+  between the two paths, which is what makes the comparison a comparison.
+  **The ~8% this was planned around was arithmetic from the issue's A100
+  table, and it was wrong in both directions**: the per-job saving is far
+  larger than 8%, and there is a fixed cost that makes a short batch slower.
+  The cost of getting it is that ember now knows what a sampler is: progress
+  streaming is impossible for a program that refuses to read its own payload,
+  and a `curl` in a config is the same knowledge maintained by hand. `cmds`
+  stays as the general mechanism, because a typed sd path cannot run `ffmpeg`.
+- **The client's own poll interval hid the entire saving, and only a
+  measurement found it.** A flat two-second poll noticed a 0.3-second job up
+  to two seconds late, so the marginal cost per job came to 2.08 s served
+  against 1.81 s for a fresh process -- the resident model saved ~0.8 s of
+  tensor loading per job and ember then spent more than that waiting for it.
+  The served path measured **slower at every batch size tried**, 1, 3 and 8,
+  with the gap widening. Replacing the flat interval with 50 ms doubling to a
+  2 s cap took the marginal to 0.43 s. A fixed cadence is a guess about how
+  long the work takes; this one was wrong by a factor of six, and no unit test
+  could have said so because the fakes return instantly.
+- **A long-running remote process must not be reaped by a bare `wait()` in a
+  defer.** `ssh.Session.Wait` does not return while the remote process is
+  alive: cancelling the context closes the session, sd-server keeps running,
+  and no exit status ever arrives. The first version called `wait()` straight
+  from `runServed`'s defer and wedged for twenty-three minutes after SIGTERM
+  -- never printing the error it was in the middle of returning, so the run
+  looked like a hang with no diagnosis. Found with SIGQUIT and a goroutine
+  dump, which is the only thing that could have found it. The exit is now
+  collected by a goroutine and the defer waits on a channel with a five-second
+  cap.
+- **A server that died has to be noticed at once, not at `ready_timeout`.**
+  Handed `--diffusion-model` for a monolithic checkpoint, sd-server printed
+  `get sd version from file failed`, exited after about a second, and ember
+  polled the port for the full ten-minute default before reporting that it
+  "never accepted a connection". On an A100 at $1.79/hour that is thirty cents
+  for a program that was already gone, and the explanation had scrolled past
+  ten minutes earlier. `orExited` now races every wait against the process's
+  exit. It also has to prefer the operation's own answer when the context is
+  already cancelled, because ember stops the server by cancelling -- otherwise
+  Ctrl-C reports a server that crashed.
+- **`--diffusion-model` is for a standalone DiT, `--model` for a whole
+  checkpoint.** FLUX.2 names its diffusion model, text encoder and VAE
+  separately, so every example in this repository used `--diffusion-model` --
+  and sd15 in one file needs `--model`. The flag that works for one silently
+  cannot load the other.
 - **sd-server was already being compiled and thrown away.**
   `examples/CMakeLists.txt` at the pinned revision is two unconditional lines,
   `add_subdirectory(cli)` and `add_subdirectory(server)`, so `cmake --build`
@@ -742,6 +791,15 @@ A leaked node bills by the hour in silence. These are not style preferences.
   of a tar. Every served run would have failed at the first image with "no
   such file or directory", after the generation was paid for. Found by writing
   the test, not by running it on a card.
+- **The wire types were a guess until a server corrected them, and it took one
+  run.** `capabilities.model` is an object, `{"name","path","stem"}`, not the
+  string api.md's field list implies; `models/status` carries no `revision`.
+  The doc-derived fixture said `"model": "flux2-dev"` and decoded happily, so
+  the mistake surfaced as `cannot unmarshal object into Go struct field` after
+  a node was up. Everything else held -- `samplers`, `schedulers`,
+  `preview_modes`, `limits` and the whole job lifecycle. `capabilities.json`
+  and `model_status_ready.json` are captured now, and
+  `internal/sdserver/testdata/README.md` says which still are not.
 - **Deferred, and recorded rather than quietly skipped:** a lab that starts
   `sd-server` in the published image and asserts it binds loopback only. The
   CUDA binary needs `libcuda.so.1` to do anything, so there is no GPU-less

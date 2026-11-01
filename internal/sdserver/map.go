@@ -276,7 +276,7 @@ func mapModelStatus(w wireModelStatus) (ModelStatus, error) {
 
 func mapCapabilities(w wireCapabilities) Capabilities {
 	return Capabilities{
-		Model:        w.Model,
+		Model:        w.Model.Name,
 		Samplers:     append([]string(nil), w.Samplers...),
 		Schedulers:   append([]string(nil), w.Schedulers...),
 		PreviewModes: append([]string(nil), w.PreviewModes...),

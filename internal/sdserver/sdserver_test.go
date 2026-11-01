@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -68,14 +69,23 @@ func TestCapabilities_ReadsTheTrimmedSubset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if caps.Model != "flux2-dev" {
-		t.Errorf("model = %q, want flux2-dev", caps.Model)
+	// The fixture is a captured response, so these are the server's own
+	// values. `model` is an object there and not the string api.md's field
+	// list implies; ember reads its name.
+	if caps.Model != "sd15.gguf" {
+		t.Errorf("model = %q, want the name out of the model object", caps.Model)
 	}
-	if len(caps.Samplers) != 6 || caps.Samplers[0] != "euler" {
+	if len(caps.Samplers) < 10 || caps.Samplers[0] != "euler" {
 		t.Errorf("samplers = %v", caps.Samplers)
 	}
-	if caps.Limits.MaxWidth != 2048 || caps.Limits.MinWidth != 64 {
-		t.Errorf("width limits = %d..%d, want 64..2048", caps.Limits.MinWidth, caps.Limits.MaxWidth)
+	if !slices.Contains(caps.Schedulers, "karras") {
+		t.Errorf("schedulers = %v, want karras among them", caps.Schedulers)
+	}
+	if !slices.Contains(caps.PreviewModes, PreviewProj) {
+		t.Errorf("preview modes = %v, want %s among them", caps.PreviewModes, PreviewProj)
+	}
+	if caps.Limits.MaxWidth != 4096 || caps.Limits.MinWidth != 64 {
+		t.Errorf("width limits = %d..%d, want 64..4096", caps.Limits.MinWidth, caps.Limits.MaxWidth)
 	}
 	if caps.Limits.MaxBatchCount != 8 {
 		t.Errorf("max_batch_count = %d, want 8", caps.Limits.MaxBatchCount)
@@ -121,7 +131,8 @@ func TestModelStatus_EveryState(t *testing.T) {
 	}{
 		{"model_status_empty.json", ModelEmpty, 0, false},
 		{"model_status_loading.json", ModelLoading, 0, false},
-		{"model_status_ready.json", ModelReady, 12470 * time.Millisecond, false},
+		// Captured: a 1.76 GB sd15 checkpoint off a warm page cache.
+		{"model_status_ready.json", ModelReady, 248 * time.Millisecond, false},
 		{"model_status_error.json", ModelError, 310 * time.Millisecond, true},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
@@ -784,8 +795,8 @@ func TestValidate_RefusesBeforeAnyGPUTimeIsSpent(t *testing.T) {
 		{"bad sampler", Job{Prompt: "a", Sampler: "eulerr"}, `sampler "eulerr" is not one`},
 		{"bad scheduler", Job{Prompt: "a", Scheduler: "karas"}, `scheduler "karas" is not one`},
 		{"width too small", Job{Prompt: "a", Width: 32}, "below this server's minimum"},
-		{"width too large", Job{Prompt: "a", Width: 4096}, "above this server's maximum"},
-		{"height too large", Job{Prompt: "a", Height: 4096}, "above this server's maximum"},
+		{"width too large", Job{Prompt: "a", Width: 8192}, "above this server's maximum"},
+		{"height too large", Job{Prompt: "a", Height: 8192}, "above this server's maximum"},
 		{"negative width", Job{Prompt: "a", Width: -1}, "negative"},
 		{"negative height", Job{Prompt: "a", Height: -1}, "negative"},
 		{"negative steps", Job{Prompt: "a", Steps: -1}, "negative"},

@@ -748,3 +748,31 @@ func TestExampleConfigs_LoadAndParse(t *testing.T) {
 		})
 	}
 }
+
+// TestLoad_RefusesADuplicateKey pins a behaviour of the YAML library rather
+// than of ember.
+//
+// KnownFields(true) covers a key that is not a field. It says nothing about
+// the same field twice, which is a different mistake and an easy one to make
+// in a long `sd.jobs` list -- two `steps:` lines in one job, where the second
+// silently wins and the run measures something the config does not say.
+//
+// gopkg.in/yaml.v3 refuses it, naming both lines. That is relied on here and
+// so it is asserted here: a dependency behaviour nothing checks is a
+// dependency behaviour that can change in a patch release. Found by making
+// the mistake in a real config, not by reading the library.
+func TestLoad_RefusesADuplicateKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ember.yaml")
+	body := "sd:\n  serve: [sd-server]\n  jobs:\n    - prompt: a cat\n      steps: 4\n      steps: 8\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("the same key twice was accepted; the second value would silently win")
+	}
+	if !strings.Contains(err.Error(), "already defined") {
+		t.Errorf("err = %v, want it to name the duplicate", err)
+	}
+}

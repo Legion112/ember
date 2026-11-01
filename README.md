@@ -404,7 +404,22 @@ rental exactly as it did for one command.
 `cmds` pays each per-rental cost once. It cannot pay the **model load** once,
 because every entry is a fresh `sd-cli` that reads the weights into VRAM again.
 `sd:` starts one `sd-server` on the node, holds the weights, and drives it over
-the same SSH connection:
+the same SSH connection.
+
+Measured on an RTX 2080 Ti, sd15 Q8_0 at 256x256 and four steps, same prompts
+and seeds both ways — all sixteen images byte-identical:
+
+| jobs | `cmds` | `sd.jobs` | |
+|---|---|---|---|
+| 1 | 3.68 s | 9.72 s | starting a server costs ~6 s |
+| 3 | 7.37 s | 10.60 s | |
+| 8 | 16.40 s | 12.78 s | 22% faster |
+| 16 | 30.82 s | 16.23 s | 47% faster |
+
+**Each job costs 0.43 s instead of 1.81 s**, so the crossover is around five
+jobs and the saving grows after that. Below five, `cmds` is the faster choice
+and the simpler one — this is for batches, and for models whose load dominates
+a short generation.
 
 ```yaml
 sd:
@@ -425,6 +440,11 @@ sd:
     - prompt: "the same river at night"
       output: river-night
 ```
+
+`--diffusion-model` is right for FLUX.2, which names its diffusion model, text
+encoder and VAE as separate files. A single-file checkpoint such as sd15 needs
+`--model` instead; the wrong one of the two fails with
+`get sd version from file failed`.
 
 Use `cmd`, `cmds` **or** `sd.serve` — never two. A served run is refused before
 anything is rented if the jobs and the server are not both there, and every job

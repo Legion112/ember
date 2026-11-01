@@ -114,11 +114,27 @@ type wireModelStatus struct {
 // be a second schema to keep current for no behaviour; what ember needs is
 // enough to refuse a job before a GPU has been asked to do anything with it.
 type wireCapabilities struct {
-	Model        string     `json:"model"`
+	// Model is an object and not a string, which is the first thing a real
+	// server corrected about these types. api.md lists `model` among the
+	// top-level fields without saying what it holds; it is
+	// {"name","path","stem"}. The doc-derived fixture said "flux2-dev" and
+	// decoded happily, so the mistake surfaced on first contact with a
+	// running sd-server -- as "cannot unmarshal object into Go struct field
+	// wireCapabilities.model of type string", after a node was up.
+	Model        wireModel  `json:"model"`
 	Samplers     []string   `json:"samplers"`
 	Schedulers   []string   `json:"schedulers"`
 	PreviewModes []string   `json:"preview_modes"`
 	Limits       wireLimits `json:"limits"`
+}
+
+// wireModel is what the server says is loaded.
+//
+// Trimmed to the name. The path is the node's own filesystem path, which the
+// config already knows because it put it there, and the stem is the name
+// without its extension.
+type wireModel struct {
+	Name string `json:"name"`
 }
 
 type wireLimits struct {
