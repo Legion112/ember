@@ -1,0 +1,295 @@
+// Package report turns a run's progress into data, and back into the lines
+// ember has always printed.
+//
+// WHY IT EXISTS. Every progress line in ember was a fmt.Fprintf to an
+// io.Writer: "job 1/2: pass 1, step 14/28" went to the operator's terminal and
+// nowhere else. A web UI cannot read prose, and a database cannot store it, so
+// the same information has to exist as a value before it exists as a sentence.
+//
+// THE RULE THAT KEEPS IT HONEST. The event is the source of truth and the text
+// is derived from it: every line lives in exactly one place, Text's renderer.
+// The alternative -- emitting an event *and* printing a line at each call site
+// -- is two sources of truth for one fact, and the one that drifts is the one
+// nobody is reading. That is the same mistake "one name for a path, not one
+// per call site" is written about in AGENTS.md, where a journal subdirectory
+// spelled twice meant a lab asserted against a directory nothing wrote to.
+//
+// WHAT IS NOT TYPED, AND WHY. A node's own output -- a workload's stdout, an
+// sd-server's complaint, an asset fetch running on the node -- is a byte
+// stream from a machine ember rented. It is not ember's prose and there is
+// nothing to type about it, so it travels as KindLog through Writer and comes
+// back out of Text byte for byte. The terminator travels with it for exactly
+// that reason; see Writer.
+//
+// PAYLOADS STAY PRIMITIVE. Ints, strings, durations and node.MicroUSD, never a
+// sdserver.Job or a node.Spec. internal/sdserver would have to be imported
+// here to carry one, and making sdserver emit its own progress would then make
+// sdserver import this package -- a cycle that cannot form while the payload
+// is primitive.
+package report
+
+import (
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/Legion112/ember/internal/node"
+)
+
+// Kind is what happened. The set is closed: Text's renderer switches over all
+// of it and TestTextRendersEveryKind fails the build if a kind is added
+// without deciding what it looks like.
+type Kind string
+
+const (
+	// KindLog is a byte stream from the node, or any text ember has not
+	// typed. Text is verbatim, terminator included.
+	KindLog Kind = "log"
+
+	// KindServerStarting is the resident sd-server being started.
+	KindServerStarting Kind = "server_starting"
+
+	// KindModelResident is the weights being loaded once rather than once per
+	// job, which is the whole reason the served shape exists.
+	KindModelResident Kind = "model_resident"
+
+	// KindUnitStarted is one job or one step beginning.
+	KindUnitStarted Kind = "unit_started"
+
+	// KindJobProgress is a sampling pass and a step within it.
+	//
+	// Never a percentage. sd-server's step and total_steps describe the
+	// current pass and not the whole job, and passes restart for each batch
+	// item, each high- and low-noise stage and each highres pass -- so a bar
+	// built from them runs to the end and then starts again, which reads as a
+	// hang.
+	KindJobProgress Kind = "job_progress"
+
+	// KindJobImages is what one job wrote.
+	KindJobImages Kind = "job_images"
+
+	// KindUnitCost is what one job or step cost of card time, and the running
+	// total.
+	KindUnitCost Kind = "unit_cost"
+
+	// KindPreviewFailed is a preview frame that could not be written. Best
+	// effort: a preview is not a reason to abandon a generation that is
+	// already paid for.
+	KindPreviewFailed Kind = "preview_failed"
+
+	// The lifecycle kinds below are emitted for a UI and a database, and Text
+	// renders nothing for them, because the CLI already reports all four
+	// through its slog handler -- "node ready" at provision.go is what
+	// test/integration/lifecycle_test.go greps for. Printing them twice would
+	// change `ember up`'s output, and a lab asserts it has not.
+
+	// KindNodeReady is a node that is usable.
+	KindNodeReady Kind = "node_ready"
+
+	// KindRunCost is what the whole rental came to, reported after the node
+	// is destroyed.
+	KindRunCost Kind = "run_cost"
+
+	// KindDestroyFailed is the one event an operator must not miss: the node
+	// may still be running, and running means billing.
+	KindDestroyFailed Kind = "destroy_failed"
+
+	// KindRunFinished and KindRunFailed end a run.
+	KindRunFinished Kind = "run_finished"
+	KindRunFailed   Kind = "run_failed"
+)
+
+// Kinds is every kind, so a renderer can be checked for completeness rather
+// than trusted to be complete.
+func Kinds() []Kind {
+	return []Kind{
+		KindLog, KindServerStarting, KindModelResident,
+		KindUnitStarted, KindJobProgress, KindJobImages, KindUnitCost,
+		KindPreviewFailed,
+		KindNodeReady, KindRunCost, KindDestroyFailed,
+		KindRunFinished, KindRunFailed,
+	}
+}
+
+// Units are the two things a rental does one of at a time.
+//
+// One sentence covers both: "job 1/2 took $0.03 of card time" and "step 1/2
+// took $0.03 of card time" were two format strings in two functions, which is
+// one sentence maintained twice.
+const (
+	UnitJob  = "job"
+	UnitStep = "step"
+)
+
+// Event is one thing that happened during a run.
+//
+// Flat, with omitempty, rather than a payload interface per kind. Over the
+// wire a flat struct is one serde type on the other side instead of thirteen,
+// and in Go the alternative is a type switch at every reader. The cost is
+// fields that are meaningless for most kinds, which the Kind documents and
+// the renderer enforces.
+type Event struct {
+	// Seq and At are stamped by Stream, not by the emitter, so every sink in
+	// a fan-out sees the same numbering. An event with Seq 0 reached a sink
+	// without passing through a Stream.
+	Seq int64     `json:"seq"`
+	At  time.Time `json:"at"`
+
+	Kind Kind `json:"kind"`
+
+	// Text is the verbatim bytes of a KindLog event, terminator included.
+	Text string `json:"text,omitempty"`
+
+	// Cmd is a command as it will be sent, quoting included.
+	Cmd string `json:"cmd,omitempty"`
+
+	// Unit is UnitJob or UnitStep; Index is 1-based and Total is how many
+	// there are.
+	Unit  string `json:"unit,omitempty"`
+	Index int    `json:"index,omitempty"`
+	Total int    `json:"total,omitempty"`
+
+	// Desc is one line identifying what this unit is -- a truncated prompt
+	// and its geometry, or a command.
+	Desc string `json:"desc,omitempty"`
+
+	Pass       int `json:"pass,omitempty"`
+	Step       int `json:"step,omitempty"`
+	TotalSteps int `json:"total_steps,omitempty"`
+
+	Files int   `json:"files,omitempty"`
+	Bytes int64 `json:"bytes,omitempty"`
+
+	// Cost and Spent are integer microdollars, never a float. $0.1+$0.2 is
+	// not $0.3 in float64, and a price that is sometimes wrong by a rounding
+	// error is a price nobody trusts.
+	Cost  node.MicroUSD `json:"cost_micro_usd,omitempty"`
+	Spent node.MicroUSD `json:"spent_micro_usd,omitempty"`
+
+	// Measured is a span ember timed itself; Reported is what the thing being
+	// measured claimed.
+	//
+	// Both, because they disagree and the disagreement matters. sd-server
+	// reported 551ms of load for weights that are 56 GiB, so ember printed
+	// "551ms of loading is paid once" while the other arm of the same
+	// measurement spent 80-96s per image re-reading those weights. Carrying
+	// one number would mean picking which lie to tell.
+	Measured time.Duration `json:"measured_ns,omitempty"`
+	Reported time.Duration `json:"reported_ns,omitempty"`
+
+	// Node identifies the node a lifecycle event is about.
+	Node string `json:"node,omitempty"`
+
+	// Err is a failure, as a string, because an event is data that crosses a
+	// wire and gets stored.
+	Err string `json:"error,omitempty"`
+}
+
+// Sink receives events.
+//
+// One method, so a database writer, a websocket fan-out and a terminal
+// renderer are the same thing to an emitter. Emit must not block for long: it
+// is called from the goroutine driving a rented GPU.
+type Sink interface {
+	Emit(Event)
+}
+
+// SinkFunc adapts a function to a Sink.
+type SinkFunc func(Event)
+
+// Emit calls f.
+func (f SinkFunc) Emit(e Event) { f(e) }
+
+// Discard throws events away. Useful where a caller has nothing to report to.
+var Discard Sink = SinkFunc(func(Event) {})
+
+// Stream stamps events and fans them out.
+//
+// Stamping happens here rather than in each sink because two sinks given the
+// same event must agree about its sequence number: the websocket tells a
+// browser "you have seen up to 41" and the browser asks the database for
+// everything after 41. Two numberings make that question unanswerable.
+type Stream struct {
+	mu   sync.Mutex
+	seq  int64
+	now  func() time.Time
+	outs []Sink
+}
+
+// NewStream returns a Stream feeding outs.
+//
+// now is injected because a recorded timestamp is compared in tests; nothing
+// here waits on a clock, so there is no clock interface, as in
+// internal/provision.
+func NewStream(now func() time.Time, outs ...Sink) *Stream {
+	return &Stream{now: now, outs: outs}
+}
+
+// Emit numbers e, timestamps it and passes it to every sink.
+//
+// Sequence numbers start at 1, so the zero value of Event.Seq means "this
+// never went through a Stream" rather than "this was first".
+func (s *Stream) Emit(e Event) {
+	s.mu.Lock()
+	s.seq++
+	e.Seq = s.seq
+	if e.At.IsZero() {
+		e.At = s.at()
+	}
+	outs := s.outs
+	s.mu.Unlock()
+
+	for _, o := range outs {
+		o.Emit(e)
+	}
+}
+
+// Seq reports the last sequence number issued.
+func (s *Stream) Seq() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seq
+}
+
+func (s *Stream) at() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// Multi fans one event out to several sinks.
+//
+// Separate from Stream because not every fan-out should renumber: a Stream
+// inside a Stream would stamp an event twice and the second number would win.
+func Multi(outs ...Sink) Sink {
+	return SinkFunc(func(e Event) {
+		for _, o := range outs {
+			o.Emit(e)
+		}
+	})
+}
+
+// Label is how a unit is named in a line of output and in an error.
+//
+// One function rather than a format string here and another in the error
+// wrapping beside it: "job 1/2" appears in `job 1/2: pass 1, step 3/4` and in
+// `job 1/2: sd-server refused it`, and two spellings is how the UI starts
+// grouping a job's progress under a name its failure does not use.
+func Label(unit string, index, total int) string {
+	return fmt.Sprintf("%s %d/%d", unit, index, total)
+}
+
+// HumanBytes is for one line of operator-facing output.
+func HumanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	v, exp := float64(n), 0
+	for v >= unit && exp < 4 {
+		v /= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", v, "KMGT"[exp-1])
+}
