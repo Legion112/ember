@@ -1,10 +1,13 @@
 package sdserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/png"
 	"io"
 	"net"
 	"net/http"
@@ -254,12 +257,29 @@ func TestPoll_DecodesThePreviewFrameAndItsPass(t *testing.T) {
 		t.Fatal("no preview")
 	}
 	// The pass is carried because step/total_steps describe the pass and not
-	// the job: without it, a bar runs to 28/28 and then starts again at 1.
-	if st.Preview.Pass != 1 || st.Preview.Step != 14 || st.Preview.TotalSteps != 28 {
-		t.Errorf("preview = %+v, want pass 1 step 14/28", *st.Preview)
+	// the job: without it, a bar runs to 6/6 and then starts again at 1.
+	//
+	// The numbers are a real server's: the fixture was captured from
+	// sd-server generating a 64x64 image in six steps with preview_interval
+	// at 1, which is the first frame of the first pass.
+	if st.Preview.Pass != 1 || st.Preview.Step != 1 || st.Preview.TotalSteps != 6 {
+		t.Errorf("preview = %+v, want pass 1 step 1/6", *st.Preview)
 	}
-	if string(st.Preview.PNG) != "fake-preview-frame" {
-		t.Errorf("frame = %q, want the decoded bytes", st.Preview.PNG)
+
+	// A real PNG, not bytes. The previous fixture carried "fake-preview-frame"
+	// and this asserted the string back, which proves base64 decoding and
+	// nothing about what a frame is.
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(st.Preview.PNG))
+	if err != nil {
+		t.Fatalf("the frame does not decode: %v", err)
+	}
+
+	// Eight by eight for a 64x64 image: `proj` is a projection of the latent
+	// and the latent is one eighth of the image per side. Worth pinning,
+	// because anyone reading "preview frame" expects a thumbnail of the
+	// output and would size a UI for one.
+	if format != "png" || cfg.Width != 8 || cfg.Height != 8 {
+		t.Errorf("frame = %s %dx%d, want png 8x8 (the latent, not the image)", format, cfg.Width, cfg.Height)
 	}
 }
 
@@ -272,8 +292,14 @@ func TestPoll_DecodesTheFinishedImage(t *testing.T) {
 	if len(st.Images) != 1 {
 		t.Fatalf("images = %d, want 1", len(st.Images))
 	}
-	if string(st.Images[0].Data) != "fake-png-bytes" {
-		t.Errorf("image = %q, want the decoded bytes", st.Images[0].Data)
+	// The captured fixture's image is the 64x64 PNG that run produced, so
+	// this decodes rather than comparing a placeholder string to itself.
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(st.Images[0].Data))
+	if err != nil {
+		t.Fatalf("the finished image does not decode: %v", err)
+	}
+	if format != "png" || cfg.Width != 64 || cfg.Height != 64 {
+		t.Errorf("image = %s %dx%d, want png 64x64", format, cfg.Width, cfg.Height)
 	}
 }
 

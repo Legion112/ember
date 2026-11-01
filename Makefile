@@ -71,7 +71,7 @@ COVER_OVERALL := 94
 # labs and a rented pod run the same bytes.
 LAB_IMAGE := ember:lab
 
-.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
+.PHONY: all build test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
 
 all: fmt vet test build
 
@@ -236,6 +236,33 @@ test-image-labs:
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
 		-run 'TestWorkloadImage_' | tee /tmp/ember-image-labs-sm$(CUDA_ARCH).log
 	@if grep -q -- '--- SKIP' /tmp/ember-image-labs-sm$(CUDA_ARCH).log; then \
+		echo "a lab skipped itself"; exit 1; fi
+
+# The served path against a real sd-server, including the progress stream.
+#
+# Needs only ember:sd -- the CPU build -- because sd-server there starts
+# without a GPU, which the CUDA build cannot: it wants libcuda.so.1 to do
+# anything at all. The two are pinned to the same upstream revision, and
+# TestWorkloadImages_PinTheSameUpstreamRevision is what keeps that true, so
+# this says something about the program that goes to RunPod rather than about
+# a different one.
+#
+# Not part of test-image-labs-publish: a publish of the CUDA image should not
+# require an unrelated image to exist, which is the same reason the video lab
+# is absent from it.
+#
+# The whole thing runs in about twenty seconds on a laptop. Set
+# EMBER_CAPTURE_DIR to have it write the server's own responses out as
+# fixtures; see internal/sdserver/testdata/README.md for what promoting one
+# means.
+test-preview-lab:
+	@docker image inspect $(SD_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(SD_IMAGE) is missing. Build it with:"; \
+		echo "  make workload-sd MODEL=/path/to/a.gguf"; exit 1; }
+	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v \
+		-timeout 25m ./test/integration/... \
+		-run 'TestPreview_' | tee /tmp/ember-preview-lab.log
+	@if grep -q -- '--- SKIP' /tmp/ember-preview-lab.log; then \
 		echo "a lab skipped itself"; exit 1; fi
 
 # The labs a publish must pass, named once so CI and a laptop run the same set.

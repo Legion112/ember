@@ -833,14 +833,49 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `preview_modes`, `limits` and the whole job lifecycle. `capabilities.json`
   and `model_status_ready.json` are captured now, and
   `internal/sdserver/testdata/README.md` says which still are not.
-- **Deferred, and recorded rather than quietly skipped:** a lab that starts
-  `sd-server` in the published image and asserts it binds loopback only. The
-  CUDA binary needs `libcuda.so.1` to do anything, so there is no GPU-less
-  runner on which starting it proves something -- the same constraint that
-  sends the video-support check to the CPU build. The Dockerfile shape is
-  asserted as text on every pull request instead, and the first live run is
-  what will capture real fixtures over
-  `internal/sdserver/testdata/README.md`'s doc-derived ones.
+- **The deferral above was answered by the image it had ruled out.** It was
+  recorded as "no GPU-less runner can start sd-server", which is true of the
+  CUDA build and was never true of the CPU one: the upstream release zip has
+  always carried `sd-server` beside `sd-cli`, and `workload-sd.Dockerfile`
+  unzipped both and then put one of them on PATH. One symlink later there is
+  a lab that starts a real server, generates, and asserts on what comes back
+  -- on a laptop, with no GPU, in twenty-one seconds. The lesson is not about
+  previews: a deferral justified by a constraint should name which artifact
+  the constraint applies to, because this one quietly generalised from the
+  CUDA image to both and bought a year of "we cannot test that".
+- **Previews were the justification for the whole package and the least
+  verified thing in it.** ember knows what a sampler is because progress
+  reporting is impossible for a program that will not read its own payload.
+  Yet `job_generating.json` was written from api.md, the fake replayed that
+  guess, the unit tests confirmed ember agreed with itself, no lab touched the
+  served path, and the live FLUX.2 measurement ran `preview: none` in both
+  arms -- so no preview frame had ever been observed by anything. The same
+  closed loop `capabilities.model` sat in. `make test-preview-lab` now watches
+  a real six-step generation: seventeen frames, every step from 1/6 to 6/6,
+  each one a decodable PNG.
+- **A `proj` preview frame is the latent, not the image.** A 64x64 generation
+  produces 8x8 PNGs of about 250 bytes. Nothing in api.md says so and
+  "preview frame" reads like a thumbnail of the output, which is what anyone
+  sizing a display for one would assume.
+- **The wire guesses held, and that is also a result.** Every field ember
+  reads was already right -- `pass`, `step`, `total_steps`, `b64_json`,
+  `result.images[].b64_json`. What the doc-derived fixtures missed was the
+  surroundings: `cancel_requested`, `result.output_format`, a whole
+  `generation_info` object echoing the parameters, and timestamps in
+  milliseconds where the guesses used seconds. Recorded because the opposite
+  outcome is the one that gets written down, and a convention that only ever
+  reports its own vindication stops being read.
+- **Polling faster than the server samples is why the deduplication exists,
+  and now there is a measurement.** Eleven of sixteen consecutive frame pairs
+  were the same frame, at a 50 ms poll against CPU sampling. The assertion is
+  written so that a server which stopped repeating frames fails the lab
+  rather than silently turning ember's dedupe into dead code.
+- **Each of the three was checked by reinstating its bug.** A serve command
+  built with `--listen-ip 0.0.0.0` instead of through `ServeCommand` makes the
+  loopback lab report `sd-server listens on "0.0.0.0:1234"`; inverting the
+  repeat check makes it fail against live data, proving the branch is reached;
+  corrupting the captured frame's base64 makes the unit test report `image:
+  unknown format` rather than passing on bytes that are not an image.
 
 ## Style
 

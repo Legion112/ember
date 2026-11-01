@@ -1,16 +1,18 @@
 {
-  "id": "job_7f3a",
+  "cancel_requested": false,
+  "completed": null,
+  "created": 1793535393759,
+  "error": null,
+  "id": "job_1a1970a3fdf_00000000",
   "kind": "img_gen",
-  "status": "generating",
-  "created": 1762000000,
-  "started": 1762000001,
-  "queue_position": 0,
   "preview": {
+    "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAlElEQVR4XmNg+P+fgYHhNIPpbYa6/yDOfwhgAIFmhv8l+8Ci5/5/+f9/s+P//zNAOhz/WwG1ResxQMB/a5AeMBusmU2ZIfH//0kMyf8Zav6DzP+/gwFiURRI0W8Q+/9Ghv9gMQcQDRJexMD5/38GUAwo8P+ty7QbDAv/f/1v1nIN5qqNin+Ass0g7un/DBDHMkCdCwD/HGc5QK02UQAAAABJRU5ErkJggg==",
     "pass": 1,
-    "step": 14,
-    "total_steps": 28,
-    "b64_json": "ZmFrZS1wcmV2aWV3LWZyYW1l"
+    "step": 1,
+    "total_steps": 6
   },
+  "queue_position": 0,
   "result": null,
-  "error": null
+  "started": 1793535393759,
+  "status": "generating"
 }

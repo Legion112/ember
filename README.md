@@ -304,7 +304,21 @@ make test       # unit tests, race detector, no Docker or network needed
 make lint
 make cover-check
 make test-integration   # Docker labs; needs a working Docker daemon
+make test-preview-lab   # the served path against a real sd-server, no GPU
 ```
+
+`make test-preview-lab` is the one that watches a generation happen. It starts
+`sd-server` inside `ember:sd` — the CPU workload image, so no GPU is involved —
+drives it over a real SSH connection through `direct-tcpip`, and asserts on the
+progress frames that come back: a 64×64 image in six steps produces seventeen
+frames, every step from 1/6 to 6/6, each a decodable PNG. It also checks that
+the server binds `127.0.0.1` and nothing else. Twenty-one seconds on a laptop;
+build the image first with `make workload-sd MODEL=/path/to/a.gguf`.
+
+Set `EMBER_CAPTURE_DIR` on it to write the server's own responses out as
+fixtures — `internal/sdserver/testdata/README.md` records, per file, whether a
+fixture was captured from a running server or written from documentation, and
+why that distinction has already cost this repository money.
 
 There is also a stateful fake of RunPod's API (`test/integration/runpodfake`)
 whose control plane is pretend and whose data plane is a real container: the
