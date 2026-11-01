@@ -36,10 +36,51 @@ import (
 // for a server the first becomes log events and the second becomes rows in a
 // database.
 func (p Plan) Do(ctx context.Context, out io.Writer, sink report.Sink) error {
-	return provision.WithNode(ctx, p.Provider, p.Spec, p.Offer, p.Options,
+	return provision.WithNode(ctx, p.Provider, p.Spec, p.Offer, p.lifecycle(sink),
 		func(ctx context.Context, s provision.Session) error {
 			return p.serve(ctx, out, sink, s)
 		})
+}
+
+// lifecycle returns this plan's Options with the two moments a caller cannot
+// otherwise see routed to sink.
+//
+// A COPY, so the hooks belong to this run and not to the process. Options is
+// a value and `ember serve` builds one at startup and shares it -- see
+// BuildOptions on why the journal and the pin store must be per process --
+// so assigning the hooks in place would send one run's progress to whichever
+// run started last.
+//
+// The destroy half is the one that is otherwise unreachable: WithNode's
+// teardown is deferred, so it runs after the closure above has already
+// returned. A reader of events that stopped when the pipeline returned would
+// never see what the rental cost, and would miss "the node may still be
+// running and billing" entirely -- which is the one line an operator must not
+// miss.
+func (p Plan) lifecycle(sink report.Sink) provision.Options {
+	o := p.Options
+	o.OnReady = func(h node.Handle, e node.Endpoint, deadline time.Time, price node.Rate) {
+		sink.Emit(report.Event{
+			Kind: report.KindNodeReady,
+			Node: h.String(), Endpoint: e.String(),
+			Deadline: deadline, Rate: price,
+		})
+	}
+	o.OnDestroyed = func(h node.Handle, bill node.Billing, err error) {
+		if err != nil {
+			sink.Emit(report.Event{
+				Kind: report.KindDestroyFailed,
+				Node: h.String(), Err: err.Error(),
+			})
+			return
+		}
+		sink.Emit(report.Event{
+			Kind: report.KindRunCost,
+			Node: h.String(), Cost: bill.Cost, Rate: bill.Rate,
+			Elapsed: bill.Elapsed, Billable: bill.Billable,
+		})
+	}
+	return o
 }
 
 // SyncAssets rents a machine with no card and has it fill the store.
