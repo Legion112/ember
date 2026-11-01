@@ -607,6 +607,59 @@ A leaked node bills by the hour in silence. These are not style preferences.
   it aborted after a 1.6 GB weight fetch. A probe that compares
   `/etc/ember-cuda-arch` to the card's own `compute_cap` refuses it — verified
   in both directions, rejecting sm_75-on-sm_89 and admitting sm_120-on-sm_120.
+- **The overhead is per rental, not per result.** Ten 1024x1024 FLUX.2 images
+  generated locally spent 4143 s wall against 3872 s of sampling: 27 s of
+  overhead per run, 7%. Tolerable here, because nothing is pulled and 56 GiB of
+  weights stay in the page cache so a reload costs 0.05 s. On a rented A100 the
+  same shape is about three minutes per rental -- provisioning, image pull,
+  store read and verify, model load -- against roughly 100 seconds of
+  generation, so ten images rented ten times spend more than half the bill
+  re-doing setup. `cmds` runs them on one node and pays it once. The cost was
+  worst exactly where ember is supposed to help.
+- **A batch brings each result home as it is produced.** Fetching once at the
+  end means an expired TTL, a dropped connection or a closed laptop loses
+  everything rather than everything so far -- and an operator cannot look at
+  the third image and decide to stop paying for the other seven. A ten-step
+  batch is over an hour of a rented card, which is a long time to be holding
+  every result on a machine that is about to be destroyed.
+- **The fetch bound is a file on the node, never a timestamp from here.**
+  ember's clock and the node's are different clocks, so `--newer=@<unix
+  computed here>` sends too much or too little whenever they disagree -- and
+  "too little" is silent data loss. A marker touched on the node is compared
+  against mtimes from that same clock, so skew cannot enter. GNU tar spells it
+  `--newer`; `--newer-than` is not a flag and fails the whole command, found by
+  running it against the node image rather than by reading the man page.
+- **A failed step stops the batch, and that step's output is still fetched.**
+  A batch where step 3 failed and 4 through 10 ran anyway is a batch nobody can
+  trust, and the remaining steps bill for work the operator no longer wants.
+  The output of the step that failed is often the one that explains why, so it
+  is collected before the stop -- on a context that survives Ctrl-C, for the
+  reason every other fetch is. **A marker that cannot be touched is wasteful,
+  not fatal:** the next fetch sends everything again, which costs bandwidth and
+  loses nothing.
+- **A step reports card time, not its share of the bill.** The rental also
+  paid for provisioning, the image pull and the asset verify, and a batch pays
+  those once for all of it rather than once per step -- which is the entire
+  saving. Folding them into a per-step figure would overstate it, so the
+  wording says "of card time". It is timed across the fetch as well as the
+  workload, and not from `workload.Run`'s own duration: the card stays rented
+  while the output comes over the wire, so a figure that stopped at the
+  workload would understate every step that moved anything large -- which is
+  the direction a money figure must never be wrong in.
+- **`max_run_usd` cannot name the step it bit on, because it bites before any
+  step exists.** The issue asked for that message; the premise was wrong.
+  `Budget.Allow` is checked against the offer's price times the TTL at
+  selection time, so a batch does not make it fire later -- it is a ceiling on
+  the rental, not a running meter. A batch that needs longer needs a larger
+  `ttl`. Written down because the request looks reasonable and implementing it
+  would have meant inventing a mid-run meter nothing else needs.
+- **`rejectSecrets` does not scan `cmd` or `cmds`, and should not.** The
+  markers are substring matches on lowercase -- `secret`, `token`, `password`
+  -- and a workload's argv carries prompts, which are arbitrary English. "A
+  token of affection" is a legitimate prompt and refusing it would be a false
+  positive on the one field an operator edits most. The argv rule is enforced
+  where it belongs instead: ember passes no *credential* as a flag, and
+  `/proc/<pid>/cmdline` being world-readable is why.
 
 ## Style
 
