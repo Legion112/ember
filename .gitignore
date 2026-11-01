@@ -13,3 +13,10 @@ credentials.yaml
 *.key
 id_ed25519*
 .model.gguf
+
+# Claude Code's per-project permission rules. Local and not committed: they
+# say what this machine lets an agent do to this repository's issues and pull
+# requests under the operator's own GitHub account, which is a property of the
+# machine and the account rather than of the code. A committed copy would hand
+# the same grants to anybody who clones and runs an agent here.
+.claude/settings.local.json

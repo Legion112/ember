@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
 	"github.com/Legion112/ember/internal/httpx"
 	"github.com/Legion112/ember/internal/node"
@@ -967,5 +968,75 @@ sd:
 func TestDescribeJob_OmitsAHalfSpecifiedGeometry(t *testing.T) {
 	if got := describeJob(sdserver.Job{Prompt: "a", Width: 512}); strings.Contains(got, "512") {
 		t.Errorf("describeJob = %q, want no geometry when only one side is set", got)
+	}
+}
+
+// TestExampleConfigs_CanSyncTheirOwnStore is the regression test for a bug
+// this repository shipped and nobody noticed.
+//
+// Converting the example configs to per-architecture `images:` maps removed
+// their scalar `image:`. That is fine for `ember up`, which picks by the
+// card's architecture -- and fatal for `ember store sync`, which rents a CPU
+// machine on purpose. A CPU box has no compute capability, so the map cannot
+// answer for it and is deliberately not consulted; with no scalar to fall
+// back to, the command refuses. The effect was that ember.flux2.yaml,
+// ember.video.example.yaml and ember.sd-server.example.yaml could not
+// populate the stores they depend on, and the only way to find out was to
+// run the command.
+//
+// Checked against the committed files rather than a fixture, because the
+// files are the thing that was wrong.
+func TestExampleConfigs_CanSyncTheirOwnStore(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "..", "ember*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) < 3 {
+		t.Fatalf("found %d example config(s), want at least 3; the glob is checking nothing", len(paths))
+	}
+
+	// What `ember store sync` rents: no GPU, so no architecture.
+	cpu := node.Offer{Provider: "runpod", Token: "cpu3c", VCPU: 4}
+	if cpu.HasGPU() {
+		t.Fatal("the stand-in offer has a GPU, so it does not exercise the CPU path")
+	}
+
+	// Filtered before the subtests rather than skipped inside them: CI greps
+	// the unit log for "--- SKIP" and fails on a hit, because a test that
+	// skips itself reports success for something that never ran. A config
+	// with no assets has nothing to sync and is simply not a case here.
+	var withAssets []string
+	for _, p := range paths {
+		cfg, err := config.Load(p)
+		if err != nil {
+			t.Fatalf("%s does not load: %v", filepath.Base(p), err)
+		}
+		if len(cfg.Assets) > 0 {
+			withAssets = append(withAssets, p)
+		}
+	}
+	if len(withAssets) == 0 {
+		t.Fatal("no committed config lists assets, so this test is checking nothing")
+	}
+
+	for _, p := range withAssets {
+		t.Run(filepath.Base(p), func(t *testing.T) {
+			cfg, err := config.Load(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, from, err := resolveImage(cfg, cpu)
+			if err != nil {
+				t.Fatalf("this config lists %d asset(s) but cannot resolve an image for the CPU "+
+					"machine `ember store sync` rents, so it cannot populate its own store: %v",
+					len(cfg.Assets), err)
+			}
+			if from != "image:" {
+				t.Errorf("resolved from %q, want the scalar image:", from)
+			}
+			if ref == "" {
+				t.Error("resolved an empty reference")
+			}
+		})
 	}
 }

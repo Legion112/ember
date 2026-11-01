@@ -36,6 +36,19 @@ images:
 # Video is minutes per clip, not the second an image takes. The ceiling here
 # is what stops a run that wedged from billing until somebody notices, so it
 # is set from the job rather than left at the default.
+# The image for the CPU machine `ember store sync` rents.
+#
+# A scalar beside the map, because the two answer different questions: a CPU
+# box has no compute capability, so `images:` cannot choose for it and is not
+# consulted. Without this, `ember store sync` on this very file refuses with
+# "there is no architecture to choose an image by" -- the config could not
+# populate the store it depends on.
+#
+# The node image and not a workload one: this machine only runs `embernode
+# fetch`, and pulling 2.9 GB of CUDA to download files would be billed for
+# nothing.
+image: ghcr.io/legion112/ember-node@sha256:cf62de1920ed868fbe567b8bd127ed693d2ced3d163de49a0816534906179f3f
+
 ttl: 2h
 
 # The store pins every node that mounts it to its own datacentre, so the GPU
