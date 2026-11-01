@@ -916,6 +916,33 @@ and renting a second card for work the operator may no longer want is not a
 decision ember makes on their behalf. Whatever images it produced stay listed,
 because they were paid for.
 
+### Checking it works
+
+```bash
+make test-integration    # the serve labs that need no workload image
+make test-serve-lab      # one rental drained by a queue, and the real UI
+```
+
+The first group runs on every pull request and is the security half: that the
+server answers on both loopback families and on none of this machine's other
+addresses, that a page from somewhere else is refused, that a paid provider is
+refused without the flag, that SIGINT destroys the rental and says so, and that
+SIGKILL leaves exactly one finding `ember ls` reports as needing attention.
+
+`make test-serve-lab` needs [`ember:sd`](#workload-images) and a Chrome or
+Chromium binary. It queues a three-job batch, waits until it is generating,
+queues a second request, and asserts from ember's own output that **one** node
+served both — then drives the real page in a real browser: offers listed,
+prompt typed, generate clicked, the sampling step advancing, and an image that
+decodes.
+
+That browser lab is not completeness. Three bugs in this feature were invisible
+to every Go test and every `cargo test` and obvious the moment a page loaded: a
+nil slice marshalled as `null` dropped whole websocket updates, a keyed list
+never re-rendered so the progress row froze, and a cached wasm meant a reload
+after `make web` served the previous app. It is the only thing in the
+repository that can see them.
+
 ### Stopping it
 
 Ctrl-C destroys any rental before the process exits, and says so. `ember serve`

@@ -251,6 +251,16 @@ that sentence made unrepresentable rather than merely tested.
   fake that is tidier than the service it stands in for tests a service that
   does not exist. The previous RunPod tests used one-off handlers returning a
   canned blob, which cannot express the thing that actually breaks: time.
+- **A UI has a class of bug no unit test can reach, so one lab drives a
+  browser.** Three in this feature were invisible to the Go tests and to
+  `cargo test` and obvious the moment a page loaded: a nil slice marshalled as
+  `null` dropped whole websocket updates, a keyed list never re-rendered so the
+  progress row froze while the step advanced in the database, and a cached wasm
+  meant a reload after `make web` served the previous app. `TestServe_UI` is
+  chromedp against the real page, and it exists for exactly those -- not for
+  coverage. Its selectors are the page's own structure rather than attributes
+  added for it, so markup that changes breaks the test, which is the correct
+  direction.
 - **A regression test that has never failed proves nothing.** Each of these
   was checked by reinstating the bug and watching the lab go red. The
   trust-on-first-use lab fails with the exact warning the live run printed.

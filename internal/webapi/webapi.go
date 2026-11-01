@@ -177,31 +177,42 @@ func (s *Server) guarded(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// Serve binds both loopback families and serves until ctx ends.
+// Listen binds both loopback families and hands back what it got.
 //
-// IT RETURNS AFTER THE LISTENERS ARE CLOSED AND NOT AFTER THE RUNS ARE. The
-// queue's own Run is what owns a rental's lifetime, and a caller must wait for
-// both -- waiting only for this one would exit while a node is alive, which is
-// the single most expensive bug available here. cmd_serve does both, in that
-// order.
-func (s *Server) Serve(ctx context.Context) error {
+// SEPARATE FROM Serve SO THE PORT IS BOUND BEFORE ANYTHING IS PRINTED.
+// `ember serve` announces a URL, and announcing one that is not listening yet
+// means an operator who clicks it immediately gets connection-refused and
+// concludes ember is broken. It also means "is another ember serve running?"
+// is answered before the process claims to have started. A lab found this by
+// racing its own helper against the announcement.
+//
+// Both families, because a v4-only listener is invisible to a browser that
+// resolves localhost to ::1 first. One of the two missing is not fatal -- a
+// machine with IPv6 disabled is ordinary -- and both missing is.
+func (s *Server) Listen(ctx context.Context) ([]net.Listener, error) {
 	lns := make([]net.Listener, 0, 2)
-	// Both families, for the reason the package comment gives.
 	for _, b := range []loopback.Bind{loopback.Port(s.opts.Port), loopback.Port6(s.opts.Port)} {
 		ln, err := loopback.Listen(ctx, b)
 		if err != nil {
-			// One family missing is not fatal -- a machine with IPv6 disabled
-			// is ordinary -- but both are.
 			s.log().Warn("could not listen on one loopback family", "bind", b.String(), "err", err)
 			continue
 		}
 		lns = append(lns, ln)
 	}
 	if len(lns) == 0 {
-		return fmt.Errorf("could not listen on 127.0.0.1:%s or [::1]:%s; is another ember serve running?",
+		return nil, fmt.Errorf("could not listen on 127.0.0.1:%s or [::1]:%s; is another ember serve running?",
 			s.port, s.port)
 	}
+	return lns, nil
+}
 
+// Serve accepts on lns until ctx ends, then drains and closes them.
+//
+// IT RETURNS AFTER THE LISTENERS ARE CLOSED AND NOT AFTER THE RUNS ARE. The
+// queue's own Run is what owns a rental's lifetime, and a caller must wait for
+// both -- waiting only for this one would exit while a node is alive, which is
+// the single most expensive bug available here. cmd_serve does both.
+func (s *Server) Serve(ctx context.Context, lns []net.Listener) error {
 	srv := &http.Server{Handler: s.mux, ReadHeaderTimeout: readHeaderTimeout}
 
 	errs := make(chan error, len(lns))

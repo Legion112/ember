@@ -155,6 +155,15 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		return err
 	}
 
+	// BOUND BEFORE ANNOUNCED. Printing a URL that is not listening yet means
+	// an operator who clicks it immediately gets connection-refused, and it
+	// means "another ember serve is already running" is reported after this
+	// one has claimed to start.
+	lns, err := srv.Listen(ctx)
+	if err != nil {
+		return err
+	}
+
 	announce(out, srv, cfg, o.AllowPaid, o.Dist, ps.Outputs)
 
 	// SHUTDOWN ORDER IS THE WHOLE POINT OF WHAT FOLLOWS.
@@ -177,7 +186,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		serveErr = srv.Serve(ctx)
+		serveErr = srv.Serve(ctx, lns)
 	}()
 	go func() {
 		defer wg.Done()

@@ -47,35 +47,35 @@ func TestServe_AnswersOnBothLoopbackFamilies(t *testing.T) {
 	h := newHarness(t, func(o *Options) { o.Port = port })
 
 	ctx, cancel := context.WithCancel(t.Context())
+	// Bound before anything else: Listen returning is what says the port is
+	// there, which is why it is separate from Serve.
+	lns, err := h.Listen(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan error, 1)
-	go func() { done <- h.Serve(ctx) }()
+	go func() { done <- h.Serve(ctx, lns) }()
 
 	for _, host := range []string{
 		fmt.Sprintf("127.0.0.1:%d", port),
 		fmt.Sprintf("[::1]:%d", port),
 	} {
 		t.Run(host, func(t *testing.T) {
-			var body string
-			// The listener may not be up on the first attempt; the server is
-			// starting in another goroutine.
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				resp, err := http.Get("http://" + host + "/api/config") //nolint:noctx // a loopback probe in a test
-				if err == nil {
-					defer func() { _ = resp.Body.Close() }()
-					if resp.StatusCode != http.StatusOK {
-						t.Fatalf("status = %d", resp.StatusCode)
-					}
-					body = resp.Status
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatalf("%s never answered: %v", host, err)
-				}
-				time.Sleep(20 * time.Millisecond)
+			// No retry loop: Listen has already bound, so the socket is
+			// there. A probe that needed retries would mean the split
+			// between Listen and Serve had not bought what it exists for.
+			req, err := http.NewRequestWithContext(t.Context(), "GET",
+				"http://"+host+"/api/config", nil)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if body == "" {
-				t.Error("no answer")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("%s did not answer: %v", host, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d", resp.StatusCode)
 			}
 		})
 	}
@@ -105,22 +105,11 @@ func TestServe_IsReachableFromNowhereElse(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() { _ = h.Serve(ctx) }()
-
-	// Wait for it to be up.
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			_ = c.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the server never came up: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
+	lns, err := h.Listen(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
+	go func() { _ = h.Serve(ctx, lns) }()
 
 	// Every non-loopback address this machine has. There should be no
 	// listener on any of them.
@@ -166,9 +155,12 @@ func TestServe_SaysSoWhenThePortIsTaken(t *testing.T) {
 	}
 
 	h := newHarness(t, func(o *Options) { o.Port = port })
-	err = h.Serve(t.Context())
+	// Listen is where this is reported, before anything is announced: an
+	// operator must not be told a URL that belongs to somebody else's
+	// process.
+	_, err = h.Listen(t.Context())
 	if err == nil {
-		t.Fatal("Serve succeeded with the port already taken")
+		t.Fatal("Listen succeeded with the port already taken")
 	}
 	if !strings.Contains(err.Error(), "another ember serve") {
 		t.Errorf("err = %v, want it to suggest the likely cause", err)
