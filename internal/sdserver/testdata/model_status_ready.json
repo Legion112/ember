@@ -1,0 +1,10 @@
+{
+  "state": "ready",
+  "recipe": "flux2-dev",
+  "models": {
+    "diffusion": "flux2-dev-Q8_0.gguf"
+  },
+  "error": null,
+  "revision": 3,
+  "load_elapsed_seconds": 12.47
+}

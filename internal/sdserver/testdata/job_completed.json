@@ -1,0 +1,18 @@
+{
+  "id": "job_7f3a",
+  "kind": "img_gen",
+  "status": "completed",
+  "created": 1762000000,
+  "started": 1762000001,
+  "completed": 1762000101,
+  "queue_position": 0,
+  "result": {
+    "images": [
+      {
+        "index": 0,
+        "b64_json": "ZmFrZS1wbmctYnl0ZXM="
+      }
+    ]
+  },
+  "error": null
+}

@@ -1,0 +1,13 @@
+{
+  "id": "job_7f3a",
+  "kind": "img_gen",
+  "status": "failed",
+  "created": 1762000000,
+  "completed": 1762000002,
+  "queue_position": 0,
+  "result": null,
+  "error": {
+    "code": "invalid_request",
+    "message": "width must be a multiple of 16"
+  }
+}
