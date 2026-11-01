@@ -117,6 +117,10 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 	hourly, run, _ := cfg.Budgets()
 
 	v := configView{
+		// An empty list and never null, for the reason ws.go gives: a client
+		// whose field is a list gets a type error from `null` and drops the
+		// whole response.
+		Providers:       []providerView{},
 		Ceilings:        ceilings{TTL: dur(cfg.TTL), MaxHourly: rate(hourly), MaxRun: usd(run)},
 		AllowPaid:       allowPaid,
 		Servable:        len(cfg.SD.Serve) > 0,
@@ -350,7 +354,8 @@ func viewRequest(r genstore.Request, ims []genstore.Image) requestView {
 		Provider: r.Provider, GPU: r.GPU, Offer: r.Offer, Node: r.Node,
 		TTL: dur(r.TTL), Cost: usd(r.Cost), Error: r.Err,
 		Preview: r.Preview, PreviewInterval: r.PreviewInterval,
-		Jobs: []newJob{},
+		Jobs:   []newJob{},
+		Images: []imageRef{},
 	}
 	if !r.Started.IsZero() {
 		v.Started = r.Started.UTC().Format(time.RFC3339)

@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -23,12 +25,26 @@ import (
 //go:embed all:dist
 var dist embed.FS
 
-// builtMarker is a file only `make web` produces.
+// builtFiles are what `make web` produces and the committed tree does not.
 //
-// Its absence is how `ember serve` knows it is serving the placeholder, which
-// is better than serving a page that looks broken: an operator who has not
-// run `make web` gets a sentence telling them to.
-const builtMarker = "ember_bg.wasm"
+// BOTH, because they can disagree and a test caught them doing it: Built()
+// keyed on the wasm while the page keyed on index.html, so a tree with one and
+// not the other reported itself built and then served the placeholder --
+// telling the operator nothing was built while claiming it was. The page is
+// what a browser loads and the module is what the page loads, so a build is
+// only a build when there are both.
+var builtFiles = []string{"index.html", "ember_bg.wasm"}
+
+// placeholderName is the committed page, served when nothing has been built.
+//
+// NOT index.html, and that is the point. `make web` writes a real index.html
+// into this directory, so if the placeholder had that name then building the
+// UI would leave the repository dirty and every test about the placeholder
+// would pass or fail depending on whether somebody had run `make web` --
+// which is the "behaves differently from one machine to the next" problem
+// AGENTS.md is written against. The built files are gitignored; this one is
+// committed.
+const placeholderName = "placeholder.html"
 
 // static serves the UI.
 //
@@ -66,12 +82,31 @@ func (s *Server) static() http.Handler {
 // "run make web" rather than a page they have to interpret.
 func (s *Server) Built() bool {
 	if s.opts.Dist != "" {
-		if _, err := os.Stat(s.opts.Dist + string(os.PathSeparator) + builtMarker); err == nil {
+		if allPresent(func(name string) error {
+			_, err := os.Stat(filepath.Join(s.opts.Dist, name))
+			return err
+		}) {
 			return true
 		}
+		// A -dist that exists but holds no build falls back to the embedded
+		// copy, so the answer is about that one.
 	}
-	_, err := dist.Open("dist/" + builtMarker)
-	return err == nil
+	return allPresent(func(name string) error {
+		f, err := dist.Open("dist/" + name)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	})
+}
+
+func allPresent(stat func(string) error) bool {
+	for _, name := range builtFiles {
+		if stat(name) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) serveFS(f fs.FS) http.Handler {
@@ -85,13 +120,43 @@ func (s *Server) serveFS(f fs.FS) http.Handler {
 			s.fail(w, http.StatusForbidden, err)
 			return
 		}
+		// NOTHING HERE IS CACHED, and that is a decision rather than
+		// laziness. `make web` writes ember.js and ember_bg.wasm under names
+		// that do not change between builds, so a browser holding the
+		// previous ones serves the previous app -- and the operator reloads,
+		// sees no change, and concludes the build did nothing. That happened
+		// while this UI was being written, twice, and cost more time than
+		// re-fetching a megabyte over loopback ever will.
+		//
+		// The alternative is hashing the filenames, which means the page has
+		// to be generated rather than copied, which means a template, for an
+		// asset that travels zero network hops.
+		w.Header().Set("Cache-Control", "no-store")
+
 		// A client-rendered app owns its own routes, so anything that is not
-		// a file is the app's own path and gets index.html. Without this, a
-		// reload on /requests/abc is a 404.
-		if r.URL.Path != "/" && !strings.Contains(r.URL.Path, ".") {
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
+		// a file is the app's own path. Without this, a reload on
+		// /requests/abc is a 404.
+		if r.URL.Path == "/" || !strings.Contains(path.Base(r.URL.Path), ".") {
+			s.serveApp(w, r, f)
+			return
 		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+// serveApp writes the page: what `make web` built, or the committed
+// placeholder when nothing has.
+func (s *Server) serveApp(w http.ResponseWriter, r *http.Request, f fs.FS) {
+	for _, name := range []string{"index.html", placeholderName} {
+		b, err := fs.ReadFile(f, name)
+		if err != nil {
+			continue
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if _, werr := w.Write(b); werr != nil {
+			s.log().Debug("could not write the page", "err", werr)
+		}
+		return
+	}
+	http.NotFound(w, r)
 }

@@ -837,23 +837,54 @@ func TestNew_DefaultsThePort(t *testing.T) {
 	}
 }
 
-// TestStatic_ServesThePlaceholderAndSaysItIsOne.
+// TestStatic_ServesWhateverWasBuiltAndSaysWhichItIs.
 //
-// The committed placeholder is what makes `go build ./...` work on a clean
-// clone: //go:embed fails at compile time when its pattern matches nothing.
-// Built() is how `ember serve` knows to print "run make web" rather than
-// leaving an operator to interpret a page.
-func TestStatic_ServesThePlaceholderAndSaysItIsOne(t *testing.T) {
+// IT ASSERTS THE RELATIONSHIP, NOT ONE OF THE TWO STATES, because both are
+// correct: a clean clone has only the committed placeholder, and a tree where
+// somebody ran `make web` has a real app. A test that asserted one would pass
+// or fail depending on whether the person running it had built the UI, which
+// is the "behaves differently from one machine to the next" problem AGENTS.md
+// is written against.
+//
+// What must hold either way is that Built() and the page agree: `ember serve`
+// prints "run make web" exactly when the page is the placeholder, so an
+// operator is never told to build something that is already there, and never
+// left to interpret a page that is a stub.
+func TestStatic_ServesWhateverWasBuiltAndSaysWhichItIs(t *testing.T) {
 	h := newHarness(t)
 	w := h.do(t, "GET", "/", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "make web") {
-		t.Errorf("the placeholder does not say how to build the UI:\n%s", w.Body.String())
-	}
+	body := w.Body.String()
+
+	// The placeholder's own sentence, which only it has. Matching on
+	// "make web" would be wrong: the built page's HTML comment mentions the
+	// command too, and the first version of this test failed on that.
+	const notBuilt = "was not built into this binary"
+
 	if h.Built() {
-		t.Error("Built() is true for the placeholder")
+		// A built page loads the module `make web` produced beside it.
+		if !strings.Contains(body, "ember.js") {
+			t.Errorf("Built() is true but the page does not load the module:\n%s", body)
+		}
+		if strings.Contains(body, notBuilt) {
+			t.Error("a built page still tells the operator to build it")
+		}
+	} else {
+		if !strings.Contains(body, notBuilt) {
+			t.Errorf("Built() is false but the page does not say so:\n%s", body)
+		}
+		if !strings.Contains(body, "make web") {
+			t.Errorf("the placeholder does not name the command that builds it:\n%s", body)
+		}
+	}
+
+	// Never cached either way: the page is a loader for a module whose name
+	// does not change between builds, so a cached one is an operator
+	// reloading after `make web` and seeing the old app.
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("cache-control = %q, want no-store", got)
 	}
 }
 
@@ -866,7 +897,7 @@ func TestStatic_AClientRenderedRouteGetsTheApp(t *testing.T) {
 		t.Fatalf("status = %d, want the app", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "<title>ember</title>") {
-		t.Error("a client-side route did not get index.html")
+		t.Error("a client-side route did not get the app")
 	}
 }
 

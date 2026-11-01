@@ -142,13 +142,22 @@ func TestAnnounce_SaysWhatIsNotGuarded(t *testing.T) {
 		"--allow-paid",
 		"no authentication",
 		"/tmp/out",
-		// The UI was not built into this test binary, so it says so.
-		"make web",
 		"destroyed before this exits",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the announcement does not mention %q:\n%s", want, got)
 		}
+	}
+
+	// "run make web" appears exactly when there is no UI built in, and the
+	// assertion is the RELATIONSHIP rather than either state -- because both
+	// are correct and which one holds depends on whether the person running
+	// the tests has built the frontend. A test that assumed one passed on CI
+	// and failed on a laptop, which is the same "behaves differently from one
+	// machine to the next" problem the injected Docker engine exists for.
+	if srv.Built() == strings.Contains(got, "make web") {
+		t.Errorf("Built() is %v but the announcement %s mention building it:\n%s",
+			srv.Built(), map[bool]string{true: "does", false: "does not"}[strings.Contains(got, "make web")], got)
 	}
 
 	var allowed bytes.Buffer

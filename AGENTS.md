@@ -20,6 +20,18 @@ This project is **Go-first**, like `go-tun`, `transcription` and `sms-gateway`.
   reconnecting client has to be told what it missed from a cursor -- which a
   ring buffer cannot answer once it has wrapped.
 
+  Rust lives in `web/` and nothing in `internal/` imports anything from it.
+  `go build ./...` and `go test ./...` work on a clean clone with no Rust
+  installed, because `internal/webapi/dist` carries a committed placeholder --
+  `//go:embed` fails at *compile* time when its pattern matches nothing, so an
+  empty directory there would make the Go toolchain depend on the Rust one.
+  `Cargo.lock` is committed and `wasm-bindgen` is pinned to exactly the
+  installed CLI, because a mismatch between the generated glue and the binary
+  that processes it is a hard error; `make web` checks the two agree and names
+  which to change, the shape `require-arch` already uses. The built `ember.js`
+  and `ember_bg.wasm` are **not** committed: a wasm blob changes on every
+  build and nobody can review one.
+
   `github.com/coder/websocket` is the web UI's progress stream. It has **zero
   dependencies of its own**, which is most of the argument, and it refuses a
   cross-origin handshake by default -- so the one thing an attacker's page
@@ -381,6 +393,33 @@ that sentence made unrepresentable rather than merely tested.
   never repeats a frame: a fake tidier than the thing it stands in for tests a
   program that does not exist. Found by running `ember serve` and reading the
   database.
+- **Nothing the UI serves is cached, and that is a decision.** `make web`
+  writes `ember.js` and `ember_bg.wasm` under names that do not change between
+  builds, so a browser holding the previous ones serves the previous app --
+  and the operator reloads, sees no change and concludes the build did
+  nothing. That happened twice while this was being written. Hashing the
+  filenames would mean generating the page rather than copying it, for an
+  asset that travels zero network hops. A *result* image is still cached
+  forever, because it never changes; a preview frame is `no-store`, because it
+  is written over as sampling proceeds.
+- **A nil slice is `null` on the wire, and `null` is not an empty list.** The
+  websocket's first envelope of every connection carries no events by design,
+  so it arrived as `{"events":null}` -- and serde's `default` covers a field
+  that is MISSING rather than one that is present and null, so the whole
+  envelope failed to decode and took the request state with it. The UI showed
+  a job frozen at "starting" while the finished image was already on disk.
+  This is the `WithExposed` note above, reached from the other direction: an
+  empty answer and a nil answer are the same slice in Go and different values
+  in JSON. The server sends `[]`, and the client tolerates `null` anyway,
+  because the rule has to hold for a field somebody adds later.
+- **A keyed list only re-renders when the key changes.** The progress rows
+  were a Leptos `<For>` keyed on the job's index -- which is exactly what a
+  key should be, stable -- so a row rendered once when the job appeared and
+  then froze: the step never advanced on screen while it advanced in the
+  database. Re-rendering a handful of rows on each event costs nothing; a
+  frozen progress display costs the operator their belief that ember is
+  working. Only a browser could find this, which is the argument for the
+  chromedp lab.
 - **The remote end of a forward is built by `tunnel.RemoteLoopback(port)` and
   never parsed from input.** `direct-tcpip` connects anywhere the node can
   reach, including the provider's metadata service; a free-form remote host

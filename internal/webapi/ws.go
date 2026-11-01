@@ -154,6 +154,18 @@ func (s *Server) send(ctx context.Context, conn *websocket.Conn, id genstore.Req
 		return after, nil
 	}
 
+	// AN EMPTY LIST AND NEVER null.
+	//
+	// This is the bug AGENTS.md already records for WithExposed, reached from
+	// the other direction: Go marshals a nil slice as `null`, and a client
+	// whose field is a list gets a type error and drops the WHOLE envelope --
+	// the request state with it. Found by watching a generation in a browser:
+	// the first envelope of every connection carries no events, so every
+	// watcher lost its opening state and the UI showed a job stuck at
+	// "starting" while the image was already on disk.
+	if es == nil {
+		es = []report.Event{}
+	}
 	env := wsEnvelope{Next: after, Events: es}
 	if n := len(es); n > 0 {
 		env.Next = es[n-1].Seq

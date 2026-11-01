@@ -1,0 +1,159 @@
+//! fetch and WebSocket, straight from web-sys.
+//!
+//! No helper crate: about eighty lines here against another dependency tree,
+//! and what is needed is narrow -- four GETs, two POSTs and one socket.
+//!
+//! EVERYTHING IS SAME-ORIGIN AND RELATIVE. The server refuses any request
+//! whose `Origin` is not its own and any whose `Host` is not a loopback name
+//! at its own port, so a URL with a host in it would be refused by the thing
+//! it was pointed at. Relative paths also mean the port `ember serve` chose
+//! needs no plumbing: whatever served this page is what answers.
+
+use serde::de::DeserializeOwned;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{Request, RequestInit, Response};
+
+/// Error is what a call came to, as something a UI can print.
+pub type Error = String;
+
+fn window() -> Result<web_sys::Window, Error> {
+    web_sys::window().ok_or_else(|| "no window".to_string())
+}
+
+async fn send(req: Request) -> Result<(u16, String), Error> {
+    let resp = JsFuture::from(window()?.fetch_with_request(&req))
+        .await
+        .map_err(describe)?;
+    let resp: Response = resp.dyn_into().map_err(|_| "not a response".to_string())?;
+    let text = JsFuture::from(resp.text().map_err(describe)?)
+        .await
+        .map_err(describe)?;
+    Ok((resp.status(), text.as_string().unwrap_or_default()))
+}
+
+/// get fetches and decodes.
+pub async fn get<T: DeserializeOwned>(path: &str) -> Result<T, Error> {
+    let req = Request::new_with_str(path).map_err(describe)?;
+    let (status, body) = send(req).await?;
+    if status != 200 {
+        return Err(reason(status, &body));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("{path}: {e}"))
+}
+
+/// post sends JSON and decodes the answer.
+pub async fn post<B: serde::Serialize, T: DeserializeOwned>(
+    path: &str,
+    body: &B,
+) -> Result<T, Error> {
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    let json = serde_json::to_string(body).map_err(|e| e.to_string())?;
+    opts.set_body(&JsValue::from_str(&json));
+
+    let req = Request::new_with_str_and_init(path, &opts).map_err(describe)?;
+    req.headers()
+        .set("Content-Type", "application/json")
+        .map_err(describe)?;
+
+    let (status, text) = send(req).await?;
+    // 200 and 202 are both success here: a queued request is accepted, not
+    // finished, and the server says so.
+    if status != 200 && status != 202 {
+        return Err(reason(status, &text));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+/// reason pulls the server's own message out of a failure.
+///
+/// IN FULL, because `ember serve` is reachable only from this machine: there
+/// is nobody to withhold an internal message from, and the alternative is a UI
+/// that says "something went wrong" over an error naming the exact config key.
+fn reason(status: u16, body: &str) -> Error {
+    #[derive(serde::Deserialize)]
+    struct Wire {
+        error: String,
+    }
+    match serde_json::from_str::<Wire>(body) {
+        Ok(w) if !w.error.is_empty() => w.error,
+        _ => format!("the server answered {status}"),
+    }
+}
+
+fn describe(v: JsValue) -> Error {
+    v.as_string()
+        .or_else(|| {
+            js_sys::Reflect::get(&v, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|m| m.as_string())
+        })
+        .unwrap_or_else(|| "the request could not be sent".to_string())
+}
+
+/// Socket is a live progress stream for one request.
+///
+/// It resumes from a cursor, which is what makes a reconnect lossless: the
+/// server replays from the rows, so a page reload and a dropped connection are
+/// the same thing to it.
+pub struct Socket {
+    ws: web_sys::WebSocket,
+    // Kept alive for as long as the socket is: a dropped closure is a
+    // callback the browser will never call again, which here is a progress
+    // stream that silently stops.
+    _on_message: Closure<dyn FnMut(web_sys::MessageEvent)>,
+    _on_close: Closure<dyn FnMut(web_sys::CloseEvent)>,
+}
+
+impl Socket {
+    /// open starts watching a request from a sequence number.
+    pub fn open(
+        id: &str,
+        after: i64,
+        mut on_envelope: impl FnMut(crate::model::Envelope) + 'static,
+        mut on_closed: impl FnMut() + 'static,
+    ) -> Result<Self, Error> {
+        let loc = window()?.location();
+        let host = loc.host().map_err(describe)?;
+        // Same scheme as the page: http on loopback, so ws and never wss.
+        let url = format!("ws://{host}/ws?id={id}&after={after}");
+
+        let ws = web_sys::WebSocket::new(&url).map_err(describe)?;
+
+        let on_message = Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
+            if let Some(text) = e.data().as_string() {
+                match serde_json::from_str::<crate::model::Envelope>(&text) {
+                    Ok(env) => on_envelope(env),
+                    // Logged and not surfaced: a message this build cannot
+                    // decode is a newer ember talking to an older page, and
+                    // dropping one envelope is better than ending the stream.
+                    Err(err) => web_sys::console::warn_1(&JsValue::from_str(&format!(
+                        "ember-web: undecodable envelope: {err}"
+                    ))),
+                }
+            }
+        }) as Box<dyn FnMut(_)>);
+        ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+
+        let on_close = Closure::wrap(Box::new(move |_: web_sys::CloseEvent| {
+            on_closed();
+        }) as Box<dyn FnMut(_)>);
+        ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+
+        Ok(Self {
+            ws,
+            _on_message: on_message,
+            _on_close: on_close,
+        })
+    }
+}
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        // Closed explicitly. Letting it fall out of scope leaves the browser
+        // holding a connection to a generation nobody is watching, and the
+        // server holding a goroutine polling for it.
+        let _ = self.ws.close();
+    }
+}
