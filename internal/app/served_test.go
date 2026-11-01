@@ -881,3 +881,59 @@ func TestExampleConfigs_CanSyncTheirOwnStore(t *testing.T) {
 		})
 	}
 }
+
+// TestRunJobs_TheProgressEventNamesTheFrameItWrote is what lets a reader
+// above this package join a step to the picture of that step.
+//
+// The name travels on the progress event rather than on one of its own,
+// because a UI that learns there is a step 4 before it learns there is a
+// frame for it shows step 4 beside step 3's picture -- and because the name
+// is safeStem's to decide, so re-deriving it anywhere else is a second
+// spelling of the same rule.
+func TestRunJobs_TheProgressEventNamesTheFrameItWrote(t *testing.T) {
+	shrinkPoll(t)
+	f := newFakeSD(t)
+	f.pollsBeforeDone = 4
+	c, _ := f.start(t)
+	dir := filepath.Join(t.TempDir(), "run")
+
+	var rec recordingSink
+	if err := runJobs(t.Context(), &rec, c, testRun(
+		sdserver.Job{Prompt: "a cat", Output: "cat"},
+	), dir, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	var named int
+	for _, e := range rec.events {
+		if e.Kind != report.KindJobProgress {
+			continue
+		}
+		if len(e.Wrote) == 0 {
+			t.Errorf("step %d reported a frame and did not name it", e.Step)
+			continue
+		}
+		named++
+		if e.Wrote[0].Name != "cat-preview-00.png" {
+			t.Errorf("frame name = %q, want the name sdserver wrote", e.Wrote[0].Name)
+		}
+		if e.Wrote[0].Bytes != int64(len("preview-pixels")) {
+			t.Errorf("frame bytes = %d, want the file's own length", e.Wrote[0].Bytes)
+		}
+	}
+	if named == 0 {
+		t.Fatal("no progress event named a frame; a reader has nothing to join a step to")
+	}
+
+	// The file is on disk under the name the event gave, or the row points at
+	// nothing and the gallery is broken images.
+	if _, err := os.Stat(filepath.Join(dir, "cat-preview-00.png")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// recordingSink keeps every event, because an assertion about what a reader
+// above this package can join needs the values and not the rendered lines.
+type recordingSink struct{ events []report.Event }
+
+func (r *recordingSink) Emit(e report.Event) { r.events = append(r.events, e) }

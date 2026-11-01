@@ -422,6 +422,27 @@ that sentence made unrepresentable rather than merely tested.
   empty answer and a nil answer are the same slice in Go and different values
   in JSON. The server sends `[]`, and the client tolerates `null` anyway,
   because the rule has to hold for a field somebody adds later.
+- **A feature built end to end and never connected passes every test it
+  has.** The preview frame was written to the run directory, the images table
+  had a `preview` column, the handler answered `?preview=1` with
+  `Cache-Control: no-store`, the wire type carried the flag and the page
+  looked for it -- and nothing ever inserted a row with it set. Every one of
+  those was dead code, the UI showed a step counter advancing beside no
+  picture, and the Go suite, `cargo test` and the chromedp lab were all green,
+  because each half agreed with itself and no test crossed the gap. The same
+  closed loop as `capabilities.model` and the preview fixtures written from
+  api.md, one layer up: what was missing was not a check on a value but a
+  check that two components were joined at all. The frame's filename now
+  travels on the progress event that reports its step -- one event, so a UI
+  cannot learn there is a step 4 before it learns there is a picture of it --
+  and the queue records it as an image row keyed `(request, job, index,
+  preview)`, which is overwritten rather than accumulated because the file on
+  disk is. Both halves were checked by reinstating the bug.
+- **A caption that is true of one mode is wrong for the others.** The preview
+  figure said "the latent, not the output" unconditionally. That is right for
+  `proj`, which projects the latent and previews a 512x512 generation as a
+  64x64 smear, and wrong for `tae` and `vae`, which decode a real image every
+  frame -- in the direction that makes a working preview look broken.
 - **A keyed list only re-renders when the key changes.** The progress rows
   were a Leptos `<For>` keyed on the job's index -- which is exactly what a
   key should be, stable -- so a row rendered once when the job appeared and

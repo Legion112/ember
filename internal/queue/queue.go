@@ -493,7 +493,21 @@ func (r *recorder) Emit(e report.Event) {
 	r.mu.Unlock()
 
 	if e.Kind == report.KindJobImages {
-		r.q.recordImages(r.id, e)
+		r.q.recordImages(r.id, e, false)
+	}
+	// A PREVIEW FRAME IS AN IMAGE TOO, and nothing recorded it.
+	//
+	// The frame was written to the run directory, the images table has had a
+	// `preview` column since it was created, the handler has answered
+	// `?preview=1` with `Cache-Control: no-store` since it was written, and
+	// the page has looked for `i.preview` since it was written -- and no row
+	// was ever inserted with it set, so every one of those was dead code and
+	// the UI showed a step counter advancing beside no picture at all. The
+	// whole feature was built end to end and never connected, which is the
+	// closed loop AGENTS.md records for previews one layer down: everything
+	// agreed with itself and nothing had been observed.
+	if e.Kind == report.KindJobProgress && len(e.Wrote) > 0 {
+		r.q.recordImages(r.id, e, true)
 	}
 	if due || urgent {
 		r.flush(context.Background())
@@ -525,16 +539,21 @@ func (r *recorder) flush(ctx context.Context) {
 // be a second spelling of the same rule, and the two would drift the first
 // time a stem is sanitised differently, leaving the gallery pointing at files
 // that are not on disk.
-func (q *Queue) recordImages(id genstore.ReqID, e report.Event) {
+// A preview row is overwritten rather than accumulated: AddImage keys on
+// (request, job, index, preview), and the frame on disk is written over on
+// every distinct step, so one row per job tracks the file for the whole
+// generation.
+func (q *Queue) recordImages(id genstore.ReqID, e report.Event, preview bool) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 10*time.Second)
 	defer cancel()
 
 	for i, f := range e.Wrote {
 		im := genstore.Image{
 			Req: id, Job: e.Index, Index: i,
-			Key:   q.keyOf(id, f.Name),
-			Bytes: f.Bytes,
-			At:    q.at(),
+			Key:     q.keyOf(id, f.Name),
+			Bytes:   f.Bytes,
+			Preview: preview,
+			At:      q.at(),
 		}
 		if err := q.Store.AddImage(ctx, im); err != nil {
 			q.log().Warn("could not record an image", "request", id, "key", im.Key, "err", err)
