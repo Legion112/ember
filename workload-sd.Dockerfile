@@ -44,8 +44,17 @@ RUN apt-get update \
 # inherit: a non-interactive `ssh host command` gets a very small environment,
 # and a model that loads from a terminal and not from ember is a confusing
 # afternoon.
+#
+# Both binaries, because a capability checked on one image has to be true of
+# the other. The release zip has always carried sd-server beside sd-cli --
+# this image unzipped it and then put only one of them on PATH, so the CUDA
+# image grew an explicit copy for the served path while the CPU image, built
+# from the same upstream revision, could not run it. That asymmetry is what
+# left the preview stream with no lab: the only image that could serve was
+# the one that needs a GPU to start.
 RUN printf '/opt/sd\n' > /etc/ld.so.conf.d/ember-sd.conf && ldconfig \
- && ln -s /opt/sd/sd-cli /usr/local/bin/sd-cli
+ && ln -s /opt/sd/sd-cli /usr/local/bin/sd-cli \
+ && ln -s /opt/sd/sd-server /usr/local/bin/sd-server
 
 # The model is baked in rather than fetched at run time. Downloading it on a
 # rented GPU would bill the download at GPU rates, and a node that reaches out
