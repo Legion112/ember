@@ -67,6 +67,45 @@ type Options struct {
 	// where something is waited on: Go 1.27's testing/synctest makes the
 	// waiting testable without a clock interface, so one does not exist here.
 	Now func() time.Time
+
+	// OnReady and OnDestroyed are notified about the two moments in a
+	// rental's life that happen where a caller cannot see them.
+	//
+	// WHY THESE EXIST. Both are reported today by slog and nowhere else,
+	// which is enough for a terminal and not enough for anything that has to
+	// store or display them. The destroy in particular is unreachable: it
+	// runs from WithNode's *deferred* block, so by the time the cost is
+	// known the closure the caller supplied has already returned. The number
+	// this whole program exists to report -- what the rental came to -- could
+	// not be had by the code that asked for the rental.
+	//
+	// The same is true of the failure, and that one matters more: "destroy
+	// failed; the node may still be running and billing" is the one line an
+	// operator must not miss, and a reader of events that stopped at the
+	// closure's return would drop exactly it.
+	//
+	// Both are notifications and neither can change what happens: the error
+	// is still returned, the record is still written. They are called after
+	// the fact, from the deferred teardown, so an implementation must not
+	// block -- the process may be on its way out.
+	//
+	// Nil is the ordinary case and means nobody is listening.
+	OnReady     func(h node.Handle, endpoint node.Endpoint, deadline time.Time, price node.Rate)
+	OnDestroyed func(h node.Handle, bill node.Billing, err error)
+}
+
+// notifyReady calls OnReady if anyone is listening.
+func (o Options) notifyReady(h node.Handle, e node.Endpoint, deadline time.Time, price node.Rate) {
+	if o.OnReady != nil {
+		o.OnReady(h, e, deadline, price)
+	}
+}
+
+// notifyDestroyed calls OnDestroyed if anyone is listening.
+func (o Options) notifyDestroyed(h node.Handle, bill node.Billing, err error) {
+	if o.OnDestroyed != nil {
+		o.OnDestroyed(h, bill, err)
+	}
 }
 
 const (
@@ -230,9 +269,14 @@ func WithNode(
 		o.log().Warn("could not record readiness", "err", err)
 	}
 
+	// Logged *and* notified, rather than one or the other. The log line is
+	// what test/integration/lifecycle_test.go greps for, so dropping it would
+	// fail a lab; and a slog record is not a thing a UI or a database can
+	// read, which is what the hook is for.
 	o.log().Info("node ready",
 		"handle", h.String(), "endpoint", ready.Endpoint().String(),
 		"deadline", req.Deadline.Format(time.RFC3339), "price", offer.Price.String())
+	o.notifyReady(h, ready.Endpoint(), req.Deadline, offer.Price)
 
 	// The workload may not outlive the node's deadline. A run that keeps
 	// going past it would be using a machine the reaper is entitled to
@@ -403,6 +447,11 @@ func destroy(ctx context.Context, p provider.Provider, o Options, runID node.Run
 			r.Phase = statestore.PhaseDestroyFailed
 			r.LastErr = err.Error()
 		})
+		// Notified before returning, because this is the path whose message
+		// matters most: the node may still be running, and running means
+		// billing. A reader that only ever saw successful teardowns would be
+		// a reader that silently misses the leak.
+		o.notifyDestroyed(h, node.Billing{}, err)
 		return fmt.Errorf("destroy node %s: %w", h, err)
 	}
 
@@ -427,6 +476,7 @@ func destroy(ctx context.Context, p provider.Provider, o Options, runID node.Run
 	} else {
 		o.log().Info("node destroyed", "handle", h.String(), "cost", bill.String())
 	}
+	o.notifyDestroyed(h, bill, nil)
 	return nil
 }
 

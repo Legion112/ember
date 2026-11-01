@@ -177,8 +177,24 @@ type Event struct {
 	Measured time.Duration `json:"measured_ns,omitempty"`
 	Reported time.Duration `json:"reported_ns,omitempty"`
 
-	// Node identifies the node a lifecycle event is about.
-	Node string `json:"node,omitempty"`
+	// Node identifies the node a lifecycle event is about, and Endpoint is
+	// where ember reaches it.
+	Node     string `json:"node,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Deadline is when the node destroys itself, and Rate is what it costs
+	// per hour. Both belong to a node becoming ready: they are what an
+	// operator needs to know how long they have and what it is costing while
+	// they have it.
+	Deadline time.Time `json:"deadline,omitempty"`
+	Rate     node.Rate `json:"rate_micro_usd_per_hour,omitempty"`
+
+	// Billable is the time a rental was charged for, which is not Elapsed: a
+	// node destroyed after four seconds on a provider with a one-minute
+	// minimum costs a minute, and reporting the four seconds would teach an
+	// operator that short runs are nearly free.
+	Elapsed  time.Duration `json:"elapsed_ns,omitempty"`
+	Billable time.Duration `json:"billable_ns,omitempty"`
 
 	// Err is a failure, as a string, because an event is data that crosses a
 	// wire and gets stored.
