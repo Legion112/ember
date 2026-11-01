@@ -1,0 +1,16 @@
+{
+  "id": "job_7f3a",
+  "kind": "img_gen",
+  "status": "generating",
+  "created": 1762000000,
+  "started": 1762000001,
+  "queue_position": 0,
+  "preview": {
+    "pass": 1,
+    "step": 14,
+    "total_steps": 28,
+    "b64_json": "ZmFrZS1wcmV2aWV3LWZyYW1l"
+  },
+  "result": null,
+  "error": null
+}

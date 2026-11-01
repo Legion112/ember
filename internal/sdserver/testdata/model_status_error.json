@@ -1,0 +1,8 @@
+{
+  "state": "error",
+  "recipe": "flux2-dev",
+  "models": {},
+  "error": "failed to open /models/flux2-dev-Q8_0.gguf: No such file or directory",
+  "revision": 2,
+  "load_elapsed_seconds": 0.31
+}

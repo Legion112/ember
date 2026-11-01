@@ -1,0 +1,37 @@
+{
+  "model": "flux2-dev",
+  "current_mode": "img_gen",
+  "supported_modes": [
+    "img_gen",
+    "vid_gen",
+    "upscale"
+  ],
+  "samplers": [
+    "euler",
+    "euler_a",
+    "heun",
+    "dpm2",
+    "dpmpp2m",
+    "lcm"
+  ],
+  "schedulers": [
+    "discrete",
+    "karras",
+    "exponential",
+    "sgm_uniform"
+  ],
+  "preview_modes": [
+    "none",
+    "proj",
+    "tae",
+    "vae"
+  ],
+  "limits": {
+    "min_width": 64,
+    "max_width": 2048,
+    "min_height": 64,
+    "max_height": 2048,
+    "max_batch_count": 8,
+    "max_queue_size": 64
+  }
+}
