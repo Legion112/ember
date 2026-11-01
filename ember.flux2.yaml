@@ -58,6 +58,19 @@ images:
   sm_103: ghcr.io/legion112/ember-sd:sd-cuda-sm103@sha256:8ff5fd43523f999a116afe5821bef067290e8d2c2416a13b24a1fef9f4899c88
   sm_120: ghcr.io/legion112/ember-sd:sd-cuda-sm120@sha256:e2447c2d0e884da44c1d33b09abb4366354e606903f2f1dcd8fe2bd835d87f7f
 
+# The image for the CPU machine `ember store sync` rents.
+#
+# A scalar beside the map, because the two answer different questions: a CPU
+# box has no compute capability, so `images:` cannot choose for it and is not
+# consulted. Without this, `ember store sync` on this very file refuses with
+# "there is no architecture to choose an image by" -- the config could not
+# populate the store it depends on.
+#
+# The node image and not a workload one: this machine only runs `embernode
+# fetch`, and pulling 2.9 GB of CUDA to download files would be billed for
+# nothing.
+image: ghcr.io/legion112/ember-node@sha256:cf62de1920ed868fbe567b8bd127ed693d2ced3d163de49a0816534906179f3f
+
 ttl: 1h
 
 # No GPU is named, and that is the point: the requirement is VRAM, not a
