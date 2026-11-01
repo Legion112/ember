@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/sdserver"
 )
 
 // FileName is the config ember looks for in the working directory.
@@ -119,6 +120,23 @@ type Config struct {
 	//
 	// Use cmd or cmds, never both.
 	Cmds [][]string `yaml:"cmds"`
+
+	// SD is the resident-server shape: one sd-server started on the node,
+	// holding the weights, driven over the SSH connection for a list of jobs.
+	//
+	// The difference from Cmds is one cost. Each entry in Cmds is a fresh
+	// sd-cli that reads the weights into VRAM again; a server loads them
+	// once. On a rented A100 that is about twelve seconds per image during
+	// which nothing is being generated.
+	//
+	// It is also the one place ember knows what a sampler is. Every other
+	// workload here is opaque argv on purpose, and that position does not
+	// survive progress streaming: a program that will not understand its own
+	// payload cannot report that job two is fourteen steps into its first
+	// pass. See internal/sdserver.
+	//
+	// Use cmd, cmds or sd.serve -- never two of them.
+	SD SDConfig `yaml:"sd"`
 
 	// Store names the persistent store this configuration uses, if any.
 	Store StoreConfig `yaml:"store"`
@@ -252,6 +270,72 @@ type StoreConfig struct {
 	Mount string `yaml:"mount"`
 }
 
+// SDConfig is the `sd:` block.
+type SDConfig struct {
+	// Serve is the sd-server argv. ember appends the listen address itself
+	// and refuses a command that names it -- see sdserver.ServeCommand.
+	Serve []string `yaml:"serve"`
+
+	// ReadyTimeout is how long the weights have to load. Empty is
+	// sdserver.DefaultModelTimeout, which is longer than the GPU probe's
+	// because the thing being waited for is bigger: FLUX.2 is 56 GiB read off
+	// a network volume.
+	ReadyTimeout time.Duration `yaml:"ready_timeout"`
+
+	// Preview and PreviewInterval are the progress stream: none, proj, tae or
+	// vae, and how many sampling steps between frames.
+	//
+	// Empty is proj every 5 steps, which is deliberately not upstream's
+	// default of a frame every single step. tae and vae run a decode to
+	// produce each frame, so upstream's default is the expensive one -- on a
+	// card billing by the second, for frames that in an unattended batch
+	// nobody is watching.
+	Preview         string `yaml:"preview"`
+	PreviewInterval int    `yaml:"preview_interval"`
+
+	// Jobs are the images to generate, in order, on one rental.
+	Jobs []SDJob `yaml:"jobs"`
+}
+
+// SDJob is one image.
+//
+// A typed subset of sd-server's request plus Extra, rather than a mirror of
+// it. /sdcpp/v1/img_gen has around forty top-level fields and four nested
+// objects: typing all of them would be a second copy of somebody else's
+// schema, which every upstream addition makes wrong until ember is released,
+// and typing none would mean ember could not check a sampler name or report
+// which seed produced which file.
+type SDJob struct {
+	Prompt         string `yaml:"prompt"`
+	NegativePrompt string `yaml:"negative_prompt"`
+
+	Width      int   `yaml:"width"`
+	Height     int   `yaml:"height"`
+	Steps      int   `yaml:"steps"`
+	BatchCount int   `yaml:"batch_count"`
+	Seed       int64 `yaml:"seed"`
+
+	Sampler   string `yaml:"sampler"`
+	Scheduler string `yaml:"scheduler"`
+
+	// CFG is the prompt guidance and Guidance is the distilled guidance.
+	// Two different numbers that both get called "cfg" in conversation -- the
+	// flux2-dev recipe sets cfg-scale 1 and guidance 4, so a config that
+	// conflated them would quietly generate at the wrong one.
+	CFG      float64 `yaml:"cfg"`
+	Guidance float64 `yaml:"guidance"`
+
+	// Output is the local filename stem. It never reaches the server.
+	Output string `yaml:"output"`
+
+	// Extra reaches every field the typed ones above do not set, so nothing
+	// in the API is unreachable from a config. A key that collides with one
+	// ember set is refused rather than resolved: a seed or a step count
+	// resolved the wrong way makes two runs that claim to be the same
+	// measurement produce different images.
+	Extra map[string]any `yaml:"extra"`
+}
+
 // DefaultMount is where a store is attached when the config does not say.
 //
 // Not /workspace, which is the provider default and also where ember writes
@@ -366,6 +450,75 @@ func Load(path string) (Config, error) {
 // This file is meant to be committed. A key pasted into it is not revocable by
 // deleting the line later, so the first run after the mistake is the right
 // time to say so.
+// ParseSD turns the `sd:` block into the run a served batch needs.
+//
+// The shape of ParseAssets and ParseImages: a value receiver, no arguments,
+// empty is not an error, the cross-field precondition first, and every entry
+// validated rather than only the one this run reaches. A config with nine good
+// jobs and a tenth whose extra shadows its seed would otherwise sit committed
+// until the day somebody waits an hour for the tenth.
+//
+// Every refusal below lives in internal/sdserver. This function is the loop
+// and the key paths, which is what keeps the meaning in one place.
+func (c Config) ParseSD() (sdserver.Run, error) {
+	if len(c.SD.Jobs) == 0 && len(c.SD.Serve) == 0 {
+		return sdserver.Run{}, nil
+	}
+
+	// Each half is useless without the other, and both failures look like a
+	// run that worked. Jobs with no server have nothing to send them to;
+	// a server with no jobs rents a card, loads the weights and generates
+	// nothing -- which bills for the whole TTL and produces an empty output
+	// directory.
+	if len(c.SD.Serve) == 0 {
+		return sdserver.Run{}, fmt.Errorf("sd.jobs has %d job(s) but sd.serve is empty, "+
+			"so there is no server to send them to", len(c.SD.Jobs))
+	}
+	if len(c.SD.Jobs) == 0 {
+		return sdserver.Run{}, errors.New("sd.serve is set but sd.jobs is empty, " +
+			"so the node would rent a card, load the weights and generate nothing")
+	}
+
+	preview, err := sdserver.ParsePreview(c.SD.Preview)
+	if err != nil {
+		return sdserver.Run{}, fmt.Errorf("sd.preview: %w", err)
+	}
+	interval, err := sdserver.ParsePreviewInterval(c.SD.PreviewInterval)
+	if err != nil {
+		return sdserver.Run{}, fmt.Errorf("sd.preview_interval: %w", err)
+	}
+
+	run := sdserver.Run{Preview: preview, PreviewInterval: interval}
+	for i, j := range c.SD.Jobs {
+		job := sdserver.Job{
+			Prompt:         j.Prompt,
+			NegativePrompt: j.NegativePrompt,
+			Width:          j.Width,
+			Height:         j.Height,
+			Steps:          j.Steps,
+			BatchCount:     j.BatchCount,
+			Seed:           j.Seed,
+			Sampler:        j.Sampler,
+			Scheduler:      j.Scheduler,
+			CFG:            j.CFG,
+			Guidance:       j.Guidance,
+			Output:         j.Output,
+			Extra:          j.Extra,
+		}
+		// Building the body is the check: it is where a key in extra that
+		// shadows a typed field is refused, and doing it here means that
+		// happens before anything is rented rather than at submission.
+		if _, err := job.Body(preview, interval); err != nil {
+			return sdserver.Run{}, fmt.Errorf("sd.jobs[%d]: %w", i, err)
+		}
+		if err := sdserver.ValidateOutput(job.Output); err != nil {
+			return sdserver.Run{}, fmt.Errorf("sd.jobs[%d]: %w", i, err)
+		}
+		run.Jobs = append(run.Jobs, job)
+	}
+	return run, nil
+}
+
 func (c Config) rejectSecrets() error {
 	// Built rather than written as a literal, because the literal was the
 	// whole set of free-text scalars and `images:` adds a map of them. A

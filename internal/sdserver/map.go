@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -348,6 +349,57 @@ const (
 	DefaultPreview         = PreviewProj
 	DefaultPreviewInterval = 5
 )
+
+// Run is everything a served batch needs that is not on the Spec.
+//
+// The jobs are here and not on node.Spec because they never reach the node as
+// argv: ember sends them over HTTP. internal/node also imports nothing else
+// from this module, so the type could not live there in any case.
+type Run struct {
+	Preview         string
+	PreviewInterval int
+	Jobs            []Job
+}
+
+// previewModes is what sd-server's own preview_modes enumerates. Checked here
+// rather than only against a live server's capabilities, because a typo should
+// refuse before anything is rented, not after.
+var previewModes = []string{PreviewNone, PreviewProj, "tae", "vae"}
+
+// ParsePreview turns a config value into a preview mode.
+//
+// Empty is ember's default and not upstream's -- see the constants. An
+// unlisted value is refused and names what is allowed, because the failure
+// otherwise lands after a card is rented, as a 400 from a server that was
+// about to generate something.
+func ParsePreview(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return DefaultPreview, nil
+	}
+	if slices.Contains(previewModes, s) {
+		return s, nil
+	}
+	return "", fmt.Errorf("preview %q is not one of %s", s, strings.Join(previewModes, ", "))
+}
+
+// ParsePreviewInterval turns a config value into a step interval.
+//
+// Zero is ember's default. Negative is refused rather than clamped: upstream
+// clamps a non-positive interval to 1, which is a frame every step -- the
+// most expensive setting there is, reached by writing something that looks
+// like "off".
+func ParsePreviewInterval(n int) (int, error) {
+	if n == 0 {
+		return DefaultPreviewInterval, nil
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("preview_interval %d is negative; sd-server would clamp it to 1, "+
+			"a preview frame every step, which is the most expensive setting rather than the least. "+
+			"Use preview: %s to turn previews off", n, PreviewNone)
+	}
+	return n, nil
+}
 
 // Body builds the request for one job.
 //

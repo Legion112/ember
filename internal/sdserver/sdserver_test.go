@@ -997,3 +997,62 @@ func TestNew_BuildsALoopbackClientThatDialsThroughTheTunnel(t *testing.T) {
 		t.Errorf("dialled %q, want %q", asked, want)
 	}
 }
+
+// Empty is ember's default and not upstream's. An unlisted value refuses
+// before anything is rented rather than as a 400 from a server that was about
+// to generate something.
+func TestParsePreview(t *testing.T) {
+	got, err := ParsePreview("")
+	if err != nil || got != DefaultPreview {
+		t.Errorf("ParsePreview(\"\") = %q, %v, want %q", got, err, DefaultPreview)
+	}
+	for _, m := range previewModes {
+		if got, err := ParsePreview(m); err != nil || got != m {
+			t.Errorf("ParsePreview(%q) = %q, %v", m, got, err)
+		}
+	}
+	if got, err := ParsePreview("  proj  "); err != nil || got != PreviewProj {
+		t.Errorf("ParsePreview with padding = %q, %v", got, err)
+	}
+	_, err = ParsePreview("full")
+	if err == nil || !strings.Contains(err.Error(), "proj") {
+		t.Errorf("err = %v, want it to list what is allowed", err)
+	}
+}
+
+// Negative is refused and not clamped. Upstream clamps a non-positive
+// interval to 1 -- a frame every step, the most expensive setting there is --
+// so a config written to mean "off" would buy the opposite.
+func TestParsePreviewInterval(t *testing.T) {
+	if got, err := ParsePreviewInterval(0); err != nil || got != DefaultPreviewInterval {
+		t.Errorf("ParsePreviewInterval(0) = %d, %v, want %d", got, err, DefaultPreviewInterval)
+	}
+	if got, err := ParsePreviewInterval(12); err != nil || got != 12 {
+		t.Errorf("ParsePreviewInterval(12) = %d, %v", got, err)
+	}
+	_, err := ParsePreviewInterval(-1)
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	// The message has to say what to write instead, or the reader turns it
+	// into 1 and pays for it.
+	for _, want := range []string{"clamp", "every step", "preview: none"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+func TestValidateOutput(t *testing.T) {
+	// Empty is fine: the caller numbers jobs that do not name themselves.
+	for _, ok := range []string{"", "   ", "station", "a/b", "shot-01"} {
+		if err := ValidateOutput(ok); err != nil {
+			t.Errorf("ValidateOutput(%q) = %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"..", "/", "../..", "."} {
+		if err := ValidateOutput(bad); err == nil {
+			t.Errorf("ValidateOutput(%q) accepted a name that cleans away to nothing", bad)
+		}
+	}
+}

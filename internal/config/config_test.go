@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/sdserver"
 )
 
 func write(t *testing.T, body string) string {
@@ -553,4 +554,148 @@ func TestLoad_ReadsTheImagesMap(t *testing.T) {
 	if len(cfg.Images) != 2 || cfg.Images["sm_89"] != "ember:lab-sm89" {
 		t.Errorf("images = %v", cfg.Images)
 	}
+}
+
+func TestParseSD_EmptyIsNotARun(t *testing.T) {
+	run, err := Config{}.ParseSD()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Jobs) != 0 || run.Preview != "" {
+		t.Errorf("run = %+v, want the zero value", run)
+	}
+}
+
+// Each half is useless without the other, and both failures look like a run
+// that worked: jobs with no server have nothing to send them to, and a server
+// with no jobs rents a card, loads the weights and produces an empty output
+// directory for the whole TTL.
+func TestParseSD_RefusesHalfAServedRun(t *testing.T) {
+	jobsOnly := Config{SD: SDConfig{Jobs: []SDJob{{Prompt: "a cat"}}}}
+	err := mustFailSD(t, jobsOnly)
+	if !strings.Contains(err.Error(), "no server to send them to") {
+		t.Errorf("err = %v", err)
+	}
+
+	serveOnly := Config{SD: SDConfig{Serve: []string{"sd-server"}}}
+	err = mustFailSD(t, serveOnly)
+	if !strings.Contains(err.Error(), "generate nothing") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestParseSD_MapsEveryTypedField(t *testing.T) {
+	cfg := Config{SD: SDConfig{
+		Serve: []string{"sd-server", "--diffusion-model", "/models/x.gguf"},
+		Jobs: []SDJob{{
+			Prompt: "a cat", NegativePrompt: "blurry",
+			Width: 1536, Height: 1024, Steps: 28, BatchCount: 2, Seed: 20261101,
+			Sampler: "euler", Scheduler: "karras", CFG: 1, Guidance: 4,
+			Output: "station", Extra: map[string]any{"output_format": "png"},
+		}},
+	}}
+	run, err := cfg.ParseSD()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Jobs) != 1 {
+		t.Fatalf("jobs = %d, want 1", len(run.Jobs))
+	}
+	j := run.Jobs[0]
+	if j.Prompt != "a cat" || j.NegativePrompt != "blurry" {
+		t.Errorf("prompts = %q / %q", j.Prompt, j.NegativePrompt)
+	}
+	if j.Width != 1536 || j.Height != 1024 || j.Steps != 28 || j.BatchCount != 2 {
+		t.Errorf("geometry = %+v", j)
+	}
+	if j.Seed != 20261101 {
+		t.Errorf("seed = %d", j.Seed)
+	}
+	if j.Sampler != "euler" || j.Scheduler != "karras" {
+		t.Errorf("sampler/scheduler = %q / %q", j.Sampler, j.Scheduler)
+	}
+	// Two different numbers that both get called "cfg": conflating them
+	// generates at the wrong one.
+	if j.CFG != 1 || j.Guidance != 4 {
+		t.Errorf("cfg = %v, guidance = %v", j.CFG, j.Guidance)
+	}
+	if j.Output != "station" {
+		t.Errorf("output = %q", j.Output)
+	}
+	if j.Extra["output_format"] != "png" {
+		t.Errorf("extra = %v", j.Extra)
+	}
+	// ember's defaults, not upstream's frame-every-step.
+	if run.Preview != sdserver.DefaultPreview || run.PreviewInterval != sdserver.DefaultPreviewInterval {
+		t.Errorf("preview = %q every %d, want the ember defaults", run.Preview, run.PreviewInterval)
+	}
+}
+
+// Every job, not just the first, and the key path says which. A config with
+// nine good jobs and a bad tenth would otherwise sit committed until somebody
+// waits an hour for the tenth.
+func TestParseSD_ValidatesEveryJobAndNamesTheIndex(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		job  SDJob
+		want string
+	}{
+		{"extra shadows a typed field", SDJob{Prompt: "a", Seed: 1,
+			Extra: map[string]any{"seed": 2}}, "sd.jobs[2]: extra sets seed"},
+		{"extra shadows the preview ember owns", SDJob{Prompt: "a",
+			Extra: map[string]any{"preview": "vae"}}, "sd.jobs[2]: extra sets preview"},
+		{"an unusable output name", SDJob{Prompt: "a", Output: ".."}, `sd.jobs[2]: output ".."`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{SD: SDConfig{
+				Serve: []string{"sd-server"},
+				Jobs:  []SDJob{{Prompt: "ok"}, {Prompt: "also ok"}, tc.job},
+			}}
+			err := mustFailSD(t, cfg)
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseSD_RefusesABadPreviewSetting(t *testing.T) {
+	cfg := Config{SD: SDConfig{
+		Serve: []string{"sd-server"}, Jobs: []SDJob{{Prompt: "a"}},
+		Preview: "full",
+	}}
+	if err := mustFailSD(t, cfg); !strings.Contains(err.Error(), "sd.preview:") {
+		t.Errorf("err = %v, want the key path", err)
+	}
+
+	cfg2 := Config{SD: SDConfig{
+		Serve: []string{"sd-server"}, Jobs: []SDJob{{Prompt: "a"}},
+		PreviewInterval: -1,
+	}}
+	if err := mustFailSD(t, cfg2); !strings.Contains(err.Error(), "sd.preview_interval:") {
+		t.Errorf("err = %v, want the key path", err)
+	}
+}
+
+// The `sd:` block is subject to KnownFields like everything else: a misspelled
+// key inside it is a typo, not a comment.
+func TestLoad_RefusesAMisspelledKeyInsideTheSDBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ember.yaml")
+	body := "sd:\n  serve: [sd-server]\n  jobs:\n    - prompt: a cat\n      promt: a dog\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("a misspelled key inside sd.jobs was accepted as if it were a comment")
+	}
+}
+
+func mustFailSD(t *testing.T, cfg Config) error {
+	t.Helper()
+	_, err := cfg.ParseSD()
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	return err
 }
