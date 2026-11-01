@@ -373,6 +373,22 @@ func WriteImages(root *os.Root, stem string, imgs []Image) (Written, error) {
 	return w, nil
 }
 
+// ValidateOutput refuses an output name that is not usable as a filename.
+//
+// Checked at config time and not only when the image comes back, because the
+// alternative is discovering it after the generation it names has been paid
+// for. An empty name is fine -- the caller numbers jobs that do not name
+// themselves -- but a name that cleans away to nothing is a typo.
+func ValidateOutput(stem string) error {
+	if strings.TrimSpace(stem) == "" {
+		return nil
+	}
+	if safeStem(stem) == "" {
+		return fmt.Errorf("output %q is not usable as a filename", stem)
+	}
+	return nil
+}
+
 // safeStem reduces an operator's output name to one path component.
 //
 // A stem is a filename and not a path: a job writing to ../../etc/x would be
