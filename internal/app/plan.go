@@ -38,6 +38,42 @@ type Request struct {
 	// VCPU is how many cores a CPU-only run wants; zero takes the minimum
 	// for the family.
 	VCPU int
+
+	// Jobs replaces the config's sd.jobs, for a batch that came from
+	// somewhere other than the file -- a queued request.
+	//
+	// WHY NOT GO THROUGH THE CONFIG. Writing them into cfg.SD.Jobs would mean
+	// converting through config.SDJob, which is the YAML shape and carries
+	// Extra -- the field that reaches every untyped part of the generation
+	// API, including the ones naming file paths on the node. A request may
+	// not set it, so routing a request through the type that can is handing
+	// it a field it was refused. These are sdserver.Job directly, and
+	// sdserver.ValidateStatic is the one function that refuses a bad one
+	// whichever direction it arrived from.
+	//
+	// sdserver.Job does have Extra, so the seal is not here -- it is at
+	// genstore.Job, which has no such field, and whose SD() leaves it nil.
+	// This package is reached from internal/cli, where a config may
+	// legitimately use it, and from internal/queue, where nothing can.
+	Jobs            []sdserver.Job
+	Preview         string
+	PreviewInterval int
+
+	// Budget overrides what the Config's own budget keys say, for a caller
+	// that has already narrowed a ceiling.
+	//
+	// WHY NOT WRITE IT BACK INTO THE CONFIG. Those keys are decimal strings,
+	// so a caller holding integer microdollars would have to render one --
+	// and node.MicroUSD's own String is "$%.6g", which is scientific notation
+	// for small values: one microdollar prints as $1e-06, which node.ParseUSD
+	// refuses outright. The round trip is lossy exactly where money must not
+	// be, so there is no round trip. Found by round-tripping every value the
+	// path has to carry rather than a plausible-looking one.
+	//
+	// It can only narrow, because whoever sets it is expected to have taken
+	// the smaller of the two already; nothing here re-checks, because nothing
+	// here knows which config the caller meant.
+	Budget *provision.Budget
 }
 
 // Plan is everything decided before the create call.
@@ -137,6 +173,9 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
+	if req.Budget != nil {
+		opts.Budget = *req.Budget
+	}
 
 	// The offer is chosen here, for the same reasons the store is resolved
 	// above: only the provider knows what it has, and the image depends on the
@@ -168,7 +207,15 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	// probe, so parsing the jobs would validate a batch this rental will
 	// never send and print it in the dry run.
 	var run sdserver.Run
-	if !req.CPUOnly {
+	switch {
+	case req.CPUOnly:
+		// Nothing: this rental runs `embernode fetch`.
+	case len(req.Jobs) > 0:
+		run, err = jobsFromRequest(req)
+		if err != nil {
+			return Plan{}, Usage(err)
+		}
+	default:
 		run, err = cfg.ParseSD()
 		if err != nil {
 			return Plan{}, Usage(err)
@@ -411,4 +458,30 @@ func BuildSpec(cfg config.Config, r Resolved) (node.Spec, error) {
 		Store:   r.Store.Handle,
 		Mount:   r.Store.Mount,
 	})
+}
+
+// jobsFromRequest validates a batch that did not come from the config file.
+//
+// Every refusal here is config.ParseSD's, reached through the same function,
+// and every one of them happens before the create call -- which is the whole
+// discipline NewPlan exists to keep. A batch checked after the node was up
+// would be a batch refused about a minute into a rented card.
+func jobsFromRequest(req Request) (sdserver.Run, error) {
+	preview, err := sdserver.ParsePreview(req.Preview)
+	if err != nil {
+		return sdserver.Run{}, fmt.Errorf("preview: %w", err)
+	}
+	interval, err := sdserver.ParsePreviewInterval(req.PreviewInterval)
+	if err != nil {
+		return sdserver.Run{}, fmt.Errorf("preview_interval: %w", err)
+	}
+
+	run := sdserver.Run{Preview: preview, PreviewInterval: interval}
+	for i, j := range req.Jobs {
+		if err := sdserver.ValidateStatic(j, preview, interval); err != nil {
+			return sdserver.Run{}, fmt.Errorf("jobs[%d]: %w", i, err)
+		}
+		run.Jobs = append(run.Jobs, j)
+	}
+	return run, nil
 }

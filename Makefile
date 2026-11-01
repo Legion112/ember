@@ -51,14 +51,24 @@ COVERPROFILE := coverage.out
 # without the gate noticing. A floor that no longer tracks the package is not
 # a floor.
 #
-# internal/app is at 82 against a measured 83.4-83.6, and the gap is
-# deliberate for internal/tunnel's reason rather than from generosity: orExited
-# races an operation against the server's exit, and when ember stops the server
-# by cancelling the context both arms of that select are ready at once, so
-# which one runs is up to the scheduler. Two consecutive runs of this gate
-# measured 83.6 and 83.4. Pinning the floor to the lucky number would make the
-# build flake, and a gate that fails for no reason is a gate people learn to
-# re-run rather than read.
+# internal/app is at 81 against a measured 82.7, and the gap is deliberate
+# twice over rather than generous.
+#
+# First, internal/tunnel's reason: orExited races an operation against the
+# server's exit, and when ember stops the server by cancelling the context both
+# arms of that select are ready at once, so which one runs is up to the
+# scheduler. Consecutive runs of this gate have measured 83.6 and 83.4.
+# Pinning the floor to the lucky number would make the build flake, and a gate
+# that fails for no reason is a gate people learn to re-run rather than read.
+#
+# Second, Plan.WithServed's own body. It is provision.WithNode plus an SSH
+# dial, and driving it in process would mean a dialer seam on Plan -- a
+# production interface shaped by a test's convenience, which is the mistake
+# sshx.Runner was kept from making. The decisions inside it are covered
+# elsewhere: Served.Generate against a real sd-server client, the refusal of a
+# config with no sd.serve, and the whole drain loop in internal/queue against
+# fakes. What is left is the wiring, and the serve lab is what exercises it --
+# the same arrangement internal/cli has had for the Docker client it builds.
 #
 # internal/tunnel is the one exception to that rule and is at 94 rather than
 # its isolated 96.6: when the forwarder is torn down, pipe's select has both
@@ -71,7 +81,7 @@ COVERPROFILE := coverage.out
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/assets=91,internal/blob=97,internal/genstore=93,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=82,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/sdserver=99
+COVER_PKGS := internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/sdserver=99
 COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,internal/dockerengine/dockerclient
 # internal/assets is below the rest because the paths it cannot reach are
 # filesystem failures with no portable way to provoke: a rename that fails
@@ -89,6 +99,14 @@ COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/c
 # run may still be finishing. internal/blob is at 97 and the one thing it
 # cannot reach is an os.OpenRoot that fails after the MkdirAll beside it
 # succeeded, which needs a race.
+#
+# internal/queue is at 94 against a measured 95.5. What it cannot reach is the
+# one line that hands a resolved plan to provision.WithNode, which needs a real
+# node and is what the serve lab exercises. Everything that *decides* anything
+# -- which request a rental may also serve, whether a failure stops it, what a
+# store that broke does to a generation already paid for -- is covered against
+# fakes, which is the point: the expensive bugs here are in the loop rather
+# than in the provisioning it calls.
 #
 # internal/sdserver is at 99 and not 100 for internal/assets' reason: what it
 # cannot reach are the two filesystem failures in WriteImages, a write that

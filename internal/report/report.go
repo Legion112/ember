@@ -160,6 +160,12 @@ type Event struct {
 	Files int   `json:"files,omitempty"`
 	Bytes int64 `json:"bytes,omitempty"`
 
+	// Wrote names the files a job produced, so a reader recording where the
+	// bytes went does not re-derive the naming. One spelling of a filename,
+	// for the reason Label exists: two would drift, and a database pointing
+	// at names that are not the ones on disk is a gallery of broken images.
+	Wrote []File `json:"wrote,omitempty"`
+
 	// Cost and Spent are integer microdollars, never a float. $0.1+$0.2 is
 	// not $0.3 in float64, and a price that is sometimes wrong by a rounding
 	// error is a price nobody trusts.
@@ -199,6 +205,12 @@ type Event struct {
 	// Err is a failure, as a string, because an event is data that crosses a
 	// wire and gets stored.
 	Err string `json:"error,omitempty"`
+}
+
+// File is one file an event reports, and its length.
+type File struct {
+	Name  string `json:"name"`
+	Bytes int64  `json:"bytes"`
 }
 
 // Sink receives events.
