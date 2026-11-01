@@ -374,6 +374,31 @@ the same clock.
 A failed step stops the batch, and its output is still collected: the step
 that failed is often the one whose output explains why.
 
+Each step reports what it cost, and the total so far:
+
+```
+step 2/3: sd-cli --diffusion-model /models/flux2.gguf --prompt 'a dog' ...
+workload finished in 1m43s
+fetching 1 output path(s) into ~/ember/outputs/20261101-0912-5f3a...
+fetched 1 file(s), 1.4 MiB
+step 2/3 took $0.0261 of card time, $0.0519 so far
+```
+
+The figure covers the fetch as well as the generation, because the card is
+rented for both — on the minutes of video the store was built for, the
+transfer is not a rounding error.
+
+**Card time, not the step's share of the bill.** The rental also paid for
+provisioning, the image pull and the asset verify, and a batch pays those once
+for all of it rather than once per step — which is the whole point. Counting
+them into a per-step figure would overstate what batching saves.
+
+`max_run_usd` is not affected by a batch and never reports a step: it is
+checked against the offer's price times the TTL *before* anything is rented,
+so it bites at selection and there is no step to name yet. A batch that needs
+longer needs a larger `ttl`, and the ceiling then refuses or admits the whole
+rental exactly as it did for one command.
+
 ### Generating on this machine's GPU
 
 A model that does not fit in VRAM is not a model that cannot run. sd-cli will

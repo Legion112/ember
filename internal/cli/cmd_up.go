@@ -209,7 +209,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	defer stop()
 
 	return provision.WithNode(ctx, p, spec, offer, opts, func(ctx context.Context, s provision.Session) error {
-		return serveSession(ctx, out, s, opts, spec, *holdFor, paths.outputs)
+		return serveSession(ctx, out, s, opts, spec, *holdFor, paths.outputs, offer.Price)
 	})
 }
 
@@ -217,7 +217,10 @@ func runUp(args []string, out io.Writer, d deps) error {
 // node's deadline arrives. The decisions it used to make inline -- when to
 // retry a dial, when to refuse one -- live in internal/session, where they
 // can be tested against an in-process SSH server instead of a rented machine.
-func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts provision.Options, spec node.Spec, hold time.Duration, outDir string) error {
+// rate is the rented offer's hourly price, used to report what each step of a
+// batch cost. It is passed in rather than read off the Session, because the
+// price belongs to the offer that was chosen and a Session carries the node.
+func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts provision.Options, spec node.Spec, hold time.Duration, outDir string, rate node.Rate) error {
 	client, so, err := dialNode(ctx, s, opts, hold)
 	if err != nil {
 		return err
@@ -244,14 +247,17 @@ func serveSession(ctx context.Context, out io.Writer, s provision.Session, opts 
 		return err
 	}
 
-	// A node rented to run something stops when it has run it. Holding
-	// afterwards would bill for a machine with nothing left to do, which is
-	// the whole failure mode ember exists to prevent.
-	// Decided once, so every step of a batch lands together.
+	// Decided once, here, rather than inside fetchOutputs: a batch fetches
+	// several times and every step of one run has to land in one directory.
 	runDir := transfer.RunDir(outDir, s.RunID, time.Now())
 
+	// A node rented to run something stops when it has run it. Holding
+	// afterwards would bill for a machine with nothing left to do, which is
+	// the whole failure mode ember exists to prevent. So this returns rather
+	// than falling through to session.Serve, and runSteps does its own
+	// fetching -- one fetch per step, not one at the end.
 	if len(spec.Cmds) > 0 {
-		return runSteps(ctx, out, client, sshexec.New(client.SSH()), spec, so, runDir)
+		return runSteps(ctx, out, client, sshexec.New(client.SSH()), spec, so, runDir, rate)
 	}
 
 	serveErr := session.Serve(ctx, out, client, session.Forwards(spec.Ports), so)
@@ -301,14 +307,23 @@ func runSteps(
 	spec node.Spec,
 	so session.Options,
 	runDir string,
+	rate node.Rate,
 ) error {
 	var errs []error
 	since := ""
+	var spent node.MicroUSD
 
 	for i, cmd := range spec.Cmds {
 		if len(spec.Cmds) > 1 {
 			outf(out, "step %d/%d: %s\n", i+1, len(spec.Cmds), workload.Describe(cmd))
 		}
+		// Timed from here and not from workload.Run's own duration, because
+		// the fetch below is billed too: the card stays rented while the
+		// output comes over the wire, which for the minutes of video the
+		// store was built for is not a rounding error. "Card time" has to
+		// mean all of the card's time or the figure is just wrong.
+		stepStart := time.Now()
+
 		stepErr := runWorkload(ctx, out, client, r, cmd, spec.Ports, so)
 		if stepErr != nil {
 			errs = append(errs, fmt.Errorf("step %d/%d: %w", i+1, len(spec.Cmds), stepErr))
@@ -322,6 +337,26 @@ func runSteps(
 		cancel()
 		if ferr != nil {
 			errs = append(errs, ferr)
+		}
+
+		// The accumulating price, so an operator watching a ten-step batch can
+		// decide to stop paying for the rest -- which is half the reason the
+		// outputs come home as they are produced rather than at the end.
+		//
+		// Card time, and the wording says so: the rental also billed for
+		// provisioning, the image pull and the asset verify, and a batch pays
+		// those once for all of it rather than once per step. Folding them
+		// into a per-step figure would overstate what batching saves, which is
+		// the number this whole feature exists to improve.
+		//
+		// Printed only for a real batch. A single command's output is
+		// byte-for-byte what it was before `cmds` existed, because somebody is
+		// parsing it.
+		if len(spec.Cmds) > 1 {
+			step := rate.Cost(time.Since(stepStart))
+			spent += step
+			outf(out, "step %d/%d took %v of card time, %v so far\n",
+				i+1, len(spec.Cmds), step, spent)
 		}
 
 		// Stop at the first failure. A batch where step 3 failed and 4

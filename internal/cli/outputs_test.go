@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -342,6 +344,11 @@ func stepSpec(t *testing.T, cmds ...[]string) node.Spec {
 // TestRunSteps_FetchesAfterEachStep is the behaviour the whole change exists
 // for. A ten-step batch is over an hour on a rented card; fetching only at
 // the end means an expired deadline or a closed laptop loses all of it.
+// stepRate is what the tests price a step at. A real rate rather than a round
+// one, because the per-step figure is reported in microdollars and a rate of
+// zero would make every assertion about it pass for the wrong reason.
+const stepRate = node.Rate(2_000_000) // $2.00/hr
+
 func TestRunSteps_FetchesAfterEachStep(t *testing.T) {
 	r := sshx.NewRecordingRunner()
 	spec := stepSpec(t, []string{"sd-cli", "-p", "one"}, []string{"sd-cli", "-p", "two"})
@@ -350,7 +357,7 @@ func TestRunSteps_FetchesAfterEachStep(t *testing.T) {
 
 	var out bytes.Buffer
 	if err := runSteps(t.Context(), &out, tunnel.NewRecordingDialer(), r,
-		spec, session.Options{Log: discardLog()}, t.TempDir()); err != nil {
+		spec, session.Options{Log: discardLog()}, t.TempDir(), stepRate); err != nil {
 		t.Fatal(err)
 	}
 
@@ -384,7 +391,7 @@ func TestRunSteps_LaterFetchesAreBounded(t *testing.T) {
 
 	var out bytes.Buffer
 	if err := runSteps(t.Context(), &out, tunnel.NewRecordingDialer(), r,
-		spec, session.Options{Log: discardLog()}, t.TempDir()); err != nil {
+		spec, session.Options{Log: discardLog()}, t.TempDir(), stepRate); err != nil {
 		t.Fatal(err)
 	}
 
@@ -420,7 +427,7 @@ func TestRunSteps_StopsAtTheFirstFailure(t *testing.T) {
 
 	var out bytes.Buffer
 	err := runSteps(t.Context(), &out, tunnel.NewRecordingDialer(), r,
-		spec, session.Options{Log: discardLog()}, t.TempDir())
+		spec, session.Options{Log: discardLog()}, t.TempDir(), stepRate)
 	if err == nil {
 		t.Fatal("a failed step was reported as success")
 	}
@@ -455,7 +462,7 @@ func TestRunSteps_ASingleStepLooksExactlyLikeItAlwaysDid(t *testing.T) {
 
 	var out bytes.Buffer
 	if err := runSteps(t.Context(), &out, tunnel.NewRecordingDialer(), r,
-		spec, session.Options{Log: discardLog()}, t.TempDir()); err != nil {
+		spec, session.Options{Log: discardLog()}, t.TempDir(), stepRate); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range r.Calls() {
@@ -466,9 +473,77 @@ func TestRunSteps_ASingleStepLooksExactlyLikeItAlwaysDid(t *testing.T) {
 			t.Errorf("a single-command fetch was bounded: %s", c)
 		}
 	}
-	// No "step 1/1" noise for the overwhelmingly common case.
+	// No "step 1/1" noise for the overwhelmingly common case, and no per-step
+	// price either: a single command's output is what it was before `cmds`
+	// existed, because somebody is parsing it.
 	if strings.Contains(out.String(), "step 1/1") {
 		t.Errorf("a single-command run announced itself as a batch: %q", out.String())
+	}
+	if strings.Contains(out.String(), "of card time") {
+		t.Errorf("a single-command run priced itself per step: %q", out.String())
+	}
+}
+
+// TestRunSteps_ReportsWhatEachStepCostAndTheRunningTotal covers the one thing
+// an operator watching a ten-step batch needs that a step number does not
+// give them: whether to stop paying for the rest.
+//
+// The figures are asserted as properties and not as values. A step's duration
+// is real wall-clock -- workload.Run measures it, and a recording runner
+// returns in microseconds -- so the exact amount differs every run. What must
+// hold is that the total accumulates: it is at least the step that was just
+// reported, and it never goes down. The arithmetic itself belongs to
+// node.Rate.Cost, which is tested against its own overflow and rounding
+// cases.
+//
+// One property is deliberately not covered here: that the figure spans the
+// fetch and not just the workload. A recording runner returns in microseconds
+// and Cost rounds up to one microdollar, so a timer that stopped at the
+// workload prints the same thing as one that did not. Making it observable
+// would mean a Runner that sleeps -- a production seam shaped by a test's
+// convenience, which this repository refuses elsewhere for the same reason.
+func TestRunSteps_ReportsWhatEachStepCostAndTheRunningTotal(t *testing.T) {
+	r := sshx.NewRecordingRunner()
+	spec := stepSpec(t,
+		[]string{"sd-cli", "-p", "one"},
+		[]string{"sd-cli", "-p", "two"},
+		[]string{"sd-cli", "-p", "three"},
+	)
+
+	primeFetches(t, r)
+
+	var out bytes.Buffer
+	if err := runSteps(t.Context(), &out, tunnel.NewRecordingDialer(), r,
+		spec, session.Options{Log: discardLog()}, t.TempDir(), stepRate); err != nil {
+		t.Fatal(err)
+	}
+
+	line := regexp.MustCompile(`step (\d+)/(\d+) took \$([0-9.e+-]+) of card time, \$([0-9.e+-]+) so far`)
+	ms := line.FindAllStringSubmatch(out.String(), -1)
+	if len(ms) != len(spec.Cmds) {
+		t.Fatalf("priced %d step(s) of %d:\n%s", len(ms), len(spec.Cmds), out.String())
+	}
+
+	prev := -1.0
+	for i, m := range ms {
+		if m[1] != strconv.Itoa(i+1) || m[2] != strconv.Itoa(len(spec.Cmds)) {
+			t.Errorf("step %d reported itself as %s/%s", i+1, m[1], m[2])
+		}
+		step, err := strconv.ParseFloat(m[3], 64)
+		if err != nil {
+			t.Fatalf("step %d price %q: %v", i+1, m[3], err)
+		}
+		total, err := strconv.ParseFloat(m[4], 64)
+		if err != nil {
+			t.Fatalf("step %d total %q: %v", i+1, m[4], err)
+		}
+		if total < step {
+			t.Errorf("step %d: running total %v is below the step's own %v", i+1, total, step)
+		}
+		if total < prev {
+			t.Errorf("step %d: running total went down, %v after %v", i+1, total, prev)
+		}
+		prev = total
 	}
 }
 
@@ -511,7 +586,7 @@ func TestRunSteps_AMissingMarkerIsWastefulNotFatal(t *testing.T) {
 
 			var out bytes.Buffer
 			if err := runSteps(t.Context(), &out, tunnel.NewRecordingDialer(), r,
-				spec, session.Options{Log: discardLog()}, t.TempDir()); err != nil {
+				spec, session.Options{Log: discardLog()}, t.TempDir(), stepRate); err != nil {
 				t.Fatalf("a batch failed because a marker could not be set: %v", err)
 			}
 
@@ -552,7 +627,7 @@ func TestRunSteps_AFailedFetchIsReportedButDoesNotStopTheBatch(t *testing.T) {
 	spec := stepSpec(t, []string{"a"}, []string{"b"})
 	var out bytes.Buffer
 	runErr := runSteps(t.Context(), &out, tunnel.NewRecordingDialer(), r,
-		spec, session.Options{Log: discardLog()}, t.TempDir())
+		spec, session.Options{Log: discardLog()}, t.TempDir(), stepRate)
 	if runErr == nil {
 		t.Fatal("a failed fetch was not reported")
 	}
@@ -581,7 +656,7 @@ func TestRunSteps_PutsEveryStepInOneDirectory(t *testing.T) {
 	dir := transfer.RunDir(t.TempDir(), "0123456789abcdef", time.Now())
 	var out bytes.Buffer
 	if err := runSteps(t.Context(), &out, tunnel.NewRecordingDialer(), r,
-		spec, session.Options{Log: discardLog()}, dir); err != nil {
+		spec, session.Options{Log: discardLog()}, dir, stepRate); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(out.String(), "fetching 1 output path(s) into "+dir); n != 3 {
