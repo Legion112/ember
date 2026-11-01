@@ -8,6 +8,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/Legion112/ember/internal/provision"
+	"github.com/Legion112/ember/internal/sshx/sshexec"
+
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
@@ -49,13 +52,83 @@ func nextPoll(d time.Duration) time.Duration {
 	return d
 }
 
-// runServed starts sd-server, waits for the weights, and drives the jobs.
+// Served is a rental whose generation server is up and whose weights are
+// resident in VRAM.
 //
-// The order is the cheap-failure order the rest of the run already uses,
-// extended: the card, then the weights on the store, then the server, then
-// the weights in VRAM, then every job checked against what the server says it
-// can do -- and only then is anything generated. A mistyped sampler refuses
-// here, after about a minute of a rented card, rather than at job seven.
+// IT IS AN INTERFACE SO THE QUEUE CAN BE TESTED WITHOUT A CARD. What a drain
+// loop needs from a rental is "generate this batch" and "what can you do", and
+// both of those are answerable by a fake. The node's own lifetime is not on
+// this interface on purpose: it belongs to WithServed's closure, for the same
+// reason provision.WithNode owns a node's -- there is no path out of the
+// closure that leaves a machine running.
+type Served interface {
+	// Generate runs one batch's jobs, reporting progress to sink and writing
+	// images under dir.
+	//
+	// Every job is checked against the server's own capabilities before the
+	// first one runs. Checking job n just before submitting it would mean
+	// n-1 images already paid for when the typo in the last one surfaces.
+	Generate(ctx context.Context, sink report.Sink, jobs sdserver.Run, dir string) error
+
+	// Caps is what this server build reported it can do.
+	Caps() sdserver.Capabilities
+}
+
+// served is the real Served: a client pointed at the node's own loopback.
+type served struct {
+	client sdserver.Client
+	caps   sdserver.Capabilities
+	rate   node.Rate
+}
+
+func (s served) Caps() sdserver.Capabilities { return s.caps }
+
+func (s served) Generate(ctx context.Context, sink report.Sink, jobs sdserver.Run, dir string) error {
+	for i, j := range jobs.Jobs {
+		if err := sdserver.Validate(j, s.caps); err != nil {
+			return Usage(fmt.Errorf("sd.jobs[%d]: %w", i, err))
+		}
+	}
+	return runJobs(ctx, sink, s.client, jobs, dir, s.rate)
+}
+
+// WithServed rents this plan's node, makes the weights resident, and calls fn.
+//
+// THE NODE IS DESTROYED WHEN fn RETURNS, whatever it returns. That is what
+// lets a drain loop keep a rental and still not leak one: the loop decides
+// when there is no more work, returns, and the deferred teardown in
+// provision.WithNode takes the node away on a context that survives Ctrl-C.
+//
+// It is the seam the queue needs and `ember up` does not: up has exactly one
+// batch, so it goes through Do. Both reach the same withServer below, so
+// there is one spelling of "start the server and wait for the weights".
+func (p Plan) WithServed(ctx context.Context, out io.Writer, sink report.Sink,
+	fn func(context.Context, Served) error) error {
+
+	if len(p.Spec.Serve) == 0 {
+		return Usage(errors.New("this configuration has no sd.serve block, so there is no " +
+			"generation server to start; a queued request has nowhere to run"))
+	}
+	return provision.WithNode(ctx, p.Provider, p.Spec, p.Offer, p.lifecycle(sink),
+		func(ctx context.Context, s provision.Session) error {
+			// No output directory decided here: fn is a drain loop serving
+			// several requests on this one rental, and each of them writes
+			// into its own, which is also its key in the blob store.
+			client, so, err := p.prepare(ctx, out, s)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = client.Close() }()
+			return withServer(ctx, out, sink, client, sshexec.New(client.SSH()),
+				p.Spec, so, p.Offer.Price, len(p.Jobs.Jobs), fn)
+		})
+}
+
+// runServed is the single-batch shape: `ember up` with an sd: block.
+//
+// Kept as its own function with its own signature because that is what the
+// tests around the served path drive, and those tests are the proof that
+// splitting Generate out of it changed nothing.
 func runServed(
 	ctx context.Context,
 	out io.Writer,
@@ -67,6 +140,37 @@ func runServed(
 	so session.Options,
 	runDir string,
 	rate node.Rate,
+) error {
+	return withServer(ctx, out, sink, client, r, spec, so, rate, len(run.Jobs),
+		func(ctx context.Context, s Served) error {
+			return s.Generate(ctx, sink, run, runDir)
+		})
+}
+
+// withServer starts sd-server, waits for the weights, and hands the result to
+// fn.
+//
+// The order is the cheap-failure order the rest of the run already uses,
+// extended: the card, then the weights on the store, then the server, then the
+// weights in VRAM, then every job checked against what the server says it can
+// do -- and only then is anything generated. A mistyped sampler refuses after
+// about a minute of a rented card rather than at job seven.
+//
+// batch is how many jobs the first caller intends to run, for the one line
+// this whole shape exists to justify. With a queue it is the first request's
+// count and anything claimed afterwards is further saving; with `ember up` it
+// is the whole batch.
+func withServer(
+	ctx context.Context,
+	out io.Writer,
+	sink report.Sink,
+	client tunnel.Dialer,
+	r sshx.Runner,
+	spec node.Spec,
+	so session.Options,
+	rate node.Rate,
+	batch int,
+	fn func(context.Context, Served) error,
 ) error {
 	// The server dies with this context, and it is a child of the run's so
 	// that returning for any reason stops it. There is no value in a server
@@ -116,14 +220,6 @@ func runServed(
 	if err != nil {
 		return err
 	}
-	// Every job before the first one runs. Checking job n just before
-	// submitting it would mean n-1 images already paid for when the typo in
-	// the last one surfaces.
-	for i, j := range run.Jobs {
-		if err := sdserver.Validate(j, caps); err != nil {
-			return Usage(fmt.Errorf("sd.jobs[%d]: %w", i, err))
-		}
-	}
 
 	// The figure this whole shape exists to stop paying repeatedly, said out
 	// loud: with cmds it would be spent again for every job after the first.
@@ -144,16 +240,16 @@ func runServed(
 	// that showed the server's figure beside a log line carrying ember's
 	// would reproduce the exact confusion this comment exists to prevent.
 	so.Log.Debug("sd-server load", "measured", time.Since(serveStart), "server_reported", load)
-	if len(run.Jobs) > 1 {
+	if batch > 1 {
 		sink.Emit(report.Event{
 			Kind:     report.KindModelResident,
 			Measured: time.Since(serveStart),
 			Reported: load,
-			Total:    len(run.Jobs),
+			Total:    batch,
 		})
 	}
 
-	return runJobs(ctx, sink, c, run, runDir, rate)
+	return fn(ctx, served{client: c, caps: caps, rate: rate})
 }
 
 // startServer starts a long-running process on the node and returns the
@@ -316,9 +412,14 @@ func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdser
 		if err != nil {
 			return fmt.Errorf("%s: %w", label, err)
 		}
+		wrote := make([]report.File, 0, len(w.Each))
+		for _, f := range w.Each {
+			wrote = append(wrote, report.File{Name: f.Name, Bytes: f.Bytes})
+		}
 		sink.Emit(report.Event{
 			Kind: report.KindJobImages, Unit: report.UnitJob,
-			Index: i + 1, Total: len(run.Jobs), Files: w.Files, Bytes: w.Bytes,
+			Index: i + 1, Total: len(run.Jobs),
+			Files: w.Files, Bytes: w.Bytes, Wrote: wrote,
 		})
 
 		// The accumulating price, the same reporting runSteps does and for the

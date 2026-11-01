@@ -506,13 +506,12 @@ func (c Config) ParseSD() (sdserver.Run, error) {
 			Output:         j.Output,
 			Extra:          j.Extra,
 		}
-		// Building the body is the check: it is where a key in extra that
-		// shadows a typed field is refused, and doing it here means that
-		// happens before anything is rented rather than at submission.
-		if _, err := job.Body(preview, interval); err != nil {
-			return sdserver.Run{}, fmt.Errorf("sd.jobs[%d]: %w", i, err)
-		}
-		if err := sdserver.ValidateOutput(job.Output); err != nil {
+		// Everything checkable without a server, which is where a key in
+		// extra that shadows a typed field is refused -- and doing it here
+		// means that happens before anything is rented rather than at
+		// submission. One function, shared with the path a queued request
+		// takes, so the refusals do not exist twice.
+		if err := sdserver.ValidateStatic(job, preview, interval); err != nil {
 			return sdserver.Run{}, fmt.Errorf("sd.jobs[%d]: %w", i, err)
 		}
 		run.Jobs = append(run.Jobs, job)

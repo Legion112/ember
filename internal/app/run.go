@@ -100,25 +100,25 @@ func (p Plan) SyncAssets(ctx context.Context, out io.Writer) error {
 		})
 }
 
-// serve opens the tunnel and holds it until the operator stops or the node's
-// deadline arrives. The decisions it used to make inline -- when to retry a
-// dial, when to refuse one -- live in internal/session, where they can be
-// tested against an in-process SSH server instead of a rented machine.
-func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s provision.Session) error {
+// prepare dials the node and gets it ready to be used.
+//
+// THE ORDER IS THE CHEAP-FAILURE ORDER, and it is the reason this is one
+// function rather than three lines repeated by every shape. A dead GPU costs
+// the probe timeout; a dead GPU discovered after `verify: always` costs the
+// probe timeout plus re-hashing every byte on the store, which for a 56 GiB
+// model set is a minute of a card that cannot run it anyway. So: the card,
+// then the weights, then whatever the node was rented for.
+//
+// The returned client is the caller's to close.
+func (p Plan) prepare(ctx context.Context, out io.Writer, s provision.Session) (*sshdial.Client, session.Options, error) {
 	client, so, err := dialNode(ctx, s, p.Options, p.Hold)
 	if err != nil {
-		return err
+		return nil, so, err
 	}
-	defer func() { _ = client.Close() }()
 
-	// The card before the weights, and the weights before the workload.
-	//
-	// This order is the cheap-failure order. A dead GPU costs the probe
-	// timeout; a dead GPU discovered after `verify: always` costs the probe
-	// timeout plus re-hashing every byte on the store, which for a 56 GiB
-	// model set is a minute of a card that cannot run it anyway.
 	if err := gpucheck.Wait(ctx, sshexec.New(client.SSH()), p.Spec.GPUProbe, p.Spec.GPUProbeTimeout, out, so.Log); err != nil {
-		return err
+		_ = client.Close()
+		return nil, so, err
 	}
 
 	// Assets next, and a failure here means the workload never starts.
@@ -128,8 +128,23 @@ func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s prov
 	// connection the workload uses, so its output streams live and its exit
 	// status is known when it happens rather than polled for afterwards.
 	if err := EnsureAssets(ctx, out, sshexec.New(client.SSH()), p.Spec, so); err != nil {
+		_ = client.Close()
+		return nil, so, err
+	}
+	return client, so, nil
+}
+
+// serve opens the tunnel and does what the spec asks.
+//
+// The decisions it used to make inline -- when to retry a dial, when to
+// refuse one -- live in internal/session, where they can be tested against an
+// in-process SSH server instead of a rented machine.
+func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s provision.Session) error {
+	client, so, err := p.prepare(ctx, out, s)
+	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
 	// Decided once, here, rather than inside fetchOutputs: a batch fetches
 	// several times and every step of one run has to land in one directory.

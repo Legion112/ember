@@ -307,6 +307,28 @@ func Validate(j Job, caps Capabilities) error {
 	return nil
 }
 
+// ValidateStatic is every refusal that needs no server.
+//
+// IT EXISTS BECAUSE THERE ARE TWO MOMENTS to refuse a job and only one of them
+// is cheap. Validate above needs the server's own capability list, which only
+// exists once a node is up and the weights are loaded -- about a minute of a
+// rented card. Everything checkable without that is checkable the instant the
+// job is written: a key in extra that shadows a seed, an output name that
+// cleans away to nothing, a negative preview interval.
+//
+// One function so the refusals do not exist twice. config.ParseSD calls it for
+// a file and the queue calls it for a request, and a config error that was
+// caught for one spelling and not the other would be the worse half of having
+// both.
+func ValidateStatic(j Job, preview string, interval int) error {
+	// Building the body IS the check: it is where a key in extra that
+	// shadows a typed field is refused.
+	if _, err := j.Body(preview, interval); err != nil {
+		return err
+	}
+	return ValidateOutput(j.Output)
+}
+
 func within(name string, v, minimum, maximum int) error {
 	if v == 0 {
 		return nil
@@ -326,6 +348,21 @@ func within(name string, v, minimum, maximum int) error {
 // Written is what WriteImages put on disk.
 type Written struct {
 	Files int
+	Bytes int64
+
+	// Each is what was written, in order.
+	//
+	// It exists so a caller recording where the bytes went does not have to
+	// re-derive the naming. Deriving it a second time would be a second
+	// spelling of safeStem, and the two would drift the first time a stem is
+	// sanitised differently -- leaving a database pointing at filenames that
+	// are not the ones on disk.
+	Each []WrittenFile
+}
+
+// WrittenFile is one file and its length.
+type WrittenFile struct {
+	Name  string
 	Bytes int64
 }
 
@@ -369,6 +406,7 @@ func WriteImages(root *os.Root, stem string, imgs []Image) (Written, error) {
 		}
 		w.Files++
 		w.Bytes += int64(n)
+		w.Each = append(w.Each, WrittenFile{Name: f, Bytes: int64(n)})
 	}
 	return w, nil
 }
