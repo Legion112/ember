@@ -661,6 +661,96 @@ A leaked node bills by the hour in silence. These are not style preferences.
   where it belongs instead: ember passes no *credential* as a flag, and
   `/proc/<pid>/cmdline` being world-readable is why.
 
+- **One cost `cmds` cannot remove, and the one place ember stops being
+  workload-agnostic.** Each entry in `cmds` is a fresh `sd-cli` that reads the
+  weights into VRAM again -- about twelve seconds per image on a rented A100,
+  against roughly a hundred of sampling at 1024x1024. `sd.serve` holds one
+  `sd-server` and the weights stay resident. That is ~8% of a ten-image FLUX.2
+  batch and most of the time on short generations, which is the shape prompt
+  iteration has. The cost of getting it is that ember now knows what a sampler
+  is: progress streaming is impossible for a program that refuses to read its
+  own payload, and a `curl` in a config is the same knowledge maintained by
+  hand. `cmds` stays as the general mechanism, because a typed sd path cannot
+  run `ffmpeg`.
+- **sd-server was already being compiled and thrown away.**
+  `examples/CMakeLists.txt` at the pinned revision is two unconditional lines,
+  `add_subdirectory(cli)` and `add_subdirectory(server)`, so `cmake --build`
+  has always produced both and the image copied one out. No revision bump and
+  no extra build time. The copy is guarded, because `find -exec cp` succeeds
+  when it matches nothing -- and the guard is braced, or a cmake failure falls
+  into it and blames the copy for a compile error at the end of a
+  forty-minute build.
+- **A completed result is erased 600 seconds after it completed, so one job is
+  in flight at a time.** `async_jobs.h` sets `completed_ttl_seconds = 600`;
+  `async_jobs.cpp` measures it from `completed_at` and purges from the worker,
+  when it wakes before popping the next job and after each one finishes.
+  `api.md` lists `410 Gone` for a job and never says why. Queueing ten jobs up
+  front would leave eight finished images, each already paid for, one dropped
+  connection away from deletion. Submitting one at a time costs nothing --
+  the generation context lock serializes the device anyway -- and makes the
+  TTL unreachable, the 64-job pending cap irrelevant and `queue_position`
+  moot. Read out of the C++ before any client code existed, which is the
+  calibration-first habit the RunPod volume API set.
+- **One API, two JSON types for one field name.** Model management answers
+  `{"error":"...","code":"..."}`, a string beside a code; a failed job answers
+  `{"error":{"code":...,"message":...}}`, an object. A Go struct with
+  `Error string` fails to decode the second and one with an object fails the
+  first, so whichever was written first works until the day the other endpoint
+  refuses something -- and then what ember prints is a JSON unmarshalling
+  complaint instead of the reason.
+- **ember owns the listen address.** `sdserver.ServeCommand` appends
+  `--listen-ip 127.0.0.1` and refuses a serve command that names either listen
+  flag. A config passing `0.0.0.0` would publish an unauthenticated image
+  generator, with arbitrary file paths in its request body, on a rented
+  machine's public interface -- the ComfyUI exposure this threat model is
+  written against. Same rule and same reason as `tunnel.RemoteLoopback`, and
+  nothing binds locally either: ember dials the node's own loopback through
+  `direct-tcpip`, so there is no `ports:` entry and no listener outside
+  `internal/loopback`.
+- **A job submission is never retried.** A transport failure on
+  `POST /img_gen` is ambiguous: the job may exist with an id ember never
+  learned. Retrying generates and bills a second image, and the second one is
+  invisible because ember is polling the first id. `httpx` has no retry loop
+  and must not gain one; the comment sits where somebody would add it.
+- **Previews cost GPU time, not just bandwidth, and ember's default is not
+  upstream's.** `preview_interval` defaults to 1 upstream -- a frame every
+  step -- and the `tae` and `vae` modes run a decode per frame. ember defaults
+  to `proj` every 5. A negative interval is refused rather than clamped,
+  because upstream clamps a non-positive value to 1: somebody writing `-1` to
+  mean "off" would buy the most expensive setting there is.
+- **Progress is a pass and a step within it, never a percentage.** sd-server's
+  `step`/`total_steps` describe the current sampling pass, and passes restart
+  for each batch item, each high/low-noise stage and each highres pass. A bar
+  built from them runs to the end and starts again, which reads as a hang.
+  Every poll also returns the current frame whether or not it is new, so the
+  poll interval is a bandwidth knob and ember deduplicates on the step.
+- **A test whose fake never repeats cannot prove a deduplication.** The first
+  version of the preview fake advanced the step on every poll, so each line
+  appeared once whether or not anything deduplicated -- the assertion passed
+  against the bug. A real server returns the same frame to every poll between
+  intervals, so the fake does now. Same shape as a lab whose cleanup runs
+  before its assertion.
+- **A verification harness that cannot tell a build failure from a pass is not
+  a verification harness.** Three of the reinstatements in this change
+  reported "nothing failed" when what had actually happened was an anchor that
+  did not match or a program that did not compile. Grep for the build error as
+  well as for `--- FAIL`, and assert that the edit applied before trusting
+  what the suite says about it.
+- **Nothing creates the run's output directory on a served path.** The
+  fetching paths get it from `transfer.Fetch`'s own `MkdirAll`, and a served
+  run never calls Fetch because the images arrive in the HTTP response instead
+  of a tar. Every served run would have failed at the first image with "no
+  such file or directory", after the generation was paid for. Found by writing
+  the test, not by running it on a card.
+- **Deferred, and recorded rather than quietly skipped:** a lab that starts
+  `sd-server` in the published image and asserts it binds loopback only. The
+  CUDA binary needs `libcuda.so.1` to do anything, so there is no GPU-less
+  runner on which starting it proves something -- the same constraint that
+  sends the video-support check to the CPU build. The Dockerfile shape is
+  asserted as text on every pull request instead, and the first live run is
+  what will capture real fixtures over
+  `internal/sdserver/testdata/README.md`'s doc-derived ones.
+
 ## Style
 
 Comments explain *why*, and name the defect that motivated them — see

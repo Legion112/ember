@@ -289,6 +289,50 @@ func TestWorkloadImages_PinTheSameUpstreamRevision(t *testing.T) {
 	}
 }
 
+// TestWorkloadImage_ShipsTheServerItAlreadyCompiles is a Dockerfile-shape
+// assertion, so it is free and runs on every pull request.
+//
+// The resident-model path needs sd-server on the node, and the build has
+// always produced it -- examples/CMakeLists.txt adds the server subdirectory
+// unconditionally at the pinned revision -- while the image copied only
+// sd-cli out. The thing that can regress is the copy, not the compile, and a
+// regression there has no symptom until a node is rented and answers
+// "sd-server: not found" over SSH.
+//
+// Checked as text rather than against a built image because the CUDA binary
+// needs libcuda.so.1 to do anything at all, so there is no runner without a
+// GPU on which starting it proves something -- see the deferred lab in
+// AGENTS.md.
+func TestWorkloadImage_ShipsTheServerItAlreadyCompiles(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "workload-sd-cuda.Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+
+	for _, want := range []string{
+		// copied out of the build tree
+		"-name 'sd-server'",
+		// and reachable by name over a non-interactive SSH session
+		"/usr/local/bin/sd-server",
+		// and the copy is checked, because find -exec cp succeeds when it
+		// matches nothing
+		"test -x /out/sd-server",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("workload-sd-cuda.Dockerfile is missing %q, so the published image "+
+				"would carry no sd-server and every served run would fail after renting a node", want)
+		}
+	}
+
+	// Braced, or a cmake failure falls into the guard and blames the copy for
+	// a compile error at the end of a forty-minute build.
+	if !strings.Contains(body, "{ test -x /out/sd-server ||") {
+		t.Error("the sd-server guard is not braced; an unbraced `A && test || { exit }` " +
+			"reports the wrong failure when the build itself fails")
+	}
+}
+
 // sdPin reads the stable-diffusion.cpp revision a Dockerfile pins.
 func sdPin(t *testing.T, file, pattern string) string {
 	t.Helper()

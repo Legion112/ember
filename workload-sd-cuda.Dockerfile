@@ -98,7 +98,32 @@ RUN test -n "${CUDA_ARCH}" || { \
  && cmake --build build --config Release -j"$(nproc)" \
  && mkdir -p /out \
  && find build -name 'sd-cli' -type f -exec cp {} /out/ \; \
- && find build -name '*.so*' -type f -exec cp -P {} /out/ \;
+ && find build -name 'sd-server' -type f -exec cp {} /out/ \; \
+ && find build -name '*.so*' -type f -exec cp -P {} /out/ \; \
+ && { test -x /out/sd-cli || { echo "the build produced no sd-cli"; exit 1; }; } \
+ && { test -x /out/sd-server || { echo "the build produced no sd-server; examples/CMakeLists.txt is supposed to add_subdirectory(server) unconditionally at this revision"; exit 1; }; }
+
+# sd-server was already being compiled and thrown away.
+#
+# examples/CMakeLists.txt at this revision is two unconditional lines --
+# add_subdirectory(cli) and add_subdirectory(server) -- so `cmake --build`
+# has always produced both and this image only ever copied one out. Taking
+# the second costs no build time and no revision bump.
+#
+# It is what makes a resident model possible: every entry in `cmds` is a
+# fresh sd-cli that reads the weights into VRAM again, and on a rented A100
+# that is about twelve seconds per image during which nothing is generating.
+# A server loads them once. See internal/sdserver.
+#
+# Both binaries are checked rather than assumed, because `find -exec cp`
+# succeeds when it matches nothing: without the test, an upstream revision
+# that moved or renamed the target would publish an image whose only symptom
+# is "sd-server: not found" over SSH, after a node was rented.
+#
+# Each test is braced. Unbraced, `A && test -x x || { echo; exit 1; }` is
+# parsed left to right, so a cmake failure skips the test, falls into the
+# block and reports "the build produced no sd-cli" -- blaming the copy for a
+# compile error, at the end of a forty-minute build.
 
 # GGML_NATIVE=OFF, because ON compiles -march=native -- for the machine doing
 # the build.
@@ -282,7 +307,8 @@ RUN printf '%s\n' "${CUDA_ARCH}" > /etc/ember-cuda-arch
 # environment, and a model that loads from a terminal but not from ember is a
 # confusing afternoon.
 RUN printf '/opt/sd\n' > /etc/ld.so.conf.d/ember-sd.conf && ldconfig \
- && ln -sf /opt/sd/sd-cli /usr/local/bin/sd-cli
+ && ln -sf /opt/sd/sd-cli /usr/local/bin/sd-cli \
+ && ln -sf /opt/sd/sd-server /usr/local/bin/sd-server
 
 # No model. This image is code, and the weights live on a store.
 #

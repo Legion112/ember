@@ -699,3 +699,52 @@ func mustFailSD(t *testing.T, cfg Config) error {
 	}
 	return err
 }
+
+// TestExampleConfigs_LoadAndParse reads every committed ember*.yaml.
+//
+// KnownFields(true) means a misspelled key is a hard failure, so a committed
+// example with a typo in it is an example that cannot be run -- and the
+// person who finds out is whoever copies it. These files are hand-written and
+// long: ember.flux2.yaml is 211 lines and the sd-server one is comparable,
+// which is exactly the size where a key gets misremembered.
+//
+// ParseAssets is deliberately not called. ember.video.example.yaml carries
+// REPLACE_WITH_THE_DIGEST_PUSH_PRINTS where a digest goes, on purpose, and a
+// placeholder that refuses is the point of it.
+func TestExampleConfigs_LoadAndParse(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "..", "ember*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) < 3 {
+		t.Fatalf("found %d example config(s) at the repository root, want at least 3; "+
+			"this test is checking nothing if the glob is wrong", len(paths))
+	}
+
+	for _, p := range paths {
+		t.Run(filepath.Base(p), func(t *testing.T) {
+			cfg, err := Load(p)
+			if err != nil {
+				t.Fatalf("%s does not load: %v", filepath.Base(p), err)
+			}
+			if _, err := cfg.ParseSD(); err != nil {
+				t.Errorf("sd: block does not parse: %v", err)
+			}
+			if _, err := cfg.ParsePorts(); err != nil {
+				t.Errorf("ports: does not parse: %v", err)
+			}
+			if _, err := cfg.ParseOutputs(); err != nil {
+				t.Errorf("outputs: does not parse: %v", err)
+			}
+			if _, err := cfg.ParseImages(); err != nil {
+				t.Errorf("images: does not parse: %v", err)
+			}
+			if _, err := cfg.Filter(); err != nil {
+				t.Errorf("the offer filter does not build: %v", err)
+			}
+			if _, _, err := cfg.Budgets(); err != nil {
+				t.Errorf("the budgets do not parse: %v", err)
+			}
+		})
+	}
+}

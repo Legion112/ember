@@ -399,6 +399,74 @@ so it bites at selection and there is no step to name yet. A batch that needs
 longer needs a larger `ttl`, and the ceiling then refuses or admits the whole
 rental exactly as it did for one command.
 
+### One resident model instead of one process per image
+
+`cmds` pays each per-rental cost once. It cannot pay the **model load** once,
+because every entry is a fresh `sd-cli` that reads the weights into VRAM again.
+`sd:` starts one `sd-server` on the node, holds the weights, and drives it over
+the same SSH connection:
+
+```yaml
+sd:
+  serve: [sd-server, --diffusion-model, /models/flux2-dev-Q8_0.gguf,
+          --llm, /models/Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf,
+          --vae, /models/flux2-ae.safetensors]
+  ready_timeout: 10m
+  jobs:
+    - prompt: "a paper boat on a slow river, morning light"
+      width: 1536
+      height: 1536
+      steps: 28
+      sampler: euler
+      cfg: 1.0
+      guidance: 4.0
+      seed: 20261101
+      output: boat
+    - prompt: "the same river at night"
+      output: river-night
+```
+
+Use `cmd`, `cmds` **or** `sd.serve` — never two. A served run is refused before
+anything is rented if the jobs and the server are not both there, and every job
+is checked against what the server reports it can do before the first one is
+submitted, so a mistyped `sampler` costs the model load and nothing else.
+
+**This is the one place ember understands a workload's arguments.** Everywhere
+else a command is opaque argv on purpose. That position does not survive
+progress streaming: a program that will not read its own payload cannot report
+that job two is fourteen steps into its first pass, and a `curl` in a config
+file is not an integration — it is the same knowledge, maintained by hand.
+
+`sd.jobs` types what ember validates and reports on; `extra` reaches every
+other field of the API, including nested ones, so nothing is out of reach:
+
+```yaml
+    - prompt: "a cat"
+      extra:
+        output_format: png
+        sample_params: { eta: 0.3 }
+```
+
+A key in `extra` that ember also set is **refused**, not resolved. A seed or a
+step count decided the wrong way makes two runs that claim to be the same
+measurement produce different images.
+
+Images arrive in the HTTP response rather than as a tar, so they are written as
+they finish — `<run>/<output>-00.png` under the same output directory everything
+else lands in, beside a `<output>-preview-00.png` that is overwritten as the
+generation proceeds. `outputs:` still works and is fetched once at the end,
+which is where the server's own log belongs.
+
+Progress is reported as a pass and a step within it, never as one percentage:
+sd-server's step count describes the current sampling pass, and passes restart
+for each batch item, each noise stage and each highres pass.
+
+**Previews cost GPU time, not just bandwidth.** ember defaults to `preview: proj`
+every 5 steps. Upstream's default is a frame every single step, and the `tae`
+and `vae` modes run a decode to produce each one — so the upstream default is
+the expensive one, billed by the second, for frames nobody in an unattended
+batch is watching. `preview: none` is the only free setting.
+
 ### Generating on this machine's GPU
 
 A model that does not fit in VRAM is not a model that cannot run. sd-cli will
