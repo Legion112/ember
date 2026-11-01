@@ -103,6 +103,16 @@ type Queue struct {
 
 	mu      sync.Mutex
 	current genstore.ReqID
+
+	// sinks is one event stream per request, memoised.
+	//
+	// ONE PER REQUEST AND NOT ONE PER CALL, because the sequence number is
+	// the whole contract with a watching client: it asks for everything
+	// after what it has seen, and two numberings for one request means
+	// events that overwrite each other. A rental's lifecycle events and its
+	// batch's progress go to the same request, so they have to come from the
+	// same counter.
+	sinks map[genstore.ReqID]*sink
 }
 
 func (q *Queue) log() *slog.Logger {
@@ -229,6 +239,13 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 	}
 
 	compat := genstore.Compat{Provider: first.Provider, GPU: first.GPU}
+
+	// Released after WithServed returns and not inside it: the rental's cost
+	// and a destroy that failed arrive from the deferred teardown, which runs
+	// after the closure below has finished.
+	var served []genstore.ReqID
+	defer func() { q.release(served...) }()
+
 	return true, rental.WithServed(ctx, q.lifecycle(first.ID), func(ctx context.Context, s app.Served) error {
 		// Learned once per process and cached, so a mistyped sampler is
 		// refused at the moment it is typed rather than a minute into a
@@ -238,7 +255,7 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 			q.log().Warn("could not cache the server's capabilities; the next request will be "+
 				"checked against a card instead of against a cache", "err", err)
 		}
-		return q.drain(ctx, s, lease, compat, first)
+		return q.drain(ctx, s, lease, compat, first, &served)
 	})
 }
 
@@ -246,9 +263,10 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 //
 // It returns when nothing compatible is left, which destroys the node: no idle
 // timeout, because a node with nothing to do is a node billing for nothing.
-func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat genstore.Compat, first genstore.Request) error {
+func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat genstore.Compat, first genstore.Request, served *[]genstore.ReqID) error {
 	req := first
 	for {
+		*served = append(*served, req.ID)
 		err := q.generate(ctx, s, req)
 		q.finish(ctx, req.ID, err)
 		if err != nil {
@@ -295,9 +313,9 @@ func (q *Queue) generate(ctx context.Context, s app.Served, req genstore.Request
 	}
 
 	dir := q.dirOf(req.ID)
-	sink := q.batchSink(req.ID)
-	err := s.Generate(ctx, sink, run, dir)
-	sink.flush(ctx)
+	snk := q.sinkFor(req.ID)
+	err := s.Generate(ctx, snk, run, dir)
+	snk.flush(ctx)
 	return err
 }
 
@@ -334,6 +352,20 @@ func (q *Queue) finish(ctx context.Context, id genstore.ReqID, cause error) {
 	}
 }
 
+// release drops a request's event stream once nothing more will be emitted
+// for it.
+//
+// Not in finish: a rental's cost and a destroy that failed arrive from a
+// deferred teardown, AFTER the last batch has been recorded as done, and they
+// belong to the request that opened the rental. Forgetting its stream at
+// finish would renumber them from 1 and overwrite the progress already
+// stored.
+func (q *Queue) release(ids ...genstore.ReqID) {
+	for _, id := range ids {
+		q.forget(id)
+	}
+}
+
 // lifecycle routes a rental's own events to the request that opened it.
 //
 // WHICH REQUEST GETS THE RENTAL'S COST is a real question with no tidy answer,
@@ -345,7 +377,7 @@ func (q *Queue) finish(ctx context.Context, id genstore.ReqID, cause error) {
 // per-request figures and calling it the bill would understate it; attributing
 // the whole rental to every request would multiply it.
 func (q *Queue) lifecycle(opener genstore.ReqID) report.Sink {
-	s := q.batchSink(opener)
+	s := q.sinkFor(opener)
 	return report.SinkFunc(func(e report.Event) {
 		s.Emit(e)
 		// Written through to the row as well, so `ember ls`'s node and this
@@ -373,10 +405,49 @@ func (q *Queue) set(id genstore.ReqID, fn func(*genstore.Request)) {
 	}
 }
 
-// batchSink persists a request's events and notices what its jobs cost.
-func (q *Queue) batchSink(id genstore.ReqID) *recorder {
-	return &recorder{q: q, id: id}
+// sinkFor is this request's event stream, created once.
+func (q *Queue) sinkFor(id genstore.ReqID) *sink {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.sinks == nil {
+		q.sinks = map[genstore.ReqID]*sink{}
+	}
+	if s, ok := q.sinks[id]; ok {
+		return s
+	}
+	buf := &recorder{q: q, id: id}
+	s := &sink{Stream: report.NewStream(q.at, buf), buf: buf}
+	q.sinks[id] = s
+	return s
 }
+
+// forget releases a finished request's stream, so a long-running server does
+// not hold one per request it has ever served.
+func (q *Queue) forget(id genstore.ReqID) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.sinks, id)
+}
+
+// sink is one request's event stream: numbered, then buffered, then stored.
+//
+// THE NUMBERING IS WHY THIS EXISTS, and its absence was a real bug that only
+// running the thing found. Emitters do not set Seq -- report.Stream does, and
+// nothing was wrapping them -- so every event arrived as Seq 0, and
+// genstore's INSERT OR REPLACE on (request, seq) meant each one overwrote the
+// last. A generation that produced a node_ready, a job_started, four progress
+// frames, an images event and a cost left exactly one row.
+//
+// The unit test did not catch it because its fake set Seq itself, which is
+// kinder than anything real: a fake that is tidier than the thing it stands
+// in for tests a program that does not exist.
+type sink struct {
+	*report.Stream
+	buf *recorder
+}
+
+// flush writes whatever is buffered.
+func (s *sink) flush(ctx context.Context) { s.buf.flush(ctx) }
 
 // recorder buffers events and writes them to the store.
 //
@@ -388,21 +459,35 @@ type recorder struct {
 	q  *Queue
 	id genstore.ReqID
 
-	mu  sync.Mutex
-	buf []report.Event
+	mu   sync.Mutex
+	buf  []report.Event
+	last time.Time
 }
 
-// flushEvery bounds the buffer. Reached long before a batch finishes on
-// anything slower than a laptop, so a watching client is never more than this
-// many events behind.
-const flushEvery = 8
+// flushEvery and flushAfter bound how far behind a watching client can be.
+//
+// BOTH, AND THE TIME ONE IS THE IMPORTANT ONE. A count alone looked
+// sufficient and is not: progress arrives once per sampling step, and FLUX.2
+// at 2048x2048 measured 140 seconds per step -- so "flush every eight events"
+// is twenty minutes of silence on exactly the generation somebody is watching.
+// A time bound makes the latency a property of the clock instead of a property
+// of how slow the card is.
+//
+// The count still earns its place at the other end: sd15 at 256x256 samples in
+// 0.3s and the preview lab measured seventeen frames for six steps, where a
+// write per event would be a transaction per frame on the path that is meant
+// to be reporting progress rather than causing it.
+const (
+	flushEvery = 8
+	flushAfter = 250 * time.Millisecond
+)
 
 func (r *recorder) Emit(e report.Event) {
 	r.mu.Lock()
 	r.buf = append(r.buf, e)
-	full := len(r.buf) >= flushEvery
-	// An image is worth writing through at once: it is the thing the operator
-	// is waiting for, and a gallery that lags eight events behind the file on
+	due := len(r.buf) >= flushEvery || r.q.at().Sub(r.last) >= flushAfter
+	// An image is written through whatever the clock says: it is the thing
+	// the operator is waiting for, and a gallery that lags behind the file on
 	// disk looks broken.
 	urgent := e.Kind == report.KindJobImages || e.Kind == report.KindRunFailed
 	r.mu.Unlock()
@@ -410,7 +495,7 @@ func (r *recorder) Emit(e report.Event) {
 	if e.Kind == report.KindJobImages {
 		r.q.recordImages(r.id, e)
 	}
-	if full || urgent {
+	if due || urgent {
 		r.flush(context.Background())
 	}
 }
@@ -420,6 +505,7 @@ func (r *recorder) flush(ctx context.Context) {
 	r.mu.Lock()
 	es := r.buf
 	r.buf = nil
+	r.last = r.q.at()
 	r.mu.Unlock()
 
 	if len(es) == 0 {

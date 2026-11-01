@@ -94,6 +94,7 @@ func commands() []command {
 		{"up", "rent a node, forward its ports to loopback, destroy it", cmdUp},
 		{"down", "destroy a node by handle", cmdDown},
 		{"ls", "list nodes ember created, across every configured provider", cmdLs},
+		{"serve", "run the web UI and a queue that drains onto one rental", cmdServe},
 		{"reap", "destroy every node past its deadline", cmdReap},
 		{"offers", "list rentable offers matching a filter", cmdOffers},
 		{"store", "create or destroy persistent storage that outlives a node", cmdStore},

@@ -84,7 +84,7 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 	if r.rentErr != nil {
 		return r.rentErr
 	}
-	sink.Emit(report.Event{Seq: 1, Kind: report.KindNodeReady, Node: "local/n1"})
+	sink.Emit(report.Event{Kind: report.KindNodeReady, Node: "local/n1"})
 	err := fn(ctx, r.served)
 	if r.block != nil {
 		// Held open so a test can see the rental alive while it cancels.
@@ -93,7 +93,7 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 		case <-time.After(5 * time.Second):
 		}
 	}
-	sink.Emit(report.Event{Seq: 99, Kind: report.KindRunCost, Node: "local/n1", Cost: 11333})
+	sink.Emit(report.Event{Kind: report.KindRunCost, Node: "local/n1", Cost: 11333})
 	return err
 }
 
@@ -421,11 +421,17 @@ func TestOnce_RecordsTheRentalAgainstTheRequestThatOpenedIt(t *testing.T) {
 // TestOnce_PersistsProgressSoAReconnectCanReplayIt.
 func TestOnce_PersistsProgressSoAReconnectCanReplayIt(t *testing.T) {
 	served := &fakeServed{
+		// NO Seq SET, deliberately. Nothing real sets one -- report.Stream
+		// stamps it -- and the first version of this fake numbered its own
+		// events, which hid a bug where nothing was numbering them at all:
+		// every event arrived as Seq 0 and overwrote the last, leaving one
+		// row for a whole generation. A fake tidier than the thing it stands
+		// in for tests a program that does not exist.
 		progress: func(sink report.Sink, _ int) {
-			for i := int64(1); i <= 4; i++ {
+			for i := 1; i <= 4; i++ {
 				sink.Emit(report.Event{
-					Seq: i, Kind: report.KindJobProgress, Unit: report.UnitJob,
-					Index: 1, Total: 1, Pass: 1, Step: int(i), TotalSteps: 4,
+					Kind: report.KindJobProgress, Unit: report.UnitJob,
+					Index: 1, Total: 1, Pass: 1, Step: i, TotalSteps: 4,
 				})
 			}
 		},
@@ -451,6 +457,34 @@ func TestOnce_PersistsProgressSoAReconnectCanReplayIt(t *testing.T) {
 	if progress != 4 {
 		t.Errorf("recorded %d progress event(s), want 4 -- a client that reconnects reads these", progress)
 	}
+
+	// EVERY EVENT NUMBERED, DISTINCTLY AND IN ORDER. This is the assertion
+	// the first version of this test could not make, because its fake set Seq
+	// itself: nothing was stamping them, so every event arrived as Seq 0 and
+	// genstore's INSERT OR REPLACE on (request, seq) meant each overwrote the
+	// last. A whole generation left one row, and only running ember found it.
+	seen := map[int64]bool{}
+	var prev int64
+	for _, e := range es {
+		if e.Seq == 0 {
+			t.Fatalf("an event reached the store unnumbered: %+v", e)
+		}
+		if seen[e.Seq] {
+			t.Fatalf("Seq %d was used twice, so one event overwrote another", e.Seq)
+		}
+		if e.Seq <= prev {
+			t.Fatalf("Seq went backwards: %d after %d", e.Seq, prev)
+		}
+		seen[e.Seq], prev = true, e.Seq
+		if e.At.IsZero() {
+			t.Errorf("event %d carries no timestamp", e.Seq)
+		}
+	}
+	// The lifecycle events share the numbering, because they belong to the
+	// same request: node_ready before the progress, run_cost after it.
+	if len(es) < 6 {
+		t.Errorf("recorded %d event(s); the rental's own node_ready and run_cost should share this stream", len(es))
+	}
 }
 
 // TestOnce_JoinsTheFilesAJobWroteToTheRequest.
@@ -462,7 +496,7 @@ func TestOnce_JoinsTheFilesAJobWroteToTheRequest(t *testing.T) {
 	served := &fakeServed{
 		progress: func(sink report.Sink, _ int) {
 			sink.Emit(report.Event{
-				Seq: 1, Kind: report.KindJobImages, Unit: report.UnitJob,
+				Kind: report.KindJobImages, Unit: report.UnitJob,
 				Index: 1, Total: 1, Files: 2, Bytes: 4096,
 				Wrote: []report.File{
 					{Name: "cat-00.png", Bytes: 2048},
@@ -667,7 +701,7 @@ func TestOnce_CachesTheServersCapabilities(t *testing.T) {
 // already paid for. The images still land and the request still finishes.
 func TestOnce_SurvivesAStoreThatCannotRecordProgress(t *testing.T) {
 	served := &fakeServed{progress: func(sink report.Sink, _ int) {
-		sink.Emit(report.Event{Seq: 1, Kind: report.KindJobProgress, Step: 1, TotalSteps: 4})
+		sink.Emit(report.Event{Kind: report.KindJobProgress, Step: 1, TotalSteps: 4})
 	}}
 	pl := &fakePlanner{served: served}
 	q, st := newQueue(t, pl)
@@ -724,7 +758,7 @@ func TestOnce_AStoreThatBreaksDoesNotTakeTheNodeWithIt(t *testing.T) {
 		t.Run(c.failOn, func(t *testing.T) {
 			served := &fakeServed{progress: func(sink report.Sink, _ int) {
 				sink.Emit(report.Event{
-					Seq: 1, Kind: report.KindJobImages, Unit: report.UnitJob,
+					Kind: report.KindJobImages, Unit: report.UnitJob,
 					Index: 1, Total: 1, Files: 1, Bytes: 2048,
 					Wrote: []report.File{{Name: "a-00.png", Bytes: 2048}},
 				})

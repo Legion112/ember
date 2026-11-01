@@ -20,6 +20,14 @@ This project is **Go-first**, like `go-tun`, `transcription` and `sms-gateway`.
   reconnecting client has to be told what it missed from a cursor -- which a
   ring buffer cannot answer once it has wrapped.
 
+  `github.com/coder/websocket` is the web UI's progress stream. It has **zero
+  dependencies of its own**, which is most of the argument, and it refuses a
+  cross-origin handshake by default -- so the one thing an attacker's page
+  could do with the socket is the one thing it already cannot. The alternative
+  was long-polling with the standard library, which works and was the first
+  plan; a socket is one connection per watched request instead of four
+  requests a second, and the latency floor stops being a poll interval.
+
   It is the **pure-Go** driver and not `mattn/go-sqlite3`, because cgo would
   mean `CGO_ENABLED=0` no longer builds ember and `go test ./...` would need a
   C toolchain, which is the kind of requirement that turns "it just works on a
@@ -325,6 +333,54 @@ that sentence made unrepresentable rather than merely tested.
   a key or token passed as a flag is readable by every user on the box for the
   life of the process. Secrets live in `~/.config/ember/credentials.yaml`
   (0600) or the environment, and reach providers in the API's JSON body.
+- **`ember serve` has no authentication, and the flag is what bounds the
+  damage.** Nothing it serves is reachable off the machine, so the threat is
+  not an attacker on the network -- it is any page the operator has open, which
+  can `fetch` a loopback port and queue a generation. The browser hides the
+  *response* cross-origin and the side effect has already happened, so CORS is
+  not a control and a server relying on it would be relying on a thing that
+  does not work. `--allow-paid` is off by default, so a cross-site POST to a
+  default invocation can start a free local container and spend nothing. The
+  `Origin` and `Host` checks on every route are not authentication; the second
+  is the DNS rebinding case, where an attacker's domain resolving to 127.0.0.1
+  makes their page same-origin with its own name -- passing the first check and
+  failing the second. The token seam is one middleware and one header when it
+  is wanted.
+- **A request may narrow the config's ceilings and never widen them.** `ember
+  up`'s `applyFlags` *replaces*: `--max-hourly-usd 999` raises the ceiling,
+  because the person typing it is the person who set it. A request is not that
+  person, so `queue.Narrow` takes the smaller of the two and `internal/app`
+  receives a `provision.Budget` it has no way to widen. The config path comes
+  from the `serve` flag and is never accepted over HTTP, or the browser would
+  be naming which file sets its own limits.
+- **A request names a provider, a card and a batch of jobs, and nothing else.**
+  No image, no store, no mount, no ports, no serve argv, no gpu probe, no
+  assets, no `extra`. Those stay in `ember.yaml`, which is what keeps every
+  seal above upstream of anything a request can influence -- a request body
+  cannot reach `node.MountAt`, `exposure.SSHPort` or `sdserver.ServeCommand`
+  because it is never consulted about them. `extra` is refused structurally:
+  the field does not exist on the wire type, and `genstore.Job` has none
+  either, so a round trip through the store cannot invent one.
+- **Two rentals at once are unrepresentable rather than refused.** There is one
+  drain goroutine and a rental lives inside one iteration of its loop. The
+  alternative -- a handler that starts a rental per request with a counter
+  saying no to the second -- is a counter that can be wrong, and being wrong
+  costs two GPUs. A double-clicked button cannot rent twice because there is
+  nothing for the second click to start. It is also the shutdown story:
+  `queue.Run` does not return until `provision.WithNode`'s deferred destroy
+  has, so waiting for one goroutine is waiting for the node to be gone.
+  `http.Server.Shutdown` drains requests, and a rental does not live in a
+  request -- `ember serve` waits for both.
+- **Every event is numbered, and nothing was numbering them.** `report.Stream`
+  stamps the sequence, emitters do not, and the queue's sinks were not wrapped
+  in one -- so every event arrived as `Seq` 0 and `genstore`'s
+  `INSERT OR REPLACE` on `(request, seq)` meant each overwrote the last. A
+  generation that emitted a node_ready, a server start, six job starts, six
+  images and six costs left **one row**. The unit test could not see it because
+  its fake set `Seq` itself, which is the same mistake as a preview fake that
+  never repeats a frame: a fake tidier than the thing it stands in for tests a
+  program that does not exist. Found by running `ember serve` and reading the
+  database.
 - **The remote end of a forward is built by `tunnel.RemoteLoopback(port)` and
   never parsed from input.** `direct-tcpip` connects anywhere the node can
   reach, including the provider's metadata service; a free-form remote host
