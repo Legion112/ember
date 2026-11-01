@@ -380,6 +380,39 @@ A leaked node bills by the hour in silence. These are not style preferences.
   and the one that matters for forty gigabytes of somebody else's weights. An
   attacker on the path can deny service — the fetch fails closed and nothing
   is written — but cannot substitute content.
+- **A resident model is worth 3% or 36%, and ember cannot tell which it bought.**
+  FLUX.2 [dev] Q8_0 at 2048x2048, 28 steps, on a rented RTX PRO 6000 at
+  $2.49/hr with the weights on a network volume: eight runs, four batch sizes,
+  both paths, same prompts and seeds, all eight images byte-identical across
+  the two arms. `sd.jobs` is flat -- every job after the first took
+  140.80-140.88s, on every node. `cmds` split in two: on a node that kept the
+  56 GiB in page cache each step took 145.3s, and on one that did not, 226.6s,
+  because every step re-read the whole model off the store at a measured
+  868 MiB/s. That is 81s and $0.056 per image of variance between two runs of
+  the same configuration against the same card in the same datacentre, and
+  what causes it is **not known** -- all eight nodes reported 620-708 GiB free
+  RAM, and the caching run was the last of the three rather than the first.
+  The leading guess is the pod's memory cgroup limit rather than host RAM,
+  since `free` in a container reports the host's; `/sys/fs/cgroup/memory.max`
+  on the next rental settles it. So the honest case for the resident model is
+  not the mean saving but that it is the only one of the two whose per-image
+  price is the same on every node. Crossover is between one and two images,
+  not the ~5 the sd15 run predicted, because one image here is 140s of
+  sampling rather than half a second.
+- **`load_elapsed_seconds` is not the cost of becoming resident.** sd-server
+  reported **551ms** for a model whose weights are 56 GiB, so ember printed
+  "551ms of loading is paid once rather than 8 times" while the `cmds` arm of
+  the same measurement was spending 80-96s per image re-reading those weights
+  -- understating the feature by two orders of magnitude, in the one line an
+  operator would size a batch from. The field was believed because api.md
+  lists it, which is the same mistake as `capabilities.model` and as RunPod's
+  `allowedCudaVersions`: a **schema** read in place of a **response**. ember
+  now times the span itself, from starting the process to `models/status`
+  reporting ready -- which is sound because sd-server does not open its port
+  until the load has finished, and is exactly what a fresh `sd-cli` pays on
+  every invocation. The honest line that did exist in `WaitModel` could never
+  print, because it is guarded on `polls > 1` and the port opening late means
+  the first poll always finds the model ready.
 - **A capability checked on one image must be true of the other.** The CPU and
   CUDA workload images are built from the same stable-diffusion.cpp revision
   on purpose, so a result from one is comparable with the other -- and so the

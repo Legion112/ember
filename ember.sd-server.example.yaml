@@ -8,26 +8,38 @@
 # are paid per rental -- waiting for the machine, pulling the image, reading
 # and verifying 56 GiB off the store. What it cannot remove is the model load,
 # because every entry in `cmds` is a fresh process that reads the weights into
-# VRAM again. On a rented A100 that is about twelve seconds per image during
-# which nothing is being generated. For ten 1536x1536 images at roughly a
-# hundred seconds each, removing it is about eight percent.
+# VRAM again.
+#
+# MEASURED, on this model and this card. FLUX.2 [dev] Q8_0 at 2048x2048, 28
+# steps, on a rented RTX PRO 6000 at $2.49/hr with the weights on a network
+# volume: eight runs, four batch sizes, both paths, same prompts and seeds,
+# and all eight images byte-identical between the two. Per image:
+#
+#   images per rental       1        2        4        8
+#   cmds                 $0.1936  $0.1895  $0.1696  $0.1075
+#   sd.jobs              $0.2378  $0.1302  $0.1249  $0.1055
+#
+# The crossover is between one and two images -- the server costs about a
+# minute to stand up and there is nothing to amortise that over at n = 1.
+#
+# THE MEAN IS NOT THE POINT. `sd.jobs` is flat: every job after the first
+# took 140.80-140.88 s, on every node. `cmds` was not. On a node that kept
+# the 56 GiB in page cache a step took 145.3 s; on one that did not, 226.6 s,
+# because each step re-read the whole model off the store. That is 81 s and
+# $0.056 per image of variance between runs of the same configuration against
+# the same card in the same datacentre, and what decides it is not known --
+# see AGENTS.md. So the argument for this file is less that it is cheaper on
+# average than that its price is the same on every node.
 #
 # It is worth much more the other way round. On short generations -- prompt
 # iteration at 512x512, four steps -- the reload is most of the step rather
-# than a tenth of it, and that is the case this shape exists for.
+# than a tenth of it, and that is the case this shape exists for: sd15 Q8_0 at
+# 256x256 measured 0.44 s per job against 1.91 s for a fresh sd-cli.
 #
-# THE SHAPE IS MEASURED; THESE WEIGHTS ARE NOT. The served path was measured
-# locally against sd15 Q8_0 at 256x256 and four steps, both ways with the same
-# prompts and seeds: 0.43 s per job against 1.81 s for a fresh sd-cli, against
-# a fixed ~6 s to start the server, with all sixteen images byte-identical. So
-# the crossover is about five jobs and the four below are over it.
-#
-# What has not been run is this file: FLUX.2 at 1536x1536 against the real
-# store, where the load is seconds rather than milliseconds and the sampling
-# is a hundred seconds rather than a third of one. The ratio should favour the
-# server by more, and "should" is why that sentence is here rather than a
-# number. ember.video.example.yaml carries the same warning for the same
-# reason.
+# STILL UNMEASURED: previews. Both arms above ran `preview: none`, so these
+# numbers price the resident model and nothing else. The progress stream --
+# the reason ember learned this API at all -- has not been priced on real
+# hardware. ember.video.example.yaml carries the same warning for video.
 #
 # LICENSE: FLUX.2 [dev] is non-commercial. The weights and anything generated
 # from them carry that restriction; this repository's MIT licence does not

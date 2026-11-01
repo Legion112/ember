@@ -15,10 +15,13 @@
 // per-rental costs once: provisioning, the image pull, reading and verifying
 // the weights. What it cannot pay once is the model load, because each step is
 // a fresh sd-cli process that reads the weights into VRAM again. On a rented
-// A100 that is about twelve seconds against roughly a hundred of sampling for
-// a 1024x1024 image -- call it eight percent of a ten-image batch. It is worth
-// much more the other way round: on short generations, where the reload is
-// most of the step, which is exactly the shape prompt iteration has.
+// RTX PRO 6000 running FLUX.2 at 2048x2048 that is 4.5s against 140.8s of
+// sampling when the node keeps the weights in page cache, and 86s when it
+// does not -- a difference ember cannot predict, which is the real argument
+// for this shape rather than the mean. It is worth much more the other way
+// round: on short generations the reload is most of the step, which is
+// exactly what prompt iteration looks like, and sd15 at 256x256 measured
+// 0.44s per job against 1.91s.
 //
 // THE WIRE TYPES ARE NOT PROVEN. They were written from examples/server/api.md
 // at stable-diffusion.cpp 77b72a2, which is the revision both workload images

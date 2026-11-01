@@ -669,6 +669,15 @@ func TestRunServed_SaysWhatBeingResidentSaves(t *testing.T) {
 	if !strings.Contains(out.String(), "paid once rather than 2 times") {
 		t.Errorf("output = %q, want the resident-weights saving named", out.String())
 	}
+	// And the span is ember's own, not the server's load_elapsed_seconds,
+	// which the fake reports as 12.5s. sd-server reported 551ms for a 56 GiB
+	// FLUX.2 model on the first real run while the cmds arm of the same
+	// measurement was spending 80-96s per image re-reading those weights, so
+	// the field names something other than the cost of becoming resident.
+	// Reinstating `load` here puts the fake's 12.5s back in the output.
+	if strings.Contains(out.String(), "12.5s") {
+		t.Errorf("reported the server's load_elapsed_seconds instead of the measured span: %q", out.String())
+	}
 
 	// One job saves nothing, so it says nothing.
 	var single strings.Builder
