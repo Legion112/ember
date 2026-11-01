@@ -73,6 +73,10 @@ type Lab struct {
 
 	cli *client.Client
 	t   *testing.T
+
+	// last is the output of the most recently Started subprocess, so
+	// WaitForLine can read it while that process is still running.
+	last *syncBuffer
 }
 
 // Require fails the test unless this machine can actually run a lab.
@@ -157,20 +161,57 @@ func New(t *testing.T) *Lab {
 func (l *Lab) WriteConfig(extra map[string]string) {
 	l.t.Helper()
 
-	lines := []string{
-		"provider: local",
-		"image: " + LabImage,
-		"ttl: 10m",
-		"config_dir: " + filepath.Join(l.Dir, "config"),
-		"state_dir: " + filepath.Join(l.Dir, "state"),
-		"output_dir: " + l.OutputDir(),
+	// extra OVERRIDES rather than appends. Appending emitted the key twice
+	// -- `image:` from here and `image:` from the caller -- and yaml.v3
+	// refuses a duplicate mapping key, so a lab that wanted a different
+	// image got "mapping key already defined" instead of a config. The
+	// obvious reading of a map of overrides is the one it should have.
+	fields := map[string]string{
+		"provider":   "local",
+		"image":      LabImage,
+		"ttl":        "10m",
+		"config_dir": filepath.Join(l.Dir, "config"),
+		"state_dir":  filepath.Join(l.Dir, "state"),
+		"output_dir": l.OutputDir(),
 	}
 	for k, v := range extra {
-		lines = append(lines, k+": "+v)
+		fields[k] = v
+	}
+
+	// Sorted, so two runs of one lab write the same file. A map's order is
+	// random, and a config that differs between runs is one nobody can
+	// compare when a lab fails on CI and passes here.
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	lines := make([]string, 0, len(keys))
+	for _, k := range keys {
+		lines = append(lines, k+": "+fields[k])
 	}
 	body := strings.Join(lines, "\n") + "\n"
 	if err := os.WriteFile(l.ConfigPath, []byte(body), 0o600); err != nil {
 		l.t.Fatalf("write %s: %v", l.ConfigPath, err)
+	}
+}
+
+// AppendConfig adds raw YAML to the lab's config.
+//
+// WriteConfig takes a map of scalars and joins them as "key: value", which
+// cannot express a nested block -- and a map's iteration order is random, so
+// it could not express one reliably even if the join allowed it. An `sd:`
+// block is nested, so it arrives this way.
+func (l *Lab) AppendConfig(raw string) {
+	l.t.Helper()
+	f, err := os.OpenFile(l.ConfigPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		l.t.Fatalf("open %s: %v", l.ConfigPath, err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(raw); err != nil {
+		l.t.Fatalf("append to %s: %v", l.ConfigPath, err)
 	}
 }
 
@@ -318,9 +359,46 @@ func (l *Lab) Start(ctx context.Context, args ...string) (*exec.Cmd, func() stri
 	if err := cmd.Start(); err != nil {
 		l.t.Fatalf("start ember %v: %v", args, err)
 	}
+	l.last = &buf
 	return cmd, func() string {
 		_ = cmd.Wait()
 		return buf.String()
+	}
+}
+
+// WaitForLine blocks until the last-started subprocess has printed sub.
+//
+// IT EXISTS BECAUSE Start's OWN READER WAITS FOR THE PROCESS. That works for
+// every command this package ran until now -- they all run to completion --
+// and cannot work for a server, whose address is printed while it keeps
+// running. Polling the buffer Start already writes into is the whole of it.
+//
+// A test helper and nothing more: giving `ember serve` a --url-file so a test
+// could read one would be a production interface shaped by a test's
+// convenience, which is the mistake sshx.Runner was kept from making.
+func (l *Lab) WaitForLine(ctx context.Context, sub string) string {
+	l.t.Helper()
+	if l.last == nil {
+		l.t.Fatal("WaitForLine before Start; there is no subprocess to read")
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		out := l.last.String()
+		if i := strings.Index(out, sub); i >= 0 {
+			rest := out[i:]
+			if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+				return rest[:nl]
+			}
+			return rest
+		}
+		select {
+		case <-ctx.Done():
+			l.t.Fatalf("waiting for %q: %v\nwhat it printed:\n%s", sub, ctx.Err(), out)
+		case <-time.After(20 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			l.t.Fatalf("%q never appeared within 30s. What it printed:\n%s", sub, out)
+		}
 	}
 }
 

@@ -129,7 +129,7 @@ COVER_OVERALL := 94
 # labs and a rented pod run the same bytes.
 LAB_IMAGE := ember:lab
 
-.PHONY: all build web web-check web-test test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
+.PHONY: all build web web-check web-test test-serve-lab test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
 
 all: fmt vet test build
 
@@ -168,8 +168,15 @@ vet:
 	# reached a publish once.
 	$(GO) vet -tags='integration imagelab' ./test/...
 
+# gofmt directly, and not `go fmt ./...`.
+#
+# `go fmt` resolves packages through the build context, so it never sees a
+# file behind a build tag -- the integration labs, every one of them. CI
+# checks with `gofmt -l .`, which walks the tree and does, so `make fmt` left
+# exactly the files CI would fail on. Same gap the vet target above documents,
+# found the same way: by CI disagreeing with a laptop.
 fmt:
-	$(GO) fmt ./...
+	gofmt -l -w .
 
 # A missing linter is a hard failure, not a skip. The earlier spelling put the
 # guard and the run on separate recipe lines, where `exit 0` only leaves that
@@ -385,6 +392,35 @@ test-preview-lab:
 		-timeout 25m ./test/integration/... \
 		-run 'TestPreview_' | tee /tmp/ember-preview-lab.log
 	@if grep -q -- '--- SKIP' /tmp/ember-preview-lab.log; then \
+		echo "a lab skipped itself"; exit 1; fi
+
+# `ember serve` end to end: one rental drained by a queue, and the real UI in
+# a real browser.
+#
+# Needs ember:sd -- the CPU build -- because sd-server there starts without a
+# GPU, which the CUDA build cannot: it wants libcuda.so.1 to do anything at
+# all. The two are pinned to the same upstream revision, so this says
+# something about the program that goes to RunPod rather than about a
+# different one.
+#
+# Also needs the web UI built, because the browser lab drives the real page.
+# A missing one is a hard failure naming the command, never a skip.
+#
+# The serve labs that need no workload image are in the ordinary
+# `make test-integration` run instead -- they are the loopback, cross-origin
+# and teardown assertions, and they are the ones worth having on every pull
+# request.
+test-serve-lab: web
+	@docker image inspect $(SD_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(SD_IMAGE) is missing. Build it with:"; \
+		echo "  make workload-sd MODEL=/path/to/a.gguf"; exit 1; }
+	@docker image inspect $(LAB_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(LAB_IMAGE) is missing. Build it with:"; \
+		echo "  make docker-build"; exit 1; }
+	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v \
+		-timeout 30m ./test/integration/... \
+		-run 'TestServe_' | tee /tmp/ember-serve-lab.log
+	@if grep -q -- '--- SKIP' /tmp/ember-serve-lab.log; then \
 		echo "a lab skipped itself"; exit 1; fi
 
 # The labs a publish must pass, named once so CI and a laptop run the same set.
