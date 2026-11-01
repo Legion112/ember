@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ember</title>
+<style>
+  :root { color-scheme: light dark }
+  body { font: 15px/1.6 ui-monospace, monospace; max-width: 44rem; margin: 4rem auto; padding: 0 1rem }
+  code { background: color-mix(in oklab, currentColor 12%, transparent); padding: .1em .35em; border-radius: .25em }
+</style>
+<h1>ember</h1>
+<p>The web UI was not built into this binary.</p>
+<p>Build it with <code>make web</code>, then start <code>ember serve</code> again. The JSON
+API under <code>/api/</code> works either way.</p>
+<!--
+  THIS FILE IS A PLACEHOLDER AND IS COMMITTED ON PURPOSE.
+
+  //go:embed fails at *compile* time when its pattern matches nothing, so
+  without a file here `go build ./...`, `go vet ./...`, `make test`,
+  `make cover-check` and every step of CI would fail for anyone who had not
+  first run a Rust build. The Go toolchain must not depend on the Rust one.
+
+  `make web` overwrites index.html and writes ember.js and ember_bg.wasm
+  beside it; those two are gitignored, because a compiled wasm blob in git is
+  a binary that changes on every build and that nobody can review.
+-->

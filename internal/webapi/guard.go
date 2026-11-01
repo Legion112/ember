@@ -1,0 +1,148 @@
+package webapi
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+)
+
+// THERE IS NO AUTHENTICATION HERE, AND THIS IS WHAT STANDS IN FOR IT.
+//
+// WHAT THE THREAT ACTUALLY IS. Nothing is listening off this machine, so it is
+// not an attacker on the network. It is any web page the operator has open:
+// evil.example can `fetch('http://127.0.0.1:7777/api/requests', {method:
+// 'POST', ...})` and queue a generation. The browser hides the *response*
+// cross-origin -- which is all CORS does -- but the side effect has already
+// happened. So CORS is not a control, and a server that relied on it would be
+// relying on a thing that does not work.
+//
+// WHAT BOUNDS THE DAMAGE is --allow-paid, which is off by default: a
+// cross-site POST to a default `ember serve` can start a free local container
+// and spend nothing. That is the reason the flag exists and the reason it
+// defaults off.
+//
+// The two checks below are not authentication and cost nothing, so they are
+// here anyway:
+//
+//   - Origin must be this server's own. An attacker's page cannot forge it;
+//     the browser sets it.
+//   - Host must be a loopback address and this port. This is the DNS
+//     rebinding case: an attacker's domain resolving to 127.0.0.1 makes their
+//     page same-origin with *their own* name, which passes the Origin check
+//     and fails this one.
+//
+// A REQUEST WITH NO Origin IS ALLOWED, deliberately. curl sends none, and so
+// does every script an operator writes against their own machine; refusing
+// would break the command line without stopping a browser, which always sends
+// one on a cross-origin fetch. The Host check applies regardless, so a
+// rebinding attack does not get in through that door.
+//
+// WHERE THE TOKEN WOULD GO is this function: one middleware, one header, and
+// the seam is already the only thing every mutating route passes through.
+
+// guard refuses a request that a page on another site could have made.
+//
+// port is this server's own, so a Host naming a different one is not this
+// server being addressed -- it is a proxy, or a rebinding attempt.
+func guard(r *http.Request, port string) error {
+	if err := checkHost(r.Host, port); err != nil {
+		return err
+	}
+	return checkOrigin(r.Header.Get("Origin"), port)
+}
+
+// checkHost refuses anything but loopback at this port.
+func checkHost(host, port string) error {
+	if host == "" {
+		// HTTP/1.1 requires it and Go's server rejects a request without
+		// one, so this is unreachable from the network. Refused rather than
+		// waved through, because "unreachable" is a claim about today's
+		// server and the cost of being wrong is the rebinding attack.
+		return errors.New("the request carries no Host header")
+	}
+	h, p, ok := splitHostPort(host)
+	if !ok {
+		return fmt.Errorf("the Host header %q is not host:port", host)
+	}
+	if p != port {
+		return fmt.Errorf("the Host header %q names port %s and this server is on %s; "+
+			"ember serve answers only for its own address", host, p, port)
+	}
+	if !isLoopbackName(h) {
+		return fmt.Errorf("the Host header %q is not a loopback address. ember serve is reachable only from "+
+			"this machine, so a request addressed to anything else reached it through a proxy or "+
+			"through a name that resolves here -- which is how a page on another site talks to a "+
+			"local server", host)
+	}
+	return nil
+}
+
+// checkOrigin refuses an Origin that is not this server.
+func checkOrigin(origin, port string) error {
+	if origin == "" {
+		// See the header comment: curl sends none, a browser always does on a
+		// cross-origin fetch.
+		return nil
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return fmt.Errorf("the Origin header %q is not a URL", origin)
+	}
+	if u.Scheme != "http" {
+		return fmt.Errorf("the Origin header %q is not http; ember serve is plain http on loopback", origin)
+	}
+	h, p, ok := splitHostPort(u.Host)
+	if !ok || p != port || !isLoopbackName(h) {
+		return fmt.Errorf("the Origin header %q is not this server. A page served from somewhere else is "+
+			"asking ember to rent hardware on your account; it is refused whatever it claims to be",
+			origin)
+	}
+	return nil
+}
+
+// isLoopbackName is the set of hosts this server answers for.
+//
+// "localhost" IS accepted here, and that is not the same decision as
+// loopback.ParseBind's refusal of it. There, a name was going to be handed to
+// net.Listen and resolved at listen time -- so a hosts file mapping it to a
+// LAN address would publish the port, and nothing in the config would look
+// wrong. Here the name has already been resolved, by the browser, to an
+// address that reached a socket bound to loopback and nothing else. What is
+// being checked is which name the operator typed, not where a packet will go.
+//
+// It is still a closed set rather than a suffix match: "localhost.evil.test"
+// must not pass, and `strings.HasSuffix(h, "localhost")` would let it.
+func isLoopbackName(h string) bool {
+	switch strings.ToLower(strings.Trim(h, "[]")) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
+
+// splitHostPort is net.SplitHostPort without the error type, and tolerant of
+// the bracketed IPv6 form a browser sends.
+func splitHostPort(hp string) (host, port string, ok bool) {
+	if hp == "" {
+		return "", "", false
+	}
+	if strings.HasPrefix(hp, "[") {
+		end := strings.Index(hp, "]")
+		if end < 0 {
+			return "", "", false
+		}
+		host = hp[1:end]
+		rest := hp[end+1:]
+		if !strings.HasPrefix(rest, ":") {
+			return "", "", false
+		}
+		return host, rest[1:], true
+	}
+	i := strings.LastIndex(hp, ":")
+	if i < 0 {
+		return "", "", false
+	}
+	return hp[:i], hp[i+1:], true
+}

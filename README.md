@@ -816,6 +816,107 @@ attack. `/workspace` is refused too: it is the provider's default mount path
 *and* where ember writes outputs, so a store there bills for every render for
 as long as the store exists.
 
+## The web UI
+
+`ember serve` runs a local web UI and a queue that drains onto **one rental**.
+It is the `sd.jobs` shape driven from a browser: pick a provider and a card
+from live offers, type a prompt and its parameters, push a batch, and watch the
+sampling steps and preview frames arrive while the images land on disk.
+
+```bash
+make web                 # builds the Rust/WASM frontend
+ember serve              # http://127.0.0.1:7777/
+```
+
+```
+      --allow-paid   let the web UI rent from providers that cost money
+      --config       path to ember.yaml (default "ember.yaml")
+      --dist         serve the UI from this directory instead of the built-in copy
+      --port         loopback port to serve on (default 7777)
+```
+
+**One rental, drained, with no idle wait.** A request is a batch of jobs; while
+a node is up the queue keeps claiming newly queued requests whose provider and
+card match, and sends their jobs to the `sd-server` that is already holding the
+weights. The moment nothing compatible is left it returns, which destroys the
+node at once. There is no idle timeout, because a node with nothing to do is a
+node billing for nothing.
+
+That is structural rather than checked: there is one drain goroutine and a
+rental lives inside one iteration of its loop, so two concurrent rentals cannot
+be expressed. A double-clicked button cannot rent twice because there is
+nothing for the second click to start.
+
+**It needs an `sd:` block**, because the serve argv names the weights and a
+request may not. `ember serve` refuses to start without one and says which
+example to copy.
+
+### What a request may and may not choose
+
+| a request may narrow | only `ember.yaml` decides |
+|---|---|
+| provider, card, region | `image:` and the `images:` map |
+| `ttl`, up to the config's | `store:` and its mount |
+| `max_hourly_usd` and `max_run_usd`, up to the config's | `ports:` |
+| prompt, size, steps, batch count, seed, sampler, scheduler, cfg, guidance, output name | `sd.serve`, `gpu_probe`, `assets:`, `verify:` |
+| preview mode and interval | `extra` |
+
+A request asking for a *higher* ceiling gets the config's, not a refusal: a UI
+offering a slider should not have to know every limit before it can offer
+anything. Everything in the right column stays in the file, which is what keeps
+every seal in `internal/node`, `internal/exposure` and `internal/loopback`
+upstream of anything a request can influence — `node.MountAt`'s refusal of
+`/root`, `ValidateImage`'s refusal of `:latest`,
+`sdserver.ServeCommand`'s refusal of a listen flag.
+
+`extra` is absent from the wire type entirely. It reaches every field of
+sd-server's request body that ember does not type, including the ones naming
+file paths on the node, so a request that could set it could point a running
+server at weights the config never mentioned.
+
+### What is not guarded
+
+**There is no authentication.** The server listens on loopback only and nothing
+it serves is reachable from another machine — but any page open in the
+operator's browser can reach a loopback port, and the browser hides only the
+*response*. CORS is not a control here.
+
+What bounds the damage is **`--allow-paid`, which is off by default**: without
+it `ember serve` refuses every provider that is not free, so a cross-site POST
+to a default invocation can start a free local container and spend nothing.
+That is the reason the flag exists and the reason it defaults off.
+
+Two things that are not authentication are checked anyway, on every route: the
+`Origin` must be this server's own, and the `Host` must be a loopback name at
+this port. The second is the DNS rebinding case, where an attacker's domain
+resolves to 127.0.0.1 and their page is therefore same-origin with its own
+name — which passes the first check and fails the second.
+
+### Where the state goes
+
+The queue and the history are a SQLite database beside the node journal, under
+the state directory. Images are written where `ember up` has always written
+them, one directory per request, and the same path is the key a later storage
+backend would use. Progress is stored as numbered events, so a page reload and
+a dropped websocket are the same code path: a client says which sequence number
+it last saw and is told everything since.
+
+A request that was generating when the process died is marked **interrupted**
+rather than failed or re-queued. Its rental is gone so it cannot be resumed,
+and renting a second card for work the operator may no longer want is not a
+decision ember makes on their behalf. Whatever images it produced stay listed,
+because they were paid for.
+
+### Stopping it
+
+Ctrl-C destroys any rental before the process exits, and says so. `ember serve`
+waits for the queue's goroutine as well as the HTTP server: a rental does not
+live in a request, so draining connections would say nothing about a node.
+
+Cancelling a **queued** request is a button. Cancelling one that is already
+generating is not: it would mean destroying the node, which would take every
+other request on the same rental with it. Stop `ember serve` to end a rental.
+
 ## Video
 
 [`ember.video.example.yaml`](ember.video.example.yaml) is the configuration

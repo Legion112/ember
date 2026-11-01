@@ -20,3 +20,16 @@ id_ed25519*
 # machine and the account rather than of the code. A committed copy would hand
 # the same grants to anybody who clones and runs an agent here.
 .claude/settings.local.json
+
+# The built web UI. `make web` writes these into internal/webapi/dist beside
+# the committed placeholder index.html, which exists because //go:embed fails
+# at compile time on a pattern that matches nothing -- so `go build ./...`
+# must work on a clean clone with no Rust installed.
+#
+# The artefacts themselves are not committed: a wasm blob changes on every
+# build and nobody can review one.
+internal/webapi/dist/ember.js
+internal/webapi/dist/ember_bg.wasm
+internal/webapi/dist/ember.d.ts
+internal/webapi/dist/style.css
+web/target/
