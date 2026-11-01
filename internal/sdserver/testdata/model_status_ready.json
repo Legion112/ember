@@ -1,10 +1,1 @@
-{
-  "state": "ready",
-  "recipe": "flux2-dev",
-  "models": {
-    "diffusion": "flux2-dev-Q8_0.gguf"
-  },
-  "error": null,
-  "revision": 3,
-  "load_elapsed_seconds": 12.47
-}
+{"error":null,"load_elapsed_seconds":0.248029675,"models":{},"origin":"command_line","recipe":null,"runtime_recipe":{"defaults":{},"description":"Uses the loaded command-line model and its generation defaults.","effective_features":{"cache":true,"cache_dit":true,"cache_unet":true,"clip_skip":true,"control_frames":true,"control_image":true,"controlnet":true,"distilled_guidance":true,"end_image":true,"flow_shift":true,"high_noise":true,"img2img":true,"img_cfg":true,"init_image":true,"ip_adapter":true,"lora":true,"mask_image":true,"preview":true,"preview_tae":true,"ref_audios":true,"ref_images":true,"ref_video_audios":true,"ref_videos":true,"shifted_timestep":true,"slg":true,"vace":true,"vae_tiling":true},"features":["cache","cache_dit","cache_unet","clip_skip","control_frames","control_image","controlnet","distilled_guidance","end_image","flow_shift","high_noise","img2img","img_cfg","init_image","ip_adapter","lora","mask_image","preview","preview_tae","ref_audios","ref_images","ref_video_audios","ref_videos","shifted_timestep","slg","vace","vae_tiling"],"id":"@command-line","name":"Command-line model (all features)","size_multiple":8,"slots":[],"source":"command_line"},"state":"ready"}

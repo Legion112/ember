@@ -16,12 +16,18 @@
 # iteration at 512x512, four steps -- the reload is most of the step rather
 # than a tenth of it, and that is the case this shape exists for.
 #
-# NOTHING HERE HAS BEEN RUN END TO END YET. The numbers above come from
-# ember.flux2.yaml's measured per-rental figures and from #7's table; the
-# eight percent is arithmetic, not a measurement. The first real run is a
-# calibration rather than a lab -- it costs money, and what it produces is a
-# number and a set of fixtures. ember.video.example.yaml carries the same
-# warning for the same reason.
+# THE SHAPE IS MEASURED; THESE WEIGHTS ARE NOT. The served path was measured
+# locally against sd15 Q8_0 at 256x256 and four steps, both ways with the same
+# prompts and seeds: 0.43 s per job against 1.81 s for a fresh sd-cli, against
+# a fixed ~6 s to start the server, with all sixteen images byte-identical. So
+# the crossover is about five jobs and the four below are over it.
+#
+# What has not been run is this file: FLUX.2 at 1536x1536 against the real
+# store, where the load is seconds rather than milliseconds and the sampling
+# is a hundred seconds rather than a third of one. The ratio should favour the
+# server by more, and "should" is why that sentence is here rather than a
+# number. ember.video.example.yaml carries the same warning for the same
+# reason.
 #
 # LICENSE: FLUX.2 [dev] is non-commercial. The weights and anything generated
 # from them carry that restriction; this repository's MIT licence does not

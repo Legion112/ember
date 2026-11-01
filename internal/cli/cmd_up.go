@@ -934,10 +934,37 @@ func dialNode(ctx context.Context, s provision.Session, opts provision.Options, 
 // this is a bandwidth knob as much as a latency one. Two seconds against a
 // sampling step that takes a second or more on the sizes these cards are
 // rented for.
-// A var and not a const so the tests can shrink it, the same move
-// internal/s3 makes with PartSize: otherwise every poll in every test waits
-// two real seconds and the unit suite stops being something anybody runs.
-var jobPoll = 2 * time.Second
+// The poll cadence, which starts fast and backs off.
+//
+// A FLAT TWO SECONDS WAS WRONG, AND MEASURED SO. Three sd15 images at
+// 256x256 and four steps take about 0.3s each to sample, and a flat 2s poll
+// noticed each one up to two seconds late: the marginal cost per job came to
+// 2.08s served against 1.81s for a fresh sd-cli per image. The resident model
+// saved about 0.8s of tensor loading per job and ember's own poll interval
+// then spent more than that waiting, so the served path measured *slower* at
+// every batch size tried -- 1, 3 and 8 jobs -- and the gap widened. The whole
+// point of the feature, hidden by its own client.
+//
+// Starting at jobPollMin and doubling to jobPollMax fits both ends: a short
+// job is noticed almost at once, and a long one settles to a cadence that
+// does not pull a preview frame every tenth of a second. The poll is a
+// loopback HTTP call over an SSH channel that is already open, and with
+// previews off it carries nothing, so the fast end is nearly free.
+var (
+	jobPollMin = 50 * time.Millisecond
+	jobPollMax = 2 * time.Second
+)
+
+// nextPoll is the backoff: double, capped.
+func nextPoll(d time.Duration) time.Duration {
+	if d <= 0 {
+		return jobPollMin
+	}
+	if d *= 2; d > jobPollMax {
+		return jobPollMax
+	}
+	return d
+}
 
 // runServed starts sd-server, waits for the weights, and drives the jobs.
 //
@@ -965,29 +992,36 @@ func runServed(
 	defer stopServer()
 
 	outf(out, "starting %s\n", workload.Describe(spec.Serve))
-	wait, err := startServer(srvCtx, out, r, spec.Serve)
+	proc, err := startServer(srvCtx, out, r, spec.Serve)
 	if err != nil {
 		return err
 	}
-	// Collected rather than ignored: a server that exited is the explanation
-	// for every failure after this point, and its status is the only thing
-	// that distinguishes "the weights are missing" from "ember lost the
-	// connection".
+	// Stopped on the way out, and its status logged: a server that exited is
+	// the explanation for every failure after this point.
 	defer func() {
 		stopServer()
-		if werr := wait(); werr != nil {
+		select {
+		case werr := <-proc.Exited():
 			so.Log.Debug("sd-server exited", "err", werr)
+		case <-time.After(5 * time.Second):
+			so.Log.Debug("sd-server did not exit promptly after being stopped")
 		}
 	}()
 
 	remote := tunnel.RemoteLoopback(sdserver.Port)
-	if err := tunnel.WaitReady(ctx, client, remote, time.Second); err != nil {
-		return fmt.Errorf("sd-server never accepted a connection on %v: %w", remote, err)
+	if err := orExited(ctx, proc, "it accepted a connection", func() error {
+		return tunnel.WaitReady(ctx, client, remote, time.Second)
+	}); err != nil {
+		return fmt.Errorf("sd-server is not listening on %v: %w", remote, err)
 	}
 
 	c := sdserver.New(client.DialContext)
-	load, err := sdserver.WaitModel(ctx, c, spec.ServeTimeout, out, so.Log)
-	if err != nil {
+	var load time.Duration
+	if err := orExited(ctx, proc, "the weights finished loading", func() error {
+		var werr error
+		load, werr = sdserver.WaitModel(ctx, c, spec.ServeTimeout, out, so.Log)
+		return werr
+	}); err != nil {
 		return err
 	}
 
@@ -1023,7 +1057,7 @@ func runServed(
 // waits inline, so the pattern is worth naming: the stream is drained in a
 // goroutine, the process ends when ctx is cancelled, and wait must be called
 // or the SSH session leaks for as long as the connection lives.
-func startServer(ctx context.Context, out io.Writer, r sshx.Runner, argv []string) (func() error, error) {
+func startServer(ctx context.Context, out io.Writer, r sshx.Runner, argv []string) (*serverProc, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("no server command")
 	}
@@ -1040,17 +1074,73 @@ func startServer(ctx context.Context, out io.Writer, r sshx.Runner, argv []strin
 	if err != nil {
 		return nil, fmt.Errorf("start sd-server: %w", err)
 	}
-	done := make(chan struct{})
+	drained := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer close(drained)
 		_, _ = io.Copy(out, stdout)
 	}()
-	return func() error {
+
+	p := &serverProc{exited: make(chan error, 1)}
+	go func() {
 		err := wait()
 		_ = stdout.Close()
-		<-done
+		<-drained
+		// Buffered and sent once, so every reader of Exited sees the status
+		// whether it is waiting at the time or asks afterwards.
+		p.exited <- err
+		close(p.exited)
+	}()
+	return p, nil
+}
+
+// serverProc is a server running on the node.
+//
+// It exists for one reason: a server that died has to be noticed at once.
+// Without it, ember polled the port until ready_timeout expired -- ten
+// minutes, by default -- for a process that had already exited one second in.
+// Measured locally with a flag sd-server rejected: the process printed its
+// complaint, exited, and ember waited out the whole budget before reporting
+// "never accepted a connection". On an A100 at $1.79/hour that is thirty
+// cents of billing for a program that was already gone, and the operator's
+// only clue is in output that scrolled past ten minutes earlier.
+//
+// Same rule as gpucheck's second switch arm: a failure no amount of waiting
+// can fix is reported now, not at the deadline.
+type serverProc struct {
+	exited chan error
+}
+
+// Exited reports the server's status once it has ended.
+func (p *serverProc) Exited() <-chan error { return p.exited }
+
+// orExited runs fn while watching the server, and reports whichever happens
+// first.
+//
+// The server's own exit status is the useful half of the message: "sd-server
+// exited with status 1 before it accepted a connection" plus the complaint it
+// printed is actionable, where "never accepted a connection" after ten
+// minutes is not.
+func orExited(ctx context.Context, p *serverProc, what string, fn func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
 		return err
-	}, nil
+	case werr := <-p.Exited():
+		// The server also exits when ember stops it, and ember stops it by
+		// cancelling the context -- so on Ctrl-C or a deadline both arms are
+		// ready at once and the select picks one at random. Attributing a
+		// cancellation to a server that died on its own would send the
+		// operator looking for a crash that did not happen, so the
+		// operation's own answer wins whenever the context is already done.
+		if ctx.Err() != nil {
+			return <-done
+		}
+		if werr == nil {
+			return fmt.Errorf("sd-server exited before %s; its output above is the only explanation", what)
+		}
+		return fmt.Errorf("sd-server exited before %s: %w", what, werr)
+	}
 }
 
 // runJobs submits one job at a time and collects its images before the next.
@@ -1141,6 +1231,7 @@ func runJobs(ctx context.Context, out io.Writer, c sdserver.Client, run sdserver
 // and not three hundred PNGs of a half-finished cat.
 func awaitJob(ctx context.Context, out io.Writer, c sdserver.Client, id, label, stem string, root *os.Root) (sdserver.State, error) {
 	lastStep := -1
+	wait := jobPollMin
 	for {
 		st, err := c.Poll(ctx, id)
 		if err != nil {
@@ -1163,8 +1254,9 @@ func awaitJob(ctx context.Context, out io.Writer, c sdserver.Client, id, label, 
 		select {
 		case <-ctx.Done():
 			return sdserver.State{}, ctx.Err()
-		case <-time.After(jobPoll):
+		case <-time.After(wait):
 		}
+		wait = nextPoll(wait)
 	}
 }
 
