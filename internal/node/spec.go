@@ -92,6 +92,27 @@ type Spec struct {
 	GPUProbe        []string
 	GPUProbeTimeout time.Duration
 
+	// Serve is a long-running process started on the node before the jobs
+	// are, and ServeTimeout is how long it has to become usable.
+	//
+	// The resident-server shape, and the reason it exists is the one cost
+	// Cmds cannot remove. Each entry in Cmds is a fresh process that reads
+	// the weights into VRAM again; a server started once holds them. On a
+	// rented A100 that is about twelve seconds per image that nothing is
+	// generating.
+	//
+	// Still argv, because starting a process is the part ember has always
+	// done this way -- what is new is that ember then speaks the protocol
+	// rather than handing the next command to a shell. The jobs themselves
+	// are not here: they never reach the node as argv, and this package
+	// imports nothing else from the module, so the type that describes them
+	// cannot live here either. They travel beside the Spec.
+	//
+	// Empty means no server, which is what every config written before this
+	// existed asks for.
+	Serve        []string
+	ServeTimeout time.Duration
+
 	// MinCUDA is the oldest CUDA runtime this image can run against, as
 	// "major.minor" -- for example "12.6". Empty asks for no constraint.
 	//
@@ -127,6 +148,8 @@ type SpecOptions struct {
 
 	GPUProbe        []string
 	GPUProbeTimeout time.Duration
+	Serve           []string
+	ServeTimeout    time.Duration
 	MinCUDA         string
 }
 
@@ -162,11 +185,31 @@ func NewSpec(o SpecOptions) (Spec, error) {
 	if o.GPUProbeTimeout < 0 {
 		return Spec{}, fmt.Errorf("negative gpu probe timeout")
 	}
-	// One spelling or the other, never both. A config carrying `cmd` and
-	// `cmds` has two answers to "what does this node run", and picking one
-	// silently is how an operator watches the wrong thing execute.
-	if len(o.Cmd) > 0 && len(o.Cmds) > 0 {
-		return Spec{}, fmt.Errorf("both cmd and cmds are set; use one")
+	if o.ServeTimeout < 0 {
+		return Spec{}, fmt.Errorf("negative serve timeout")
+	}
+	// A CPU-only run has no card, and the only reason to hold weights
+	// resident is to generate with them. Same shape as the gpu probe check
+	// below, and the same reason: it would fail after the machine was rented.
+	if len(o.Serve) > 0 && o.Filter.CPUOnly {
+		return Spec{}, fmt.Errorf("a server is configured but this run asks for no GPU")
+	}
+	for i, a := range o.Serve {
+		if strings.TrimSpace(a) == "" {
+			return Spec{}, fmt.Errorf("serve[%d] is empty", i)
+		}
+	}
+	// One spelling, never two. A config carrying any two of `cmd`, `cmds` and
+	// `sd.serve` has two answers to "what does this node run", and picking
+	// one silently is how an operator watches the wrong thing execute.
+	//
+	// `serve` joins the other two rather than being allowed beside them
+	// because it is not a step: it is the thing the steps are sent to, and a
+	// run that had both would start a server, hold the weights in VRAM, and
+	// then execute a separate sd-cli that loads them a second time -- paying
+	// for the resident copy and not using it.
+	if named := namedWorkloads(o); len(named) > 1 {
+		return Spec{}, fmt.Errorf("%s are set; use one", humanList(named))
 	}
 	cmds := make([][]string, 0, len(o.Cmds)+1)
 	if len(o.Cmd) > 0 {
@@ -214,6 +257,8 @@ func NewSpec(o SpecOptions) (Spec, error) {
 
 		GPUProbe:        append([]string(nil), o.GPUProbe...),
 		GPUProbeTimeout: o.GPUProbeTimeout,
+		Serve:           append([]string(nil), o.Serve...),
+		ServeTimeout:    o.ServeTimeout,
 		MinCUDA:         o.MinCUDA,
 	}, nil
 }
@@ -355,4 +400,33 @@ func CUDAAtLeast(have, want string) (bool, error) {
 		return hm > wm, nil
 	}
 	return hn >= wn, nil
+}
+
+// humanList renders a list the way the refusal reads it out: "cmd and cmds",
+// or "cmd, cmds and sd.serve". Not strings.Join, because "cmd and cmds and
+// sd.serve" is the kind of message that reads as a bug in the message.
+func humanList(xs []string) string {
+	switch len(xs) {
+	case 0:
+		return ""
+	case 1:
+		return xs[0]
+	}
+	return strings.Join(xs[:len(xs)-1], ", ") + " and " + xs[len(xs)-1]
+}
+
+// namedWorkloads lists which of the mutually exclusive workload keys a config
+// set, so the refusal can name them rather than saying "two of these".
+func namedWorkloads(o SpecOptions) []string {
+	var out []string
+	if len(o.Cmd) > 0 {
+		out = append(out, "cmd")
+	}
+	if len(o.Cmds) > 0 {
+		out = append(out, "cmds")
+	}
+	if len(o.Serve) > 0 {
+		out = append(out, "sd.serve")
+	}
+	return out
 }
