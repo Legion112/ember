@@ -14,7 +14,7 @@ provider: runpod
 # Pinned by digest, not by tag. A tag can be moved, so `:latest` means a pod
 # that provisioned yesterday and one that provisions today are not the same
 # machine -- which is why ember refuses a `:latest` image outright.
-image: ghcr.io/legion112/ember-node@sha256:cf62de1920ed868fbe567b8bd127ed693d2ced3d163de49a0816534906179f3f
+image: ghcr.io/legion112/ember-node@sha256:70de4503dfeee1ecc09347fb3a8998d293b36ddf67691dd3af925950e787aa2d
 
 # The node destroys itself after this even if ember never gets to, which is
 # what stops the bill when the laptop dies mid-run.

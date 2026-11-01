@@ -47,7 +47,7 @@ images:
 # The node image and not a workload one: this machine only runs `embernode
 # fetch`, and pulling 2.9 GB of CUDA to download files would be billed for
 # nothing.
-image: ghcr.io/legion112/ember-node@sha256:cf62de1920ed868fbe567b8bd127ed693d2ced3d163de49a0816534906179f3f
+image: ghcr.io/legion112/ember-node@sha256:70de4503dfeee1ecc09347fb3a8998d293b36ddf67691dd3af925950e787aa2d
 
 ttl: 2h
 
