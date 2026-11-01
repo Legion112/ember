@@ -13,14 +13,11 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/awssig"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/node"
-	"github.com/Legion112/ember/internal/provider"
-	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/s3"
-	"github.com/Legion112/ember/internal/sdserver"
-	"github.com/Legion112/ember/internal/sshx/sshexec"
 )
 
 func cmdStore(args []string, out io.Writer) error { return runStore(args, out, deps{}) }
@@ -86,7 +83,7 @@ func runStoreCreate(args []string, out io.Writer, d deps) error {
 		return usageError{fmt.Errorf("ember store create takes no arguments; it creates the store named in %s", *cfgPath)}
 	}
 
-	reg, _, cfg, err := registryAndStore(*cfgPath, d)
+	reg, _, cfg, err := app.RegistryAndStore(*cfgPath, d)
 	if err != nil {
 		return err
 	}
@@ -95,7 +92,7 @@ func runStoreCreate(args []string, out io.Writer, d deps) error {
 			"a size_gib and a region", *cfgPath)}
 	}
 
-	sp, p, err := storeProvider(reg, node.ProviderID(cfg.Provider))
+	sp, p, err := app.StoreProvider(reg, node.ProviderID(cfg.Provider))
 	if err != nil {
 		return err
 	}
@@ -147,7 +144,7 @@ func runStoreRm(args []string, out io.Writer, d deps) error {
 	}
 	name := fs.Arg(0)
 
-	reg, _, cfg, err := registryAndStore(*cfgPath, d)
+	reg, _, cfg, err := app.RegistryAndStore(*cfgPath, d)
 	if err != nil {
 		return err
 	}
@@ -155,13 +152,13 @@ func runStoreRm(args []string, out io.Writer, d deps) error {
 	if *providerName != "" {
 		want = *providerName
 	}
-	sp, _, err := storeProvider(reg, node.ProviderID(want))
+	sp, _, err := app.StoreProvider(reg, node.ProviderID(want))
 	if err != nil {
 		return err
 	}
 
 	ctx := context.Background()
-	s, found, err := findStore(ctx, sp, name)
+	s, found, err := app.FindStore(ctx, sp, name)
 	if err != nil {
 		return err
 	}
@@ -178,97 +175,6 @@ func runStoreRm(args []string, out io.Writer, d deps) error {
 	outf(out, "destroyed %s\n", s)
 	return nil
 }
-
-// storeProvider resolves a provider that has stores, or says why not.
-func storeProvider(reg *provider.Registry, name node.ProviderID) (provider.StoreAPI, provider.Provider, error) {
-	p, err := reg.Get(name)
-	if err != nil {
-		return nil, nil, usageError{err}
-	}
-	sp, ok := p.(provider.StoreAPI)
-	if !ok || !p.Caps().Stores {
-		return nil, nil, fmt.Errorf("provider %s has no persistent storage, so there is no store to manage there", name)
-	}
-	return sp, p, nil
-}
-
-// findStore looks a store up by the name ember knows it as.
-//
-// By listing rather than by constructing a handle from the name. The provider
-// decides what a store's id is -- RunPod's is an opaque token, the local
-// provider's is the volume name -- so building one here would be this package
-// guessing at another's identifiers, and a guess that is right for one
-// provider and wrong for the next is how `rm` misses.
-func findStore(ctx context.Context, sp provider.StoreAPI, name string) (node.Store, bool, error) {
-	list, err := sp.StoreList(ctx)
-	if err != nil {
-		return node.Store{}, false, err
-	}
-	for _, s := range list {
-		if s.Name == name {
-			return s, true, nil
-		}
-	}
-	return node.Store{}, false, nil
-}
-
-// attachStore resolves the configured store and puts it on the spec.
-//
-// It also narrows the offer filter to the store's datacentre, which is the
-// placement constraint a store implies: the volume lives in one site and a
-// node that mounts it must be created there. Expressing that as a filter
-// rather than as provider state is what lets two runs want different stores
-// without rebuilding anything.
-//
-// A missing store is a refusal naming the command that makes one. Creating it
-// here would be ember bringing a standing monthly charge into existence
-// because a config mentioned a name, which is the one thing `ember store
-// create` exists to prevent.
-func attachStore(ctx context.Context, p provider.Provider, cfg config.Config) (Attached, error) {
-	if !cfg.HasStore() {
-		return Attached{}, nil
-	}
-
-	sp, ok := p.(provider.StoreAPI)
-	if !ok || !p.Caps().Stores {
-		return Attached{}, fmt.Errorf("this configuration names the store %q, but provider %s has no persistent storage; "+
-			"remove the store block or choose a provider that does", cfg.Store.Name, p.Name())
-	}
-
-	s, found, err := findStore(ctx, sp, cfg.Store.Name)
-	if err != nil {
-		return Attached{}, err
-	}
-	if !found {
-		return Attached{}, fmt.Errorf("no store named %q at %s. Create it with:\n  ember store create\n"+
-			"Nothing here will make one for you: a store bills by the month and nothing destroys it on a deadline",
-			cfg.Store.Name, p.Name())
-	}
-
-	mount, err := cfg.StoreMount()
-	if err != nil {
-		return Attached{}, err
-	}
-	return Attached{Handle: s.Handle, Mount: mount, Region: s.Region}, nil
-}
-
-// Attached is the store this run will mount, resolved.
-//
-// A value rather than three return parameters, because the three travel
-// together everywhere and a caller that dropped the region would silently
-// lose the placement lock -- the one part of this whose absence looks like
-// success right up until the node lands in the wrong datacentre.
-type Attached struct {
-	Handle node.StoreHandle
-	Mount  node.Mount
-
-	// Region is the store's datacentre, empty for a provider that does not
-	// pin stores to one.
-	Region string
-}
-
-// IsZero reports whether this run mounts nothing.
-func (a Attached) IsZero() bool { return a.Handle.IsZero() }
 
 // runStorePush uploads a local file to the store over the S3 endpoint.
 //
@@ -301,7 +207,7 @@ func runStorePush(args []string, out io.Writer, d deps) error {
 	}
 	local := fs.Arg(0)
 
-	reg, _, cfg, err := registryAndStore(*cfgPath, d)
+	reg, _, cfg, err := app.RegistryAndStore(*cfgPath, d)
 	if err != nil {
 		return err
 	}
@@ -341,12 +247,12 @@ func runStorePush(args []string, out io.Writer, d deps) error {
 		return fmt.Errorf("%s is a directory; push takes one file", local)
 	}
 
-	sp, p, err := storeProvider(reg, node.ProviderID(cfg.Provider))
+	sp, p, err := app.StoreProvider(reg, node.ProviderID(cfg.Provider))
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
-	store, found, err := findStore(ctx, sp, cfg.Store.Name)
+	store, found, err := app.FindStore(ctx, sp, cfg.Store.Name)
 	if err != nil {
 		return err
 	}
@@ -368,7 +274,7 @@ func runStorePush(args []string, out io.Writer, d deps) error {
 		return err
 	}
 
-	creds, err := d.credentials(mustConfigDir(cfg, d))
+	creds, err := d.Credentials(app.ConfigDir(cfg, d))
 	if err != nil {
 		return err
 	}
@@ -409,16 +315,6 @@ func digestOf(f *os.File) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// mustConfigDir resolves the credentials directory, falling back to the
-// config's own so that a failure here is reported by the loader rather than
-// by a nil path somewhere lower down.
-func mustConfigDir(cfg config.Config, d deps) string {
-	if ps, err := resolvePaths(cfg, d); err == nil {
-		return ps.config
-	}
-	return cfg.ConfigDir
 }
 
 // runStoreSync fills the store from a rented CPU machine.
@@ -462,92 +358,28 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 		return usageError{fmt.Errorf("no assets are listed in %s, so there is nothing to fetch", *cfgPath)}
 	}
 
-	paths, err := resolvePaths(cfg, d)
+	// The same pipeline `ember up` runs, asked for a machine with no card.
+	// It used to be a second copy of that sequence in this file -- load,
+	// resolve, credentials, registry, store, filter, options, offer, image,
+	// spec -- and two copies of an ordering whose whole purpose is that every
+	// refusal happens before the create call is one copy too many.
+	plan, err := app.NewPlan(context.Background(), app.Request{
+		Config: cfg, Deps: d, CPUOnly: true, VCPU: *vcpu,
+	}, out)
 	if err != nil {
 		return err
 	}
-	creds, err := d.credentials(paths.config)
-	if err != nil {
-		return err
-	}
-	reg, err := buildRegistry(d, creds, cfg)
-	if err != nil {
-		return err
-	}
-	p, err := reg.Get(node.ProviderID(cfg.Provider))
-	if err != nil {
-		return usageError{err}
-	}
-
-	store, err := attachStore(context.Background(), p, cfg)
-	if err != nil {
-		return err
-	}
-	filter, err := buildFilter(cfg, store)
-	if err != nil {
-		return usageError{err}
-	}
-
-	// No workload, and no GPU to idle while the download runs. The filter is
-	// exclusive in both directions, so this cannot quietly land on a card.
-	//
-	// Built before the spec rather than patched into it afterwards. Patching
-	// meant NewSpec validated a filter this command never used -- and the one
-	// check that cared, "a gpu probe is configured but this run asks for no
-	// GPU", could therefore never fire, although ember.flux2.yaml configures
-	// exactly that. A seal nothing could trip is a seal that was not there.
-	filter.CPUOnly = true
-	filter.GPU = ""
-	filter.MinVRAM = 0
-	filter.MinCount = *vcpu
-
-	opts, err := buildOptions(paths, cfg, out)
-	if err != nil {
-		return err
-	}
-
-	// A CPU machine has no architecture, so resolveImage uses image: and never
-	// consults an images: map. Choosing the offer first is what lets it know
-	// that -- the answer depends on what was rented.
-	offer, err := provision.PickOffer(context.Background(), p, filter, cfg.TTL, opts)
-	if err != nil {
-		return err
-	}
-
-	ref, from, err := resolveImage(cfg, offer)
-	if err != nil {
-		return usageError{err}
-	}
-
-	spec, err := buildSpec(cfg, resolved{
-		Store: store, Filter: filter, Offer: offer, Image: ref, ImageFrom: from,
-	})
-	if err != nil {
-		return usageError{err}
-	}
-	spec.Cmds = nil
-	spec.Outputs = nil
 
 	if *dryRun {
-		// No served run here: store sync is CPU-only and buildSpec drops
-		// the server for the same reason it drops the gpu probe.
-		return dryRunUp(out, p, offer, spec, from, sdserver.Run{})
+		return dryRunUp(out, plan)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	return provision.WithNode(ctx, p, spec, offer, opts, func(ctx context.Context, s provision.Session) error {
-		client, so, err := dialNode(ctx, s, opts, 0)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = client.Close() }()
-
-		if err := ensureAssets(ctx, out, sshexec.New(client.SSH()), spec, so); err != nil {
-			return err
-		}
-		outf(out, "the store now holds every asset %s lists.\n", *cfgPath)
-		return nil
-	})
+	if err := plan.SyncAssets(ctx, out); err != nil {
+		return err
+	}
+	outf(out, "the store now holds every asset %s lists.\n", *cfgPath)
+	return nil
 }

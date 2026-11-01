@@ -73,8 +73,17 @@ func TestUp_RefusesAnUnknownProvider(t *testing.T) {
 
 func TestUp_RefusesAMalformedPort(t *testing.T) {
 	var out bytes.Buffer
-	if err := runUp([]string{"--image", "x:v1", "--port", "nonsense"}, &out, labDeps(t)); err == nil {
+	err := runUp([]string{"--image", "x:v1", "--port", "nonsense"}, &out, labDeps(t))
+	if err == nil {
 		t.Fatal("a malformed port spec was accepted")
+	}
+	// The exit code, not just the error. These refusals now come back from
+	// internal/app, which cannot build this package's usage type, so the
+	// status depends on ExitCode recognising app.ErrUsage -- and exit 3 is a
+	// documented contract with cron and CI. A test asserting only that
+	// something failed would not have noticed it degrading to 1.
+	if got := ExitCode(err); got != ExitUsage {
+		t.Errorf("exit = %d, want %d for a config error", got, ExitUsage)
 	}
 }
 
@@ -323,6 +332,9 @@ func TestUp_RefusesACardItCannotIdentify(t *testing.T) {
 	err := runUp([]string{"--config", cfg, "--dry-run"}, &out, d)
 	if err == nil {
 		t.Fatal("a card ember cannot identify was accepted")
+	}
+	if got := ExitCode(err); got != ExitUsage {
+		t.Errorf("exit = %d, want %d for a config error", got, ExitUsage)
 	}
 	if !strings.Contains(err.Error(), "acmehypercard9000") {
 		t.Errorf("the refusal does not name the card: %v", err)

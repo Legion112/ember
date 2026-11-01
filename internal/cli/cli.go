@@ -14,6 +14,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/Legion112/ember/internal/app"
 )
 
 // Version is overwritten at build time with -ldflags.
@@ -61,6 +63,18 @@ func ExitCode(err error) int {
 	}
 	var u usageError
 	if errors.As(err, &u) {
+		return ExitUsage
+	}
+	// And the same answer for a refusal raised inside internal/app, which
+	// cannot construct the unexported type above.
+	//
+	// Without this line every refusal that moved out of this package -- "no
+	// image", "that is not a port", "a serve command chose its own listen
+	// address" -- would silently become exit 1, and exit 3 is a documented
+	// contract with cron and CI rather than decoration. Five of the tests
+	// covering those paths assert only that an error came back, so they
+	// would not have noticed.
+	if errors.Is(err, app.ErrUsage) {
 		return ExitUsage
 	}
 	return ExitError

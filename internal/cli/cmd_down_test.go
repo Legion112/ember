@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
 	"github.com/Legion112/ember/internal/node"
@@ -207,7 +208,7 @@ func TestDown_ClearsTheJournalRecordAfterTheProviderConfirms(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := openStore(filepath.Join(d.HomeDir, "state"))
+	store, err := app.OpenStore(filepath.Join(d.HomeDir, "state"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +247,7 @@ func TestDown_ClearsTheJournalRecordAfterTheProviderConfirms(t *testing.T) {
 func TestDown_LeavesAnUnrelatedRecordAlone(t *testing.T) {
 	d := labDeps(t)
 
-	store, err := openStore(filepath.Join(d.HomeDir, "state"))
+	store, err := app.OpenStore(filepath.Join(d.HomeDir, "state"))
 	if err != nil {
 		t.Fatal(err)
 	}
