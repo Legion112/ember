@@ -272,8 +272,30 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 	//
 	//   status 422: additional properties 'allowedCudaVersions' not allowed
 	//
-	// Filtering offers instead is not available either: the v2 schema puts
-	// cudaVersions on GpuType, and the live catalogue does not return it.
+	// Filtering offers instead is not available either, and the reason is NOT
+	// the one this comment used to give. It said "the v2 schema puts
+	// cudaVersions on GpuType, and the live catalogue does not return it",
+	// which was false when it was written: testdata/gpus.json is a live
+	// capture, committed two days earlier, and three of its four entries
+	// carry cudaVersions. A schema was consulted where the response was
+	// already in the tree -- allowedCudaVersions a third time, with the roles
+	// reversed.
+	//
+	// What the field cannot do is be a floor, and that is measured rather
+	// than reasoned: `available` tracks the card's top-level availability
+	// summary on every captured row, so a floor built on it refuses the RTX
+	// 4090 that reads NONE overall, LOW in US-IL-1 and reports all eight of
+	// its CUDA versions unavailable -- for every value of min_cuda, including
+	// ones the card satisfies. That is the bug hasCapacity and regionOffers
+	// exist to prevent, through a different field. Read without the flag it
+	// describes the catalogue and not the host the pod lands on, and the
+	// versions are described upstream as "suitable for
+	// gpu.allowedCudaVersions on pod create" -- the property below answers
+	// 422 for. It is also on GpuType rather than on dataCenters[], so it
+	// cannot be re-read through a store's site. See
+	// TestCatalogue_ReportsCudaVersionsAndTheyAreNotAFloorForMinCUDA, which
+	// pins all of that to the capture so the next person re-decides it on
+	// evidence.
 	//
 	// So this is a refusal rather than a silent drop. A constraint the
 	// operator believes is in force and is not would be worse than none --
@@ -286,8 +308,10 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 	if strings.TrimSpace(req.Spec.MinCUDA) != "" {
 		return node.Handle{}, fmt.Errorf(
 			"min_cuda is set to %q and RunPod's pod API does not accept it: "+
-				"api.runpod.io/v2/pods has no CUDA field, and its catalogue does not report one "+
-				"per GPU type either, so ember cannot narrow placement by CUDA version at all.\n"+
+				"api.runpod.io/v2/pods has no CUDA field, and the per-GPU cudaVersions its "+
+				"catalogue does report tracks whether the card has capacity rather than what a "+
+				"host can run -- a card that is rentable in one datacentre reports every CUDA "+
+				"version unavailable -- so ember cannot narrow placement by CUDA version.\n"+
 				"Remove min_cuda. To refuse a host that cannot run the image, use gpu_probe: it "+
 				"runs on the node and fails before any workload does, costing the probe rather "+
 				"than the run",

@@ -1090,11 +1090,26 @@ Every create with `min_cuda` set died at
 status 422: additional properties 'allowedCudaVersions' not allowed
 ```
 
-Filtering offers instead is not available either: the v2 schema puts
-`cudaVersions` on `GpuType`, and the live catalogue does not return it. So the
-constraint cannot be expressed at create time or at selection time, and the
-honest answer is to say so — a constraint an operator believes is in force and
-is not would be worse than none.
+Filtering offers instead is not available either, and this paragraph used to
+give the wrong reason: it said the live catalogue does not return
+`cudaVersions`. It does — the captured catalogue in
+`internal/provider/runpod/testdata/gpus.json` carries it on three of its four
+entries, and it had been committed for two days when that sentence was
+written.
+
+What the field cannot be is a floor. `available` tracks whether the card has
+capacity rather than what a host can run: the captured RTX 4090 reads `NONE`
+overall, `LOW` in `US-IL-1` — rentable — and reports **all eight** of its CUDA
+versions unavailable, so a floor built on it would refuse that card for every
+value of `min_cuda`, including values the card satisfies. Read without the
+flag, the versions describe the catalogue and not the host the pod lands on,
+and upstream describes them as suitable for the one create property that
+answers 422. The field also sits on the GPU type rather than per datacentre,
+so it cannot be re-read through a store's site the way availability is.
+
+So the constraint cannot be expressed at create time or at selection time, and
+the honest answer is to say so — a constraint an operator believes is in force
+and is not would be worse than none.
 
 This is the second time RunPod's two APIs have disagreed about a field; the
 first was `dataCenter` against `dataCenterId` on network volumes.

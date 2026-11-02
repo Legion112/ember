@@ -240,6 +240,46 @@ not caught up with the request body — the same lesson a third time, one level
 further down: a schema is not a response, and a description is not even a
 schema.
 
+### `cudaVersions` is in the capture, and it is not a floor (#91)
+
+Three places in this repository said "the live catalogue does not return
+`cudaVersions`" — `runpod.go`, `config.go`'s `min_cuda` doc and README. All
+three were written on 2026-10-31. `gpus.json` is a live capture committed on
+2026-10-29 and **three of its four entries carry the field**, as
+`{version, available}` pairs. The schema was consulted where the response was
+already in the tree, which is the `allowedCudaVersions` lesson with the roles
+reversed and the reason the correction is an assertion
+(`TestCatalogue_ReportsCudaVersionsAndTheyAreNotAFloorForMinCUDA`) rather than
+a reworded sentence.
+
+What the capture shows about the field itself, which is #91's actual question:
+
+| gpu | overall | sites | cudaVersions |
+|---|---|---|---|
+| `NVIDIA A100 80GB PCIe` | `LOW` | CA-MTL-3 `LOW`, US-MO-1 `LOW` | 2 entries, **both available** |
+| `NVIDIA A100-SXM4-40GB` | `NONE` | none listed | 1 entry, unavailable |
+| `NVIDIA GeForce RTX 4090` | `NONE` | US-IL-1 `LOW` | 8 entries, **all unavailable** |
+| `AMD Instinct MI300X OAM` | `NONE` | none listed | `null` |
+
+`available` tracks the top-level availability summary on every row. Four rows
+is a correlation and not a semantics, and the decision does not rest on it:
+the 4090 is the row this same file already records as rentable while its
+summary reads `NONE`, so a `min_cuda` floor built on the flag refuses a card
+you could have rented, for **every** value of `min_cuda` — the bug
+`hasCapacity` and `regionOffers` exist to prevent, through a different field.
+Read without the flag, the versions describe the catalogue rather than the
+host, and they are described upstream as suitable for the create property that
+answers 422. The field is on `GpuType` and not on `dataCenters[]`, so it also
+cannot be re-read through a store's own site.
+
+**Not observed:** what `available` means. Nobody has set
+`allowedCudaVersions` on the v1 API for a card reading `false` and watched
+what happens, and nothing here has read a CUDA *runtime* version off a rented
+host — `nvidia-smi --query-gpu=compute_cap` is a compute capability, which is
+`node.ComputeCap` and a different number. `pod_running.json`'s `"cudaVersion":
+"12.4"` is schema-derived like the rest of the `pod_*.json` files and ember
+does not decode it.
+
 ### `cpus.json`
 
 The CPU catalogue, captured live on 2026-10-30, trimmed to two families.
