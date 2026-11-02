@@ -206,6 +206,102 @@ func TestWorkloadImage_UnderstandsTheFetchCommand(t *testing.T) {
 	}
 }
 
+// TestWorkloadImage_LinksNothingItDoesNotShip.
+//
+// This image's final stage is `nvidia/cuda:*-base` plus a COPY of the three
+// CUDA libraries the binaries link, rather than `*-runtime`, which is that
+// base plus an apt layer of every CUDA library NVIDIA publishes. Measured on
+// sm_75: that layer was 1496.7 MB of a 1724.1 MB pull and ~1264 MiB of it was
+// never opened -- cufft, cusparse, cusolver, curand, nvrtc, nvJitLink and the
+// NPP family, none of which appears even as a string in either binary.
+//
+// So the saving is a hand-picked library list where the vendor shipped a
+// complete one, and the regression it can cause is a missing library. This is
+// the assertion that makes that safe, and it is cheap enough to be
+// unconditional: `ldd` needs no GPU, no network and no weights.
+//
+// libcuda.so.1 is the one exception, and it is expected rather than tolerated.
+// It is the driver, injected into the container by the NVIDIA container
+// runtime at `docker run` time, so it is legitimately absent from any image
+// and from this lab -- which runs without a GPU. That split is the entire
+// reason `nvidia/cuda:*-runtime` exists as a published image: everything else
+// in the dependency set has to be in the image.
+//
+// What this does NOT prove, said plainly because the next CUDA bump will read
+// it: `ldd` is link-time resolution. A library opened with dlopen() by a name
+// the string table never revealed would not appear here, and both binaries do
+// reference dlopen. The corroborating evidence is a string-table check -- the
+// complete set of `.so` literals anywhere in sd-cli and sd-server is exactly
+// its DT_NEEDED set, so there is no name for a dlopen to pass -- but that is
+// still evidence about a binary rather than about a run. Honest completion
+// wants one cheap rental generating an image on the slimmed build. See the
+// pull request for #9: that has not been done.
+//
+// Both binaries, not just sd-cli. They are separate links of the same source,
+// so a library only sd-server needs is a library a lab reading sd-cli alone
+// would miss -- and the served path is the one `sd.jobs` uses.
+func TestWorkloadImage_LinksNothingItDoesNotShip(t *testing.T) {
+	l := harness.New(t)
+	ctx := t.Context()
+	image, arch := sdCUDAUnderTest(t)
+
+	if !l.HaveImage(ctx, image) {
+		t.Fatalf("%s is not built, and this asserts about what the binaries in it link:\n"+
+			"  make workload-sd-cuda CUDA_ARCH=%d", image, arch)
+	}
+
+	n := mintAndStartImage(t, l, "ldd", image)
+
+	for _, bin := range []string{"/opt/sd/sd-cli", "/opt/sd/sd-server"} {
+		out := l.ExecOut(ctx, n.ID, "ldd", bin)
+
+		var missing []string
+		resolved := 0
+		for _, line := range strings.Split(out, "\n") {
+			// Parsed, not grepped: ldd writes one dependency per line as
+			// "\tname => path (addr)", "\tname => not found", or -- for the
+			// vdso and the loader itself -- "\tname (addr)" with no arrow at
+			// all. Splitting on the arrow is what tells the third shape from
+			// an unresolved one; a grep for "not found" would also match a
+			// library whose *path* contained those words.
+			name, rest, ok := strings.Cut(strings.TrimSpace(line), " => ")
+			if !ok {
+				continue
+			}
+			if !strings.HasPrefix(rest, "not found") {
+				resolved++
+				continue
+			}
+			// The driver, and only the driver.
+			if name == "libcuda.so.1" {
+				continue
+			}
+			missing = append(missing, name)
+		}
+
+		if len(missing) > 0 {
+			t.Errorf("%s in %s links %v, and this image does not carry them:\n%s\n"+
+				"The final stage is nvidia/cuda:*-base plus an explicit COPY of the libraries "+
+				"ldd reports, so a dependency the binary gained -- or one a CUDA bump renamed -- "+
+				"is a library the loader cannot resolve. On a node that is `error while loading "+
+				"shared libraries` after a pod was rented, the image pulled and the weights "+
+				"fetched, all of it billed. Add the COPY for each name above to "+
+				"workload-sd-cuda.Dockerfile.", bin, image, missing, out)
+		}
+
+		// And the loop above actually read an ldd report, rather than
+		// counting zero missing libraries out of zero lines. A static binary,
+		// a moved path or an ldd that printed to stderr would otherwise pass
+		// this lab by saying nothing -- the same shape as a cleanup that runs
+		// before the assertion it is supposed to feed.
+		if resolved < 5 {
+			t.Errorf("ldd %s reported only %d resolved libraries, which is too few for a "+
+				"CUDA build of stable-diffusion.cpp -- this lab did not see a dependency list, "+
+				"so it proved nothing:\n%s", bin, resolved, out)
+		}
+	}
+}
+
 // sdCUDAUnderTest names the per-architecture image this run is about, and the
 // architecture it was asked for.
 //
