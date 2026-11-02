@@ -14,6 +14,50 @@ export GOTOOLCHAIN ?= go1.27.0
 BIN := bin
 COVERPROFILE := coverage.out
 
+# The build stamp. `ember version` answered `dev` in every build that has ever
+# existed, because internal/cli.Version carried a comment describing a
+# mechanism nobody had wired: there was no -ldflags anywhere in this file or in
+# any workflow. Every measurement in README.md is a claim about what a specific
+# build did, and none of them could name the build that produced it -- the same
+# argument this repository makes for refusing a `:latest` image, applied to
+# ember itself.
+#
+# `git describe --tags --always --abbrev=12 --dirty` is the whole decision, and
+# what each part answers for:
+#
+#   --tags      any tag, not only an annotated one, because this repository's
+#               only tag so far is a lightweight working marker.
+#   --always    falls back to the commit hash when no tag is reachable. There
+#               are NO release tags here today, and `git describe` without it
+#               fails outright -- so this is the branch every build currently
+#               takes: `ember version` prints a bare 12-character revision.
+#   --abbrev=12 so a revision from here and one Go's own build info supplies
+#               (internal/cli's fromBuildInfo, the fallback when nothing
+#               stamps) are the same length. Two spellings of one fact is how
+#               an operator ends up unsure which they are reading.
+#   --dirty     a tree with uncommitted changes reports `<rev>-dirty`. A
+#               measurement taken with a modified tree cannot be reproduced
+#               from anything in the repository, which is exactly when saying
+#               so is worth something.
+#
+# NOTHING INVENTS A TAG. A string like `v0.0.0-3-gabc` for a repository with no
+# tags would name a release nobody cut, and a version that lies is worse than
+# one that admits it: with no git at all -- a source tarball, `go build` outside
+# a checkout -- VERSION is empty, the -X sets the var to empty, and
+# internal/cli falls through to build info and then to the literal `dev`.
+#
+# Overridable (?=) so a release build can name itself without a tag being
+# reachable, which is also what makes the value testable from a recipe.
+VERSION ?= $(shell git describe --tags --always --abbrev=12 --dirty 2>/dev/null)
+
+# -X is a SILENT no-op when the symbol it names does not exist: rename the var
+# or move the package and the stamp stops happening with no error from the
+# linker and no change in the build -- which is the same class of failure as
+# the unwired mechanism above, and undetectable by eye. internal/cli's
+# TestVersionStampTargetsThisPackage parses this line and the workflows, and
+# fails when what they name is not a string var in that package.
+GO_LDFLAGS := -X github.com/Legion112/ember/internal/cli.Version=$(VERSION)
+
 # Packages whose statements must be covered, and the floor for each. A package
 # in neither this list nor COVER_EXCLUDE fails the gate; see -strict.
 #
@@ -143,7 +187,7 @@ LAB_IMAGE := ember:lab
 all: fmt vet test build
 
 build:
-	$(GO) build -o $(BIN)/ember ./cmd/ember
+	$(GO) build -ldflags '$(GO_LDFLAGS)' -o $(BIN)/ember ./cmd/ember
 
 test:
 	$(GO) test -race -count=1 ./...

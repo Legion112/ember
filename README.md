@@ -35,10 +35,6 @@ your terminal, fetches `/workspace/out` back over SSH, and destroys the node —
 including when you interrupt it. Leave `cmd` out and it forwards the ports
 instead and holds, which is the interactive shape.
 
-That rents a node, waits for it, forwards `8188` to `127.0.0.1:8188` over SSH,
-waits for you to finish, fetches the outputs and destroys the node — including
-when you interrupt it.
-
 Every run reports what it cost, and `ember ls` reports what each node has cost
 so far — the figure that turns "an orphaned H100 burns about 175 ₽/hour in
 silence" from a sentence in a README into something to act on this afternoon.
@@ -100,18 +96,51 @@ different image would prove nothing about what the provider pulls.
 | `internal/reconcile` | pure scan over providers and records — what `ls` and `reap` act on |
 | `internal/session`, `internal/config`, `internal/cli` | wiring |
 
-Every verb is implemented: `up`, `down`, `ls`, `reap`, `offers`, `catalogue`,
-`version`.
+Every verb `ember` dispatches, with the one-line summary it prints for itself:
+
+<!-- verbs: checked against internal/cli.commands() by TestREADME_NamesEveryVerb.
+     Name, summary and order must match the dispatch table exactly, in both
+     directions: a verb added there and not here fails the build, and so does a
+     row for a verb that no longer exists. This list said six while the program
+     had twelve, because it was maintained by hand and nothing compared them. -->
+
+| verb | what it does |
+|---|---|
+| `version` | print the ember version |
+| `up` | rent a node, forward its ports to loopback, destroy it |
+| `down` | destroy a node by handle |
+| `ls` | list nodes ember created, across every configured provider |
+| `serve` | run the web UI and a queue that drains onto one rental |
+| `reap` | destroy every node past its deadline |
+| `spend` | report what the recorded generations cost |
+| `history` | list the generations ember has run, newest first |
+| `offers` | list rentable offers matching a filter |
+| `store` | create or destroy persistent storage that outlives a node |
+| `catalogue` | record what a provider has available, and read the series back |
+| `archs` | print the CUDA architectures ember publishes an image for |
+| `images` | assemble an images: block from the digests a build published |
+
 `ls` asks every provider rather than trusting the local records, and exits 2
 when anything needs attention — including a provider it could not reach.
 
-The RunPod provider is written and tested against committed fixtures and an
-`httptest` server, but has never spoken to the live API — see
-`internal/provider/runpod/testdata/README.md` for exactly what that does and
-does not prove.
+The RunPod provider has rented real hardware with real money. Eight rented
+cards across seven architectures are measured below, each with the price paid
+and the wall-clock it bought; the exposure check earned its keep on the first real
+provision by refusing a node and destroying it, and the store, the volume
+throughput and the resident-model comparison are all live figures.
+`internal/provider/runpod/testdata/README.md` records which of the wire
+fixtures were captured from the live API and which were written from
+documentation, because this repository has twice paid for believing a schema
+over a response.
 
-Next: a first real-money smoke test against RunPod, then Vast.ai. See
-`AGENTS.md` for the rules all of it is written against.
+Next: Vast.ai, which nothing has spoken to — see
+[#22](https://github.com/Legion112/ember/issues/22). See `AGENTS.md` for the
+rules all of it is written against.
+
+`ember version` reports what built it: `git describe --tags --always
+--abbrev=12 --dirty`, so a measurement can name the ember that produced it. See
+[Build](#build) for what a tagless, dirty or git-less build prints and why none
+of them invents a tag.
 
 ## Two properties that outrank features
 
@@ -366,12 +395,52 @@ success for a security control that never ran.
 Go 1.27. The Makefile prefers `~/sdk/go1.27.0` when present so the compiler
 cannot drift from what `go.mod` declares.
 
+### What `ember version` reports
+
+`make build` stamps the binary with `git describe --tags --always --abbrev=12
+--dirty`:
+
+```
+$ make build && ./bin/ember version
+0f109263a709-dirty
+```
+
+| the tree it was built from | what it prints |
+|---|---|
+| a release tag | `v1.2.0` |
+| three commits past one | `v1.2.0-3-g0f109263a709` |
+| **no tags at all** — today's state | `0f109263a709`, the bare revision |
+| any of the above, uncommitted changes present | the same with `-dirty` |
+| no git: a source tarball, or `go build` outside a checkout | `dev` |
+
+**Nothing invents a tag.** There are no release tags in this repository, so
+every build today takes the third row. A string like `v0.0.0-3-g0f10926` would
+name a release nobody cut, which is worse than `dev` — the same argument this
+project makes for refusing a `:latest` image, turned on itself. Every
+measurement here is a claim about what a specific build did, so a version that
+lies is worse than one that admits it.
+
+A plain `go build ./cmd/ember` with no `-ldflags` prints the same thing, because
+`ember version` falls back to Go's own build information. It reads the recorded
+revision rather than the main-module version: the toolchain synthesises
+`v0.0.0-20261102192343-0f109263a709+dirty` for a build from a checkout, which is
+a real revision wearing the shape of a release at v0.0.0.
+
+`-ldflags -X` is a **silent** no-op when the symbol it names does not exist, so
+renaming the variable or moving the package would stop the stamp with no error
+from anything. `internal/cli`'s `TestVersionStampTargetsThisPackage` reads the
+Makefile and every workflow and fails when what they name is not a string
+`var` in that package; a sibling test fails when a workflow builds `ember`
+directly rather than through `make build`, because two spellings of one build
+command is how one of them ends up without the flags.
+
 ## Configuration
 
 `ember.yaml` holds image names, GPU filters, ports and budgets, and is safe to
 commit. Credentials are not in it: they come from the environment
 (`RUNPOD_API_KEY`, `VAST_API_KEY`) or from `~/.config/ember/credentials.yaml`,
-which ember refuses to read unless it is mode 0600 — checked on every load,
+where the same two are spelled `runpod_api_key` and `vast_api_key`, and which
+ember refuses to read unless it is mode 0600 — checked on every load,
 because a file created correctly once and chmodded later is the common case.
 The environment wins over the file, so a one-off run can use another account
 and CI needs nothing on disk.
@@ -384,6 +453,60 @@ make every clean run look like a problem.
 Nothing secret is ever passed as a command-line flag, because
 `/proc/<pid>/cmdline` is world-readable — on a rented machine, readable by
 whoever else is on that host.
+
+### Placement, disk and where ember keeps things
+
+These keys were implemented and documented nowhere, which is the half of
+`AGENTS.md`'s "document a config key in the same commit" rule that had been
+skipped. `internal/cli`'s `TestREADME_DocumentsEveryConfigKey` reads the
+`yaml:` tags out of `internal/config` and fails on a key this document has
+never heard of, so the next one cannot arrive silently.
+
+```yaml
+# where a node may be placed, and how much disk it gets
+data_centers: [US-IL-1, EU-RO-1]   # RunPod only; empty lets RunPod choose
+disk_gib: 80                       # RunPod only; the container disk
+runpod_cloud: COMMUNITY            # or SECURE, which is RunPod's own default
+allow_interruptible: true          # see the warning below
+
+# where ember keeps its own files; all three are resolved when empty
+config_dir: ~/.config/ember        # keys and credentials.yaml
+state_dir: ~/.local/state/ember    # node records, host-key pins, the queue
+output_dir: ~/renders              # fetched outputs, one directory per run
+```
+
+`data_centers` reaches **RunPod only** — the local provider's Docker daemon is
+wherever it is, not in a datacentre. **A store overrides it rather than
+intersecting with it**: a volume lives in exactly one site and a pod that
+mounts it has to be created there, so an intersection could be empty while the
+store's own site has capacity.
+
+`disk_gib` also reaches RunPod only, and a value below 1 silently means ember's
+default of 50 rather than an error. A CPU-only machine is clamped to 20, which
+is a property of the product and not a default that could be lowered for
+both — the API answers `Container Disk must be less than or equal to 20` with a
+400 above it.
+
+The three directories default to `$XDG_CONFIG_HOME/ember`, `$XDG_STATE_HOME` or
+`~/.local/state/ember`, and `<state_dir>/outputs`. Outputs live under the state
+directory so a run's results sit beside the journal record of the run that
+produced them, and so one `XDG_STATE_HOME` move takes both. The state directory
+is deliberately *not* the config one: pins and node records are machine-local
+facts about running nodes, and a config directory synced between machines would
+carry pins for nodes the other machine cannot see.
+
+> **`allow_interruptible` currently changes nothing, and that is a finding
+> rather than a feature.** It sets `node.Filter.AllowInterruptible`, which
+> admits an offer whose `Interruptible` field is true — and **no provider in
+> ember sets that field on an offer**. RunPod's community tier is reported one
+> level up, as a provider capability (`Caps().Interruptible`), which the filter
+> does not consult. So the switch has nothing to permit yet: leaving it false
+> excludes nothing, and setting it true admits nothing. What it is *not* is a
+> guard against renting interruptible hardware — `runpod_cloud: COMMUNITY`
+> rents exactly that, with `allow_interruptible` left at its default. It is
+> documented here as an opt-in that is waiting for a provider to mark an offer,
+> because a key that reads like a safety switch and is not one is worse than a
+> key nobody can find.
 
 ### Several results from one rental
 
@@ -469,11 +592,15 @@ sd:
           --llm, /models/Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf,
           --vae, /models/flux2-ae.safetensors]
   ready_timeout: 10m
+  preview: proj                   # none, proj, tae or vae
+  preview_interval: 5             # sampling steps between frames
   jobs:
     - prompt: "a paper boat on a slow river, morning light"
+      negative_prompt: "blurry, watermark"
       width: 1536
       height: 1536
       steps: 28
+      batch_count: 2              # images from this one job, same prompt
       sampler: euler
       cfg: 1.0
       guidance: 4.0
@@ -482,6 +609,13 @@ sd:
     - prompt: "the same river at night"
       output: river-night
 ```
+
+`batch_count` is checked against the `max_batch_count` the server reports
+before anything is submitted, and each image it produces is numbered —
+`boat-00.png`, `boat-01.png` — so a `batch_count` of one and a `batch_count` of
+four produce the same shape of filename. A batch restarts the sampling pass per
+image, so two images at 28 steps is 56 steps of progress reported as two passes
+rather than one bar to 56.
 
 `--diffusion-model` is right for FLUX.2, which names its diffusion model, text
 encoder and VAE as separate files. A single-file checkpoint such as sd15 needs
@@ -613,11 +747,14 @@ Progress is reported as a pass and a step within it, never as one percentage:
 sd-server's step count describes the current sampling pass, and passes restart
 for each batch item, each noise stage and each highres pass.
 
-**Previews cost GPU time, not just bandwidth.** ember defaults to `preview: proj`
-every 5 steps. Upstream's default is a frame every single step, and the `tae`
-and `vae` modes run a decode to produce each one — so the upstream default is
-the expensive one, billed by the second, for frames nobody in an unattended
-batch is watching. `preview: none` is the only free setting.
+**Previews cost GPU time, not just bandwidth.** ember defaults to `preview:
+proj` with `preview_interval: 5`. Upstream's default is a frame every single
+step, and the `tae` and `vae` modes run a decode to produce each one — so the
+upstream default is the expensive one, billed by the second, for frames nobody
+in an unattended batch is watching. `preview: none` is the only free setting. A
+negative `preview_interval` is refused rather than clamped, because upstream
+clamps a non-positive value to 1: writing `-1` to mean "off" would buy the most
+expensive setting there is.
 
 ### Generating on this machine's GPU
 

@@ -8,7 +8,6 @@ package cli
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -17,9 +16,6 @@ import (
 
 	"github.com/Legion112/ember/internal/app"
 )
-
-// Version is overwritten at build time with -ldflags.
-var Version = "dev"
 
 // outf writes to the command's output stream.
 //
@@ -150,16 +146,6 @@ func usage(out io.Writer) {
 		outf(out, "  %-*s %s\n", width, c.name, c.summary)
 	}
 	outf(out, "\nRun ember <subcommand> -h for the flags of one subcommand.\n")
-}
-
-func cmdVersion(args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("version", flag.ContinueOnError)
-	fs.SetOutput(out)
-	if err := fs.Parse(args); err != nil {
-		return usageError{err}
-	}
-	outf(out, "%s\n", Version)
-	return nil
 }
 
 // Quote is a small helper for error messages that embed user input.
