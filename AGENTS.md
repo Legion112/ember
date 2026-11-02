@@ -281,6 +281,33 @@ that sentence made unrepresentable rather than merely tested.
   then reaps, then reports the snapshot, so both properties hold: one failing
   lab still cannot cascade, and a leak is still named. Found by reinstating a
   deliberate leak and watching the suite stay green.
+- **A test that asserts on a port number is asserting about the whole
+  machine.** `TestForwarder_CancelReleasesEveryPort` checks the real property
+  -- after `Run` returns, the same ports must be bindable again -- and
+  `freePort` gets those ports by asking the kernel for an ephemeral one and
+  giving it straight back. Between the release and the re-bind, anything else
+  on the machine can take it; CI runs every package's test binary at once,
+  each handing out ephemeral ports, and it did:
+  `bind: address already in use` on a pull request that had not touched that
+  package, and never once in 300 local runs. A single attempt turns that into
+  a red build on an unrelated change, which is how a working check gets
+  ignored rather than obeyed. The assertion retries to a bound now, which
+  keeps the property -- a forwarder that really held its listener still fails,
+  a second or two later -- and loses only the false failure. `EADDRINUSE`
+  cannot say who holds the port, so the message says that rather than
+  accusing the forwarder.
+- **And that test could not have failed anyway, which is the more useful
+  finding.** On the cancellation path the leak is unrepresentable: closing the
+  listener is what unblocks a goroutine parked in `Accept`, so `wg.Wait`
+  cannot return until every listener is closed and `Run` returning *implies*
+  the ports are free. Measured rather than reasoned -- deleting `closeAll`
+  from the exit path entirely leaves the test green, because
+  `context.AfterFunc` has already done it. What it guards is therefore the
+  shape: the day somebody unblocks `Accept` another way, `closeAll` becomes
+  the only thing releasing the ports. The leak that IS reachable is the
+  early-return path, and reinstating it there -- a `Run` that refuses after
+  opening a listener and forgets to close it -- is what proves the retry did
+  not turn either assertion into a no-op.
 - **A lab helper owns what it creates.** `CreateVolume` registers its own
   cleanup rather than leaving each lab to remember, because cleanups run
   last-registered-first: the seeded volume goes before the stray check looks,
