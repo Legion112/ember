@@ -156,9 +156,22 @@ func (s *SQLite) Spend(ctx context.Context, q SpendQuery) ([]Bucket, error) {
 	key, group := groupExpr(q.By)
 	where, args := spendWhere(q)
 
+	// THE TWO CONCATENATED PIECES ARE BOTH CONSTANTS, which is the whole of
+	// why this is safe and is worth stating here rather than only at the
+	// functions that produce them.
+	//
+	// key comes from groupExpr, which switches over the four GroupBy
+	// constants and returns a literal column expression -- GroupBy.Valid has
+	// already refused anything else above, so the caller's string selects a
+	// branch and never reaches the statement. where comes from spendWhere,
+	// which emits fixed clause text and puts every value in args as a `?`.
+	// Nothing an operator types is interpolated.
+	//
 	// The job-side sums come from a subquery keyed on the request, so each
 	// rental's own cost is counted once per request row rather than once per
-	// job.
+	// job. A plain join would multiply each rental's cost by its job count.
+	//
+	//nolint:gosec // G202: key and where are literals from groupExpr and spendWhere; values are parameters
 	stmt := `
 		SELECT ` + key + ` AS k,
 		       COUNT(*),
