@@ -1072,7 +1072,13 @@ that sentence made unrepresentable rather than merely tested.
   `cannot register LoRA source` and generates the image without the LoRA. So a
   future `lora` field buys a refusal for a name the server does not have and
   nothing at all for a name it has and cannot use -- which is a thing to write
-  down rather than discover from an image that looks untouched.
+  down rather than discover from an image that looks untouched. **"Nothing at
+  all" was the generous reading and it is now measured as worse than
+  nothing**: the completed job's `generation_info.loras[]` and the PNG's own
+  `parameters` chunk both state the LoRA that was never applied, and the only
+  account of the failure is two stderr lines with no job id on them. The
+  entry beside the asset-verification ones in **Money** has the measurement
+  and why option 1 cannot be built on it.
 - **A control for a feature the server denies is unavailable, and the flag it
   is read from is the model's and not the mode's.** sd-server publishes two
   feature maps and they answer different questions. `features` is built per
@@ -2161,6 +2167,85 @@ A leaked node bills by the hour in silence. These are not style preferences.
   a model. Every path out of the download removes the partial, because a
   partial on a store is a file nothing cleans up and the operator pays by the
   month to keep.
+- **The same argument one layer later, and the answer is that it cannot be
+  made there: a LoRA sd-server cannot load is a warning, the image is
+  generated and billed without it, and the response says the LoRA was
+  applied.** The three entries above are one rule -- the weights are checked
+  before GPU time is spent, a mismatch stops the run, and a short file is
+  never mistaken for a model. A LoRA is weights by the same definition and the
+  rule has no reach there, because the file is read inside sd-server after the
+  job has been accepted. Measured rather than reasoned, by
+  `TestPreview_ALoraThatDidNotLoadIsNowhereInTheResponse` against a real CPU
+  server: a published id whose contents are the line `not a lora` completes
+  with `"status": "completed"`, `"error": null` and one image, and the decoded
+  pixels are those of the same prompt and seed with no `lora` key at all -- 0
+  of 4096 differ, which is #79's "indistinguishable from a LoRA that did
+  nothing" turned into a number.
+
+  **The response does not merely omit it, it contradicts it.** The one mention
+  of a LoRA in the whole envelope is
+  `result.images[].generation_info.loras[]`, and `generation_info.cpp:121`
+  builds that array from the request's own params *before* sampling -- so it
+  echoes `{"path":"unloadable.safetensors","multiplier":1}` for a LoRA that
+  was never registered. The PNG carries the same claim further: the encoder
+  writes a `tEXt` chunk under `parameters` reading
+  `a paper boat <lora:unloadable:1.0>`, in the spelling every gallery reads,
+  so the artifact outlives the rental asserting a setting it was not generated
+  with. The two PNGs differ by 105 bytes and every pixel is the same, which
+  means a with-against-without comparison done on bytes reports that the LoRA
+  did something. This is the `allowedCudaVersions` failure with the roles
+  swapped: not a schema believed in place of a response, but a *response*
+  believed when it is a transcript of the request.
+
+  **So #79's option 1 -- fail the job -- is unavailable, and it is unavailable
+  twice over.** The server's own account is two `[W]` lines on stderr
+  (`unknown format`, then `cannot register LoRA source '<path>'`), which ember
+  passes to the operator's terminal as `KindLog` and stores nowhere. Reading
+  them would be the coupling this file already refuses by name: the status is
+  read and the log is not, because the same server writes
+  `[E] Diffusion model sampling failed` for a job it reports as `cancelled`.
+  It is worse than that precedent, because sd-server's stderr is one stream
+  for the whole rental and carries no job id -- so a batch of eight would get
+  a warning that cannot be attributed to the image it belongs to. And there is
+  no stricter mode to opt into: `ModelManager::LoraSpec` has a `required` flag
+  that `model_manager.cpp:120` honours by failing the call, nothing on the
+  wire sets it (`parse_lora_json_field` reads `path`, `multiplier` and
+  `is_high_noise`, and `apply_loras` leaves `required` false), and only a
+  generation extension ember cannot reach turns it on.
+
+  **It is reachable today, which #79 assumed it was not.** The issue closes
+  with "until a request can name a LoRA, this is unreachable from ember", and
+  that is true of the wire type and false of the config: `extra` merges into
+  the `img_gen` body, so `extra: {lora: [{path: ..., multiplier: ...}]}` in
+  `ember.yaml` reaches this path on the next rental. What is bounded is the
+  web UI, by the same refusal that keeps `extra` off the wire.
+
+  **What the lab is therefore for is the absence.** It enumerates every
+  mention of a LoRA in a completed job by JSON path and asserts the set is the
+  request's echo and nothing else, so a sd-server that grows a `loras_loaded`,
+  a `warnings` array or a per-entry status fails it -- and option 1 becomes
+  buildable at the moment it does. Same shape as
+  `TestConformance_CannotCatchARederivedRunID`: a limitation nobody can read
+  out of the code is a limitation that will be forgotten. Checked by
+  reinstating seven worlds in which the claim is false -- a server that
+  refuses, a response that gains a field, an echo that lists only what loaded,
+  pixels that differ, metadata that stops claiming it, an `error` object that
+  appears, and a missing PNG chunk read as silence -- and all seven went red.
+
+  **Options 2 and 3 are not built, and the reasons are different.** Recording
+  it against the request (option 2) needs the fact first, and the only carrier
+  is the log: a column written from a stderr grep would be a *stored* number
+  with the authority of a measurement and the provenance of a guess, which is
+  the `load_elapsed_seconds` mistake with worse evidence. Verifying before the
+  workload (option 3) is the one worth coming back for, and it is not cheap
+  the way `EnsureAssets` is: `capabilities.loras[]` publishes which ids exist
+  and says nothing about whether they load, and the only way to find out is to
+  ask the server to load one -- which is a generation, on the card, at full
+  price. The honest intermediate, if a `lora` field is ever built, is that the
+  `slices.Contains` against the published list buys a refusal for a name the
+  server does not have and **nothing** for a name it has and cannot use, and
+  that the README says so where an operator reads about the field rather than
+  leaving it to be discovered from an image that looks untouched.
 - **The store is resolved before the spec is built, not after.** Only the
   provider knows what a store's id is, so resolution needs the registry --
   but a spec built first would carry assets with no store and have to be

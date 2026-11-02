@@ -373,6 +373,76 @@ func TestPoll_ReportsAFailedJobsOwnReason(t *testing.T) {
 	}
 }
 
+// TestPoll_ALoraThatNeverLoadedReadsAsACleanSuccess is the finding of #79
+// stated at the layer that would have to act on it.
+//
+// The fixture is a real completed job whose request named a LoRA sd-server
+// published and could not read. Everything this package decodes from it says
+// the generation went fine -- `StatusCompleted`, no error, one image that is
+// a real PNG -- and the preview lab has measured that the pixels are the
+// no-LoRA pixels exactly. So the assertion is that ember's own view carries no
+// signal, which is why #79's option 1 is not built: there is nothing here to
+// branch on. The server's account is two `[W]` lines on its stderr, which
+// reach the operator through KindLog and are recorded nowhere.
+//
+// It is NOT a test of agreement with itself. A fixture decoded by hand proves
+// the shape is readable and nothing about the service; what makes this one
+// evidence is that it is bytes a server sent, captured by
+// TestPreview_ALoraThatDidNotLoadIsNowhereInTheResponse, which asserts against
+// the live exchange that this is still what one looks like. The day that lab
+// goes red because the response grew a load status, this test is the one that
+// changes.
+func TestPoll_ALoraThatNeverLoadedReadsAsACleanSuccess(t *testing.T) {
+	c := newTestClient(t, serveFile(t, "job_lora_not_loaded_completed.json"))
+	st, err := c.Poll(t.Context(), "job_7f3a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != StatusCompleted {
+		t.Errorf("status = %v, want completed", st.Status)
+	}
+	if st.Err != nil {
+		t.Errorf("err = %+v, want none: a registration failure that reached this field would "+
+			"be the machine-readable signal #79 asked for, and ember could refuse the "+
+			"generation instead of reporting it", *st.Err)
+	}
+	if len(st.Images) != 1 {
+		t.Fatalf("images = %d, want 1 -- the generation was paid for in full", len(st.Images))
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(st.Images[0].Data))
+	if err != nil {
+		t.Fatalf("the image does not decode: %v", err)
+	}
+	if format != "png" || cfg.Width != 64 || cfg.Height != 64 {
+		t.Errorf("image = %s %dx%d, want png 64x64", format, cfg.Width, cfg.Height)
+	}
+
+	// And the one place the response does mention it, which is the request
+	// echoed back. ember reads none of `generation_info`, so this is asserted
+	// against the raw bytes: the point is that the only carrier of the LoRA's
+	// name states it was used, so a reader of the response would conclude the
+	// opposite of what happened.
+	var env struct {
+		Result struct {
+			Images []struct {
+				GenerationInfo struct {
+					Loras []struct {
+						Path string `json:"path"`
+					} `json:"loras"`
+				} `json:"generation_info"`
+			} `json:"images"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(fixture(t, "job_lora_not_loaded_completed.json"), &env); err != nil {
+		t.Fatal(err)
+	}
+	loras := env.Result.Images[0].GenerationInfo.Loras
+	if len(loras) != 1 || loras[0].Path != "unloadable.safetensors" {
+		t.Errorf("generation_info.loras = %+v, want the request's own entry. An empty list "+
+			"would be the report #79 wanted", loras)
+	}
+}
+
 func TestPoll_RefusesAnUnknownStatus(t *testing.T) {
 	c := newTestClient(t, serveJSON(200, `{"id":"j","status":"thinking"}`))
 	_, err := c.Poll(t.Context(), "j")

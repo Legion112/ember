@@ -837,6 +837,23 @@ upstream lines and the lab that measured it. So a `lora` field is a
 `hires.upscaler` already has; it is not built yet because this change's
 deliverable was the answer rather than the control.
 
+**What that allow-list would not buy, which matters more than what it
+would.** A published id whose file sd-server cannot read — a truncated
+download, a quantisation the build does not support, a half-finished copy —
+is a *warning*, not a refusal. The generation runs, the image comes back, the
+rental is billed, and nothing in the exchange says the LoRA was skipped: the
+job is `completed` with `error: null`, the pixels are exactly those of the
+same prompt and seed with no LoRA at all, and the one field that mentions it
+— `generation_info.loras[]` — is the request echoed back, so it asserts the
+LoRA was used. The PNG goes further and writes `<lora:name:1.0>` into its own
+`parameters` metadata, which is what a gallery will show you about an image
+generated without it. The server's only account of the failure is a
+`cannot register LoRA source` line on its stderr, which ember prints live and
+does not record. This is reachable from a config today — `extra` carries a
+`lora` array to the server, as the example below does — and the measurement
+is in `AGENTS.md` beside the asset-verification rules, with why ember does
+not read that log.
+
 **What is greyed out, and why.** The six advanced controls that have a feature
 flag in one of the server's two maps — clip skip, flow shift, shifted
 timestep, skip-layer guidance, vae tiling and the hires pass — are visibly
