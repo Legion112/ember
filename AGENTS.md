@@ -277,6 +277,44 @@ moment it imports a sibling, the sibling's dependencies become its own.
   assertion while linting nothing. Checked by reinstating the gap, by
   inventing a third tag the test had never heard of, and by pasting a
   hand-written `-tags` back into CI.
+- **The first round of a reinstatement pass is reliably incomplete, and a
+  flawless one is a finding about the harness rather than about the change.**
+  Measured across one session of eleven changes here: every pass that reported
+  a result had uncaught cases on its first attempt, between one and six each,
+  and chasing them produced a dead condition in a seal, an unreachable error
+  branch, an untested zero-time guard and a security walk that could be
+  laundered around. That is a claim about the method and not a tally to keep
+  up to date -- what it licenses is the expectation, which is that a pass
+  going red on every defect at the first attempt has more likely proved
+  something about its own thoroughness than about the suite. The question
+  that catches most of it, asked of each assertion before the suite is
+  believed: **what would this say if the bug were present?** If the answer is
+  "the same thing", it is not an assertion. The two shapes below are both the
+  *test* being wrong rather than the code, and both were found more than once.
+- **The expected value is what the bug produces.** Three in one session, each
+  passing against the defect and against the fix.
+  `TestHistoryRm_OlderThanReachesEveryRequestAndNotOnlyAPage` seeded 201
+  requests with the newest one a day back, which a 24h horizon correctly
+  excludes -- so its expected count was 200, exactly what a prune bounded by
+  `genstore.defaultLimit` returns. The usage-alignment assertion in
+  `TestCatalogue_IsInTheDispatchTable` named `catalogue`, the nine-character
+  verb: that line reads identically at `%-8s` and at the width taken from the
+  longest name, and the lines that move are every *other* one, so it asserts
+  on `up` now. And `TestGPUSamples_APriceIsRoundedAndNotTruncated` used a
+  price out of the captured RunPod catalogue, every one of which survives
+  `int64(f * 1e6)` -- so it could not tell `node.RateFromUSD` from a
+  multiplication, and uses $2.01, which truncates to 2009999.
+- **The hand-built fixture is missing the row the bug reads.**
+  `TestOpen_MigratesAVersionFourFile` built a version-4 database statement by
+  statement and left out the cached `caps` row that `PutCaps` writes on every
+  rental -- so the reinstated backfill-from-cache defect found nothing to
+  read, wrote the empty string, and the assertion passed. It seeds the row now
+  precisely because a backfill written later must have something to find.
+  `make tidy-check` is the same shape from the other side: it runs
+  `go mod tidy` and then `git diff --exit-code go.mod go.sum`, so an untidy
+  `go.mod` in the **working tree** is repaired by the tidy and leaves an empty
+  diff and a passing check. The untidy state has to be in the **index**, which
+  is what a CI checkout gives it.
 
 ## Threat model
 
@@ -2427,7 +2465,20 @@ A leaked node bills by the hour in silence. These are not style preferences.
   reported "nothing failed" when what had actually happened was an anchor that
   did not match or a program that did not compile. Grep for the build error as
   well as for `--- FAIL`, and assert that the edit applied before trusting
-  what the suite says about it.
+  what the suite says about it. A third way has turned up since, and it is the
+  subtlest because the harness is working correctly throughout: a patch
+  inserted *beside* the live code rather than replacing it -- an
+  `if false { … }` next to the real assignment -- so the suite was green
+  because the defect was never present at all. The edit applied, the program
+  compiled, nothing failed, and every check above passed. It was caught only
+  by asking *why* a case had gone green rather than accepting the green. The
+  cheap answer to all three is a **negative control**: a no-op patch the
+  harness must report as *not caught*, beside the positive control that the
+  suite is green before anything is patched. A positive control alone cannot
+  distinguish "the guard fired" from "the patch did nothing", which is the one
+  thing the whole exercise turns on -- the passes that added a negative
+  control caught their own broken patches at once, and the ones that did not
+  reported them as clean runs.
 - **Nothing creates the run's output directory on a served path.** The
   fetching paths get it from `transfer.Fetch`'s own `MkdirAll`, and a served
   run never calls Fetch because the images arrive in the HTTP response instead
