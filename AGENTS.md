@@ -374,7 +374,13 @@ that sentence made unrepresentable rather than merely tested.
   network and no assertion mentioned one, so a leak stayed invisible until
   Docker had subnetted its whole address pool and every run failed with "all
   predefined address pools have been fully subnetted". `AssertNoStray` now
-  covers networks, and a lab asserts `ember up` leaves none.
+  covers networks, and a lab asserts `ember up` leaves none. The check still
+  matches on the *presence* of ember's label and never on its value, because a
+  sweep that removes only what the harness remembered creating is this leak
+  again -- but the set it is taken over is **this suite run's**, not the
+  daemon's. That distinction is the entry two below, and it cost two suite
+  runs to learn: the breadth is the property and the daemon was never the right
+  scope for it.
 - **`AssertNoStray` could not fail, and nobody noticed for the life of the
   suite.** The lab's cleanup ran `Reap()` and then `AssertNoStray()` in that
   order, so the reap removed every container and network and the assertion
@@ -385,7 +391,67 @@ that sentence made unrepresentable rather than merely tested.
   reached without skipping anything. The cleanup now snapshots the daemon,
   then reaps, then reports the snapshot, so both properties hold: one failing
   lab still cannot cascade, and a leak is still named. Found by reinstating a
-  deliberate leak and watching the suite stay green.
+  deliberate leak and watching the suite stay green. What the snapshot is taken
+  *over* was wrong for longer and in the other direction -- it was the whole
+  daemon, which is the entry below -- so the two fixes are one rule: the
+  cleanup sees everything this suite run produced, at a moment when reaping
+  cannot have emptied it, and nothing else.
+- **A cleanup that deleted another run's live nodes.** `Lab.Nodes` filtered
+  containers on the mere presence of `ember.run-id`, with no value, and `Reap`
+  force-removed everything it returned plus every labelled network and volume
+  -- so a lab's cleanup was a whole-daemon delete. That was safe while this
+  repository was one checkout. Agent worktrees put several on one machine, each
+  able to run the labs against the one Docker daemon, and the two runs then
+  destroyed each other's nodes mid-test: `No such container` and `connection
+  refused` for a container that existed a moment earlier, 170s of wall clock
+  against the usual 85, and **every failing test passing when run alone**. A
+  lab that fails for reasons unrelated to the code is the other half of the
+  `--- SKIP` problem -- it teaches people to re-run rather than to read, and a
+  re-run that passes is indistinguishable from a flake that was hiding
+  something. The fix is an advisory lock on the daemon, taken once per test
+  binary (`labdaemon.Acquire`), plus a snapshot of what was already labelled
+  when the lock was taken, which every listing subtracts. **A per-run label
+  value was the obvious answer and is not sufficient**: it can scope what the
+  *harness* looks at, and ember's own leftover sweep is daemon-wide by design
+  -- `TestLeftover_ReapRemovesANetworkNothingElseWould` asserts `removed 1 of 1
+  leftover`, and a second suite's deliberately-expired network is swept by this
+  one's `ember reap` whatever the harness filters on. Only exclusivity makes
+  those assertions true. It is an flock and not a pid file because the kernel
+  releases it when the holder dies, and two labs here SIGKILL ember on purpose;
+  a lock that could go stale would have to be stealable, which is the
+  daemon-wide delete again with extra steps.
+- **"Another run is in progress" is a wait. "Something ember will report is on
+  the daemon" is a refusal.** Failing a suite because the daemon is busy would
+  be the `--- SKIP` mistake in red, so a queued suite waits, says who it is
+  waiting for, and fails with one sentence only if the holder never finishes
+  (`LockWait`, ten minutes, under the binary's own 20). A stale object is the
+  other question, and the split between tolerating and refusing one is
+  **measured** rather than chosen: with one `ember.kind=node` container left
+  over on the daemon, `ember ls` reports it `untracked` -- correctly, that is
+  what the command is for -- and
+  `TestLeftover_ReapRemovesANetworkNothingElseWould` fails ninety seconds in
+  with "ls still reports findings after reap", which names nothing an operator
+  can act on. ember's own listings are daemon-wide by design, so the harness
+  cannot filter that away; deleting it was the defect; so `Objects.Reported` is
+  refused up front, naming each object and `make reap-labs`. Everything else --
+  a container wearing only `ember.run-id`, which `local.List` never looks at --
+  is left strictly alone: not counted, not reported, not removed, named once in
+  the log. Both halves are live code, which is the test of the split: refuse
+  everything and the subtraction would be dead, subtract everything and the
+  refusal would be.
+- **`make reap-labs` is the escape hatch, and it is the one place the refusal
+  points at a tool rather than a rule.** It is honest about being a developer
+  tool: nothing in CI runs it, and it will remove objects no test created.
+  Refusing while a suite holds the lock is right there and waiting would be
+  wrong -- a tool whose whole job is a daemon-wide delete must not queue behind
+  a suite and then remove what it has just finished producing.
+- **A lab log is read back, so two checkouts cannot share its path.** The four
+  lab targets `tee`d into fixed `/tmp` names and then grepped them for `---
+  SKIP`. A second worktree's run truncates that file as it starts, so the first
+  run's gate greps a log belonging to somebody else -- an assertion reading the
+  wrong file, which is how the journal's "nodes" subdirectory went unchecked,
+  applied to the gate that exists because a skipped lab reports success for
+  something that never ran. `LAB_LOG_DIR` is keyed to the checkout.
 - **A test that asserts on a port number is asserting about the whole
   machine.** `TestForwarder_CancelReleasesEveryPort` checks the real property
   -- after `Run` returns, the same ports must be bindable again -- and
@@ -424,7 +490,10 @@ that sentence made unrepresentable rather than merely tested.
   They call `Reap()` themselves once they have finished asserting, which
   declares the orphan as deliberate and keeps the check unconditional for
   every lab that leaks by mistake. Relaxing the check instead would have put
-  it straight back where it was.
+  it straight back where it was. Their orphan is still reaped under the scoping
+  above, and must be: it was created during this suite run, which is the only
+  thing that distinguishes it from the stale container of a run that died
+  yesterday -- and that one is left alone because nothing here made it.
 - **The run id travels into `Destroy`; it is never re-derived from the thing
   being destroyed.** `local.Destroy` used to read it off the container's own
   label in order to find the bridge network beside it -- and a container
