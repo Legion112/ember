@@ -1113,7 +1113,7 @@ least. Every field in the form explains itself on hover.
 |---|---|
 | provider, card, region | `image:` and the `images:` map |
 | `ttl`, up to the config's | `store:` and its mount |
-| `max_hourly_usd` and `max_run_usd`, up to the config's | `ports:` |
+| `max_hourly_usd` and `max_run_usd`, up to the config's | `ports:`, `max_day_usd` and `max_month_usd` |
 | prompt, size, steps, batch count, seed, sampler, scheduler, cfg, guidance, output name | `sd.serve`, `gpu_probe`, `assets:`, `verify:` |
 | clip skip, eta, flow shift, shifted timestep, output format and compression | `extra` |
 | the `hires`, `vae_tiling` and `slg` blocks | an image input and `lora` |
@@ -1131,6 +1131,82 @@ upstream of anything a request can influence — `node.MountAt`'s refusal of
 sd-server's request body that ember does not type, including the ones naming
 file paths on the node, so a request that could set it could point a running
 server at weights the config never mentioned.
+
+### What bounds a queue
+
+`max_hourly_usd` bounds a card. `max_run_usd` bounds a rental. Nothing bounded
+a **sequence** of rentals, and `ember serve` is the first thing here that can
+produce one without the operator being at the keyboard for each: thirty queued
+requests at $1.79/hour on a one-hour TTL are inside every ceiling ember had,
+and are $54.
+
+```yaml
+max_day_usd: "20.00"
+max_month_usd: "250.00"
+```
+
+Both are UTC calendar periods, and a rental is refused when the offer's price
+over the TTL would take the period past its ceiling — the same arithmetic
+`max_run_usd` is compared against, at the same moment, after the offer is
+chosen and before anything is created. `ember serve` prints where both stand
+at startup, and a refused request carries the reason, so it is in the page and
+in `ember history`:
+
+```
+the month beginning 2026-11 has spent $212.3 of its max_month_usd ceiling of
+$250, and this rental is projected at $38.7 -- which would take it to $251.
+Nothing was rented. Raise max_month_usd in ember.yaml, or wait for the month
+to turn over
+```
+
+This is **not** the mid-run meter that was asked for and refused. That one
+needed a clock, a price and a running total kept correct *while* a rental is in
+flight. This needs the completed cost of finished rentals, which is already
+recorded, numbered and durable — one more `SUM` over rows that exist.
+
+Five decisions, with what each costs.
+
+**Calendar, not rolling**, because the thing being defended against is an
+invoice and an invoice is calendar. The cost is a real hole: a day ceiling
+resets at midnight UTC, so a queue can spend one day's allowance twice in two
+hours across the boundary. What bounds that is the month ceiling, which is why
+both exist and why the month is the one to set if you set only one.
+
+**It projects rather than reports.** A check that refuses only once a period has
+already been exceeded is a ceiling every period breaches by one rental, and one
+rental is the $54 above.
+
+**It refuses rather than quietly renting something cheaper.** Narrowing the run
+ceiling to the remaining headroom was the first design, and it would have meant
+asking for an H100 and getting a 4090 because the month was nearly spent. ember
+exists to measure what a card costs, and a run that silently happened on
+different hardware is a measurement nobody can use.
+
+**It counts rentals and not store standing charges.** A store bills by the
+gigabyte-month whether or not anything runs, so a ceiling that ignores a
+$40/month store is wrong by a known amount. Counting it would mean a provider
+scan inside the drain loop, and a provider that could not be reached would
+leave two choices: block the queue, which is worse than the gap, or carry on
+without that store's charge, which is the gap with a false sense that it was
+covered. `ember ls` is where a standing charge is reported, and it exits
+non-zero over a provider it could not ask.
+
+**It bites at selection and not at enqueue.** Refusing when a request is
+queued would be kinder and is not sound in the direction that matters: it is a
+*false* refusal across a period boundary, because work queued on the 30th for
+next month would be rejected although the queue would have run it after the
+turnover. A ceiling reached by something else while a request sat in the queue
+is the other half of the same argument. The refusal reaches the operator
+anyway — the request is marked failed with the reason.
+
+Two things it does not do. A free rental is never refused: the local provider's
+price is zero, so its projection is zero and it adds nothing to any period.
+And `ember up` does not read these at all — it is one rental the operator
+started themselves, which is the case `max_run_usd` already covers.
+
+What it reads is complete, which is worth saying because `ember spend` has to
+warn that its per-job figures are not. `requests.cost` was a column before the
+execution columns existed, so the period total has no gap in it.
 
 ### What is not guarded
 

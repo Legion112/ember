@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/config"
@@ -17,12 +18,19 @@ import (
 
 // AppPlanner turns a stored request into a rental, against one config.
 //
-// THIS IS WHERE THE CEILING IS APPLIED, and it is the only place a request's
-// numbers meet the operator's. `ember up`'s applyFlags *replaces*: typing
-// --max-hourly-usd 999 raises the ceiling, because the person typing it is the
-// person who set it. A request is not that person, so Narrow below only ever
-// takes the smaller of the two -- and internal/app receives a
+// THIS IS WHERE THE CEILINGS ARE APPLIED, and it is the only place a
+// request's numbers meet the operator's. `ember up`'s applyFlags *replaces*:
+// typing --max-hourly-usd 999 raises the ceiling, because the person typing it
+// is the person who set it. A request is not that person, so Narrow below only
+// ever takes the smaller of the two -- and internal/app receives a
 // provision.Budget it has no way to widen.
+//
+// THERE ARE NOW TWO KINDS OF CEILING HERE, and the difference is what they
+// bound. max_hourly_usd and max_run_usd bound one card and one rental, and a
+// request may narrow them. max_day_usd and max_month_usd bound every rental in
+// a calendar period together, and a request is not consulted about them at all
+// -- there is no field for either on the wire type, so the limit that stops a
+// browser is one the browser cannot name. See ceiling.go.
 //
 // WHAT A REQUEST MAY NOT TOUCH stays on the config: the image and the images:
 // map, the store and its mount, the ports, sd.serve's argv, the gpu probe, the
@@ -49,6 +57,27 @@ type AppPlanner struct {
 
 	// Out carries byte streams from the node.
 	Out io.Writer
+
+	// Ledger is what the period ceilings are checked against.
+	//
+	// A Spender and not a Store, so what this layer can do to the database is
+	// visible in its type: it decides whether to spend money, and handing it
+	// a writer would mean reading the body to know it does not enqueue
+	// anything. Nil means no ceiling can be checked, which is why Plan
+	// refuses rather than proceeding when one is configured and this is not
+	// set.
+	Ledger Spender
+
+	// Now is injected because a ceiling is a question about a calendar
+	// period, and a test that could not choose the day could not ask it.
+	Now func() time.Time
+}
+
+func (p AppPlanner) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
 }
 
 // Plan resolves a request and rents nothing.
@@ -82,7 +111,49 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 		return nil, err
 	}
 
+	// And the period ceilings, here for the same reason and in the same
+	// place: this is the last statement before anything is created, and the
+	// projection needs the offer's own price. Plan rents nothing, so a
+	// refusal here costs the offer lookup and not a node.
+	if err := p.refuseOverPeriod(ctx, cfg.TTL, plan.Offer.Price); err != nil {
+		return nil, err
+	}
+
 	return appRental{plan: plan, out: p.Out}, nil
+}
+
+// refuseOverPeriod is the max_day_usd and max_month_usd gate.
+//
+// The projection is the offer's price over the TTL, which is exactly what
+// provision.Budget.Allow compares max_run_usd against -- so the figure a
+// period is charged and the figure one rental is bounded by are the same
+// arithmetic, and the two ceilings cannot come to disagree about what a rental
+// may come to.
+//
+// A ceiling with no ledger to read is a REFUSAL and not a pass. An operator
+// who wrote max_month_usd into their config has said that unattended spending
+// must stop somewhere, and the one answer a spend ceiling must never give is
+// "probably fine" -- the same rule that makes `ember ls --all` exit non-zero
+// over a provider it could not ask. It cannot happen through `ember serve`,
+// which always wires the store; it is here because a ceiling that silently
+// does nothing is worse than one that is not configured.
+func (p AppPlanner) refuseOverPeriod(ctx context.Context, ttl time.Duration, price node.Rate) error {
+	day, month, err := p.Config.PeriodCeilings()
+	if err != nil {
+		// The operator's own file, as Narrow says of the budgets: their
+		// error, and found before anything is rented.
+		return fmt.Errorf("the configured period ceiling: %w", err)
+	}
+	cs := Ceilings{Day: day, Month: month}
+	if cs.IsZero() {
+		return nil
+	}
+	if p.Ledger == nil {
+		return fmt.Errorf("this configuration sets a period ceiling (%v a day, %v a month) and "+
+			"nothing here can read what has been spent, so ember cannot tell whether this rental "+
+			"is within it and will not rent", day, month)
+	}
+	return cs.Allow(ctx, p.Ledger, p.now(), price.Cost(ttl))
 }
 
 // refusePaid is the --allow-paid gate.

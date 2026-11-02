@@ -347,7 +347,7 @@ func TestPostRequest_RefusesWhatItCannotParse(t *testing.T) {
 		{"a ttl of zero", `{"provider":"local","ttl":"0s","jobs":[{"prompt":"a"}]}`, "not positive"},
 		{"a negative ttl", `{"provider":"local","ttl":"-1h","jobs":[{"prompt":"a"}]}`, "not positive"},
 		// A JSON number would be a float on both sides of this wire, and
-		// ParseFloat("0.29")*1e6 is 289999. Decimal strings only.
+		// ParseFloat("2.01")*1e6 truncates to 2009999. Decimal strings only.
 		{"a budget that is not a price", `{"provider":"local","max_hourly_usd":"cheap","jobs":[{"prompt":"a"}]}`, "max_hourly_usd"},
 		{"a negative budget", `{"provider":"local","max_run_usd":"-1","jobs":[{"prompt":"a"}]}`, "max_run_usd"},
 		{"no jobs", `{"provider":"local","jobs":[]}`, "generate nothing"},

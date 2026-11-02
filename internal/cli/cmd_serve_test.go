@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/webapi"
 )
 
@@ -134,7 +136,7 @@ func TestAnnounce_SaysWhatIsNotGuarded(t *testing.T) {
 	cfg := config.Config{TTL: 30 * time.Minute, MaxHourlyUSD: "2.49", MaxRunUSD: "3.00"}
 
 	var refused bytes.Buffer
-	announce(&refused, srv, cfg, false, "", "/tmp/out")
+	announce(&refused, srv, cfg, false, "", "/tmp/out", periodStanding{})
 	got := refused.String()
 	for _, want := range []string{
 		"http://127.0.0.1:7777/",
@@ -161,7 +163,7 @@ func TestAnnounce_SaysWhatIsNotGuarded(t *testing.T) {
 	}
 
 	var allowed bytes.Buffer
-	announce(&allowed, srv, cfg, true, "", "/tmp/out")
+	announce(&allowed, srv, cfg, true, "", "/tmp/out", periodStanding{})
 	got = allowed.String()
 	for _, want := range []string{
 		"PAID PROVIDERS ARE ENABLED",
@@ -295,4 +297,87 @@ func (b *syncBuf) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// TestAnnounce_SaysWhereThePeriodCeilingsStand.
+//
+// A ceiling an operator learns about by having a request refused is a ceiling
+// they find out about after queueing thirty of them. This is the one place
+// `ember serve` can tell them their headroom before they type anything.
+func TestAnnounce_SaysWhereThePeriodCeilingsStand(t *testing.T) {
+	srv, err := webapi.New(webapi.Options{Store: genstore.NewRecordingStore(), Port: 7777})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{TTL: 30 * time.Minute, MaxDayUSD: "20", MaxMonthUSD: "250"}
+	st := periodStanding{
+		Ceilings: queue.Ceilings{Day: 20_000_000, Month: 250_000_000},
+		Day:      4_500_000,
+		Month:    212_300_000,
+	}
+
+	var out bytes.Buffer
+	announce(&out, srv, cfg, true, "", "/tmp/out", st)
+	got := out.String()
+	t.Logf("ember serve with period ceilings:\n%s", got)
+
+	for _, want := range []string{
+		"Today has spent $4.5 of $20", "max_day_usd",
+		"This month has spent $212.3 of $250", "max_month_usd",
+		"refused", "Only ember.yaml raises one",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the announcement does not mention %q:\n%s", want, got)
+		}
+	}
+
+	// Without --allow-paid there is nothing to bound: a free rental is never
+	// refused by a money ceiling, so naming one would be noise.
+	var free bytes.Buffer
+	announce(&free, srv, cfg, false, "", "/tmp/out", st)
+	if strings.Contains(free.String(), "max_month_usd") {
+		t.Errorf("a period ceiling is announced where no provider may cost money:\n%s", free.String())
+	}
+}
+
+// A ceiling ember cannot read what has been spent against refuses every
+// rental, so the announcement has to say so rather than printing a figure it
+// does not have.
+func TestAnnounce_SaysWhenAPeriodCeilingCannotBeRead(t *testing.T) {
+	srv, err := webapi.New(webapi.Options{Store: genstore.NewRecordingStore(), Port: 7777})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := periodStanding{
+		Ceilings: queue.Ceilings{Month: 250_000_000},
+		Err:      errors.New("database is locked"),
+	}
+
+	var out bytes.Buffer
+	announce(&out, srv, config.Config{TTL: time.Hour}, true, "", "/tmp/out", st)
+	got := out.String()
+	for _, want := range []string{"could not read what has been spent", "database is locked", "refused"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the announcement does not mention %q:\n%s", want, got)
+		}
+	}
+}
+
+// standing reads both periods out of the store it is given.
+func TestStanding_ReadsBothPeriods(t *testing.T) {
+	st := standing(t.Context(), genstore.NewRecordingStore(),
+		config.Config{MaxDayUSD: "20", MaxMonthUSD: "250"})
+	if st.Err != nil {
+		t.Fatal(st.Err)
+	}
+	if st.Ceilings.Day != 20_000_000 || st.Ceilings.Month != 250_000_000 {
+		t.Errorf("ceilings = %+v", st.Ceilings)
+	}
+
+	// A malformed ceiling is the operator's own error, and it is reported
+	// rather than rendered as zero -- which would read as "no ceiling".
+	bad := standing(t.Context(), genstore.NewRecordingStore(), config.Config{MaxDayUSD: "~~"})
+	if bad.Err == nil {
+		t.Error("a malformed max_day_usd was announced as no ceiling")
+	}
 }

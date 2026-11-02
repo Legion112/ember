@@ -10,11 +10,13 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/blob"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/webapi"
 )
@@ -140,8 +142,13 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	logger := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	q := &queue.Queue{
-		Store:   store,
-		Planner: queue.AppPlanner{Config: cfg, Deps: d, AllowPaid: o.AllowPaid, Out: out},
+		Store: store,
+		// Ledger is the same store, as a reader: the period ceilings are
+		// checked against what the generation history says was spent, which
+		// is the one number that is already recorded, numbered and durable.
+		Planner: queue.AppPlanner{
+			Config: cfg, Deps: d, AllowPaid: o.AllowPaid, Out: out, Ledger: store,
+		},
 		Outputs: ps.Outputs,
 		Out:     out,
 		Log:     logger,
@@ -164,7 +171,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		return err
 	}
 
-	announce(out, srv, cfg, o.AllowPaid, o.Dist, ps.Outputs)
+	announce(out, srv, cfg, o.AllowPaid, o.Dist, ps.Outputs, standing(ctx, store, cfg))
 
 	// SHUTDOWN ORDER IS THE WHOLE POINT OF WHAT FOLLOWS.
 	//
@@ -202,7 +209,45 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 //
 // It says what is NOT guarded as plainly as what is, because the one thing a
 // person has to decide here is whether to leave this running.
-func announce(out io.Writer, srv *webapi.Server, cfg config.Config, allowPaid bool, dist, outputs string) {
+// periodStanding is where the period ceilings stand at startup.
+//
+// SAID AT THE START, because a ceiling an operator learns about by having a
+// request refused is a ceiling they find out about after queueing thirty of
+// them. This is the one place `ember serve` can tell them their headroom
+// before they type anything, and it costs two SELECTs.
+type periodStanding struct {
+	Ceilings queue.Ceilings
+	Day      node.MicroUSD
+	Month    node.MicroUSD
+
+	// Err is a read that failed. Reported in the announcement rather than
+	// refused at startup, because this is the informational copy -- the
+	// planner does the same read before every rental and refuses there, which
+	// is the check that stops money.
+	Err error
+}
+
+// standing reads what the current day and month have come to.
+func standing(ctx context.Context, s queue.Spender, cfg config.Config) periodStanding {
+	day, month, err := cfg.PeriodCeilings()
+	if err != nil {
+		return periodStanding{Err: err}
+	}
+	st := periodStanding{Ceilings: queue.Ceilings{Day: day, Month: month}}
+	if st.Ceilings.IsZero() {
+		return st
+	}
+	now := time.Now()
+	if st.Day, err = queue.Spent(ctx, s, queue.PeriodDay.Start(now)); err != nil {
+		return periodStanding{Ceilings: st.Ceilings, Err: err}
+	}
+	if st.Month, err = queue.Spent(ctx, s, queue.PeriodMonth.Start(now)); err != nil {
+		return periodStanding{Ceilings: st.Ceilings, Err: err}
+	}
+	return st
+}
+
+func announce(out io.Writer, srv *webapi.Server, cfg config.Config, allowPaid bool, dist, outputs string, st periodStanding) {
 	outf(out, "ember serve\n\n")
 	outf(out, "  %s\n", srv.URL())
 	if !srv.Built() {
@@ -225,12 +270,38 @@ func announce(out io.Writer, srv *webapi.Server, cfg config.Config, allowPaid bo
 			outf(out, ", %v per run", run)
 		}
 		outf(out, ".\n  A request may narrow those and never widen them.\n")
+		announcePeriods(out, st)
 	} else {
 		outf(out, "  Paid providers are refused. Start with --allow-paid to let the UI spend money.\n")
 	}
 	outf(out, "  There is no authentication: any page in your browser can reach this port.\n")
+
 	outf(out, "  Images land in %s\n", outputs)
 	outf(out, "\nCtrl-C to stop. Any rental is destroyed before this exits.\n\n")
+}
+
+// announcePeriods says where the period ceilings stand.
+//
+// Only under --allow-paid, because a free rental is never refused by a money
+// ceiling: the local provider's price is zero, so its projection is zero and
+// it adds nothing to any period.
+func announcePeriods(out io.Writer, st periodStanding) {
+	if st.Err != nil {
+		outf(out, "  A period ceiling is configured and ember could not read what has been spent: %v\n"+
+			"  Every rental will be refused until that read works.\n", st.Err)
+		return
+	}
+	if st.Ceilings.IsZero() {
+		return
+	}
+	if st.Ceilings.Day > 0 {
+		outf(out, "  Today has spent %v of %v (max_day_usd).\n", st.Day, st.Ceilings.Day)
+	}
+	if st.Ceilings.Month > 0 {
+		outf(out, "  This month has spent %v of %v (max_month_usd).\n", st.Month, st.Ceilings.Month)
+	}
+	outf(out, "  A rental projected to take a period past its ceiling is refused, and the\n"+
+		"  request says so. Only ember.yaml raises one.\n")
 }
 
 // syncWriter serializes writes from the two halves of `ember serve`.
