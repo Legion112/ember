@@ -1637,11 +1637,44 @@ that sentence made unrepresentable rather than merely tested.
 - **Zero is "no limit" and a dash is "nobody read it", and conflating them
   makes a slow node look fine.** cgroup v2 writes the literal `max` and v1 a
   sentinel near the top of int64, so both come through as zero -- and
-  `mem_cgroup` is what says whether anything was read at all. `Limit()` then
-  falls back to the host's total rather than reading zero as a container that
-  cannot allocate anything, which is the opposite claim. Found by a test:
-  cutting the probe's output before trimming it meant a file that was readable
-  and EMPTY became indistinguishable from one that was not there.
+  `mem_cgroup` is what says whether anything was read at all.
+  `node.Memory.Ceiling` then falls back to the host's total rather than
+  reading zero as a container that cannot allocate anything, which is the
+  opposite claim. Found by a test: cutting the probe's output before trimming
+  it meant a file that was readable and EMPTY became indistinguishable from
+  one that was not there.
+- **That rule had two implementations, its tests were split across them, and
+  the one this file used to name was the one nothing called.** It said
+  `Limit()`, which was `nodemem.Report`'s: four lines whose only caller was
+  the dead `Headroom` beside it, on the far side of a SQLite round trip from
+  `genstore.Entry.MemCeiling`/`MemHeadroom` -- which is what `ember history
+  --memory` actually prints. Both pairs were written in the same commit and
+  they agreed for the life of the feature because one of them never ran, which
+  is `dataCenter` against `dataCenterId` reached through a document: somebody
+  editing the function named here would have changed nothing an operator sees.
+  What makes it more than tidiness is **measured** rather than argued --
+  deleting `|| e.AssetBytes <= 0` from the live method leaves `go test ./...`
+  entirely green, because the only assertion anywhere that a ceiling with no
+  asset figure answers *nothing* belonged to the dead copy. Half of the rule
+  an operator reads was covered by a test of code that never ran, and that
+  half is not hypothetical: a baked image and a local container have no asset
+  set, so a headroom printed there would be the whole ceiling, as though the
+  weights took no room. So there is one `node.Memory`, in the one package both
+  `nodemem` and `genstore` already import -- `genstore` importing `nodemem`
+  instead would put `sshx`, `workload` and `x/crypto/ssh` in the dependency
+  graph of a SQLite store, which is the `internal/node` seal's own argument
+  pointed the other way. Its fields are **named** rather than two positional
+  `int64`s, because `Ceiling(total, limit)` compiles and is this rule exactly
+  inverted, in the direction that makes a bounded node look unbounded; the
+  conformance table runs every quadrant through both stores. `Entry.MemCeiling`
+  went with the duplication, and `TestNoProductionDeadCode` is what said so --
+  the moment the subtraction became a delegation the ceiling had no production
+  reader at all, because the ledger prints the two raw columns and the headroom
+  and never the step between them. The waiver that used to sit in that guard's
+  list justified the dead `Headroom` by pointing at `Limit`, which was dead
+  too; an exclusion's reason may not name another symbol as evidence that it is
+  live, because a call from a production file counts whether or not the
+  function making it is reachable.
 - **The v1 paths are named rather than derived from `/proc/self/cgroup`.** A
   guess at where a hierarchy is mounted reports "no limit" on the one kernel it
   is wrong about, and "no limit" is the answer that makes a node look fine.

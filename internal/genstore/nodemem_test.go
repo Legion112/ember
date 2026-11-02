@@ -170,8 +170,8 @@ func TestHistory_CarriesWhatTheNodeSaidAboutItsMemory(t *testing.T) {
 		// The ceiling is the cgroup's and not the host's, which is the whole
 		// hypothesis: this node reported 700 GiB free and could not hold a
 		// 56 GiB model.
-		if e.MemCeiling() != 32<<30 {
-			t.Errorf("MemCeiling = %d, want the cgroup's limit", e.MemCeiling())
+		if e.memory().Ceiling() != 32<<30 {
+			t.Errorf("memory().Ceiling() = %d, want the cgroup's limit", e.memory().Ceiling())
 		}
 		h, ok := e.MemHeadroom()
 		if !ok {
@@ -179,6 +179,55 @@ func TestHistory_CarriesWhatTheNodeSaidAboutItsMemory(t *testing.T) {
 		}
 		if h != (32<<30)-(56<<30) {
 			t.Errorf("headroom = %d, want -24 GiB", h)
+		}
+	})
+}
+
+// A ceiling with no weights beside it answers nothing, through both stores.
+//
+// THIS CASE WAS COVERED BY A TEST OF CODE THAT NEVER RAN. The same four lines
+// existed on nodemem.Report, where nothing called them, and its test was the
+// only thing anywhere asserting this half of the knowability rule -- so
+// deleting `|| Assets <= 0` from the live method left `go test ./...` green.
+// Measured, before the two copies became one.
+//
+// It is not a hypothetical row: a baked image and a local container have no
+// asset set at all, so every local run records a ceiling and no weights. A
+// headroom printed there would be the whole limit, as though the model took
+// no room.
+func TestHistory_AnsweringNothingAboutTheWeightsIsNotAHeadroom(t *testing.T) {
+	each(t, func(t *testing.T, s Store) {
+		id, err := s.Enqueue(t.Context(), Request{
+			Provider: "local", TTL: time.Hour, Created: day(1), Jobs: []Job{{Prompt: "a"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Update(t.Context(), id, func(r *Request) {
+			r.Status = StatusDone
+			// Both views read, no assets: the local provider's shape.
+			r.MemCgroup, r.MemLimit, r.MemTotal = 2, 8<<30, 64<<30
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		rows, err := s.History(t.Context(), Filter{})
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("History = %+v, %v", rows, err)
+		}
+		e := rows[0]
+		// The ceiling is knowable -- the cgroup answered -- and the headroom
+		// is not, which are different questions and must not collapse into
+		// one.
+		if e.memory().Ceiling() != 8<<30 {
+			t.Errorf("memory().Ceiling() = %d, want the cgroup's limit", e.memory().Ceiling())
+		}
+		h, ok := e.MemHeadroom()
+		if ok {
+			t.Errorf("headroom = %d is knowable with no asset figure", h)
+		}
+		if h != 0 {
+			t.Errorf("headroom = %d over a figure nobody read, want zero", h)
 		}
 	})
 }
@@ -216,14 +265,14 @@ func TestHistory_TellsNoLimitFromNoAnswer(t *testing.T) {
 		for _, e := range rows {
 			switch e.ID {
 			case noLimit:
-				if e.MemCeiling() != 64<<30 {
+				if e.memory().Ceiling() != 64<<30 {
 					t.Errorf("a node with no cgroup limit does not fall back to the host's total: %+v", e)
 				}
 				if h, ok := e.MemHeadroom(); !ok || h != (64<<30)-(8<<30) {
 					t.Errorf("headroom = %d, %v; want 56 GiB", h, ok)
 				}
 			case silent:
-				if e.MemCeiling() != 0 {
+				if e.memory().Ceiling() != 0 {
 					t.Errorf("a node that answered nothing reports a ceiling: %+v", e)
 				}
 				if _, ok := e.MemHeadroom(); ok {

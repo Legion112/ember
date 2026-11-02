@@ -751,32 +751,51 @@ type Entry struct {
 // and no Elapsed at all. Zero when either end is missing, as JobRun.Sampling
 // is, rather than a duration measured against the zero time -- which would be
 // two thousand years and would poison every average it reached.
-// MemCeiling is the bound this node's page cache actually lived under.
+// MemHeadroom is the bound this node's page cache lived under, less the
+// weights that had to fit in it, and whether that is knowable at all.
 //
-// The cgroup's limit when there was one, the host's total otherwise -- which
-// is the whole hypothesis about the unexplained 81 seconds in one method, and
-// the same rule nodemem.Report.Limit applies to a live node. Zero when neither
-// was read, because an unanswered question and a limit of zero bytes are
-// different things.
-func (e Entry) MemCeiling() int64 {
-	if e.MemLimit > 0 {
-		return e.MemLimit
-	}
-	return e.MemTotal
-}
+// THE RULE IS NOT REIMPLEMENTED HERE, IT IS CALLED, and it used to be both.
+// These four lines existed twice -- once over these columns and once over
+// nodemem.Report's fields, written in the same commit -- and the copy on the
+// live-node side was never called by anything, so the two stayed in step only
+// because nobody exercised one of them. That is the exposure decision's rule
+// ("a second copy of the rule is a second place for it to drift") met over a
+// subtraction, and the drift would have been silent in the expensive
+// direction: AGENTS.md named the dead copy as the home of the dash-versus-zero
+// decision, so an edit there changed nothing an operator sees.
+//
+// node.Memory is the one implementation. It lives in the one package both
+// sides already import, which is what keeps this a delegation rather than an
+// import of internal/nodemem -- that would put sshx, workload and
+// x/crypto/ssh in the dependency graph of a SQLite store.
+//
+// THERE IS NO EXPORTED MemCeiling, AND THE DETECTOR IS WHAT SETTLED THAT.
+// There was one, and its only production caller was the sentence of this
+// method that the delegation above replaced -- so the moment the subtraction
+// moved, `TestNoProductionDeadCode` reported it, which is the ninth instance
+// of the defect this guard was written for and the first it caught as it was
+// being created. It is right that it is gone: `ember history --memory` prints
+// the cgroup's limit and the host's total as their own columns and the
+// headroom as the one derived figure, so the ceiling is a step in an
+// arithmetic nobody reads out. The tests ask e.memory().Ceiling() instead,
+// which is the same code without an exported name that claims a reader.
+//
+// The name stays MemHeadroom because that is what the ledger calls it, and
+// the columns stay flat for the reason Entry itself is flat.
+func (e Entry) MemHeadroom() (int64, bool) { return e.memory().Headroom() }
 
-// MemHeadroom is the ceiling less the weights, and whether it is knowable.
+// memory is this row's memory facts as the rule's own type.
 //
-// Negative is a real answer and the interesting one: a node that could not
-// hold the model re-read it every step, at 868 MiB/s off a network store in
-// the one measurement there is. The bool is false when either figure is
-// missing, because a headroom computed over a number nobody read is the kind
-// that gets believed.
-func (e Entry) MemHeadroom() (int64, bool) {
-	if e.MemCeiling() <= 0 || e.AssetBytes <= 0 {
-		return 0, false
+// By field name, never positionally: node.Memory's fields are two counts of
+// bytes whose order IS the rule, and a ceiling read off the host's total
+// instead of the cgroup's limit is the answer that makes a slow node look
+// fine.
+func (e Entry) memory() node.Memory {
+	return node.Memory{
+		CgroupLimit: e.MemLimit,
+		HostTotal:   e.MemTotal,
+		Assets:      e.AssetBytes,
 	}
-	return e.MemCeiling() - e.AssetBytes, true
 }
 
 func (e Entry) Wall() time.Duration {

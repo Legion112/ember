@@ -50,16 +50,32 @@ func TestParse_ReadsBothViewsFromTheUnifiedHierarchy(t *testing.T) {
 	// The whole hypothesis in one assertion: the ceiling is the cgroup's and
 	// not the host's, so the weights do not fit although `free` says they
 	// would eleven times over.
-	if got.Limit() != 64<<30 {
-		t.Errorf("Limit = %d, want the cgroup's limit and not the host's", got.Limit())
+	//
+	// ASKED OF node.Memory, WHICH IS THE CODE AN OPERATOR'S HEADROOM COLUMN
+	// GOES THROUGH. This package used to answer it itself, with four lines
+	// nothing called, and this assertion passed against them while the rule
+	// the ledger applies went unexercised on exactly this case.
+	if c := memory(got).Ceiling(); c != 64<<30 {
+		t.Errorf("Ceiling = %d, want the cgroup's limit and not the host's", c)
 	}
-	h, ok := got.Headroom()
+	h, ok := memory(got).Headroom()
 	if !ok {
 		t.Fatal("headroom is unknowable with both figures present")
 	}
 	if h != (64<<30)-(56<<30) {
 		t.Errorf("headroom = %d, want 8 GiB", h)
 	}
+}
+
+// memory is this report's figures as the rule's own type.
+//
+// Spelled out here rather than added to Report as a method, because a method
+// whose only caller is a test is the defect this package just had: nothing on
+// the live-node side acts on the derived answers yet, and the verdict that
+// would is deliberately deferred until a rental has happened. By field name,
+// never positionally -- the order of the two counts IS the rule.
+func memory(r Report) node.Memory {
+	return node.Memory{CgroupLimit: r.CgroupMax, HostTotal: r.HostTotal, Assets: r.Assets}
 }
 
 // The v1 fallback, which #30 asks for by name: the paths are named rather
@@ -133,11 +149,13 @@ func TestParse_ReadsEverySpellingOfNoLimit(t *testing.T) {
 			}
 			// Zero means "no limit" and not "a limit of nothing", so the
 			// ceiling falls back to the host's total rather than reading as a
-			// container that cannot allocate anything.
-			if got.Limit() != 65536000*1024 {
-				t.Errorf("Limit = %d, want the host's total", got.Limit())
+			// container that cannot allocate anything. This is the join
+			// between the three spellings and the rule: the parser's answer
+			// is handed to the code the ledger uses.
+			if c := memory(got).Ceiling(); c != 65536000*1024 {
+				t.Errorf("Ceiling = %d, want the host's total", c)
 			}
-			if _, ok := got.Headroom(); !ok {
+			if _, ok := memory(got).Headroom(); !ok {
 				t.Error("headroom is unknowable although the host's total is known")
 			}
 		})
@@ -163,18 +181,17 @@ func TestReport_ZeroIsNotAnAnswer(t *testing.T) {
 	if !r.IsZero() {
 		t.Error("a zero Report does not report itself as empty")
 	}
-	if r.Limit() != 0 {
-		t.Errorf("Limit = %d over nothing read, want zero", r.Limit())
+	// IsZero is what this package owes its caller -- app.reportMemory records
+	// nothing over an empty report, because writing zeros would put a row in
+	// the history claiming facts nobody read. What those zeros then MEAN to a
+	// ceiling is node.Memory's, and its own table covers every quadrant,
+	// including the one this test used to be the only cover for: a limit with
+	// no weights beside it answers nothing.
+	if c := memory(r).Ceiling(); c != 0 {
+		t.Errorf("Ceiling = %d over nothing read, want zero", c)
 	}
-	if _, ok := r.Headroom(); ok {
+	if _, ok := memory(r).Headroom(); ok {
 		t.Error("headroom is knowable over nothing read")
-	}
-
-	// An unreadable asset figure is the other half: a limit with no weights
-	// to compare it against answers nothing.
-	withLimit := Report{CgroupVersion: 2, CgroupMax: 1 << 30}
-	if _, ok := withLimit.Headroom(); ok {
-		t.Error("headroom is knowable with no asset figure")
 	}
 }
 
@@ -336,7 +353,7 @@ func TestProbe_ReadsWhatTheNodeAnswered(t *testing.T) {
 	}
 	// The interesting case: the weights are twice the limit, so this node
 	// re-read the model every step.
-	h, ok := got.Headroom()
+	h, ok := memory(got).Headroom()
 	if !ok || h != -(1<<30) {
 		t.Errorf("headroom = %d, %v; want -1 GiB over a node that cannot hold the model", h, ok)
 	}
@@ -445,8 +462,8 @@ func TestParse_ReadsWhatARealContainerAnswered(t *testing.T) {
 		// page cache lived under.
 		{"container_limited.txt", 2, 512 << 20, 512 << 20},
 		// "No limit" is the literal string `max`, which a parser reading it
-		// as a number would have reported as zero -- and Limit would then
-		// have had to read as a container that cannot allocate anything.
+		// as a number would have reported as zero -- and the ceiling would
+		// then have had to read as a container that cannot allocate anything.
 		{"container_unlimited.txt", 2, 0, hostTotal},
 		// The root cgroup has no memory.max at all, so nothing was read and
 		// the host's total is the only ceiling there is.
@@ -468,8 +485,13 @@ func TestParse_ReadsWhatARealContainerAnswered(t *testing.T) {
 			if got.HostTotal != hostTotal {
 				t.Errorf("host total = %d, want the host's %d", got.HostTotal, hostTotal)
 			}
-			if got.Limit() != c.ceiling {
-				t.Errorf("Limit = %d, want %d", got.Limit(), c.ceiling)
+			// The captures are the only real container output in this
+			// repository, so this is where the rule meets observed data
+			// rather than a hand-written line -- and it is asked of the one
+			// implementation, which is what the ledger's headroom column
+			// goes through.
+			if ceiling := memory(got).Ceiling(); ceiling != c.ceiling {
+				t.Errorf("Ceiling = %d, want %d", ceiling, c.ceiling)
 			}
 		})
 	}
@@ -491,7 +513,7 @@ func TestParse_TheTwoViewsDisagreeByAFactorOf252(t *testing.T) {
 	// And a 56 GiB model would not have fitted, which the host's view says
 	// nothing about.
 	got.Assets = 56 << 30
-	h, ok := got.Headroom()
+	h, ok := memory(got).Headroom()
 	if !ok || h >= 0 {
 		t.Errorf("headroom = %d, %v; want a negative answer under a 512 MiB limit", h, ok)
 	}
