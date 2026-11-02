@@ -194,6 +194,21 @@ moment it imports a sibling, the sibling's dependencies become its own.
   diffs rather than living unread in a Makefile variable.
 - **A test that skips itself reports success for something that never ran.** CI
   greps for `--- SKIP` in both the unit and the lab logs and fails on a hit.
+  In the Makefile's lab targets that grep was for a long time **the only thing
+  that could fail them**, because the `go test` beside it was piped into `tee`
+  and a shell pipeline reports the last command's status: four targets --
+  `test-image-labs`, `test-preview-lab`, `test-serve-lab` and
+  `test-image-labs-publish` -- exited 0 over a red suite, including the one
+  that gates a publish, and the guard against the small failure was bolted onto
+  a pipeline that discarded the large one. The Makefile sets
+  `SHELL := /bin/bash` and `.SHELLFLAGS := -o pipefail -c` once, globally,
+  rather than fixing four recipes, so the next pipeline somebody writes cannot
+  reintroduce it. `pipefail` and not `-e`: make already stops a target on a
+  non-zero recipe line, while `-e` would abort `workload-sd` before the
+  `rm -f .model.gguf` that follows its docker build and leave a multi-gigabyte
+  checkpoint in the tree. The SKIP grep now shares the recipe line with the
+  test and runs from a captured status, because a failing line stops the
+  target and "it failed **and** it skipped" is two problems rather than one.
 - **Every provider is held to `providertest.RunConformance`, because the
   guarantees are not in the interface.** `provider.Provider` is six methods
   and says nothing about Destroy being idempotent, about a label surviving
@@ -504,7 +519,16 @@ that sentence made unrepresentable rather than merely tested.
   *over* was wrong for longer and in the other direction -- it was the whole
   daemon, which is the entry below -- so the two fixes are one rule: the
   cleanup sees everything this suite run produced, at a moment when reaping
-  cannot have emptied it, and nothing else.
+  cannot have emptied it, and nothing else. The same shape was then found one
+  layer *out* of the suite, in the Makefile: every lab target piped `go test`
+  into `tee`, so `make` read tee's status and a failing lab exited 0 -- the
+  gate that decides whether a workload image is published among them.
+  Measured rather than argued: with the old recipe a deliberately failing
+  `TestWorkloadImage_ListensOnNothingButSSH` left `make publish-sd-cuda`
+  running `docker tag` and `docker push`, and the only thing that stopped the
+  image shipping was that the registry in that experiment was a closed port.
+  Both halves of this entry are the one rule -- a gate nobody has watched fail
+  is a gate nobody should trust -- and both were found by reinstating the bug.
 - **A cleanup that deleted another run's live nodes.** `Lab.Nodes` filtered
   containers on the mere presence of `ember.run-id`, with no value, and `Reap`
   force-removed everything it returned plus every labelled network and volume
@@ -1630,7 +1654,11 @@ A leaked node bills by the hour in silence. These are not style preferences.
   file is not compiled without the tag, and the one assertion that cannot run
   there -- video support needs `sd-cli`, and the CUDA binary wants
   libcuda.so.1 on a runner with no GPU -- runs against the CPU build, whose
-  revision the ordinary suite checks matches.
+  revision the ordinary suite checks matches. That sentence was **false from
+  the commit that wrote it**, and not because of the labs: the same commit
+  added the target that runs them, which piped `go test` into `tee` and so
+  reported tee's success -- the Testing entry above. A gate stated as a design
+  property is worth exactly what its exit code is.
 - **The listener assertion runs against the published image too.** ember-sd
   cannot be built FROM the node image -- that one is debian-slim and CUDA
   needs an NVIDIA base -- so it repeats the sshd configuration by hand, on a
