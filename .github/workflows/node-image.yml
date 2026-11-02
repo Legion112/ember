@@ -45,28 +45,60 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Tagged by commit sha as well as by a moving tag. The sha tag is what
-      # ember.yaml should name: `:latest` on a node image means a pod that
-      # provisioned yesterday and one that provisions today are not the same
-      # machine, and node.Spec already refuses a `:latest` workload image for
-      # the same reason.
+      # One tag, the commit sha, and no moving one.
+      #
+      # This step used to push `:latest` beside it, six lines under the
+      # sentence that argues against it: `:latest` on a node image means a pod
+      # that provisioned yesterday and one that provisions today are not the
+      # same machine. A comment that contradicts its own step teaches the
+      # reader to believe neither.
+      #
+      # The argument was right and it was also understated. ember runs one
+      # container that is both the node and the workload, so the node image is
+      # the `image:` key and goes through node.NewSpec like any other --
+      # `validateImage` refuses `:latest` by name, so every reference this
+      # step published under that tag was one ember would not provision from.
+      # It existed only to be refused, which is why nothing in this repository
+      # ever named it and every example config names a digest.
+      #
+      # Renaming it to `:main` would be worse rather than better.
+      # `validateImage` knows the *name* `latest`, not the behaviour "this tag
+      # moves" -- a moving tag called `main` is accepted and silently run, so
+      # the rename converts a reference ember refuses into one it does not.
+      # workload-image.yml may publish `<tag>-sm<arch>` because the reference
+      # it hands an operator carries the digest as well, and the digest is
+      # what decides; nothing here needs that, since the step below prints the
+      # digest and the sha tag is readable on its own. cmd/check-coverage's
+      # TestNoWorkflowPublishesAMovingLatestTag is what stops the tag being
+      # pasted back.
       - uses: docker/build-push-action@v6
         id: build
         with:
           context: .
           file: node.Dockerfile
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ github.sha }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       # The digest is the only thing worth quoting in a config: a tag can be
       # moved, a digest cannot.
+      #
+      # The sha tag is printed beside it because `:latest` is gone and this is
+      # the answer to "then what do I pull": it names one build, it is what
+      # `docker pull` can take, and ember accepts it. Anything that was
+      # pulling the moving tag wants this line.
+      #
+      # The key is `image:`, which it was not: this printed `node_image:`, and
+      # there is no such config key -- config.Load decodes with
+      # KnownFields(true), so the block it told the operator to paste was one
+      # ember refuses as a misspelling. Noticed while checking which key the
+      # node image reaches ember through, which is the same question #57 turns
+      # on.
       - name: report what to put in ember.yaml
         run: |
           echo "### node image published" >> "$GITHUB_STEP_SUMMARY"
           echo '```yaml' >> "$GITHUB_STEP_SUMMARY"
-          echo "node_image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "Also published as \`${{ env.IMAGE }}:${{ github.sha }}\`." >> "$GITHUB_STEP_SUMMARY"

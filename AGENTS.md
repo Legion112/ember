@@ -1137,6 +1137,31 @@ A leaked node bills by the hour in silence. These are not style preferences.
 - **Images are pinned to a tag or a digest; `:latest` is refused.** The point
   of ember is to measure what a model costs and how long it takes, and two runs
   a week apart that both say `:latest` may not have run the same software.
+- **The refusal covers the node image too, because there is only one image.**
+  `node-image.yml`'s comment said `node.Spec` refuses a `:latest` *workload*
+  image, which reads as though the node image arrives by some other path and
+  is therefore unguarded -- and the node image is the more dangerous of the
+  two, since it is what installs the host key and starts sshd. It does not:
+  ember
+  runs one container that is both, so the node image *is* `image:`, it is the
+  reference `node.NewSpec` validates, and `:latest` is refused there. Written
+  down because working it out took reading four files, and because
+  `node-image.yml` published a `:latest` tag for the life of the image --
+  underneath a comment arguing against it -- that ember would have rejected
+  on sight. Nothing named it and every example config names a digest.
+- **A moving tag is not recognisable from a reference, so one is not
+  published.** `validateImage` knows the *name* `latest`; it cannot know that
+  `:main` moves, and it accepts it. So renaming the node image's moving tag
+  would have converted a reference ember rejects into one it runs silently,
+  which is the refusal defeated by deleting the one word that fires it. The
+  tag is gone instead, the sha tag is what an external consumer pulls, and
+  `cmd/check-coverage`'s `TestNoWorkflowPublishesAMovingLatestTag` stops the
+  paste coming back -- the `TestEveryBuildTagReachesTheGates` argument one axis
+  over: a workflow edit fixes the tag and leaves the next one a silent gap.
+  The guard asserts the production rule still refuses `:latest` before
+  believing its own message. The workload images' `<tag>-sm<arch>` is a moving
+  tag on purpose and is not caught, because the reference they publish carries
+  the digest as well and a guard claiming more than that would be false.
 - **The volume is faster than documented, and it barely matters.** Measured
   ~1.0 GB/s against a published 200-400 MB/s. For a 40 GB model set the pull
   dominates either way, so the break-even moves from about six runs a month to
