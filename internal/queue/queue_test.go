@@ -1196,6 +1196,90 @@ func TestOnce_RecordsWhatTheNodeSaidAboutItsMemory(t *testing.T) {
 	}
 }
 
+// TestOnce_RecordsWhichModelServedEveryRequestOnTheRental.
+//
+// EVERY REQUEST AND NOT ONLY THE OPENER, which is the opposite of the rule
+// just above and for a stated reason: the memory figures and the rental's cost
+// are quantities, so attributing one rental's to each of its requests
+// multiplies them. A model is a label -- every request this rental served ran
+// against the same weights -- and recording it on the opener alone would split
+// one model's spend between its own name and the dash in
+// `ember spend --by model`, which is the figure the column exists to produce.
+//
+// From the server's own /capabilities response, as PutCaps caches it, and
+// never from `sd.serve`: an operator can edit the config between two rentals,
+// and then a reading of it attributes last week's spend to this week's
+// weights. That is the `allowedCudaVersions` mistake -- a value read from the
+// wrong place and believed.
+func TestOnce_RecordsWhichModelServedEveryRequestOnTheRental(t *testing.T) {
+	served := &fakeServed{caps: sdserver.Capabilities{Model: "flux2-dev-Q8_0.gguf"}}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+
+	opener := enqueue(t, st, "rtx2080ti", "first")
+	rider := enqueue(t, st, "rtx2080ti", "second")
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []genstore.ReqID{opener, rider} {
+		got, err := st.Get(t.Context(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Model != "flux2-dev-Q8_0.gguf" {
+			t.Errorf("request %s records model %q, want what the server reported", id, got.Model)
+		}
+	}
+}
+
+// A server that reports no model is recorded as reporting none.
+//
+// sd-server resolves capabilities.model from --model, then from
+// --diffusion-model, and reports an empty name when a configuration gave
+// neither. Writing something in its place -- the card, the image, the word
+// "unknown" -- would be a value ember made up sitting in the column whose
+// entire purpose is that it was read from a response.
+func TestOnce_DoesNotInventAModelTheServerDidNotReport(t *testing.T) {
+	pl := &fakePlanner{served: &fakeServed{caps: sdserver.Capabilities{}}}
+	q, st := newQueue(t, pl)
+	id := enqueue(t, st, "rtx2080ti", "first")
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Get(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Model != "" {
+		t.Errorf("model = %q, want nothing: the server reported none", got.Model)
+	}
+}
+
+// A request that never reached a node records no model.
+//
+// The write happens at claim time on a rental that exists, so a request the
+// planner refused has nothing to record -- and a model name beside a request
+// that never generated would claim a run happened.
+func TestOnce_APlanThatFailsRecordsNoModel(t *testing.T) {
+	pl := &fakePlanner{planErr: errors.New("no capacity")}
+	q, st := newQueue(t, pl)
+	id := enqueue(t, st, "rtx2080ti", "first")
+
+	if _, err := q.once(t.Context()); err == nil {
+		t.Fatal("a plan that failed was not reported")
+	}
+	got, err := st.Get(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Model != "" {
+		t.Errorf("a request that never got a node records model %q", got.Model)
+	}
+}
+
 // --- cancel ---
 
 // TestCancel_StopsOneRequestAndTheRentalServesTheNext is the money assertion

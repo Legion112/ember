@@ -168,6 +168,97 @@ func TestHistory_DashesTheColumnsNothingRecorded(t *testing.T) {
 	}
 }
 
+// TestHistory_ShowsWhichModelServedARequest.
+//
+// The ledger's answer to "which run was it" is incomplete without it: a row
+// with 56 GiB of weights and no model name says the size and not the thing,
+// and a cost per image is a fact about a model on a card rather than about the
+// card.
+func TestHistory_ShowsWhichModelServedARequest(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, "")
+	seedSpend(t, cfg, d, func(t *testing.T, st genstore.Store) {
+		id := ledgerRow(t, st, "run-a", "rtx-pro-6000", spendDay(1), 2_490_000, 2, 400_000)
+		if err := st.Update(t.Context(), id, func(r *genstore.Request) {
+			r.Model = "flux2-dev-Q8_0.gguf"
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// And one from before the column, which is what a dash is for.
+		ledgerRow(t, st, "run-b", "rtx4090", spendDay(2), 890_000, 1, 95_000)
+	})
+
+	var out bytes.Buffer
+	if err := runHistory([]string{"-config", cfg}, &out, d); err != nil {
+		t.Fatalf("history = %v\n%s", err, out.String())
+	}
+	got := out.String()
+	t.Logf("ember history with a model column:\n%s", got)
+
+	if !strings.Contains(got, "model") {
+		t.Errorf("the ledger has no model column:\n%s", got)
+	}
+	// Whole, not truncated: a name cut to a column width makes two
+	// quantisations of one model read as the same model.
+	if !strings.Contains(got, "flux2-dev-Q8_0.gguf") {
+		t.Errorf("the model is not reported:\n%s", got)
+	}
+	// A DASH AND NOT A BLANK CELL for the request nobody read a model for,
+	// the same rule the rental and card-time columns follow -- and the
+	// footnote that says which two kinds of run those are, because a column
+	// of dashes otherwise reads as ember having lost the names.
+	line := rowFor(t, got, "rtx4090")
+	if !strings.HasSuffix(strings.TrimRight(line, " "), "-") {
+		t.Errorf("a request with no model does not end in a dash: %q", line)
+	}
+	if !strings.Contains(got, "have no model") {
+		t.Errorf("the ledger does not say why a model is missing:\n%s", got)
+	}
+
+	// Through the wire type as well, where it is omitted rather than sent as
+	// an empty string: `omitempty` and a dash are the same statement in two
+	// spellings.
+	var rows []genstore.Entry
+	var js bytes.Buffer
+	if err := runHistory([]string{"-config", cfg, "-json"}, &js, d); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(js.Bytes(), &rows); err != nil {
+		t.Fatalf("history --json is not JSON: %v\n%s", err, js.String())
+	}
+	var seen int
+	for _, e := range rows {
+		switch e.GPU {
+		case "rtx-pro-6000":
+			seen++
+			if e.Model != "flux2-dev-Q8_0.gguf" {
+				t.Errorf("the JSON row does not carry the model: %+v", e)
+			}
+		case "rtx4090":
+			seen++
+			if e.Model != "" {
+				t.Errorf("the JSON row invented a model: %+v", e)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("history --json has %d of the two rows:\n%s", seen, js.String())
+	}
+}
+
+// rowFor is the one table line naming s, so an assertion about a cell is about
+// that row rather than about the whole report.
+func rowFor(t *testing.T, out, s string) string {
+	t.Helper()
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, s) {
+			return l
+		}
+	}
+	t.Fatalf("no row mentions %q:\n%s", s, out)
+	return ""
+}
+
 // A queued request has nothing missing: it has not run.
 func TestHistory_DoesNotCallAQueuedRequestUnrecorded(t *testing.T) {
 	d := labDeps(t)

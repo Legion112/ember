@@ -32,6 +32,10 @@ func ran(t *testing.T, s Store, r Request, jobs []JobRun) ReqID {
 		g.Cost, g.Rate = r.Cost, r.Rate
 		g.Elapsed, g.Billable = r.Elapsed, r.Billable
 		g.LoadMeasured, g.LoadReported = r.LoadMeasured, r.LoadReported
+		// Through Update and not through Enqueue, because that is the only
+		// way it can be written: a request does not ask for a model, so the
+		// INSERT does not name the column and the fake forgets it too.
+		g.Model = r.Model
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -298,8 +302,21 @@ func TestSpend_RefusesAGroupingItDoesNotImplement(t *testing.T) {
 		if err == nil {
 			t.Fatal("an unknown grouping was accepted")
 		}
-		if _, err := s.Spend(t.Context(), SpendQuery{By: GroupBy("model")}); err == nil {
-			t.Fatal("grouping by model was accepted; nothing records the model")
+		// A near miss as well as an injection, because the plausible typo is
+		// what a closed set is for: "models" is not "model", and the answer
+		// has to be a refusal rather than one row keyed on nothing.
+		if _, err := s.Spend(t.Context(), SpendQuery{By: GroupBy("models")}); err == nil {
+			t.Fatal("a grouping that is not in the set was accepted")
+		}
+
+		// And everything the set DOES name is accepted by both stores. A
+		// grouping listed in GroupBys that Spend refuses would print in the
+		// flag help and fail when typed, which is the disagreement GroupBys
+		// exists to make impossible.
+		for _, g := range GroupBys() {
+			if _, err := s.Spend(t.Context(), SpendQuery{By: g}); err != nil {
+				t.Errorf("Spend refused %q, which GroupBys offers: %v", g, err)
+			}
 		}
 	})
 }

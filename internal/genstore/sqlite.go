@@ -32,7 +32,7 @@ const FileName = "generations.db"
 // internal/statestore's reason: reading a newer layout as an older one drops
 // columns, and the column it would drop is the one that says a request is
 // still running.
-const schemaVersion = 4
+const schemaVersion = 5
 
 // migrations takes an existing file forward, one version per entry:
 // migrations[0] moves a version-1 file to version 2.
@@ -149,6 +149,40 @@ var migrations = [][]string{
 		`ALTER TABLE requests ADD COLUMN mem_total INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE requests ADD COLUMN mem_cached INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE requests ADD COLUMN asset_bytes INTEGER NOT NULL DEFAULT 0`,
+	},
+
+	// 4 -> 5: which model served the request.
+	//
+	// THE ONE GROUPING `ember spend` COULD NOT OFFER, and the reason it could
+	// not was this column's absence rather than a decision about reports:
+	// `sd.serve` is config and not request, and the only stored copy of the
+	// model was one cached `caps` row in `meta` that every rental overwrites.
+	// So `--by gpu` grouped the dimension that is nearly useless alone --
+	// "an A100 costs $X per image" is meaningless without the model, and the
+	// two measurements this repository has made differ by a factor of about
+	// three hundred in sampling time on hardware a factor of four apart.
+	//
+	// Written from the server's own /capabilities response at claim time, not
+	// from the config: an operator may edit `sd.serve` between two rentals,
+	// and a figure attributed to the model that is configured NOW is a figure
+	// about a run that did not happen. It is capabilities.model.name -- which
+	// upstream resolves as the basename of `--model`, or of
+	// `--diffusion-model` when there is no `--model`, or empty when neither
+	// is named (resolve_display_model_path in routes_sdcpp.cpp). A
+	// three-file configuration therefore records its DIFFUSION model and says
+	// nothing about the text encoder or the VAE beside it, which is written
+	// down in README because it bounds what the grouping can distinguish.
+	//
+	// NOTHING BACKFILLS, and here that is not even a choice between evidence
+	// and inference -- there is no evidence. The facts are not in the event
+	// bodies of requests that already ran: no event carries the model, which
+	// is why this is a column and not a read of `events`. The only stored
+	// copy is that single `caps` row, and reading it would answer "whatever
+	// is loaded now" for every row in the history -- the mistake schema
+	// version 2 already had to DELETE that row over. A request from before
+	// this version reads as empty and both readers print a dash for it.
+	{
+		`ALTER TABLE requests ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 	},
 }
 
@@ -280,6 +314,23 @@ CREATE TABLE IF NOT EXISTS requests (
 	mem_total     INTEGER NOT NULL DEFAULT 0,
 	mem_cached    INTEGER NOT NULL DEFAULT 0,
 	asset_bytes   INTEGER NOT NULL DEFAULT 0,
+
+	-- Which model served this request, as the generation server reported it.
+	--
+	-- WRITTEN FROM A RESPONSE AND NEVER FROM THE CONFIG, which is the whole
+	-- point of the column. sd.serve names files on the node and an operator
+	-- can change it between two rentals, so a reading of the config answers
+	-- "what would run now" where the question is "what ran then". The value
+	-- is capabilities.model.name, out of the same /capabilities response
+	-- PutCaps caches -- and that field is an OBJECT, {"name","path","stem"},
+	-- which is the shape a real server corrected after a node was already up.
+	--
+	-- Empty means nobody read it: a request that never got a node, or one
+	-- from before this column. Nothing backfills it, and both readers print
+	-- it as a dash rather than as a blank cell, because the one answer
+	-- available to a backfill is the cached caps row -- which is the CURRENT
+	-- model and which the next rental overwrites.
+	model         TEXT    NOT NULL DEFAULT '',
 
 	err           TEXT    NOT NULL DEFAULT ''
 );
@@ -516,7 +567,7 @@ const requestColumns = `id, created_unix, status, provider, gpu, offer, ttl_ns,
 	started_unix, ended_unix, cost, rate, elapsed_ns, billable_ns,
 	load_measured_ns, load_reported_ns,
 	mem_cgroup, mem_limit, mem_current, mem_total, mem_cached, asset_bytes,
-	err`
+	model, err`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -535,6 +586,7 @@ func scanRequest(sc scanner) (Request, error) {
 		memCgroup                     int
 		provider, gpu, offer          string
 		preview, runID, nodeID, errTx string
+		model                         string
 		previewEvery                  int
 	)
 	if err := sc.Scan(&id, &created, &status, &provider, &gpu, &offer, &ttl,
@@ -542,7 +594,7 @@ func scanRequest(sc scanner) (Request, error) {
 		&started, &ended, &cost, &rate, &elapsed, &billable,
 		&loadMeasured, &loadReported,
 		&memCgroup, &memLimit, &memCurrent, &memTotal, &memCached, &assets,
-		&errTx); err != nil {
+		&model, &errTx); err != nil {
 		return Request{}, err
 	}
 	r = Request{
@@ -571,6 +623,7 @@ func scanRequest(sc scanner) (Request, error) {
 		MemTotal:        memTotal,
 		MemCached:       memCached,
 		AssetBytes:      assets,
+		Model:           model,
 		Err:             errTx,
 	}
 	// Zero stays zero rather than becoming the epoch: "this never started"
@@ -759,14 +812,16 @@ func (s *SQLite) Update(ctx context.Context, id ReqID, fn func(*Request)) error 
 			rate = ?, elapsed_ns = ?, billable_ns = ?,
 			load_measured_ns = ?, load_reported_ns = ?,
 			mem_cgroup = ?, mem_limit = ?, mem_current = ?,
-			mem_total = ?, mem_cached = ?, asset_bytes = ?, err = ?
+			mem_total = ?, mem_cached = ?, asset_bytes = ?,
+			model = ?, err = ?
 		WHERE id = ?`,
 		string(r.Status), r.Offer, r.RunID, r.Node,
 		unixOrZero(r.Started), unixOrZero(r.Ended), int64(r.Cost),
 		int64(r.Rate), int64(r.Elapsed), int64(r.Billable),
 		int64(r.LoadMeasured), int64(r.LoadReported),
 		r.MemCgroup, r.MemLimit, r.MemCurrent,
-		r.MemTotal, r.MemCached, r.AssetBytes, r.Err, string(id))
+		r.MemTotal, r.MemCached, r.AssetBytes,
+		r.Model, r.Err, string(id))
 	if err != nil {
 		return fmt.Errorf("update request %s: %w", id, err)
 	}

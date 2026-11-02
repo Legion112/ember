@@ -72,6 +72,7 @@ func runHistoryList(args []string, out io.Writer, d deps) error {
 		outf(out, "ember history lists the generations ember has run.\n\n")
 		outf(out, "Out of the database `ember serve` writes, which is the only thing that\nrecords a generation. `ember up` prints its cost and keeps nothing, so a\nrun made that way is not in here -- see README.\n\n")
 		outf(out, "Two cost columns. rental is what the provider charged for the node;\ncard time is what this request's own jobs took. A rental serves every\nqueued request it can, so the rental is charged to the request that\nopened it and a dash means this one rode along on somebody else's.\n\n")
+		outf(out, "The model column is what the generation server reported when the weights\nwent resident, not what `sd.serve` names today -- a dash means nobody read\nit, which is a request that never reached a node or one from before ember\nrecorded it. `ember spend --by model` groups on the same value.\n\n")
 		outf(out, "Dates are UTC and the period is half-open -- --since includes, --until\nexcludes -- the same rule `ember spend` uses, so the two tile alike.\n\n")
 		outf(out, "--memory prints what each node said about its memory instead of the cost\ncolumns. Both views, because they disagree: a container's cgroup limit is\nwhat bounds its page cache, and /proc/meminfo reports the HOST's memory --\nwhich is why eight nodes could all claim 620-708 GiB free while two of them\ndiffered by 81 seconds and $0.056 per image. See README.\n\n")
 		outf(out, "It reads and nothing else: no provider is contacted and the queue cannot\nbe advanced through it.\n\n")
@@ -239,17 +240,28 @@ func bytesOrDash(n int64) string {
 // historyRow is the column layout, named once so the header and the rows
 // cannot drift apart -- which is how a table ends up with its headings one
 // column off from its figures.
-const historyRow = "%-16s %-16s %-11s %-10s %-12s %5s %6s %9s %11s %11s\n"
+//
+// THE MODEL IS LAST, AND NOT BESIDE THE CARD WHERE IT BELONGS. It is the only
+// free-width cell in the table -- a model is a filename, and
+// "flux2-dev-Q8_0.gguf" is nineteen characters against "rtx4090"'s seven --
+// so anywhere but the end a long name shifts every figure after it out of its
+// column, and the row reads as if the money belonged to a different heading.
+// Truncating it to a fixed width was the alternative and is worse: two
+// quantisations of one model cut to twelve characters become the same text,
+// which is the substring mistake node.NormalizeGPU exists to prevent, in a
+// ledger. Printed whole, at the end, where it can only make a line longer.
+const historyRow = "%-16s %-16s %-11s %-10s %-12s %5s %6s %9s %11s %11s %s\n"
 
 // printHistory writes the table.
 func printHistory(out io.Writer, rows []genstore.Entry) {
 	outf(out, historyRow, "when (utc)", "request", "status", "provider", "card",
-		"jobs", "images", "wall", "rental", "card time")
+		"jobs", "images", "wall", "rental", "card time", "model")
 
 	var (
 		rental, card     node.MicroUSD
 		requests, images int
 		rode, unrecorded int
+		nameless         int
 		failed           []struct{ id, err string }
 	)
 	for _, e := range rows {
@@ -271,11 +283,20 @@ func printHistory(out io.Writer, rows []genstore.Entry) {
 			rode++
 		}
 
+		// A dash and not a blank cell, which is the same rule the rental and
+		// card-time columns follow: empty means nobody read the model -- a
+		// request that never reached a node, or one from before ember
+		// recorded it -- and an empty cell in a column of names reads as a
+		// value that failed to print.
+		if e.Model == "" {
+			nameless++
+		}
+
 		outf(out, historyRow,
 			e.Created.UTC().Format("2006-01-02 15:04"), string(e.ID),
 			string(e.Status), e.Provider, keyOr(e.GPU),
 			fmt.Sprintf("%d", e.Jobs), imgs, wall(e.Wall()),
-			rentalCell, cardTime)
+			rentalCell, cardTime, keyOr(e.Model))
 
 		requests++
 		images += e.Images
@@ -289,7 +310,7 @@ func printHistory(out io.Writer, rows []genstore.Entry) {
 	// One blank line between the table and any prose, whichever prose there
 	// turns out to be. Without it a footnote with no total above it runs
 	// straight into the last row and reads as another one.
-	if len(rows) > 1 || rode > 0 || unrecorded > 0 || len(failed) > 0 {
+	if len(rows) > 1 || rode > 0 || unrecorded > 0 || nameless > 0 || len(failed) > 0 {
 		outf(out, "\n")
 	}
 	if len(rows) > 1 {
@@ -311,6 +332,17 @@ func printHistory(out io.Writer, rows []genstore.Entry) {
 		outf(out, "%d request(s) finished with no per-job figures -- from before ember recorded\n"+
 			"them, or without a job completing -- so their images and card time are a dash\n"+
 			"rather than zero. Nothing backfills them.\n", unrecorded)
+	}
+	if nameless > 0 {
+		// Said out loud for the reason the unrecorded line is: a column of
+		// dashes in a report about models would otherwise read as ember
+		// having lost the names, when what happened is that nothing ever read
+		// them. Naming both causes, because they are different runs and only
+		// one of them is about the schema.
+		outf(out, "%d request(s) have no model: they never reached a node, or they ran before\n"+
+			"ember recorded which model served a request. Nothing backfills them -- the only\n"+
+			"stored copy of a past model is a cached capability row the next rental\n"+
+			"overwrites.\n", nameless)
 	}
 }
 

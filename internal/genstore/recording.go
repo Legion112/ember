@@ -104,6 +104,14 @@ func (s *RecordingStore) Enqueue(_ context.Context, r Request) (ReqID, error) {
 
 	copied := r
 	copied.Jobs = append([]Job(nil), r.Jobs...)
+	// A MODEL IS NOT PART OF THE ASK, so it is forgotten here exactly as the
+	// real store's INSERT forgets it -- that statement does not name the
+	// column. Remembering it would make this fake KINDER than SQLite in the
+	// one direction that matters: a caller could set it on the way in, see it
+	// come back from the fake, and build on a field that is silently dropped
+	// against a file on disk. The queue writes it through Update once a
+	// rental has read it off /capabilities.
+	copied.Model = ""
 	s.reqs[r.ID] = &copied
 	s.order = append(s.order, r.ID)
 	return r.ID, nil
@@ -573,6 +581,13 @@ func (s *RecordingStore) Spend(_ context.Context, q SpendQuery) ([]Bucket, error
 			k = r.GPU
 		case ByDay:
 			k = r.Created.UTC().Format("2006-01-02")
+		case ByModel:
+			// The stored value and not a fallback, so a request whose model
+			// nobody read groups under the empty key here exactly as it does
+			// under `r.model` in SQL. A fake that substituted "unknown" would
+			// make the conformance test disagree about the one row whose
+			// answer is "ember does not know".
+			k = r.Model
 		}
 		b := byKey[k]
 		if b == nil {
@@ -681,7 +696,7 @@ func (s *RecordingStore) History(_ context.Context, f Filter) ([]Entry, error) {
 
 		e := Entry{
 			ID: r.ID, Created: r.Created, Status: r.Status,
-			Provider: r.Provider, GPU: r.GPU,
+			Provider: r.Provider, GPU: r.GPU, Model: r.Model,
 			RunID: r.RunID, Node: r.Node,
 			Started: r.Started, Ended: r.Ended,
 			Cost: r.Cost, Rate: r.Rate,

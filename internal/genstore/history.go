@@ -67,7 +67,7 @@ func (s *SQLite) History(ctx context.Context, f Filter) ([]Entry, error) {
 	//
 	//nolint:gosec // G202: where is fixed text from filterWhere and jobSideByRequest is a literal; values are parameters
 	stmt := `
-		SELECT r.id, r.created_unix, r.status, r.provider, r.gpu,
+		SELECT r.id, r.created_unix, r.status, r.provider, r.gpu, r.model,
 		       r.run_id, r.node, r.started_unix, r.ended_unix,
 		       r.cost, r.rate, r.elapsed_ns, r.billable_ns, r.err,
 		       r.mem_cgroup, r.mem_limit, r.mem_current,
@@ -105,7 +105,7 @@ func (s *SQLite) History(ctx context.Context, f Filter) ([]Entry, error) {
 			jobCost, span, recorded       int64
 			rode                          bool
 		)
-		if err := rows.Scan(&id, &created, &status, &e.Provider, &e.GPU,
+		if err := rows.Scan(&id, &created, &status, &e.Provider, &e.GPU, &e.Model,
 			&e.RunID, &e.Node, &started, &ended,
 			&cost, &rate, &elapsed, &billable, &e.Err,
 			&e.MemCgroup, &e.MemLimit, &e.MemCurrent,
