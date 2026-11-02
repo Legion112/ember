@@ -311,6 +311,62 @@ moment it imports a sibling, the sibling's dependencies become its own.
   assertion while linting nothing. Checked by reinstating the gap, by
   inventing a third tag the test had never heard of, and by pasting a
   hand-written `-tags` back into CI.
+- **"Document CLI flag, config key and behaviour changes in `README.md`" names
+  three things, one of them was read out of the tree, and the one that could
+  have been and was not had drifted by seven.**
+  `TestREADME_DocumentsEveryConfigKey` reads `internal/config`'s `yaml:` tags
+  and `TestREADME_NamesEveryVerb` reads `commands()` -- a verb is not one of
+  the three, but it is the same shape of claim. Flags were left to the
+  sentence, so `--max-hourly-usd` -- the money ceiling, on `up` **and**
+  `offers`, and the one this file leans on by name for replacing a configured
+  value rather than narrowing it -- appeared nowhere in `README.md`, along with
+  `--cmd`, `--as`, `--vcpu`, `--only`, `--from` and `--archs`. The
+  `imagelabs` argument one axis over: a rule maintained in prose is the
+  hand-maintained list with no list.
+  `TestREADME_DocumentsEveryFlag` reads every flag out of `internal/cli` with
+  `go/parser`, and the receiver is what makes it a parse rather than a grep --
+  a call counts only when the identifier it is called on was bound to a
+  `*flag.FlagSet` in that function, by `flag.NewFlagSet` or as a parameter,
+  because `grep 'fs\.String'` over this package also returns `p.Min.String()`
+  and `e.Cost.String()`, and `cmd_images.go` shadows its own `io/fs` import
+  with the FlagSet so a guard keyed on the spelling `fs` would be right by
+  luck. A method called on a FlagSet and named in neither
+  `flagSetDeclarators` nor `flagSetOthers` is a **fatal**, and
+  `TestFlagTablesClassifyEveryFlagSetMethod` holds both lists to
+  `reflect.TypeOf(&flag.FlagSet{})` rather than to each other: the alternative
+  to failing on a method it cannot classify is reading straight past a flag,
+  which is one more gate that cannot fail in a repository that has already
+  found four.
+  **A mention is a whole token and the config-key guard's substring is
+  deliberately not copied.** A key is long and distinctive; `--as`, `--by` and
+  `--from` are two to four characters, and a substring would count `--as` as
+  documented the day somebody writes up a `--assets` -- a guard whose cheapest
+  false pass is on its shortest name goes wrong first where nobody looks.
+  One dash or two, because `flag` takes both and `README.md` writes `-image`
+  in one place and `--image` in another; measured over the document, the
+  single-dash spelling adds that one mention and no false pass.
+  **The stale direction is bounded by a backtick, and the bound was
+  measured.** It reads the flags `README.md` types at ember -- from the word
+  `ember` to the end of the line or the next backtick -- because a renamed
+  flag is caught by the forward direction the moment the new name appears
+  nowhere, while a *removed* one leaves the document describing something
+  nobody can type and nothing would fire. Reading to the end of the line
+  instead condemns `--tags`, `--always` and `--abbrev` out of the
+  `git describe` span sitting beside `ember version` on one line; reading
+  every backticked span that merely names ember is worse rather than better
+  and picks `--listen-ip` out of an sd-server argv in a fenced block; and one
+  dash would condemn the `-c` in `grep -c opentelemetry` and `jq -c`. What it
+  gives up is a flag documented only in prose, which the forward direction
+  covers. It found one on its first run: a `--all` on an `ember ls`, in
+  `README.md` and four times in **this file**, which has never been a flag --
+  `ember ls` has had exactly one, `--config`, and has asked every configured
+  provider since it was written. Both documents are corrected; a guard whose
+  first run finds nothing is a guard nobody should trust.
+  **Behaviour, the third thing the line names, is still on the sentence
+  alone**, and is not an omission: a behaviour is not a token anything can
+  enumerate out of the tree, so a guard for it would either be a marked table
+  of claims maintained by hand -- the thing all three of these exist not to be
+  -- or a grep whose only honest answer is "something changed somewhere".
 - **The first round of a reinstatement pass is reliably incomplete, and a
   flawless one is a finding about the harness rather than about the change.**
   Measured across one session of eleven changes here: every pass that reported
@@ -1443,7 +1499,7 @@ that sentence made unrepresentable rather than merely tested.
   when there are any, because the division is over a smaller denominator than
   the money paid for. Found by reading the real output, not by a test. A
   figure wrong in the expensive direction that does not say so is worse than
-  one that is missing, which is why `ember ls --all` exits non-zero on a
+  one that is missing, which is why `ember ls` exits non-zero on a
   provider it could not ask.
 - **Nothing backfills, and that is a decision.** The facts are in the event
   bodies of requests that already ran, so a backfill is possible -- and it
@@ -1752,7 +1808,7 @@ that sentence made unrepresentable rather than merely tested.
   that costs nothing, which is the opposite of what the ceiling is for.
 - **"I could not read what has been spent" is not "it is allowed", and a
   configured ceiling with no ledger is a refusal.** Both are the rule that
-  makes `ember ls --all` exit non-zero over a provider it could not ask: an
+  makes `ember ls` exit non-zero over a provider it could not ask: an
   operator who wrote `max_month_usd` has said unattended spending must stop
   somewhere, and "probably fine" is the one answer a spend ceiling must never
   give. The second cannot happen through `ember serve`, which always wires the
@@ -2035,7 +2091,7 @@ A leaked node bills by the hour in silence. These are not style preferences.
   the request and reading the response is where an orphan with no local record
   is born.
 - **A provider that could not be reached is a finding, not a silence.**
-  `ember ls --all` exits non-zero when any provider failed to answer: "I could
+  `ember ls` exits non-zero when any provider failed to answer: "I could
   not check RunPod" must never render as a clean bill of health.
 - **Images are pinned to a tag or a digest; `:latest` is refused.** The point
   of ember is to measure what a model costs and how long it takes, and two runs
@@ -2322,7 +2378,7 @@ A leaked node bills by the hour in silence. These are not style preferences.
   error. A 403 means the credentials cannot see the store, and reporting that
   as absence sends an operator to re-upload forty gigabytes over a permissions
   problem. `store verify` returns the error rather than counting a finding for
-  the same reason `ember ls --all` exits non-zero on a provider it could not
+  the same reason `ember ls` exits non-zero on a provider it could not
   reach.
 - **`store verify` checks presence and says plainly that it does not check
   digests.** A digest means reading the object back: forty gigabytes through
