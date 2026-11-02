@@ -270,6 +270,15 @@ naming any architecture that published nothing** — a map missing a key is a
 card ember will refuse to rent, so a block pasted over a complete map would
 take those cards away silently.
 
+That job is `ember images --from <dir>`: each matrix job writes a fragment
+holding one `sm_NN: <reference>` line, and this reads them back and assembles
+the map, because Actions does not merge matrix outputs and a single output
+would be last-writer-wins. `--archs` says which architectures have to be
+present, so a deliberate one-architecture rebuild does not report the other
+six as missing; both spellings, `90` or `sm_90`, are accepted. The fragments
+are found at any depth under the directory, since `download-artifact` with
+`merge-multiple` flattens them and `gh run download` does not.
+
 Dispatch one architecture with `-f archs=89` to republish just that one.
 
 Locally one architecture takes about four minutes on thirty-two threads
@@ -525,6 +534,41 @@ Nothing secret is ever passed as a command-line flag, because
 whoever else is on that host, and on this one readable by every other account.
 `serve_token`, which is `ember serve`'s own credential, lives in the same file
 for that reason and has no flag either.
+
+### What a flag may do that a config key may not
+
+A flag **replaces** the config's value for that run rather than narrowing it.
+`ember up --max-hourly-usd 999` *raises* a `max_hourly_usd` of `"1.50"`,
+because the person typing it is the person who set the ceiling. Nothing that
+takes a value from somewhere else may reuse that rule: a request arriving at
+`ember serve` can only ever ask for **less**, and the smaller of the two
+values wins. `--provider`, `--image`, `--gpu`, `--ttl` and `--port` replace
+the same way, and `--image` also clears an `images:` map, so a one-off pin
+cannot be silently ignored on a config that has one.
+
+`ember offers --max-hourly-usd 1.50` is the same flag read through the same
+code, and all it does there is hide rows — it rents nothing, which makes it
+the cheap way to see what a ceiling would admit before `ember up` runs under
+it. A second `offers`-only ceiling would read as the friendlier design and
+would let a listing show an offer `up` then refuses, which is the one thing a
+preview of a price must not do.
+
+`ember up --cmd` is `cmd:` typed at a command line, **one word per flag, in
+order**: `--cmd sd-cli --cmd -p --cmd "a lovely orange cat"`. A single string
+would have to be split by a quoting rule ember does not own, and a remote
+command is argv. There is no flag for `cmds`.
+
+Those were documented nowhere. `AGENTS.md`'s last line names three things to
+document in the commit that changes them — a CLI flag, a config key and a
+behaviour — and the config keys have had a guard that reads the tree since
+before the section below was written, while the flags had nothing and seven of
+them were missing, `--max-hourly-usd` among them.
+`internal/cli`'s `TestREADME_DocumentsEveryFlag` now reads every flag out of
+`internal/cli`'s own source with `go/parser` and fails on one this document
+has never heard of. It fails the other way too, on a flag this document types
+at ember that no `flag.FlagSet` declares, because a stale line waives nothing
+and hides the next real one: its first run found a `--all` on an `ember ls`
+here that has never been a flag.
 
 ### Placement, disk and where ember keeps things
 
@@ -1117,6 +1161,11 @@ $ ember archs --cards
 90      sm_90   h100 h100-80g h200
 ```
 
+`ember archs --only 90,sm_89` narrows both of those to a subset, which is what
+a rebuild of one architecture passes. It refuses a number no card ember can
+select needs, naming the set it could have been, rather than buying twenty
+minutes of `nvcc` and an image nothing will ever pull.
+
 ember knows which architecture a card is from a table in
 [`internal/node/compute.go`](internal/node/compute.go). A card it has never
 heard of is refused rather than guessed at, for the same reason as everything
@@ -1213,6 +1262,14 @@ It prints the digest at the end, because that is the value `assets:` needs and
 reading it from the same pass that uploaded the file is how the two cannot
 disagree.
 
+`ember store push --as flux2.gguf ./flux2-dev-Q8_0.gguf` chooses what the file
+is called on the store, which is the name `assets:` then has to use; the
+default is the file's own basename. The name is checked against the same rule
+a node applies to an asset, so one a node would refuse fails here instead of
+after forty gigabytes have gone up. Flags come before the file, as in every
+`store` verb, and a file named after one of them is a usage error rather than
+a push of something else.
+
 This needs a **second credential**: RunPod issues S3 keys separately from the
 API key, on the Credentials page under "S3 API keys", and shows the secret
 once. They go in `credentials.yaml` as `runpod_s3_access_key` and
@@ -1238,6 +1295,13 @@ Which one is right depends on where the files already are:
 
 Measured, not estimated: 67 Mbps up from here, and sd15 fetched and verified
 on a `cpu3c` for a quarter of a cent.
+
+`ember store sync --vcpu 8` rents more cores than the two every family's
+minimum gives you. Two is the default because the job is bound by the network
+and the disk, and a core that waits on them is a core paid for nothing —
+RunPod prices a CPU machine per core, so eight of them is four times the
+$0.06/hour above, and a value past a family's maximum drops that family from
+the offers rather than being clamped into it.
 
 Only **10 of RunPod's 23** volume-capable datacentres serve the S3 API. A
 store created outside those can only be filled by renting something to
@@ -1399,7 +1463,7 @@ over an absent field.
 gpu|cpu`, `--since`/`--until` (UTC dates, half-open as `ember spend`'s period
 is) and `--json` narrow it further. Exit 2 means the reader found lines it
 could not place or files it did not read — a series quietly missing part of
-itself is the clean-bill-of-health failure `ember ls --all` exits non-zero to
+itself is the clean-bill-of-health failure `ember ls` exits non-zero to
 avoid, over a file nothing can rebuild.
 
 **Scheduled from outside ember.** A process that must stay running to collect
