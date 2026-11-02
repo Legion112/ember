@@ -1339,6 +1339,30 @@ What it reads is complete, which is worth saying because `ember spend` has to
 warn that its per-job figures are not. `requests.cost` was a column before the
 execution columns existed, so the period total has no gap in it.
 
+### How a ceiling is read
+
+Every `*_usd` key is a decimal string read into integer microdollars without
+going through a float, because `ParseFloat("2.01")*1e6` is 2009999.9999999998
+and a ceiling that is occasionally wrong by a rounding error is a ceiling
+nobody trusts. What that accepts: a leading `$` with or without a space after
+it, surrounding whitespace, a leading `.` (`".5"`), leading zeros, and up to
+six fractional digits. A seventh digit and beyond are **truncated**, because
+providers publish prices like `0.4290000000000001` after a float round-trip of
+their own.
+
+What it refuses, each with the reason in the error: an empty string, a
+negative (a negative price is a field ember has misread, not a discount), an
+exponent (`"1e3"`), a thousands separator (`"1,000"`), a sign (`"+1"`), a
+trailing point (`"5."`), anything that is not an ASCII digit, and a space
+inside the number.
+
+It also refuses a **positive amount below one microdollar** — `"0.0000001"`
+and anything smaller. Those used to truncate to zero and parse successfully,
+and zero means *no ceiling* everywhere in ember, so a ceiling written in the
+wrong unit silently removed the hourly ceiling, the run ceiling and the price
+filter together. Write `"0"` for no limit, or a figure of at least
+`"0.000001"`.
+
 ### What is not guarded
 
 **There is no authentication.** The server listens on loopback only and nothing

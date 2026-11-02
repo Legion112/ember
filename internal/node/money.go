@@ -162,14 +162,33 @@ func RateFromUSD(usd float64) Rate {
 // 0.28999999999999998 exactly as stated, and times a million it is exactly
 // 290000, because the error cancels. Which is why this function exists at all
 // rather than a documented list of bad values: you cannot tell by looking.
+//
+// What it accepts and refuses is enumerated in money_fuzz_test.go's seed
+// corpus and checked against a math/big.Rat oracle on every run, because the
+// only other feedback this function has is a price that silently compares as
+// cheaper than it is. Refused today, each for a reason: an exponent ("1e3"),
+// a thousands separator ("1,000"), a sign ("+1", "-1", and a unicode minus),
+// a trailing point ("5."), a radix prefix ("0x10"), non-ASCII digits, and any
+// space inside the number. None of those is a spelling a provider or a config
+// has ever produced, and every one of them has a reading that is wrong by
+// orders of magnitude rather than by a rounding error.
 func ParseUSD(s string) (MicroUSD, error) {
+	// Errors quote the string as typed. Quoting the trimmed copy meant
+	// `max_hourly_usd: "$1,000"` reported `malformed price "1,000"` -- a
+	// string the operator never wrote, with the one character that explains
+	// nothing removed and the one that caused it left in.
+	orig := s
+
 	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "$")
+	// Trimmed on both sides of the "$", because trimming only before it
+	// accepted " $1.00" and refused "$ 1.00", which is an arbitrary
+	// distinction in a field an operator types by hand.
+	s = strings.TrimSpace(strings.TrimPrefix(s, "$"))
 	if s == "" {
 		return 0, fmt.Errorf("empty price")
 	}
 	if strings.HasPrefix(s, "-") {
-		return 0, fmt.Errorf("negative price %q", s)
+		return 0, fmt.Errorf("negative price %q", orig)
 	}
 
 	// s is non-empty here, so a missing whole part means the string began with
@@ -179,17 +198,17 @@ func ParseUSD(s string) (MicroUSD, error) {
 		whole = "0"
 	}
 	if hasFrac && frac == "" {
-		return 0, fmt.Errorf("malformed price %q", s)
+		return 0, fmt.Errorf("malformed price %q", orig)
 	}
 
 	var cents int64
 	for _, c := range whole {
 		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("malformed price %q", s)
+			return 0, fmt.Errorf("malformed price %q", orig)
 		}
 		cents = cents*10 + int64(c-'0')
 		if cents > math.MaxInt64/micros/10 {
-			return 0, fmt.Errorf("price out of range %q", s)
+			return 0, fmt.Errorf("price out of range %q", orig)
 		}
 	}
 	total := cents * micros
@@ -198,18 +217,34 @@ func ParseUSD(s string) (MicroUSD, error) {
 	// digit is truncated rather than rejected, because providers do publish
 	// prices like "0.4290000000000001" after a float round-trip of their own
 	// and refusing those would make ember unable to see real offers.
+	//
+	// truncated records that the truncation threw away something, because on
+	// one input it throws away the entire value: every digit of "0.0000001"
+	// is past the sixth, so the result was zero and the error was nil. Zero
+	// is not "a very small price" anywhere in ember -- Budget.Allow guards on
+	// MaxRate > 0 and Filter.Match on MaxPrice > 0 -- so a ceiling typed in
+	// the wrong unit silently became *no ceiling at all*, on the one field
+	// whose whole job is to stop a run that costs too much. The seventh-digit
+	// rule is kept for every value it was written for, where it is an error
+	// of one part in ten million; it is refused where it is an error of one
+	// part in one, because that is not a truncation, it is a different number.
+	truncated := false
 	if hasFrac {
 		scale := int64(micros / 10)
 		for i, c := range frac {
 			if c < '0' || c > '9' {
-				return 0, fmt.Errorf("malformed price %q", s)
+				return 0, fmt.Errorf("malformed price %q", orig)
 			}
 			if i >= 6 {
+				truncated = truncated || c != '0'
 				continue
 			}
 			total += int64(c-'0') * scale
 			scale /= 10
 		}
+	}
+	if total == 0 && truncated {
+		return 0, fmt.Errorf("price %q is positive but below one microdollar, which ember cannot tell from no ceiling at all: write 0 for no limit, or a figure of at least 0.000001", orig)
 	}
 	return MicroUSD(total), nil
 }
