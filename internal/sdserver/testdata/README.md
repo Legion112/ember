@@ -40,6 +40,26 @@ does not publish these maps. It is the fixture the whole capability gate is
 tested against, and the only one that can drive its deny path — see the note
 below on why no server ember starts reaches it.
 
+**`job_completed_img2img.json` is the evidence for the one image-dependent
+parameter that ships, and nothing reads it.** It is a 64x64 six-step
+generation from a hand-built 344-byte PNG at `strength: 0.3`, captured from
+the CPU build the same way the files above were. What it is for is the field
+`generation_info.strength`: it comes back as `0.30000001192092896`, which is
+the only published evidence anywhere that `strength` reached the generation at
+all — and the same probe with **no** `init_image` returns a completed job
+whose `generation_info` carries no `strength` key whatsoever. Accepted,
+dropped, reported nowhere. That asymmetry is why ember refuses a strength
+without an image and why four of the five image-dependent parameters are still
+absent: `img_cfg` sent at `0`, `-1` and `99` is echoed at none of them, so
+there is no response that could tell an operator whether it did anything.
+
+It is also what a request body ember does not send looks like from the other
+side — `generation_info` echoes the parameters, which is the closest thing
+sd-server has to an acknowledgement, and the next person adding one of those
+four needs to see which fields appear there and which do not. ember reads none
+of `generation_info`, so this fixture is read by nothing, which is the same
+decision `capabilities_loras.json` records below.
+
 **`capabilities_loras.json` is a capture with nothing reading it yet, on
 purpose.** It is a CPU server started with `--lora-model-dir`, so `loras[]` is
 non-empty: `{"name":"real","path":"real.safetensors","display_path":
@@ -242,6 +262,7 @@ two upscale bounds ember does not read.
 | `job_accepted.json` | `POST /sdcpp/v1/img_gen` | **guessed** | the 202, and that the id is read from `id` rather than parsed out of `poll_url` |
 | `job_generating.json` | `GET /sdcpp/v1/jobs/{id}` | **captured** — preview lab, six steps at `preview_interval` 1 | a preview frame, its pass and its step |
 | `job_completed.json` | same | **captured** — same run | the finished image |
+| `job_completed_img2img.json` | same | **captured** — CPU build, 64x64 from a 344-byte PNG at `strength: 0.3` | that `generation_info` echoes `strength` when an init image was taken, and nothing when it was not; read by no test, and the note above says why |
 | `job_cancelled.json` | same | **captured** — cancel lab, a sixty-step job stopped at step 2 | an error object beside a status that is **not** a failure |
 | `job_lora_not_loaded_completed.json` | same | **captured** — the unloadable-LoRA lab, a published id whose file is not a model | a clean success carrying no account of a LoRA that never loaded, and the request echoed back as though it had |
 | `job_failed.json` | same | **captured** — failure lab, vae tiling with a one-pixel tile | the **object** form of `error`, beside `result: null` |

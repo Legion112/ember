@@ -11,6 +11,7 @@ import (
 	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/sshx/sshexec"
 
+	"github.com/Legion112/ember/internal/blob"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
@@ -88,11 +89,29 @@ type served struct {
 	client sdserver.Client
 	caps   sdserver.Capabilities
 	rate   node.Rate
+
+	// inputs is where a job's image inputs are staged, empty when this
+	// rental's jobs cannot name one. See resolveInputs.
+	inputs string
 }
 
 func (s served) Caps() sdserver.Capabilities { return s.caps }
 
 func (s served) Generate(ctx context.Context, sink report.Sink, jobs sdserver.Run, dir string, stop <-chan struct{}) error {
+	// BEFORE Validate AND BEFORE THE FIRST SUBMISSION, which is as early as
+	// this layer can manage: the drain loop builds the Run it passes here
+	// from the stored request, so the resolution NewPlan did cannot travel
+	// with it and this is the only place that sees the jobs that will
+	// actually be submitted. The cheap refusal already happened one layer up,
+	// at enqueue and again before the create call; reaching here with an
+	// unstaged reference means the file went away in between, and the whole
+	// batch is refused rather than its first job failing after the others
+	// have been paid for.
+	resolved, err := s.resolveInputs(jobs.Jobs)
+	if err != nil {
+		return err
+	}
+	jobs.Jobs = resolved
 	for i, j := range jobs.Jobs {
 		if err := sdserver.Validate(j, s.caps); err != nil {
 			return Usage(fmt.Errorf("sd.jobs[%d]: %w", i, err))
@@ -104,6 +123,50 @@ func (s served) Generate(ctx context.Context, sink report.Sink, jobs sdserver.Ru
 	// holds both.
 	return runJobs(ctx, sink, s.client, jobs, dir, s.rate,
 		cancelSignal{on: stop, server: s.caps.CancelGenerating})
+}
+
+// resolveInputs loads the bytes every job's image reference names.
+//
+// ONE READ PER REFERENCE AND NOT PER JOB. A batch of eight variations on one
+// picture names the same digest eight times, and content addressing is what
+// makes that a fact rather than a coincidence -- so the file is read once and
+// the slice is shared. They are read-only from here: Body base64-encodes
+// them and nothing writes through the slice.
+//
+// An empty inputs directory with a job that names an image is a refusal and
+// not a nil map read as "nothing staged": `ember up` takes its jobs from a
+// config that has no field for an image, so this is a state only a bug could
+// produce, and the alternative is a generation that silently drops the input.
+func (s served) resolveInputs(jobs []sdserver.Job) ([]sdserver.Job, error) {
+	if !wantsInputs(jobs) {
+		return jobs, nil
+	}
+	if s.inputs == "" {
+		return nil, Usage(errors.New("a job names an image input and this rental has no " +
+			"staging directory to read it from"))
+	}
+	in, err := blob.OpenInputs(s.inputs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = in.Close() }()
+
+	seen := map[string][]byte{}
+	out := make([]sdserver.Job, 0, len(jobs))
+	for i, j := range jobs {
+		if ref := j.Params.InitImage; ref != "" {
+			b, ok := seen[ref]
+			if !ok {
+				if b, err = in.Load(ref); err != nil {
+					return nil, Usage(fmt.Errorf("sd.jobs[%d]: %w", i, err))
+				}
+				seen[ref] = b
+			}
+			j.InitImageBytes = b
+		}
+		out = append(out, j)
+	}
+	return out, nil
 }
 
 // WithServed rents this plan's node, makes the weights resident, and calls fn.
@@ -134,7 +197,7 @@ func (p Plan) WithServed(ctx context.Context, out io.Writer, sink report.Sink,
 			}
 			defer func() { _ = client.Close() }()
 			return withServer(ctx, out, sink, client, sshexec.New(client.SSH()),
-				p.Spec, so, p.Offer.Price, len(p.Jobs.Jobs), fn)
+				p.Spec, so, p.Offer.Price, len(p.Jobs.Jobs), p.InputsDir, fn)
 		})
 }
 
@@ -155,7 +218,12 @@ func runServed(
 	runDir string,
 	rate node.Rate,
 ) error {
-	return withServer(ctx, out, sink, client, r, spec, so, rate, len(run.Jobs),
+	// NO STAGING DIRECTORY, AND THAT IS THE SEAL RATHER THAN AN OMISSION.
+	// This is `ember up`: the jobs came from ember.yaml, and config.SDJob has
+	// no field for an image input, so there is no reference for resolveInputs
+	// to find. Passing the directory anyway would make the one path that
+	// cannot name an image able to read the staging area.
+	return withServer(ctx, out, sink, client, r, spec, so, rate, len(run.Jobs), "",
 		func(ctx context.Context, s Served) error {
 			// nil: `ember up` has one batch and no second caller, so the only
 			// way to stop it is Ctrl-C, which cancels the whole run. There is
@@ -187,6 +255,7 @@ func withServer(
 	so session.Options,
 	rate node.Rate,
 	batch int,
+	inputsDir string,
 	fn func(context.Context, Served) error,
 ) error {
 	// The server dies with this context, and it is a child of the run's so
@@ -274,7 +343,7 @@ func withServer(
 		Model: caps.Model,
 	})
 
-	return fn(ctx, served{client: c, caps: caps, rate: rate})
+	return fn(ctx, served{client: c, caps: caps, rate: rate, inputs: inputsDir})
 }
 
 // startServer starts a long-running process on the node and returns the

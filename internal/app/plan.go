@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"time"
 
 	"github.com/Legion112/ember/internal/assets"
+	"github.com/Legion112/ember/internal/blob"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/node"
@@ -112,6 +114,20 @@ type Plan struct {
 	// ImageFrom says where Spec.Image came from, for `--dry-run`. An
 	// operator staring at a digest needs to know which key produced it.
 	ImageFrom string
+
+	// InputsDir is where a job's image inputs are staged.
+	//
+	// A PATH AND NOT AN OPEN STORE, because a Plan has no Close and an
+	// os.Root held from NewPlan until a rental ends would be a descriptor
+	// nothing accounts for -- on the queue's path that is the life of the
+	// process. The two places that need the bytes open it for as long as
+	// they are reading, which is one open(2) each.
+	//
+	// It travels on the Plan rather than being re-derived where it is used,
+	// so that `ember up` -- whose jobs come from a config file, which has no
+	// field for an image input -- carries an empty one and the resolution
+	// path is unreachable from it by construction rather than by a check.
+	InputsDir string
 
 	Hold time.Duration
 }
@@ -245,7 +261,7 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	case req.CPUOnly:
 		// Nothing: this rental runs `embernode fetch`.
 	case len(req.Jobs) > 0:
-		run, err = jobsFromRequest(req)
+		run, err = jobsFromRequest(req, ps.Inputs)
 		if err != nil {
 			return Plan{}, Usage(err)
 		}
@@ -279,6 +295,10 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 		Paths:     ps,
 		ImageFrom: from,
 		Hold:      req.Hold,
+		// Empty for every shape but a queued request, which is the only one
+		// that can name an image input: `ember up` reads its jobs from
+		// ember.yaml, and config.SDJob has no field for one.
+		InputsDir: inputsDir(req, ps),
 	}, nil
 }
 
@@ -509,13 +529,35 @@ func BuildSpec(cfg config.Config, r Resolved) (node.Spec, error) {
 	})
 }
 
+// inputsDir is the staging directory for the shapes that can name an input.
+//
+// A function rather than `ps.Inputs` at the one call site, because the
+// emptiness is the seal: a reader should be able to see that `ember up`
+// cannot reach the resolution path at all, rather than inferring it from the
+// fact that a YAML type happens to have no field today.
+func inputsDir(req Request, ps Paths) string {
+	if len(req.Jobs) == 0 {
+		return ""
+	}
+	return ps.Inputs
+}
+
 // jobsFromRequest validates a batch that did not come from the config file.
 //
 // Every refusal here is config.ParseSD's, reached through the same function,
 // and every one of them happens before the create call -- which is the whole
 // discipline NewPlan exists to keep. A batch checked after the node was up
 // would be a batch refused about a minute into a rented card.
-func jobsFromRequest(req Request) (sdserver.Run, error) {
+//
+// THE IMAGE INPUTS ARE VERIFIED HERE AND LOADED SOMEWHERE ELSE, which looks
+// like duplication and is the cheap-refusal order. Verifying costs one read
+// of a file on this machine and happens before PickOffer's choice becomes a
+// create call; the bytes are not needed until a generation server is up and
+// the weights are resident, which on a rented card is about a minute of
+// billing later. A reference that was never staged must not be discovered
+// then. blob.Inputs.Load is the one spelling of what verifying means, so the
+// two moments cannot come to different answers.
+func jobsFromRequest(req Request, inputsDir string) (sdserver.Run, error) {
 	preview, err := sdserver.ParsePreview(req.Preview)
 	if err != nil {
 		return sdserver.Run{}, fmt.Errorf("preview: %w", err)
@@ -525,12 +567,57 @@ func jobsFromRequest(req Request) (sdserver.Run, error) {
 		return sdserver.Run{}, fmt.Errorf("preview_interval: %w", err)
 	}
 
+	// Opened once for the batch and closed before anything is rented. Nil
+	// when no job names an image, so a configuration that cannot have one
+	// does not create a staging directory as a side effect of planning.
+	var in *blob.Inputs
+	if wantsInputs(req.Jobs) {
+		if inputsDir == "" {
+			return sdserver.Run{}, errors.New("a job names an image input and this run has no " +
+				"staging directory; image inputs reach ember through `ember serve`, which is " +
+				"the only thing that accepts one")
+		}
+		var oerr error
+		if in, oerr = blob.OpenInputs(inputsDir); oerr != nil {
+			return sdserver.Run{}, oerr
+		}
+		defer func() { _ = in.Close() }()
+	}
+
 	run := sdserver.Run{Preview: preview, PreviewInterval: interval}
 	for i, j := range req.Jobs {
+		// ValidateStatic builds the body, which refuses a reference with no
+		// bytes -- so the bytes have to be here even though they are thrown
+		// away a line later. Resolving for the check and again for the
+		// generation is two reads of a file on this machine; the alternative
+		// is a check that does not exercise the thing it is checking.
+		if ref := j.Params.InitImage; ref != "" {
+			b, lerr := in.Load(ref)
+			if lerr != nil {
+				return sdserver.Run{}, fmt.Errorf("jobs[%d]: %w", i, lerr)
+			}
+			j.InitImageBytes = b
+		}
 		if err := sdserver.ValidateStatic(j, preview, interval); err != nil {
 			return sdserver.Run{}, fmt.Errorf("jobs[%d]: %w", i, err)
 		}
+		// Carried WITHOUT the bytes. This Run reaches the dry run and the
+		// batch-count line and nothing that submits -- the drain loop builds
+		// its own from the stored request for every batch it claims,
+		// including the first -- so megabytes held here would be megabytes
+		// held for the life of a rental by nothing that reads them.
+		j.InitImageBytes = nil
 		run.Jobs = append(run.Jobs, j)
 	}
 	return run, nil
+}
+
+// wantsInputs reports whether any job names an image.
+func wantsInputs(jobs []sdserver.Job) bool {
+	for _, j := range jobs {
+		if j.Params.InitImage != "" {
+			return true
+		}
+	}
+	return false
 }

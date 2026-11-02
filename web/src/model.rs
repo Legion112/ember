@@ -136,6 +136,12 @@ pub struct Caps {
 /// better answer than a boolean.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Features {
+    /// Whether the loaded model takes an image input at all. It gates the
+    /// file picker and, through it, the strength control -- which ember
+    /// refuses without an image, because a server measured accepting one and
+    /// silently dropping it.
+    #[serde(default)]
+    pub init_image: Option<bool>,
     #[serde(default)]
     pub clip_skip: Option<bool>,
     #[serde(default)]
@@ -311,6 +317,24 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub shifted_timestep: i32,
 
+    /// The staged image this job generates from, and how much of it survives.
+    ///
+    /// `init_image` IS A DIGEST AND NOT A FILENAME: the string
+    /// `POST /api/inputs` answered with, which is the sha256 of the bytes.
+    /// The name of the file the operator picked is never sent anywhere -- the
+    /// server derives the key from the content, so there is nothing for a
+    /// filename to reach.
+    ///
+    /// `strength` is an `Option` because the server's own default is 0.75 and
+    /// 0 is a real value it echoes back, so an empty box and a 0 are
+    /// different requests. It is sent ONLY with an image: ember refuses the
+    /// combination, because a live server accepts a strength with no image,
+    /// generates, and reports the strength nowhere -- which reads as working.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub init_image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f64>,
+
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_format: String,
     #[serde(default, skip_serializing_if = "is_zero_i32")]
@@ -419,6 +443,15 @@ impl Job {
     /// block are already absent from the body, and for skip-layer guidance the
     /// scale is the switch. Clearing more than that would be clearing nothing.
     pub fn drop_denied(&mut self, f: &Features) {
+        if denied(f.init_image) {
+            // The strength goes with it, and that pairing is why this is one
+            // branch rather than two. ember refuses a strength with no
+            // image, so clearing the image alone would turn a job the server
+            // merely cannot do into a job ember will not accept -- a 400 at
+            // enqueue in place of a greyed control.
+            self.init_image = String::new();
+            self.strength = None;
+        }
         if denied(f.clip_skip) {
             self.clip_skip = None;
         }
@@ -461,6 +494,53 @@ impl Job {
             out += &format!(" seed {}", self.seed);
         }
         out
+    }
+}
+
+/// Input is what `POST /api/inputs` answered with.
+///
+/// `id` is the digest a job carries. The geometry and the format are here
+/// because the upload is the only moment they are free -- the server has just
+/// read the header -- and a file picker that cannot say "that is a 1024x768
+/// jpeg" gives no way to tell a staged file from a refused one.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Input {
+    pub id: String,
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub width: i32,
+    #[serde(default)]
+    pub height: i32,
+    #[serde(default)]
+    pub bytes: i64,
+}
+
+impl Input {
+    /// One line naming what was staged, for the picker to show.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} {}x{}, {}",
+            self.format,
+            self.width,
+            self.height,
+            human_bytes(self.bytes)
+        )
+    }
+}
+
+/// human_bytes is a size an operator reads.
+///
+/// Kibibytes and mebibytes, because that is what the size bound is written in
+/// -- `ember serve` refuses an upload over 8 MiB, and a picker reporting
+/// "8.4 MB" beside a bound of "8 MiB" would be two units for one number.
+pub fn human_bytes(n: i64) -> String {
+    const KIB: i64 = 1024;
+    const MIB: i64 = 1024 * KIB;
+    match n {
+        n if n >= MIB => format!("{:.1} MiB", n as f64 / MIB as f64),
+        n if n >= KIB => format!("{:.0} KiB", n as f64 / KIB as f64),
+        n => format!("{n} B"),
     }
 }
 
@@ -1565,6 +1645,88 @@ mod tests {
         let before = kept.clone();
         kept.drop_denied(&Features::default());
         assert_eq!(kept, before, "a silent server had a parameter dropped");
+    }
+
+    /// The image reference and its strength travel together, both ways.
+    ///
+    /// THE PAIR IS THE POINT. ember refuses a strength with no image -- a
+    /// live server accepts that combination, generates and reports the
+    /// strength nowhere -- so a page that could post one without the other
+    /// would be posting a request it knows will be refused. Checked in both
+    /// directions: set, they are both on the wire; unset, neither is; denied,
+    /// both go.
+    #[test]
+    fn an_image_and_its_strength_are_sent_together_or_not_at_all() {
+        let bare = serde_json::to_string(&Job {
+            prompt: "a paper boat".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!bare.contains("init_image"), "{bare}");
+        assert!(!bare.contains("strength"), "{bare}");
+
+        let set = serde_json::to_string(&Job {
+            prompt: "a paper boat".into(),
+            init_image: "sha256:abc".into(),
+            // Zero, which is the value a zero-is-unset rule would lose: the
+            // server's own default is 0.75 and it echoes an explicit 0 back.
+            strength: Some(0.0),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(set.contains(r#""init_image":"sha256:abc""#), "{set}");
+        assert!(set.contains(r#""strength":0.0"#), "{set}");
+
+        // And a server that says no to an image takes the strength with it.
+        let no: Features = serde_json::from_str(r#"{"init_image":false}"#).unwrap();
+        let mut j = Job {
+            prompt: "a paper boat".into(),
+            init_image: "sha256:abc".into(),
+            strength: Some(0.4),
+            ..Default::default()
+        };
+        j.drop_denied(&no);
+        assert_eq!(j.init_image, "");
+        assert_eq!(
+            j.strength, None,
+            "the image was dropped and the strength was left, which ember refuses"
+        );
+        assert_eq!(j.prompt, "a paper boat");
+
+        // A server that published nothing about it keeps both: absent is not
+        // a denial, and treating it as one would make the picker unusable
+        // against every build that does not publish the map.
+        let mut kept = Job {
+            init_image: "sha256:abc".into(),
+            strength: Some(0.4),
+            ..Default::default()
+        };
+        let before = kept.clone();
+        kept.drop_denied(&Features::default());
+        assert_eq!(kept, before, "a silent server had the image dropped");
+    }
+
+    /// The picker's own line, which is the only way to tell staged from
+    /// refused.
+    #[test]
+    fn a_staged_image_describes_itself() {
+        let i = Input {
+            id: "sha256:abc".into(),
+            format: "jpeg".into(),
+            width: 1024,
+            height: 768,
+            bytes: 2 * 1024 * 1024,
+        };
+        assert_eq!(i.describe(), "jpeg 1024x768, 2.0 MiB");
+    }
+
+    /// Mebibytes, because the bound the server enforces is written in them.
+    #[test]
+    fn sizes_are_in_the_units_the_bound_is() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(344), "344 B");
+        assert_eq!(human_bytes(2048), "2 KiB");
+        assert_eq!(human_bytes(8 * 1024 * 1024), "8.0 MiB");
     }
 
     #[test]

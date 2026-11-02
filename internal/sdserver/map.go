@@ -201,7 +201,7 @@ type Capabilities struct {
 // They are spelled out one field per parameter rather than carried as a
 // map[string]bool, because a map would make the gate a string the UI has to
 // spell the same way the server does, in a language that cannot be compiled
-// against it. The closed set is upstream's k_recipe_features; ember reads five
+// against it. The closed set is upstream's k_recipe_features; ember reads six
 // of its twenty-seven and the one `hires` flag that only `features` carries.
 type Supported struct {
 	ClipSkip        *bool
@@ -210,6 +210,11 @@ type Supported struct {
 	SLG             *bool
 	VAETiling       *bool
 	Hires           *bool
+
+	// InitImage is generation_features.init_image: whether the loaded model
+	// takes an image input at all. It gates Params.InitImage and, through it,
+	// Params.Strength -- which cannot be sent without one.
+	InitImage *bool
 }
 
 // denied reports that the server published this flag and said no.
@@ -370,6 +375,7 @@ func mapCapabilities(w wireCapabilities) Capabilities {
 			SLG:             w.GenerationFeatures.SLG,
 			VAETiling:       w.GenerationFeatures.VAETiling,
 			Hires:           w.Features.Hires,
+			InitImage:       w.GenerationFeatures.InitImage,
 		},
 		Samplers:      append([]string(nil), w.Samplers...),
 		Schedulers:    append([]string(nil), w.Schedulers...),
@@ -435,6 +441,24 @@ type Job struct {
 	// has and every renderer prints; these are optional and mostly unset.
 	Params Params
 
+	// InitImageBytes are the pixels Params.InitImage names, resolved.
+	//
+	// IT IS ON Job AND NOT ON Params, AND THAT IS STRUCTURAL. Params is
+	// stored as the JSON of its own struct in genstore's `params` column and
+	// handed back to the browser by viewRequest; Job is never serialised
+	// anywhere. Putting the bytes on Params with a `json:"-"` would work
+	// today and silently empty itself on a round trip through the store,
+	// which is a footgun aimed at whoever next reads a request back out of
+	// the database. Here the asymmetry is visible: the reference persists,
+	// the bytes do not, and whatever is about to submit has to have resolved
+	// them.
+	//
+	// Body REFUSES A REFERENCE WITH NO BYTES rather than omitting the field.
+	// Omitting would send a plain text-to-image generation for a request that
+	// asked for an image input and bill for it, which is the quiet half of
+	// the defect the reference exists to close.
+	InitImageBytes []byte
+
 	// Extra is merged into the request after the typed fields. A key that
 	// collides with one ember set is refused rather than resolved -- see
 	// Body.
@@ -447,13 +471,16 @@ type Job struct {
 // text-to-image generation and name no file and no directory. The fields left
 // out divide into two groups with two different reasons:
 //
-// `strength`, `guidance.img_cfg`, `control_strength`, `ip_adapter_strength`,
-// `increase_ref_index`, `ref_image_args` and `image_preprocess` do nothing
-// without an image input, and ember has no inbound image path at all -- the
-// image fields take base64 in the request body, which a YAML config cannot
-// hold and the web UI has no upload route for. A control that cannot affect
-// the generation is the same defect as a caption that is true of one preview
-// mode and wrong for the others: it reads as working.
+// `guidance.img_cfg`, `control_strength`, `ip_adapter_strength`,
+// `increase_ref_index`, `ref_image_args` and `image_preprocess` need an image
+// input, and `InitImage` below is the only one ember has. They were held back
+// as a group for that reason and four of them stay held back for a sharper
+// one, which is a measurement rather than an inference -- see the probe
+// recorded beside Strength.
+//
+// A control that cannot affect the generation is the same defect as a caption
+// that is true of one preview mode and wrong for the others: it reads as
+// working.
 //
 // `cache_mode`, `cache_option`, `scm_mask`, `scm_policy_dynamic`,
 // `qwen_image_layers`, `custom_sigmas` (both of them) and
@@ -481,6 +508,54 @@ type Params struct {
 	// ShiftedTimestep's own default is 0, so zero-is-unset is the server's
 	// own meaning here rather than ember's convention imposed on it.
 	ShiftedTimestep int `json:"shifted_timestep,omitempty"`
+
+	// InitImage is a STAGED REFERENCE AND NOT BYTES: "sha256:<64 hex>", the
+	// name blob.Inputs gave the upload. The bytes travel on Job.InitImageBytes,
+	// which is not serialised anywhere -- so a request row holds a digest,
+	// the browser gets a digest back, and the megabytes stay in one place on
+	// disk instead of in the params column of every job that uses them.
+	//
+	// THE REFERENCE IS THE WHOLE OF WHAT A REQUEST MAY CHOOSE HERE. It is
+	// sixty-four hex characters or it is refused, so it cannot be a path, a
+	// traversal, a URL or a filename -- which is what keeps this field on the
+	// right side of the line newRequest draws: a request names a provider, a
+	// card, a batch of jobs and now bytes it has already uploaded, and still
+	// nothing that reaches node.MountAt, exposure.SSHPort or ServeCommand.
+	InitImage string `json:"init_image,omitempty"`
+
+	// Strength is how much of the init image survives: 0 keeps it and 1
+	// replaces it.
+	//
+	// A POINTER BECAUSE THE SERVER'S DEFAULT IS 0.75 AND 0 IS A REAL VALUE,
+	// which is the ClipSkip rule reached from a fourth default. Measured
+	// against a live sd-server: `strength: 0` is accepted and echoed back as
+	// `generation_info.strength: 0.0`, while sending no strength at all
+	// echoes 0.75. A sentinel of 0 here would make "keep the whole image"
+	// unrepresentable while looking exactly like a field that works.
+	//
+	// IT IS SENT ONLY WITH AN INIT IMAGE, and that is not tidiness either.
+	// The same probe sent `strength: 0.4` with no `init_image`: the server
+	// answered 202, generated, and `generation_info` carried no `strength` at
+	// all. So a strength without an image is accepted, dropped, and reported
+	// nowhere -- the exact "reads as working" defect this parameter was held
+	// back for. staticParams refuses the combination rather than relying on
+	// the operator to notice.
+	//
+	// The same probe is why `img_cfg`, `control_strength`,
+	// `ip_adapter_strength` and `increase_ref_index` are still absent. All
+	// four were accepted and none changed anything observable:
+	// `control_strength` and `ip_adapter_strength` were dropped with no echo
+	// and need `control_image`/`ip_adapter_image` plus a ControlNet or an
+	// IP-Adapter in the serve argv, which nothing here has run;
+	// `increase_ref_index` was echoed as `ref_image_args:
+	// "ref_index_mode=increase"` and needs `ref_images`, which is an edit
+	// model's input; and `img_cfg` was accepted at 0, at -1 and at 99, echoed
+	// at none of them, on a build whose `generation_features.img_cfg` says
+	// true -- so there is no value ember could send and no flag it could read
+	// that would tell an operator whether it did anything. Typing a parameter
+	// on that evidence is the allowedCudaVersions mistake with better
+	// manners.
+	Strength *float64 `json:"strength,omitempty"`
 
 	SLG       SLG       `json:"slg,omitzero"`
 	Hires     Hires     `json:"hires,omitzero"`
@@ -734,6 +809,26 @@ func (j Job) Body(preview string, interval int) (map[string]any, error) {
 	}
 	if p.ShiftedTimestep != 0 {
 		set(sample, "sample_params.shifted_timestep", "shifted_timestep", p.ShiftedTimestep)
+	}
+	// BARE BASE64 AND NOT A DATA URL. api.md says the field takes either and
+	// a live server accepts both -- measured, with the same result -- so the
+	// choice is ember's: the prefix is eleven bytes of nothing on a payload
+	// that is already a third larger than the file, and one spelling means
+	// one thing for a reader of a captured request to compare against.
+	if p.InitImage != "" {
+		if len(j.InitImageBytes) == 0 {
+			return nil, fmt.Errorf("job names the staged image %s and nothing resolved it. "+
+				"The reference is stored and the bytes are not, so whatever submits a job has to "+
+				"load them first; sending the generation without the image would bill for a "+
+				"text-to-image run the request did not ask for", p.InitImage)
+		}
+		set(body, "init_image", "init_image",
+			base64.StdEncoding.EncodeToString(j.InitImageBytes))
+	}
+	// A pointer that is set is sent even when it holds zero: strength 0 is
+	// "keep the init image" and the server's own default is 0.75.
+	if p.Strength != nil {
+		set(body, "strength", "strength", *p.Strength)
 	}
 	// Scale is the switch, so a zero scale sends no block at all rather than
 	// a block the server reads as off. Layers without a scale would otherwise
