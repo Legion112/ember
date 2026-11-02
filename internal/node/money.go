@@ -249,22 +249,29 @@ func ParseUSD(s string) (MicroUSD, error) {
 	return MicroUSD(total), nil
 }
 
-// RateFromFloat converts a provider's JSON number to a Rate.
+// There is deliberately no float64 entry point to Rate. `RateFromFloat` was
+// one, written for Vast.ai -- #22 part 2, which does not exist -- and deleted
+// having never been called. Its premise, that Vast.ai reports prices as JSON
+// numbers, was read from documentation rather than from a response, which is
+// the bet `allowedCudaVersions` and `capabilities.model` both lost: a schema
+// read in place of a reply. Worse, it named a ceiling that was not the live
+// one, so a reader of this file could believe MaxRate was enforced here when
+// what enforces it is `Offer.Validate`, on every offer from every provider.
+// Two ceilings for one number with one of them unreachable is the shape
+// `queue.Cost` was deleted for.
 //
-// Vast.ai reports prices as JSON numbers, so a float64 is what the decoder
-// hands us and there is no decimal string to parse. Rounding is to nearest
-// here rather than up, because the float already is the provider's value and
-// biasing it would make ember's displayed price disagree with the invoice.
-func RateFromFloat(f float64) (Rate, error) {
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, fmt.Errorf("price is not a finite number: %v", f)
-	}
-	if f < 0 {
-		return 0, fmt.Errorf("negative price %v", f)
-	}
-	r := Rate(math.Round(f * micros))
-	if r > MaxRate {
-		return 0, fmt.Errorf("price %v/hr above the %v sanity ceiling: the field is probably not dollars per hour", f, MaxRate)
-	}
-	return r, nil
-}
+// The two judgements it carried are the reason this note exists rather than
+// nothing, because whoever writes that converter has to make them again:
+//
+//   - Round to NEAREST, not up. `Rate.Cost` rounds up because an estimate
+//     that reads low lets a run start the budget would have refused -- but a
+//     float that already *is* the provider's published price has no error to
+//     bias away from, and rounding it up makes ember's displayed price
+//     disagree with the invoice.
+//   - Refuse NaN, either infinity, a negative, and anything above MaxRate.
+//     A figure above the ceiling means the field was not dollars per hour --
+//     cents, or a total rather than a rate -- and renting on it rents
+//     something nobody priced.
+//
+// Nothing needs to re-implement the ceiling itself: an offer carrying such a
+// price is refused by `Offer.Validate` whether or not its provider checked.

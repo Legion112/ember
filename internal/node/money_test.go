@@ -92,27 +92,6 @@ func TestParseUSD_ErrorsQuoteWhatWasTyped(t *testing.T) {
 	}
 }
 
-func TestRateFromFloat_RefusesNonFiniteNegativeAndAbsurd(t *testing.T) {
-	for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -0.5, 5000} {
-		if got, err := RateFromFloat(f); err == nil {
-			t.Errorf("RateFromFloat(%v) = %v, want an error", f, got)
-		}
-	}
-}
-
-func TestRateFromFloat_Accepts(t *testing.T) {
-	got, err := RateFromFloat(2.134)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := Rate(2134000); got != want {
-		t.Errorf("RateFromFloat(2.134) = %d, want %d", got, want)
-	}
-	if got, err := RateFromFloat(0); err != nil || got != 0 {
-		t.Errorf("RateFromFloat(0) = %d, %v", got, err)
-	}
-}
-
 // TestRate_CostRoundsUp: an estimate that reads low is an estimate that lets a
 // run start which the budget would have refused.
 func TestRate_CostRoundsUp(t *testing.T) {

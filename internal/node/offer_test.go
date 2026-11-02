@@ -55,6 +55,11 @@ func validOffer() Offer {
 	return Offer{Provider: "runpod", Token: "tok", GPU: "rtx4090", GPUCount: 1, VRAM: 24576, Price: 340000, Reclaim: ReclaimNever}
 }
 
+// TestOffer_ValidateRefuses: the "absurd price" case is what makes this the
+// live MaxRate ceiling rather than one of two. The unreachable copy in
+// RateFromFloat was deleted for being believable as the enforced one, so
+// removing the branch here would leave the ceiling nowhere -- which this case
+// is here to notice instead of a comment nobody re-greps.
 func TestOffer_ValidateRefuses(t *testing.T) {
 	for name, mut := range map[string]func(*Offer){
 		"no provider":    func(o *Offer) { o.Provider = "" },
