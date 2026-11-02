@@ -214,6 +214,29 @@ make workload-sd MODEL=/path/to/v1-5-pruned_bf16.gguf
 ember up --config sd.yaml     # provider: local — free, CPU, a few seconds
 ```
 
+#### What the node image is published as
+
+`node.Dockerfile` is built by `.github/workflows/node-image.yml` on every push
+to `master` that touches it, and pushed to
+`ghcr.io/legion112/ember-node:<commit sha>`. The run's summary prints the
+digest, which is what `image:` should name.
+
+**There is no `:latest` tag, and that is not an oversight.** ember runs one
+container that is both the node and the workload, so the node image *is* the
+`image:` key and goes through the same refusal as any other reference: a
+`:latest` image, or one with no tag at all, is rejected before anything is
+rented. A published `:latest` could therefore never be provisioned from — it
+was pushed until this was noticed, and nothing in the repository ever named
+it. If you were pulling it, pull the sha tag instead and put the digest in
+your config.
+
+Renaming it to something like `:main` would be worse. ember refuses the
+*name* `latest`, not the behaviour "this tag moves", so a moving tag under
+another name is accepted and silently run — which is the mistake the refusal
+exists to prevent, with the one word that triggers it removed. The CUDA
+workload images do publish a moving `<tag>-sm<arch>`, but the reference they
+hand you carries the digest as well, and the digest is what decides.
+
 #### Publishing the CUDA image
 
 Either machine can publish it, and both run the same checks first.
