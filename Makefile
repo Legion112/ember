@@ -165,7 +165,7 @@ cover-check: cover
 #
 # It used to be spelled three times -- here and in two ci.yml steps -- and
 # .golangci.yml held a fourth list that named only `integration`, so the
-# image labs were vetted and linted nowhere for their whole life. The
+# image labs were vetted three times over and linted nowhere. The
 # workflows ask make for the tags now, the way workload-image.yml already
 # asks it for the image tag, and cmd/check-coverage's
 # TestEveryBuildTagReachesTheGates fails when this list or .golangci.yml's
