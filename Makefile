@@ -5,6 +5,57 @@
 # shell can still accumulate, and go-tun's verify-router target is what sixty
 # lines of inlined ssh looks like a year later.
 
+# SHELL and .SHELLFLAGS, because four gates could not fail and one of them was
+# what stopped a bad image shipping.
+#
+# Every lab target pipes `go test` into `tee`, so a human watches the run live
+# and the `--- SKIP` grep can read the log back afterwards. A shell pipeline
+# reports the LAST command's status, and `tee` always succeeds -- so for the
+# life of `test-image-labs`, `test-preview-lab`, `test-serve-lab` and
+# `test-image-labs-publish`, **a failing lab exited 0**. The only thing that
+# could fail those targets was the grep for a lab that skipped itself: the
+# guard against the small failure was the only live one, bolted onto a
+# pipeline that discarded the large one. Same shape as `AssertNoStray` running
+# after the reap had emptied the daemon, one layer out of the suite.
+#
+# The fourth is the serious one. `publish-sd-cuda` and
+# .github/workflows/workload-image.yml both run `test-image-labs-publish` and
+# then push, so AGENTS.md's claim that a bad image never ships rested on a
+# gate that could not fail -- a wrong-architecture image, a listener on a port
+# that should not be open, a missing `embernode fetch`, every one of them
+# checked by a lab whose failure the gate threw away.
+#
+# It is not only the labs. `cover`'s `go tool cover -func | tail -1` has the
+# same shape, and what it loses is smaller but the same kind of thing: a
+# profile the tool refuses prints no total and the target says nothing about
+# it, so the one number a human reads off `make cover` can simply be absent.
+# `cover-check`'s own recipe is a single `go run` whose status make already
+# sees, so the gate itself was never at risk there -- only the figure.
+#
+# `pipefail` and deliberately NOT `-e`. make already runs each recipe line in
+# its own shell and already stops the target on a non-zero line, so `-e` buys
+# almost nothing here and breaks three recipes that tolerate a failure in
+# order to say something useful about it: `workload-sd` copies a checkpoint
+# into the tree and removes it from `rc=$$?; rm -f .model.gguf` *after* a
+# docker build that may fail -- under `-e` a failed build would leave
+# gigabytes behind -- and `web-check` and `workload-sd-cuda-local` read a
+# version or an architecture into a variable and then print the command that
+# fixes it when nothing came back. pipefail is the part this defect needed,
+# and setting it here rather than per target is what keeps the next pipeline
+# somebody writes from reintroducing it.
+#
+# .github/workflows/ci.yml already had all of this right -- `set -o pipefail`
+# over both of its `go test | tee` steps and the SKIP grep in a step of its
+# own with `if: always()` so it runs over a red suite. The Makefile was the
+# odd one out, and the four targets it got wrong are exactly the gates no
+# pull request runs: a laptop and the dispatch-only publishing workflow.
+#
+# .SHELLFLAGS reaches `$(shell ...)` too in GNU make, not only recipes. The
+# three expansions below have no pipelines in them, so there is nothing for
+# pipefail to change; a pipeline added to one later inherits the fix.
+SHELL := /bin/bash
+.SHELLFLAGS := -o pipefail -c
+
 # Prefer the pinned toolchain when it is installed, so the Go that builds this
 # cannot drift from what go.mod declares just because the system package
 # updated. jira-mcp does the same.
@@ -198,6 +249,38 @@ LAB_IMAGE := ember:lab
 # same reason the lab lock exists: several checkouts on one machine is now the
 # normal way this is developed.
 LAB_LOG_DIR := /tmp/ember-labs-$(notdir $(CURDIR))
+
+# One name per log, not one per call site. Each of these was spelled twice --
+# once in the `tee` and once in the grep that reads it back -- which is the
+# drift the "nodes" subdirectory literal already cost this repository once.
+#
+# Recursive (=), not simple (:=), for the two that carry the architecture, so
+# the log follows a CUDA_ARCH set on the command line the way SD_CUDA_IMAGE
+# does.
+IMAGE_LABS_LOG = $(LAB_LOG_DIR)/image-labs-sm$(CUDA_ARCH).log
+PUBLISH_LABS_LOG = $(LAB_LOG_DIR)/publish-labs-sm$(CUDA_ARCH).log
+PREVIEW_LAB_LOG := $(LAB_LOG_DIR)/preview-lab.log
+SERVE_LAB_LOG := $(LAB_LOG_DIR)/serve-lab.log
+
+# The tail of every lab target, in the SAME shell line as the `go test` whose
+# log it reads. $(1) is that log.
+#
+# The spelling is the fix. A recipe line that fails stops the target, so the
+# grep as a line of its own would never run once the pipeline above it could
+# fail -- and "it failed **and** it skipped" is two problems rather than one:
+# a suite that reported a failure *and* reported success for something that
+# never ran has lost more than the failure says. So the status of the pipeline
+# is captured first, the log is grepped either way, and whichever went wrong
+# exits non-zero. The log is still written live by `tee`, pass or fail,
+# because a grep cannot read a log that only exists when the test succeeded --
+# that would trade one blind spot for another.
+#
+# A grep that could not READ the log is its own failure and not a clean run.
+# `grep -q` answers 1 for "no such line" and 2 for "could not look", and
+# treating the second as the first is how this whole entry happened: a check
+# that reports success for something it never did. The lesson is the check's
+# own, so it applies to itself.
+LAB_CHECK = rc=$$?; grep -q -- '--- SKIP' $(1); g=$$?; if [ $$g -eq 0 ]; then echo "a lab skipped itself"; rc=1; elif [ $$g -gt 1 ]; then echo "could not read $(1), so the --- SKIP check did not run"; rc=1; fi; exit $$rc
 
 .PHONY: all build web web-check web-test test-serve-lab test test-race cover cover-check vet fmt lint docker-build test-integration reap-labs test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
 
@@ -449,9 +532,8 @@ test-image-labs:
 	@mkdir -p $(LAB_LOG_DIR)
 	EMBER_SD_CUDA_IMAGE=$(SD_CUDA_IMAGE) EMBER_CUDA_ARCH=$(CUDA_ARCH) \
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
-		-run 'TestWorkloadImage_' | tee $(LAB_LOG_DIR)/image-labs-sm$(CUDA_ARCH).log
-	@if grep -q -- '--- SKIP' $(LAB_LOG_DIR)/image-labs-sm$(CUDA_ARCH).log; then \
-		echo "a lab skipped itself"; exit 1; fi
+		-run 'TestWorkloadImage_' | tee $(IMAGE_LABS_LOG); \
+	$(call LAB_CHECK,$(IMAGE_LABS_LOG))
 
 # The served path against a real sd-server, including the progress stream.
 #
@@ -477,9 +559,8 @@ test-preview-lab:
 	@mkdir -p $(LAB_LOG_DIR)
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v \
 		-timeout 25m ./test/integration/... \
-		-run 'TestPreview_' | tee $(LAB_LOG_DIR)/preview-lab.log
-	@if grep -q -- '--- SKIP' $(LAB_LOG_DIR)/preview-lab.log; then \
-		echo "a lab skipped itself"; exit 1; fi
+		-run 'TestPreview_' | tee $(PREVIEW_LAB_LOG); \
+	$(call LAB_CHECK,$(PREVIEW_LAB_LOG))
 
 # `ember serve` end to end: one rental drained by a queue, and the real UI in
 # a real browser.
@@ -507,9 +588,8 @@ test-serve-lab: web
 	@mkdir -p $(LAB_LOG_DIR)
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v \
 		-timeout 30m ./test/integration/... \
-		-run 'TestServe_' | tee $(LAB_LOG_DIR)/serve-lab.log
-	@if grep -q -- '--- SKIP' $(LAB_LOG_DIR)/serve-lab.log; then \
-		echo "a lab skipped itself"; exit 1; fi
+		-run 'TestServe_' | tee $(SERVE_LAB_LOG); \
+	$(call LAB_CHECK,$(SERVE_LAB_LOG))
 
 # The labs a publish must pass, named once so CI and a laptop run the same set.
 #
@@ -535,9 +615,8 @@ test-image-labs-publish:
 	@mkdir -p $(LAB_LOG_DIR)
 	EMBER_SD_CUDA_IMAGE=$(SD_CUDA_IMAGE) EMBER_CUDA_ARCH=$(CUDA_ARCH) \
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
-		-run $(PUBLISH_LABS) | tee $(LAB_LOG_DIR)/publish-labs-sm$(CUDA_ARCH).log
-	@if grep -q -- '--- SKIP' $(LAB_LOG_DIR)/publish-labs-sm$(CUDA_ARCH).log; then \
-		echo "a lab skipped itself"; exit 1; fi
+		-run $(PUBLISH_LABS) | tee $(PUBLISH_LABS_LOG); \
+	$(call LAB_CHECK,$(PUBLISH_LABS_LOG))
 
 # Publishing the CUDA image from this machine, as an equal of the CI workflow.
 #

@@ -212,6 +212,12 @@ jobs:
       # point of it. The lab compares what this job *asked* for against the
       # label the build baked, which is the only leg of the comparison the
       # build itself cannot influence.
+      #
+      # This step being *before* the publish is only worth something if it can
+      # fail, and for the life of the target it could not: the lab recipe piped
+      # `go test` into `tee`, make read tee's status, and a red suite exited 0.
+      # Measured with a deliberately failing lab -- the push ran. The Makefile
+      # sets `pipefail` globally now; see its header.
       - name: verify the image before publishing it
         run: make docker-build test-image-labs-publish CUDA_ARCH=${{ matrix.arch }}
 
