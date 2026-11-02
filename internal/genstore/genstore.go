@@ -261,6 +261,28 @@ type Request struct {
 	MemCached  int64 `json:"mem_cached_bytes,omitempty"`
 	AssetBytes int64 `json:"asset_bytes,omitempty"`
 
+	// Model is which model served this request, as the generation server
+	// reported it rather than as the config names it.
+	//
+	// NOT PART OF THE ASK, AND STRUCTURALLY SO. Enqueue's INSERT does not
+	// name the column, exactly as it does not name cost or node: a request
+	// does not choose a model -- `sd.serve` does, and a request may not touch
+	// it -- so a caller that set this before enqueueing would have it
+	// dropped. It is written by the queue, from the same /capabilities
+	// response PutCaps caches, at the moment a rental claims the request.
+	//
+	// THE CONFIG IS NOT THE ANSWER even though it is right in front of
+	// whoever asks. An operator can edit `sd.serve` between two rentals, so a
+	// reading of the config attributes last week's spend to this week's
+	// weights -- the `allowedCudaVersions` mistake in another costume, a
+	// value read from the wrong place and believed.
+	//
+	// Empty means nobody read it, which is a request that never got a node or
+	// one from before schema version 5. Both readers print a dash for it;
+	// nothing backfills, because the only stored copy of a past model is the
+	// cached caps row the next rental overwrites.
+	Model string `json:"model,omitempty"`
+
 	Err string `json:"error,omitempty"`
 }
 
@@ -406,12 +428,25 @@ const (
 	ByProvider GroupBy = "provider"
 	ByGPU      GroupBy = "gpu"
 	ByDay      GroupBy = "day"
+
+	// ByModel groups by the model the generation server reported, which is
+	// the grouping that makes the others interpretable.
+	//
+	// Every measurement this project has made is a statement about a model on
+	// a card: FLUX.2 at 2048x2048 took 140.8s a job on an RTX PRO 6000, sd15
+	// at 256x256 took 0.43s marginal on an RTX 2080 Ti. Those differ by a
+	// factor of about three hundred in sampling time on hardware a factor of
+	// four apart, so `--by gpu` alone groups the dimension that cannot be
+	// read without this one. It was absent until requests.model existed,
+	// because the only stored copy of a model was the cached caps row every
+	// rental overwrites.
+	ByModel GroupBy = "model"
 )
 
 // Valid reports whether g is a grouping this package implements.
 func (g GroupBy) Valid() bool {
 	switch g {
-	case ByTotal, ByProvider, ByGPU, ByDay:
+	case ByTotal, ByProvider, ByGPU, ByDay, ByModel:
 		return true
 	}
 	return false
@@ -419,7 +454,7 @@ func (g GroupBy) Valid() bool {
 
 // GroupBys is every grouping, so a command's flag help and this list cannot
 // disagree.
-func GroupBys() []GroupBy { return []GroupBy{ByProvider, ByGPU, ByDay} }
+func GroupBys() []GroupBy { return []GroupBy{ByProvider, ByGPU, ByDay, ByModel} }
 
 // SpendQuery narrows an aggregate.
 //
@@ -587,6 +622,16 @@ type Entry struct {
 
 	Provider string `json:"provider"`
 	GPU      string `json:"gpu,omitempty"`
+
+	// Model is what the generation server said it had loaded, which is the
+	// other half of every figure in this row: a cost per image is a fact
+	// about a model on a card and not about the card.
+	//
+	// Empty for a request that never reached a node and for every request
+	// from before schema version 5. `ember history` prints a dash there,
+	// because a blank cell in a column of names reads as a value that failed
+	// to print rather than as a question nobody can answer.
+	Model string `json:"model,omitempty"`
 
 	// RunID and Node name the rental that served it, which is what joins a
 	// row here to what `ember ls` reported at the time.

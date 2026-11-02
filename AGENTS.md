@@ -845,13 +845,40 @@ that sentence made unrepresentable rather than merely tested.
   `GroupBy.Valid` refuses anything else and `groupExpr` switches over the
   constants rather than interpolating the string. It is the one place in
   `genstore` where a caller's value could have become part of a statement.
-- **Grouping by model is not offered, because nothing records the model.**
-  `sd.serve` is config rather than request, and the only stored copy is a
-  single cached `caps` row the next rental overwrites -- so a historical
-  request's model is not knowable from the database. Offering it would be the
+- **The model is recorded from a response, and that is what makes grouping by
+  it possible.** It was not offered for a schema version, because `sd.serve`
+  is config rather than request and the only stored copy was a single cached
+  `caps` row the next rental overwrites -- so a historical request's model was
+  not knowable, and offering the grouping would have been the
   `allowedCudaVersions` mistake again: a value read from the wrong place and
-  believed. Recording it is a column written at claim time, which is a
-  follow-up and not a guess.
+  believed. `requests.model` is that column, written at claim time from
+  `capabilities.model.name` -- the same `/capabilities` response `PutCaps`
+  caches, and an **object** rather than the string the published field list
+  implies. It is written to **every** request on a rental and not only to the
+  opener, which is the opposite of how the rental's cost and memory figures
+  are attributed: those are quantities, and writing one rental's to each of
+  its requests multiplies the bill, while a model is a label every request on
+  that node ran against -- recording it on the opener alone would split one
+  model's spend between its own name and the dash. Nothing backfills, and here
+  there is not even a wrong answer available: no event carries the model, so a
+  backfill would have to read the cached caps row and stamp every row in the
+  history with whatever is loaded today. A row from before the column is empty
+  and both readers print a dash.
+- **What the server reports is the diffusion model, and that bounds what the
+  grouping can distinguish.** `resolve_display_model_path` in sd-server's
+  `routes_sdcpp.cpp` answers the basename of `--model`, else of
+  `--diffusion-model`, else nothing -- so a FLUX.2 configuration naming its
+  diffusion model, text encoder and VAE separately records the first and says
+  nothing about the other two, and two setups differing only in those read as
+  one model. Written down rather than worked around: a name ember composed
+  from the serve argv would be a reading of the config, which is the thing
+  this column exists not to be. Verified against a live `/capabilities` for
+  the single-file case (`{"name":"sd15.gguf","path":"/opt/models/sd15.gguf",
+  "stem":"sd15"}`, off `ember:sd` on a laptop) and from upstream's source for
+  the split case, because a monolithic checkpoint handed to
+  `--diffusion-model` refuses to load -- so **no response has been observed
+  for a three-file configuration**, and the limit above is read from the
+  server's code rather than from its answer.
 - **A total that is missing part of its history says so, every time.** A
   request from before these columns existed contributes its rental cost and no
   per-job figures, so `Bucket.Unrecorded` counts it and `ember spend` prints

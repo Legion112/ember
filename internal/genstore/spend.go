@@ -323,6 +323,14 @@ func groupExpr(g GroupBy) (expr string, named bool) {
 		// time makes the same spend land in different buckets depending on
 		// where the operator was sitting.
 		return "strftime('%Y-%m-%d', r.created_unix / 1000, 'unixepoch')", true
+	case ByModel:
+		// The empty string for a request whose model nobody read, as ByGPU
+		// does it for a request that named no card: one row for all of them,
+		// which `ember spend` prints as a dash. Coalescing them into a named
+		// bucket -- "unknown", or the currently loaded model -- would put
+		// requests ember knows nothing about into a group that claims to
+		// describe them.
+		return "r.model", true
 	default:
 		return "''", false
 	}

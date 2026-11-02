@@ -298,7 +298,10 @@ func TestSpend_Refusals(t *testing.T) {
 	cfg := storeConfig(t, d, "")
 
 	for name, args := range map[string][]string{
-		"an unknown grouping":   {"-by", "model"},
+		// "models" and not "model", which is now a grouping ember offers: the
+		// near miss is what a closed set is for, and a plural typo must be a
+		// refusal rather than one row keyed on nothing.
+		"an unknown grouping":   {"-by", "models"},
 		"a grouping with SQL":   {"-by", "provider; DROP TABLE requests"},
 		"a date that is not":    {"-since", "last tuesday"},
 		"a backwards period":    {"-since", "2026-11-03", "-until", "2026-11-01"},
@@ -314,12 +317,167 @@ func TestSpend_Refusals(t *testing.T) {
 		})
 	}
 
-	// And the refusal for a model grouping says why, because it is the one an
-	// operator will reach for first and the reason is not obvious.
+	// And the refusal names the groupings there are, from the one list, so a
+	// typo is answered with the set rather than with a document to go and
+	// read.
 	var out bytes.Buffer
-	err := runSpend([]string{"-config", cfg, "-by", "model"}, &out, d)
-	if err == nil || !strings.Contains(err.Error(), "nothing records which model") {
-		t.Errorf("the refusal does not say why grouping by model is not offered: %v", err)
+	err := runSpend([]string{"-config", cfg, "-by", "models"}, &out, d)
+	if err == nil {
+		t.Fatal("a grouping that is not in the set was accepted")
+	}
+	for _, g := range genstore.GroupBys() {
+		if !strings.Contains(err.Error(), string(g)) {
+			t.Errorf("the refusal does not name the %q grouping: %v", g, err)
+		}
+	}
+}
+
+// TestSpend_GroupsByModel.
+//
+// THE GROUPING THAT MAKES THE OTHERS READABLE, and the one `ember spend` used
+// to refuse: every measurement this project has made is a statement about a
+// model on a card, so "an A100 costs $X per image" means nothing on its own.
+func TestSpend_GroupsByModel(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, "")
+	seedSpend(t, cfg, d, func(t *testing.T, st genstore.Store) {
+		modelRow(t, st, "flux2-dev-Q8_0.gguf", "rtx-pro-6000", spendDay(1),
+			2_490_000, time.Hour, 2, 400_000, 28, 140*time.Second)
+		modelRow(t, st, "sd15.gguf", "rtx2080ti", spendDay(2),
+			340_000, time.Hour, 2, 20_000, 4, 10*time.Second)
+		// A request from before the column: it has a rental cost and no
+		// model, which is what the dash row is.
+		rentalRow(t, st, "rtx4090", spendDay(3), 890_000, time.Hour, 1, 95_000, 28, time.Minute)
+	})
+
+	var out bytes.Buffer
+	if err := runSpend([]string{"-config", cfg, "-by", "model"}, &out, d); err != nil {
+		t.Fatalf("spend --by model = %v\n%s", err, out.String())
+	}
+	got := out.String()
+	t.Logf("ember spend --by model:\n%s", got)
+
+	if !strings.HasPrefix(got, "model ") {
+		t.Errorf("the key column is not headed model:\n%s", got)
+	}
+	// IN FULL, NOT TRUNCATED. A model name cut to the old twelve-character
+	// key column turns two quantisations of one model into the same row, the
+	// substring mistake node.NormalizeGPU exists to prevent.
+	for _, want := range []string{"flux2-dev-Q8_0.gguf", "sd15.gguf"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the model %q is not reported whole:\n%s", want, got)
+		}
+	}
+	// THE COLUMNS STILL LINE UP, which a fixed-width key column did not do
+	// once a nineteen-character filename went in it: every figure in that row
+	// was pushed right, so the table read as if the money sat under the wrong
+	// headings. Every line ends with a right-aligned column, so an equal
+	// length is an exact statement about alignment.
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	header := lines[0]
+	for _, l := range lines[1:] {
+		if l == "" {
+			break // the table ends at the blank line before any prose
+		}
+		if len(l) != len(header) {
+			t.Errorf("a row is %d characters and the header is %d, so the columns do not line up:\n%s",
+				len(l), len(header), got)
+		}
+	}
+	// And the request nobody recorded a model for is its own row, keyed with
+	// a dash rather than with a blank cell or with a model it did not run.
+	// Money under a heading that claims to describe it is the mistake the
+	// column exists to end, and an empty key would print as whitespace an
+	// operator reads as a figure that failed to print.
+	var dashed bool
+	for _, l := range lines[1:] {
+		if l == "" {
+			break
+		}
+		if strings.HasPrefix(l, "- ") && strings.Contains(l, "$0.89") {
+			dashed = true
+		}
+	}
+	if !dashed {
+		t.Errorf("the request with no model is not keyed with a dash:\n%s", got)
+	}
+}
+
+// A group with no images reports a dash per image rather than $0.
+//
+// FOUND BY READING THE OUTPUT of `--by model`, which is where it first became
+// visible: grouped by card, a request from before ember recorded anything sits
+// in a row with real images and its missing figures are absorbed; grouped by
+// model it is its own row, and it printed "$0" per image over a $0.50 rental.
+// That reads as free, which is the direction a money figure must never be
+// wrong in -- and the footnote under the table calls per image an upper BOUND,
+// so the row contradicted the only warning the report gives.
+func TestSpend_DashesADivisionWithNoDenominator(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, "")
+	seedSpend(t, cfg, d, func(t *testing.T, st genstore.Store) {
+		r := genstore.Request{
+			Provider: "runpod", GPU: "rtx4090", TTL: time.Hour, Created: spendDay(1),
+			Jobs: []genstore.Job{{Prompt: "a cat"}},
+		}
+		id, err := st.Enqueue(t.Context(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Finished, charged for, and not one job ever reported: a request
+		// from before the execution columns existed.
+		if err := st.Update(t.Context(), id, func(g *genstore.Request) {
+			g.Status = genstore.StatusDone
+			g.Cost, g.Billable = 500_000, time.Hour
+			g.Started, g.Ended = spendDay(1), spendDay(1).Add(time.Hour)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	var out bytes.Buffer
+	if err := runSpend([]string{"-config", cfg}, &out, d); err != nil {
+		t.Fatalf("spend = %v\n%s", err, out.String())
+	}
+	got := out.String()
+	t.Logf("ember spend over a request with no images:\n%s", got)
+
+	if !strings.Contains(got, "$0.5") {
+		t.Errorf("the rental that was paid for is not reported:\n%s", got)
+	}
+	// The rental is real and the quotients are not. The last two cells are
+	// per image and steps/s; "$0" and "0.00" there are claims that a card
+	// generated images for free at no rate. Card time of $0 beside them is a
+	// SUM of nothing and stays a zero, which is a different statement.
+	row := strings.Split(got, "\n")[1]
+	cells := strings.Fields(row)
+	if len(cells) < 2 {
+		t.Fatalf("the row has no figures: %q", row)
+	}
+	for _, cell := range cells[len(cells)-2:] {
+		if cell != "-" {
+			t.Errorf("a division with no denominator printed as %q: %q", cell, row)
+		}
+	}
+}
+
+// modelRow records a finished rental that reported which model it served.
+func modelRow(t *testing.T, st genstore.Store, model, gpu string, created time.Time,
+	cost node.MicroUSD, billable time.Duration, jobs int, each node.MicroUSD,
+	steps int64, took time.Duration) {
+	t.Helper()
+	rentalRow(t, st, gpu, created, cost, billable, jobs, each, steps, took)
+	rows, err := st.List(t.Context(), genstore.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The newest, which is the one just written. Through Update because a
+	// request cannot ASK for a model -- Enqueue does not write the column, so
+	// this is the only way in, and it is the way the queue uses.
+	if err := st.Update(t.Context(), rows[0].ID, func(r *genstore.Request) {
+		r.Model = model
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -1745,16 +1745,16 @@ a100-80g         1     4      4       $1.79       $1.52       $0.27    $0.4475  
 rtx4090          3     9      8       $1.39       $0.76       $0.63   $0.17375    0.15
 
 total: 4 request(s), 12 image(s), $3.18 of rental, $2.28 of card time
-41% of billable rental time was spent generating.
+62% of billable rental time was spent generating.
 1 request(s) contribute their rental cost and no per-job figures -- they ran
 before ember recorded them, or finished without a job completing. So per image
 is an upper bound here, and steps/s is computed only over what was recorded.
 Nothing backfills them.
 ```
 
-`--by` takes `provider`, `gpu` or `day`; `--since` and `--until` are UTC dates
-and the period is half-open, so consecutive periods tile without counting a
-day twice. `--json` prints the rows with money as integer microdollars, and
+`--by` takes `provider`, `gpu`, `day` or `model`; `--since` and `--until` are
+UTC dates and the period is half-open, so consecutive periods tile without
+counting a day twice. `--json` prints the rows with money as integer microdollars, and
 without the derived figures: cost per image and steps/s are divisions of
 columns that are there, and a stored quotient is a number that can be wrong
 while its terms are right.
@@ -1769,11 +1769,49 @@ measured, now, rather than estimated by hand at 7%. `rental` is summed over
 the request that *opened* each rental, so a rental is counted once however
 many requests rode along on it.
 
-**It cannot group by model.** Nothing records which model served a request:
-`sd.serve` is config rather than request, and the only stored copy is a single
-cached capability row that the next rental overwrites. Grouping by it would
-mean guessing, which is the `a100-40g` is not `a100-80g` mistake one layer up.
-Recording it is a column written at claim time and a small follow-up.
+**Grouping by model took a column, and it is the grouping that makes the
+others readable.** `--by gpu` on its own groups the dimension that is nearly
+useless alone: "an A100 costs $X per image" means nothing without the model,
+and the two measurements in this file differ by a factor of about three
+hundred in sampling time on hardware a factor of four apart. It could not be
+offered at all until `requests.model` existed, because `sd.serve` is config
+rather than request and the only stored copy of a model was one cached
+capability row that the next rental overwrites — so a historical request's
+model was not knowable, and grouping by it would have meant reading a value
+from the wrong place and believing it.
+
+```
+$ ember spend --by model
+model                reqs  jobs images      rental   card time    overhead  per image steps/s
+-                       1     1      0        $0.5          $0        $0.5          -       -
+flux2-dev-Q8_0.gguf     1     4      4       $1.79       $1.52       $0.27    $0.4475    0.05
+sd15-Q8_0.gguf          2     8      8       $0.89       $0.76       $0.13   $0.11125    0.15
+
+total: 4 request(s), 12 image(s), $3.18 of rental, $2.28 of card time
+62% of billable rental time was spent generating.
+1 request(s) contribute their rental cost and no per-job figures -- they ran
+before ember recorded them, or finished without a job completing. So per image
+is an upper bound here, and steps/s is computed only over what was recorded.
+Nothing backfills them.
+```
+
+Three things about that column. **It is a response, not a reading of the
+config.** The value is `capabilities.model.name`, out of the same
+`/capabilities` answer ember caches to validate a sampler — so a `sd.serve`
+edited between two rentals cannot attribute last week's spend to this week's
+weights. **It is what the server calls the model, which is the diffusion
+model.** sd-server answers the basename of `--model`, or of
+`--diffusion-model` where there is no `--model`, so a FLUX.2 configuration
+naming its diffusion model, text encoder and VAE separately records the first
+and says nothing about the other two: two setups differing only in those read
+as one model. That is a limit of what the server reports rather than a
+decision here, and ember prefers it to a name ember composed from the serve
+argv, which would be a reading of the config again. **Nothing backfills, and
+here there is not even a wrong answer available** — no event carries the
+model, so the only thing a backfill could read is that cached capability row,
+which would stamp every row in the history with whatever is loaded today. A
+request from before the column, or one that never reached a node, groups under
+a dash and `ember history` says how many it had to leave unnamed.
 
 **`ember up` is not in here.** It prints its cost and keeps nothing — only
 `ember serve` writes to the generation history — so about half the
@@ -1810,11 +1848,11 @@ a browser, or opening SQLite by hand.
 
 ```
 $ ember history
-when (utc)       request          status      provider   card          jobs images      wall      rental   card time
-2026-10-31 18:19 080f21c0cc2f5be8 done        runpod     rtx4090          3      3     6m45s           -      $0.285
-2026-10-31 18:02 5f324627337df6f5 done        runpod     rtx4090          5      5    14m30s       $0.89      $0.475
-2026-10-29 09:14 15d87a1aae672727 done        runpod     a100-80g         4      4    41m12s       $1.79       $1.52
-2026-10-24 11:40 1393e5b386595420 done        runpod     rtx4090          1      -     33m0s        $0.5           -
+when (utc)       request          status      provider   card          jobs images      wall      rental   card time model
+2026-10-31 18:19 080f21c0cc2f5be8 done        runpod     rtx4090          3      3     8m30s           -      $0.285 sd15-Q8_0.gguf
+2026-10-31 18:02 5f324627337df6f5 done        runpod     rtx4090          5      5     17m0s       $0.89      $0.475 sd15-Q8_0.gguf
+2026-10-29 09:14 15d87a1aae672727 done        runpod     a100-80g         4      4    41m12s       $1.79       $1.52 flux2-dev-Q8_0.gguf
+2026-10-24 11:40 1393e5b386595420 done        runpod     rtx4090          1      -     33m0s        $0.5           - -
 
 total: 4 request(s), 12 image(s), $3.18 of rental, $2.28 of card time
 1 request(s) rode along on a rental another request opened, so their rental
@@ -1823,7 +1861,18 @@ request paid for it to exist.
 1 request(s) finished with no per-job figures -- from before ember recorded
 them, or without a job completing -- so their images and card time are a dash
 rather than zero. Nothing backfills them.
+1 request(s) have no model: they never reached a node, or they ran before
+ember recorded which model served a request. Nothing backfills them -- the only
+stored copy of a past model is a cached capability row the next rental
+overwrites.
 ```
+
+The model column is last for one reason: it is the only cell whose width is
+not ember's to choose. A model is a filename, and
+`flux2-dev-Q8_0.gguf` is nineteen characters against `rtx4090`'s seven — so
+anywhere else a long name pushes every figure after it out of its column, and
+truncating it to fit would make two quantisations of one model read as the
+same model.
 
 `--since` and `--until` are UTC dates and half-open, the same rule `ember
 spend` uses, so the two tile alike. `--provider`, `--gpu` and `--status` match
@@ -1831,7 +1880,7 @@ exactly; `--limit` bounds the page, which defaults to the newest 200. `--json`
 prints the rows with money as integer microdollars and the full text of any
 error, where the table shows one line of it.
 
-**The two dashes are the point of the table.** A rental serves every queued
+**The two money dashes are the point of the table.** A rental serves every queued
 request it can, and its cost is charged to the request that *opened* it — so
 every request that joined a rental already up has a rental cost of zero by
 design. A money column of zeros that means "charged on another row" is the
@@ -1843,6 +1892,12 @@ which is every request from before the execution columns existed and also one
 that broke before a job completed. Both divide a rental cost into no images,
 which is why they are counted together and why `ember spend` calls per image
 an upper bound when there are any.
+
+A dash in the model column is a third fact and not one of those two: nobody
+read a model for that request, because it never reached a node or because it
+ran before ember recorded which model served one. It is said out loud under
+the table for the reason the other two are — a column of dashes otherwise
+reads as ember having lost the names.
 
 **It reports what each node said about its memory.** `--memory` prints the
 same rows with the memory facts instead of the costs:

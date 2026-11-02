@@ -35,7 +35,7 @@ func runSpend(args []string, out io.Writer, d deps) error {
 	fs.SetOutput(out)
 	var (
 		cfgPath = fs.String("config", config.FileName, "path to ember.yaml")
-		by      = fs.String("by", "", "group by provider, gpu or day; empty is one total")
+		by      = fs.String("by", "", "group by provider, gpu, day or model; empty is one total")
 		since   = fs.String("since", "", "only requests created at or after this date (YYYY-MM-DD, UTC)")
 		until   = fs.String("until", "", "only requests created before this date (YYYY-MM-DD, UTC)")
 		asJSON  = fs.Bool("json", false, "print the rows as JSON")
@@ -45,6 +45,7 @@ func runSpend(args []string, out io.Writer, d deps) error {
 		outf(out, "Out of the database `ember serve` writes, which is the only thing that\nrecords a generation. `ember up` prints its cost and keeps nothing, so a\nrun made that way is not in here -- see README.\n\n")
 		outf(out, "Two cost figures, and the difference between them is the point. The\nrental is what the provider charges; card time is what the jobs\nthemselves took. A batch pays provisioning, the image pull, the store\nread and the model load once for everything it serves, and that gap is\nthe overhead column.\n\n")
 		outf(out, "Dates are UTC and the period is half-open -- --since includes, --until\nexcludes -- so consecutive periods tile without counting a day twice.\n\n")
+		outf(out, "--by model groups by the name the generation server reported when the\nweights went resident, not by what `sd.serve` names today: a config edited\nbetween two rentals would otherwise attribute last week's spend to this\nweek's weights. It is the checkpoint's filename, or the diffusion model's\nwhere a configuration names its text encoder and VAE separately -- so two\nsetups differing only in those two read as one model. A request from\nbefore ember recorded it, or one that never got a node, groups under a\ndash; nothing backfills.\n\n")
 		outf(out, "usage: ember spend [flags]\n\n")
 		fs.PrintDefaults()
 	}
@@ -58,8 +59,7 @@ func runSpend(args []string, out io.Writer, d deps) error {
 
 	group := genstore.GroupBy(*by)
 	if !group.Valid() {
-		return usageError{fmt.Errorf("cannot group by %q; ember groups by %v, or by nothing for one total. "+
-			"Grouping by model is not offered because nothing records which model served a request -- see README",
+		return usageError{fmt.Errorf("cannot group by %q; ember groups by %v, or by nothing for one total",
 			*by, genstore.GroupBys())}
 	}
 	q := genstore.SpendQuery{By: group}
@@ -133,11 +133,35 @@ func printSpend(out io.Writer, rows []genstore.Bucket, group genstore.GroupBy) {
 		genstore.ByProvider: "provider",
 		genstore.ByGPU:      "card",
 		genstore.ByDay:      "day",
+		genstore.ByModel:    "model",
 	}[group]
 
+	// THE KEY COLUMN IS AS WIDE AS THE WIDEST KEY, which it was not until a
+	// model name went in it. A model is a filename -- "flux2-dev-Q8_0.gguf"
+	// is nineteen characters where "rtx4090" is seven -- and a fixed twelve
+	// pushed every figure in that row out of its column, so the table read as
+	// if the numbers belonged to different headings. Truncating instead would
+	// have been worse: a name cut to twelve turns two quantisations of one
+	// model into one row's worth of identical text, which is the substring
+	// mistake node.NormalizeGPU exists to prevent, in a report.
+	//
+	// Never narrower than the old twelve, so every other grouping prints
+	// exactly as it did.
+	keyWidth := len(label)
+	for _, b := range rows {
+		if n := len(keyOr(b.Key)); n > keyWidth {
+			keyWidth = n
+		}
+	}
+	if keyWidth < 12 {
+		keyWidth = 12
+	}
+	keyCell := fmt.Sprintf("%%-%ds ", keyWidth)
+
 	if label != "" {
-		outf(out, "%-12s %5s %5s %6s %11s %11s %11s %10s %7s\n",
-			label, "reqs", "jobs", "images", "rental", "card time", "overhead", "per image", "steps/s")
+		outf(out, keyCell, label)
+		outf(out, "%5s %5s %6s %11s %11s %11s %10s %7s\n",
+			"reqs", "jobs", "images", "rental", "card time", "overhead", "per image", "steps/s")
 	} else {
 		outf(out, "%5s %5s %6s %11s %11s %11s %10s %7s\n",
 			"reqs", "jobs", "images", "rental", "card time", "overhead", "per image", "steps/s")
@@ -149,11 +173,28 @@ func printSpend(out io.Writer, rows []genstore.Bucket, group genstore.GroupBy) {
 	)
 	for _, b := range rows {
 		if label != "" {
-			outf(out, "%-12s ", keyOr(b.Key))
+			outf(out, keyCell, keyOr(b.Key))
 		}
-		outf(out, "%5d %5d %6d %11s %11s %11s %10s %7.2f\n",
+		// A DASH WHERE THE DIVISION HAS NO DENOMINATOR, which is the rule
+		// `ember history` already applies to its own columns and which this
+		// table did not until a model grouping gave the unrecorded requests a
+		// row of their own. Aggregated by card they hid inside a row with
+		// real images; grouped by model, a request from before ember recorded
+		// anything is its own row -- and it printed "$0" per image over a
+		// $0.50 rental, which reads as free. That is wrong in the cheap
+		// direction, and the footnote three screens down calls per image an
+		// upper BOUND, so the table was contradicting the only warning it
+		// gives. Found by reading the output, not by a test.
+		perImage, rate := b.PerImage().String(), fmt.Sprintf("%.2f", b.StepsPerSecond())
+		if b.Images <= 0 {
+			perImage = "-"
+		}
+		if b.Steps <= 0 || b.Sampling <= 0 {
+			rate = "-"
+		}
+		outf(out, "%5d %5d %6d %11s %11s %11s %10s %7s\n",
 			b.Requests, b.Jobs, b.Images, b.RunCost, b.JobCost, b.Overhead(),
-			b.PerImage(), b.StepsPerSecond())
+			perImage, rate)
 
 		total.Requests += b.Requests
 		total.Jobs += b.Jobs
@@ -197,7 +238,11 @@ func printSpend(out io.Writer, rows []genstore.Bucket, group genstore.GroupBy) {
 // keyOr prints a dash for a group with no key.
 //
 // A CPU-only request has no card, and the empty string in that column would
-// read as a missing value rather than as the answer.
+// read as a missing value rather than as the answer. Grouped by model it is
+// the other way round and the dash is just as necessary: the key is empty
+// because nobody read the model -- a request that never got a node, or one
+// from before schema version 5 -- and a blank cell in a column of names reads
+// as a value that failed to print.
 func keyOr(k string) string {
 	if k == "" {
 		return "-"

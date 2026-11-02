@@ -312,6 +312,28 @@ func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat ge
 	req := first
 	for {
 		*served = append(*served, req.ID)
+		// WHICH MODEL SERVED THIS REQUEST, recorded before it generates and
+		// to EVERY request on the rental rather than only to the opener.
+		//
+		// That is the opposite of how the rental's cost, its memory figures
+		// and its load spans are written, and the difference is that those
+		// are money: attributing one rental's cost to each of its requests
+		// multiplies the bill, so they go to whichever request paid for the
+		// node to exist. A model is a label, not a quantity -- every request
+		// this rental serves ran against the same weights -- and writing it
+		// to the opener alone would split one model's spend between its own
+		// name and the dash, which is the figure `ember spend --by model`
+		// exists to produce.
+		//
+		// From s.Caps() and not from the config: `sd.serve` is editable
+		// between rentals, and the capabilities are a response. There is no
+		// event carrying the model, so unlike the cost columns this one is
+		// not a derived index of the event stream -- the response is the
+		// authority, read once per rental, cached by PutCaps a few lines up.
+		// An empty name is written as empty: a server that reported no model
+		// (neither --model nor --diffusion-model named) is a fact, and
+		// inventing a value here is the mistake the column exists to end.
+		q.set(req.ID, func(r *genstore.Request) { r.Model = s.Caps().Model })
 		err := q.generate(ctx, s, req)
 		q.finish(ctx, req.ID, err)
 		switch {
