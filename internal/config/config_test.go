@@ -911,3 +911,44 @@ sd:
 		t.Errorf("err = %v, want it to name the field and the job", err)
 	}
 }
+
+// TestKeepEvents_OffByDefaultAndRefusesANegativeHorizon.
+//
+// Off by default is the retention decision: nothing in ember deletes an
+// operator's data as a side effect, so the absent key means keep every event
+// forever rather than keep them for some built-in number of days.
+//
+// A negative value is refused rather than clamped, as `ember store abort`
+// refuses a negative --older-than. It reads as "no bound", and a horizon of
+// "finished before now PLUS a month" selects every request that has ever
+// ended -- while clamping it to zero is the other defensible guess and would
+// silently mean "keep everything" to somebody who wrote -720h meaning the
+// opposite.
+func TestKeepEvents_OffByDefaultAndRefusesANegativeHorizon(t *testing.T) {
+	bare, err := Load(write(t, "provider: local\nimage: ember-sd:1\nttl: 10m\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep, err := bare.KeepEvents()
+	if err != nil || keep != 0 {
+		t.Errorf("KeepEvents() = %v, %v; an absent history block keeps everything", keep, err)
+	}
+
+	set, err := Load(write(t, "provider: local\nimage: ember-sd:1\nttl: 10m\nhistory:\n  keep_events: 720h\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keep, err = set.KeepEvents(); err != nil || keep != 720*time.Hour {
+		t.Errorf("KeepEvents() = %v, %v; want 720h", keep, err)
+	}
+
+	bad, err := Load(write(t, "provider: local\nimage: ember-sd:1\nttl: 10m\nhistory:\n  keep_events: -720h\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bad.KeepEvents(); err == nil {
+		t.Fatal("a negative horizon was accepted")
+	} else if !strings.Contains(err.Error(), "keep_events") {
+		t.Errorf("err = %v, want it to name the key", err)
+	}
+}

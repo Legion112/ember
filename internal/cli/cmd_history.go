@@ -17,7 +17,30 @@ import (
 
 func cmdHistory(args []string, out io.Writer) error { return runHistory(args, out, deps{}) }
 
-// runHistory lists what ember has been asked for and what each request cost.
+// runHistory dispatches the history subcommands, and lists the ledger when
+// there is none.
+//
+// THE BARE VERB STAYS THE LEDGER. `ember history` has printed the table since
+// it existed and `ember history --json` is in README; a second level of switch
+// that required `ember history ls` would break both for the sake of symmetry
+// with `ember store`. A leading word that is not a subcommand falls through to
+// the flag parser, which is what rejects it -- so `ember history -status done`
+// and `ember history nonsense` both end up where they did before.
+func runHistory(args []string, out io.Writer, d deps) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "du":
+			return runHistoryDu(args[1:], out, d)
+		case "prune":
+			return runHistoryPrune(args[1:], out, d)
+		case "rm":
+			return runHistoryRm(args[1:], out, d)
+		}
+	}
+	return runHistoryList(args, out, d)
+}
+
+// runHistoryList lists what ember has been asked for and what each request cost.
 //
 // THE LEDGER BESIDE THE AGGREGATE. `ember spend` answers "what did last week
 // cost"; this answers "which run was it", which is the next question whenever
@@ -31,7 +54,7 @@ func cmdHistory(args []string, out io.Writer) error { return runHistory(args, ou
 // able to rent" is a property of what this function has rather than a rule
 // somebody has to remember, which is the DryProvider distinction applied to a
 // command that does not need a provider at all.
-func runHistory(args []string, out io.Writer, d deps) error {
+func runHistoryList(args []string, out io.Writer, d deps) error {
 	fs := flag.NewFlagSet("history", flag.ContinueOnError)
 	fs.SetOutput(out)
 	var (
@@ -52,7 +75,10 @@ func runHistory(args []string, out io.Writer, d deps) error {
 		outf(out, "Dates are UTC and the period is half-open -- --since includes, --until\nexcludes -- the same rule `ember spend` uses, so the two tile alike.\n\n")
 		outf(out, "--memory prints what each node said about its memory instead of the cost\ncolumns. Both views, because they disagree: a container's cgroup limit is\nwhat bounds its page cache, and /proc/meminfo reports the HOST's memory --\nwhich is why eight nodes could all claim 620-708 GiB free while two of them\ndiffered by 81 seconds and $0.056 per image. See README.\n\n")
 		outf(out, "It reads and nothing else: no provider is contacted and the queue cannot\nbe advanced through it.\n\n")
-		outf(out, "usage: ember history [flags]\n\n")
+		outf(out, "usage: ember history [flags]\n       ember history <subcommand> [flags]\n\n")
+		outf(out, "  du       say what the history occupies, in the database and on disk\n")
+		outf(out, "  prune    drop the per-step events of finished requests past a horizon\n")
+		outf(out, "  rm       remove a request's generated images from disk, keeping its costs\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

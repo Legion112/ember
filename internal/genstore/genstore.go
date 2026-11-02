@@ -807,5 +807,25 @@ type Store interface {
 	// process died cannot be resumed, because its rental is gone.
 	Interrupt(ctx context.Context) (int, error)
 
+	// PruneEvents drops the events of finished requests that ended before the
+	// horizon, keeping the request, its jobs, its costs and its images.
+	// dryRun counts them and removes nothing.
+	//
+	// THE ONE THING HERE THAT MAY GO BY AGE. The execution columns are a
+	// derived index of these events, so what a prune costs is the replay and
+	// not a figure -- see internal/genstore/prune.go for why the other three
+	// tables have no equivalent, and why the schema's ON DELETE CASCADE
+	// clauses are not the mechanism this looks like it should have used.
+	PruneEvents(ctx context.Context, before time.Time, dryRun bool) (int, error)
+
+	// DropImages forgets the image rows of one request and reports how many
+	// went. The blobs they named are the caller's to remove, first: a row
+	// removed ahead of its file leaves bytes nothing in ember can name.
+	DropImages(ctx context.Context, id ReqID) (int, error)
+
+	// Usage counts what the history holds, for `ember history du`. An operator
+	// cannot decide to prune something they cannot measure.
+	Usage(ctx context.Context) (Usage, error)
+
 	Close() error
 }

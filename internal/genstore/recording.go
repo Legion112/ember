@@ -334,6 +334,95 @@ func (s *RecordingStore) Interrupt(_ context.Context) (int, error) {
 	return n, nil
 }
 
+// PruneEvents drops the events of finished requests that ended before the
+// horizon.
+//
+// A SECOND IMPLEMENTATION OF THE PREDICATE, as Spend and Filter.matches here
+// already are, and for the same reason: the SQL half is where this is most
+// likely to be subtly wrong, and a fake that delegated to it could not
+// disagree. The conformance table drives both and compares what each one
+// removed AND what each one kept, because a prune that takes a row it should
+// have left is the failure mode, and a prune that takes nothing passes any
+// assertion that only counts what went.
+func (s *RecordingStore) PruneEvents(_ context.Context, before time.Time, dryRun bool) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("PruneEvents", before.UTC().Format(time.RFC3339)); err != nil {
+		return 0, err
+	}
+
+	n := 0
+	for _, id := range s.order {
+		r, ok := s.reqs[id]
+		if !ok {
+			continue
+		}
+		// Ended and before the horizon, which is the whole of the SQL
+		// predicate. A queued or running request has no end, so its events
+		// are unreachable from here -- the live-stream case is excluded by
+		// the shape of the test rather than by a separate filter.
+		if r.Ended.IsZero() || !r.Ended.Before(before) {
+			continue
+		}
+		n += len(s.events[id])
+		if !dryRun {
+			delete(s.events, id)
+		}
+	}
+	return n, nil
+}
+
+// DropImages forgets the image rows of one request.
+func (s *RecordingStore) DropImages(_ context.Context, id ReqID) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("DropImages", string(id)); err != nil {
+		return 0, err
+	}
+	n := len(s.images[id])
+	delete(s.images, id)
+	return n, nil
+}
+
+// Usage counts what the history holds.
+func (s *RecordingStore) Usage(_ context.Context) (Usage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("Usage", ""); err != nil {
+		return Usage{}, err
+	}
+
+	var u Usage
+	for _, id := range s.order {
+		r, ok := s.reqs[id]
+		if !ok {
+			continue
+		}
+		u.Requests++
+		u.Jobs += len(r.Jobs)
+		u.Events += len(s.events[id])
+		u.Images += len(s.images[id])
+		for _, im := range s.images[id] {
+			u.ImageBytes += im.Bytes
+		}
+
+		// Finished, reported images, and has none left -- which is what
+		// `ember history rm` leaves behind. Read off the job runs rather than
+		// off the image rows, because that is where the count survives a
+		// prune, exactly as the SQL reads jobs.images.
+		if r.Ended.IsZero() || len(s.images[id]) > 0 {
+			continue
+		}
+		for _, j := range s.runsOf(id) {
+			if j.Images > 0 {
+				u.Reclaimed++
+				break
+			}
+		}
+	}
+	return u, nil
+}
+
 // Close is a no-op. It exists so a caller can hold the interface and not care
 // which implementation it has.
 func (s *RecordingStore) Close() error { return nil }
