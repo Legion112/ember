@@ -61,6 +61,63 @@ func dialLocal(t *testing.T, port uint16) net.Conn {
 	return dialAddr(t, loopback.Port(port).String())
 }
 
+// assertBindable asserts a port can be listened on again, retrying until a
+// deadline.
+//
+// THE RETRY IS ABOUT THE MACHINE, NOT ABOUT THE FORWARDER. Run closes every
+// listener before it returns -- twice over, through context.AfterFunc on
+// cancellation and through closeAll on the way out -- so the port really is
+// free by then. What is not guaranteed is that it STAYS free: freePort asks
+// the kernel for an ephemeral port and gives it straight back, and between
+// Run releasing the port and this assertion taking it, anything else on the
+// machine can bind it. CI runs every package's test binary at once, each
+// handing out ephemeral ports, and that is what happened:
+//
+//	port 45531 was still bound after Run returned: listen on 127.0.0.1:45531:
+//	listen tcp 127.0.0.1:45531: bind: address already in use
+//
+// once, on a pull request that had not touched this package, and never in 300
+// local runs. A single attempt turns that into a red build on an unrelated
+// change, which is how a working check gets ignored rather than obeyed.
+//
+// The property is unweakened: a forwarder that genuinely held its listener
+// still fails here, a second or two later. What the retry removes is the
+// false failure, and the cost is that a leak is reported late rather than at
+// once. EADDRINUSE cannot say WHO holds the port, so the two cannot be told
+// apart from here and the message says so rather than accusing the forwarder.
+//
+// Same shape and same reason as dialAddr below, from the other side: that one
+// retries because a listener may not be open yet, this one because a port may
+// not be free yet.
+func assertBindable(t *testing.T, port uint16, when string) {
+	t.Helper()
+	deadline := time.Now().Add(portReleaseWait)
+	var err error
+	for {
+		var ln net.Listener
+		if ln, err = loopback.Listen(t.Context(), loopback.Port(port)); err == nil {
+			_ = ln.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("port %d could not be bound %s, after %v of retrying: %v\n"+
+				"Either the forwarder did not release it, or something else on this "+
+				"machine holds it; the error cannot tell those apart.",
+				port, when, portReleaseWait, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// portReleaseWait bounds that retry.
+//
+// Long enough to outlast another test binary's ephemeral listener, short
+// enough that a forwarder which really leaked is reported in about the time
+// one of these tests already takes. Not a guarantee: a process that holds the
+// port for longer still fails this, which is the honest limit of asserting on
+// a port number the kernel is free to hand to anybody.
+const portReleaseWait = 3 * time.Second
+
 // dialAddr retries, because Run opens its listeners on another goroutine and
 // a test that dialled once would be asserting on the scheduler.
 func dialAddr(t *testing.T, addr string) net.Conn {
@@ -178,6 +235,21 @@ func TestForwarder_RemoteDialFailureDoesNotKillTheListener(t *testing.T) {
 
 // TestForwarder_CancelReleasesEveryPort asserts the real property rather than
 // a call count: after Run returns, the same ports must be bindable again.
+//
+// WHY IT HAS NEVER FAILED, which is worth knowing before trusting it. On this
+// path the leak is unrepresentable: closing the listener is what unblocks a
+// goroutine parked in Accept, so wg.Wait cannot return until every listener
+// is closed, and Run returning therefore IMPLIES the ports are free.
+// Measured, not assumed -- deleting closeAll from the exit path entirely
+// leaves this test green, because context.AfterFunc has already done it.
+//
+// So what it guards is the SHAPE rather than the current code: the day
+// somebody unblocks Accept another way -- a deadline, a select on ctx.Done in
+// serve -- closeAll becomes the only thing releasing the ports and this is
+// what notices. The leak that IS reachable today is the early-return path,
+// which TestForwarder_RefusesToStartWhenAPortIsTaken covers through the same
+// assertion, and reinstating it there is what proves the retry below did not
+// turn either of them into a no-op.
 func TestForwarder_CancelReleasesEveryPort(t *testing.T) {
 	d := NewRecordingDialer()
 	defer d.Close()
@@ -192,11 +264,7 @@ func TestForwarder_CancelReleasesEveryPort(t *testing.T) {
 	}
 
 	for _, p := range []uint16{a, b} {
-		ln, err := loopback.Listen(t.Context(), loopback.Port(p))
-		if err != nil {
-			t.Fatalf("port %d was still bound after Run returned: %v", p, err)
-		}
-		_ = ln.Close()
+		assertBindable(t, p, "after Run returned")
 	}
 }
 
@@ -224,11 +292,7 @@ func TestForwarder_RefusesToStartWhenAPortIsTaken(t *testing.T) {
 	}
 
 	// And nothing may be left bound, including the one that did open.
-	ln, lerr := loopback.Listen(t.Context(), loopback.Port(free))
-	if lerr != nil {
-		t.Fatalf("the first listener survived a failed Run: %v", lerr)
-	}
-	_ = ln.Close()
+	assertBindable(t, free, "after a Run that refused to start")
 }
 
 func TestForwarder_RefusesMalformedForwards(t *testing.T) {
