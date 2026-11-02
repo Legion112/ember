@@ -226,7 +226,55 @@ RUN set -eu; \
 # the image must carry is the CUDA *runtime*, and its sonames move with the
 # major version -- libcudart.so.13 now, not .so.12. Anything reasoning about
 # which libraries this image actually links has to be re-measured.
-FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04@sha256:c3fde347d52d578c84fd644bc177bc7ec333feaf11550d990da4084d7612e4c7
+#
+# -base, not -runtime, because measured on the image this file produced:
+# 87% of what a node downloads was CUDA libraries nothing in it links.
+#
+# `nvidia/cuda:*-runtime` is `*-base` plus one apt layer, `cuda-libraries-13-0`
+# and `libnccl2`. On sm_75 that layer is 2117.7 MB uncompressed and **1496.7 MB
+# of a 1724.1 MB pull**. What sd-cli and sd-server link out of it is cublas
+# (51.9 MiB) and cublasLt (514.5 MiB) from the toolkit and nccl (180.9 MiB)
+# beside it. The other ~1264 MiB is shipped and never opened:
+#
+#   libcufft 273.3   libcusparse 155.0   libcusolver 134.6   libcurand 126.6
+#   libnvrtc 104.3   libnvrtc.alt 104.7  libcusolverMg 99.1  libnvJitLink 94.2
+#   the NPP family ~151   libnvjpeg 5.6   libcufile 3.0   libnvfatbin 2.4
+#
+# ldd and the string table agree about that, which is what made it actionable:
+# the complete set of `.so` names appearing as literals anywhere in either
+# binary is exactly its DT_NEEDED set, so no code path can name cufft or nvrtc
+# at runtime either. test/integration/imagelab_test.go asserts the ldd half on
+# every build, because that is the half this swap can break.
+#
+# libcudart is *not* copied, and that is not an omission: -base already ships
+# libcudart.so.13 (0.7 MiB) -- it is the one CUDA library it exists to carry.
+# A COPY of it would be a second copy of a file already there.
+#
+# COPY from sdbuild rather than `apt install libcublas-13-0 libnccl2`, because
+# sdbuild is the stage that compiled the binary and therefore holds the exact
+# build the binary was linked against -- 13.0.2.14 and 2.28.3 here, verified
+# equal to what -runtime shipped. An apt index moves; a copy out of the stage
+# above cannot. Same reason every base here is pinned by digest.
+#
+# A `RUN rm` of the unused libraries would save nothing. Layers are additive:
+# the bytes stay in the layer below and the pull still carries them. The base
+# has to change, which is why this is a FROM line and not a cleanup step.
+#
+# Nothing about PTX JIT changes in either direction. /usr/local/cuda-13.0/compat
+# -- the forward-compatibility package, 307 MiB of it -- is in -base as well,
+# and the JIT compiler itself comes from the host driver. Nothing is compiled
+# on a rented machine regardless: this image carries SASS for one architecture
+# and no PTX, and a card it has no kernel for is refused before the rental.
+#
+# What is lost is /opt/nvidia/nvidia_entrypoint.sh, which -runtime sets as its
+# ENTRYPOINT and -base does not have. It never ran: this image's ENTRYPOINT is
+# embernode, set at the bottom of this file, which replaced it.
+#
+# -runtime is the vendor-supported shape and a hand-picked list is not, so a
+# CUDA bump has to re-read `ldd` rather than assume this list still holds. That
+# is a lab assertion rather than a promise: see
+# TestWorkloadImage_LinksNothingItDoesNotShip.
+FROM nvidia/cuda:13.0.1-base-ubuntu24.04@sha256:f8ef28f579ea42a44b415d2c5d46f788e6a9b395c6c83f2929416e1fc192c143
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -258,6 +306,39 @@ RUN rm -f /etc/ssh/ssh_host_*
 
 COPY --from=gobuild /out/embernode /usr/local/bin/embernode
 COPY --from=sdbuild /out/ /opt/sd/
+
+# The three CUDA libraries the binaries above actually link, and no others.
+#
+# They go where the vendor packages put them, because both directories are
+# already on the loader's search path in -base: /etc/ld.so.conf.d lists
+# /usr/local/cuda/targets/x86_64-linux/lib and /usr/lib/x86_64-linux-gnu. The
+# alternative -- dropping them in /opt/sd beside the binaries -- would work and
+# would also mean the one directory this image adds to the search path holds
+# both ember's build and NVIDIA's.
+#
+# The glob takes the *versioned* file and deliberately not the soname symlink
+# beside it. `COPY --from` dereferences a symlink rather than copying the link,
+# so `libcublas.so.13*`, which matches both, copied the 51.9 MiB file twice and
+# the 514.5 MiB one twice -- 747 MiB of duplicates, an image 2.20 GB instead of
+# 1.41 GB, and `ldconfig` complaining that "libcublas.so.13 is not a symbolic
+# link" at the end of the build. Measured, not reasoned about: the first version
+# of this block did exactly that. The `.` after the major version is the whole
+# fix, and it is why the pattern looks oddly specific.
+#
+# The soname links are made by the ldconfig below, which is what ldconfig is
+# for: it reads SONAME out of each file and creates the name DT_NEEDED asks
+# for. That step already existed for /opt/sd.
+#
+# The list is three entries long because that is what `ldd` reports, not
+# because three felt like enough. A fourth would be a library the loader
+# cannot resolve, and TestWorkloadImage_LinksNothingItDoesNotShip fails naming
+# it on a laptop with no GPU, before anything is rented.
+COPY --from=sdbuild /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so.13.* \
+                    /usr/local/cuda/targets/x86_64-linux/lib/
+COPY --from=sdbuild /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so.13.* \
+                    /usr/local/cuda/targets/x86_64-linux/lib/
+COPY --from=sdbuild /usr/lib/x86_64-linux-gnu/libnccl.so.2.* \
+                    /usr/lib/x86_64-linux-gnu/
 
 # What architecture this image is for, said by the image itself.
 #

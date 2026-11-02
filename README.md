@@ -274,11 +274,11 @@ Dispatch one architecture with `-f archs=89` to republish just that one.
 
 Locally one architecture takes about four minutes on thirty-two threads
 against roughly twenty on a four-vCPU runner, and the push is seconds rather
-than minutes: the runtime base is pinned by digest, so only the layers that
-actually changed go up.
+than minutes: the base is pinned by digest, so only the layers that actually
+changed go up.
 
 stable-diffusion.cpp rather than ComfyUI or diffusers, deliberately: no Python
-and no PyTorch anywhere, and 2.45 GB rather than a dozen. On a rented GPU that
+and no PyTorch anywhere, and 1.41 GB rather than a dozen. On a rented GPU that
 difference is pull time, and pull time is billed at GPU rates.
 
 Measured end to end on a rented RTX 4090 at $0.89/hour, generating one
@@ -306,6 +306,28 @@ Wan 2.2's experts are 14 GB each.
 Weights go on a store instead: `ember store push` once, `assets:` names them
 with a digest, and the node verifies what it mounts before the GPU is asked to
 do anything.
+
+**And it is built on `nvidia/cuda:*-base`, not `*-runtime`, for the same
+reason.** `-runtime` is that base plus one apt layer holding every CUDA library
+NVIDIA publishes, and measured on the `sm_75` image that layer was **1496.7 MB
+of a 1724.1 MB pull — 87% of what a node downloads**. What `sd-cli` and
+`sd-server` link out of it is cublas, cublasLt and nccl; the other ~1264 MiB
+was cufft, cusparse, cusolver, curand, nvrtc, nvJitLink and the NPP family,
+none of which appears even as a string in either binary. The image carries
+those three by an explicit `COPY` from the stage that compiled against them —
+not `apt install`, so the version cannot drift from the one the binary was
+linked against — and the pull is **0.83 GB rather than 1.72 GB**, 1.41 GB
+rather than 2.75 GB unpacked. `/usr/local/cuda-13.0/compat` is in both bases,
+so nothing about PTX forward-compatibility changes in either direction.
+
+A hand-picked library list is not the vendor-supported shape, so
+`TestWorkloadImage_LinksNothingItDoesNotShip` runs `ldd` on both binaries in
+the image and fails on anything unresolved except `libcuda.so.1`, which the
+container runtime injects from the host driver. That is link-time evidence
+rather than proof about a run — it cannot see a `dlopen` of a name the string
+table never held — and it costs no GPU, no network and no weights, so it runs
+on every build and a CUDA bump that renames a soname fails on a laptop instead
+of on a rented pod.
 
 The CPU variant still bakes one in. It exists to prove a pipeline locally for
 nothing and has no store to mount.
