@@ -321,6 +321,11 @@ func (o Offer) Validate() error {
 	if o.Price < 0 {
 		return fmt.Errorf("offer %s/%s has negative price", o.Provider, o.Token)
 	}
+	// This is the only live MaxRate check in ember, and the only reason a
+	// provider's mapper does not need its own: an offer priced above the
+	// ceiling is refused here whatever decoded it. money.go used to hold a
+	// second, unreachable copy -- see the note where RateFromFloat was -- and
+	// a reader could not tell from that file which of the two was enforced.
 	if o.Price > MaxRate {
 		return fmt.Errorf("offer %s/%s priced at %v, above the %v sanity ceiling", o.Provider, o.Token, o.Price, MaxRate)
 	}

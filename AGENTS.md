@@ -1015,6 +1015,28 @@ A leaked node bills by the hour in silence. These are not style preferences.
   rather than a weaker one: the error cancels for 0.29 and does not for 2.01,
   so there is no way to tell by looking which prices survive the trip, and the
   only safe rule is not to take it.
+- **`node.RateFromFloat` is gone, and it had never been called. It is the
+  sixth thing found in this repository that was written, covered and connected
+  to nothing**, and the first that was never connected to anything because its
+  caller had not been written yet: it converted a provider's JSON number to a
+  `Rate` for Vast.ai, which is #22 part 2 and does not exist. That makes it
+  speculative generality rather than abandoned code, so the `queue.Cost`
+  precedent does not obviously apply and the `sdserver.Client.Cancel` one --
+  wire it up, because deleting the only mechanism deletes the mechanism --
+  looks like it might. It does not, for two reasons. Its premise, that Vast.ai
+  prices arrive as JSON numbers, was read from documentation and not from a
+  response, which is exactly the bet `allowedCudaVersions` and
+  `capabilities.model` both lost; and there *is* a second mechanism for the
+  half that matters, because `Offer.Validate` enforces `MaxRate` on every
+  offer from every provider, so the ceiling `RateFromFloat` named was the
+  unreachable copy of a live one. A reader of `money.go` could believe it was
+  the enforced one, which is the `queue.Cost` mistake -- two paths for one
+  number -- arrived at from the other direction. The two judgements worth
+  keeping, rounding to nearest rather than up and refusing a figure above the
+  ceiling, are a note where the function was, because whoever writes that
+  converter has to make them again; losing them was the only way to get this
+  wrong. Nothing was reinstated: a deletion plus a comment has no defect to
+  put back.
 - **The type stays `int64` and the parser stays hand-written, and the
   criterion that decided it is that a budget check is `>` on two integers.**
   `Budget.Allow` is `o.Price > b.MaxRate`. Every candidate replaces that with
