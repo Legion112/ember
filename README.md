@@ -562,6 +562,27 @@ the same clock.
 A failed step stops the batch, and its output is still collected: the step
 that failed is often the one whose output explains why.
 
+**A step's output stays on the node, so a later step can read it.** The fetch
+is a read — `tar` streams the files out and nothing removes them, and the
+marker bounds only what is *sent* — so the node's filesystem carries every
+earlier step's output for the whole rental. A `cmds` entry can therefore name
+a file an earlier entry wrote:
+
+```yaml
+cmds:
+  - [sd-cli, ..., -o, /workspace/out/01.png]
+  - [sh, -c, "convert /workspace/out/01.png -resize 50% /workspace/out/01-small.png"]
+```
+
+That is documented because configurations may rely on it, not because it is
+encouraged. ember still does not read argv, so it does not know that entry 2
+depends on entry 1: nothing checks that the filename is right, a typo is found
+at step 7 of a rental whose first six steps are paid for, and the dependency
+is invisible to every figure ember prints. For a long video — twelve clips,
+each continued from the last frame of the one before — those costs dominate
+and the chain belongs somewhere ember can read a result. See
+[Long video is a pipeline](docs/long-video-is-a-pipeline.md).
+
 Each step reports what it cost, and the total so far:
 
 ```
@@ -1821,6 +1842,43 @@ clips chained on the last frame of the one before, which is a pipeline rather
 than a command and does not belong in `cmd:`. The seams between those clips,
 not the fidelity within them, are what makes a long video hard.
 
+#### If you are about to reach for `cmds` to make a long clip
+
+It will work, and you should not.
+
+Twelve `cmds` entries *do* chain: a step's output stays on the node, so entry
+*n+1* can name the file entry *n* wrote. That is stated above under `cmds` and
+asserted by a lab. What it costs is everything ember cannot see:
+
+- Each seam needs the previous clip's **last frame**, so a real chain is
+  twenty-three entries — twelve generations and eleven `ffmpeg` decodes,
+  written by hand in YAML, with nothing checking that entry 7 names the file
+  entry 6 wrote. A typo there surfaces at step 7 of a rental whose first six
+  steps have been paid for.
+- A clip is **minutes of sampling reported as one line**. `cmds` prints a
+  description, a duration and a cost per entry; there is no step counter and
+  no preview, so a clip that is working and a clip that is wedged look the
+  same for as long as it takes.
+- The clips come home as they are produced, but **the chain's state dies with
+  the node**. A failure at clip 7 leaves six clips on your disk and clip 6's
+  last frame on a machine that is being destroyed; resuming means paying for
+  the first six again. So `ttl` has to cover all twelve and `max_run_usd` —
+  checked against the offer's price times that `ttl`, before anything is
+  rented — is one decision made up front about a rental of hours.
+
+The chain belongs on the served path, which is the one place ember reads its
+own payload and so the one place that can take the last frame of job *n* and
+hand it to job *n+1*. That is not built, and it is not *sized* either: what a
+`vid_gen` response even carries decides whether a seam needs a decode at all,
+and the captured `capabilities.json` answers that for `img_gen` only. The
+reasoning, the measurement that corrected the original premise, and the list
+of numbers that cannot be estimated before one real clip exists are in
+[Long video is a pipeline](docs/long-video-is-a-pipeline.md).
+
+One thing `cmds` is good for here: two identical clips as two entries, and the
+difference between the two per-step card-time lines is the per-clip model
+reload — the number a served path would be removing, which nobody has.
+
 **Nothing has run it end to end.** It is written from the measured API shapes
 and the flags in this repository's own image. The first real run is a
 calibration — it costs money, and what it produces is a number and a fixture
@@ -1831,6 +1889,10 @@ rather than a pass or a fail.
 Things worked out but not built, kept where the reasoning was fresh rather
 than in a commit message nobody will search for.
 
+- [Long video is a pipeline](docs/long-video-is-a-pipeline.md) — **not built,
+  and deliberately not sized.** Where a twelve-clip chain goes, why it is not
+  `cmds` even though `cmds` turns out to chain, and which numbers cannot be
+  estimated before one real clip has been generated.
 - [Collecting GPU availability over time](docs/gpu-availability-history.md) —
   **built**, as `ember catalogue snapshot` and `ember catalogue report`; the
   note is kept as the reasoning the implementation follows, and says where the

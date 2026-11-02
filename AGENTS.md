@@ -1614,6 +1614,43 @@ A leaked node bills by the hour in silence. These are not style preferences.
   streaming is impossible for a program that refuses to read its own payload,
   and a `curl` in a config is the same knowledge maintained by hand. `cmds`
   stays as the general mechanism, because a typed sd path cannot run `ffmpeg`.
+- **`cmds` does chain, through the node's filesystem, and chaining video with
+  it is still wrong.** #20 was filed on the premise that `cmds` entries have
+  "no way to name a file the step before produced" -- which was a reasonable
+  reading of "opaque argv, fetched home between steps" and is false. The fetch
+  is a *read*: `TarCommand` builds `tar -czf - -C dir --newer=marker -- base`,
+  there is no `--remove-files`, and the marker bounds what is **sent** and not
+  what **exists**. So every step after the first starts with every earlier
+  step's output underneath it. Checked rather than reasoned about, on the
+  local provider for nothing: step 2 listed `clip01.txt`, read it, wrote a
+  file derived from it, and the two fetches carried 18 B and 31 B -- each file
+  exactly once. What `cmds` cannot do is the part that needs ember to
+  understand a result: a filename it did not know in advance, a last frame it
+  would have to decode, a step counter inside a clip that samples for minutes.
+  That is the same seal as the entry above, and it is the claim worth keeping.
+  The reasons not to chain video there anyway are an `ffmpeg` seam per clip
+  maintained by hand in YAML (the `curl`-in-a-config again, eleven times),
+  and a chain whose intermediate state dies with the node -- so a failure at
+  clip 7 can only be resumed by paying for clips 1-6 again, and the `ttl` and
+  `max_run_usd` decision is made once, up front, over a rental of hours. Per-
+  clip overhead is **not estimable** from the figures above: both are images,
+  Wan 2.2 is two 14 GB experts, and scaling an sd15 number would be the "~8%"
+  mistake. `cmds` is the instrument that settles it -- two identical clips,
+  and the difference between the per-step card-time lines is the reload.
+  `docs/long-video-is-a-pipeline.md` has the rest.
+- **Nothing warns an operator whose `cmds` entries look like a chain, and the
+  reason is not only the seal.** Detecting one means reading argv, and a
+  heuristic over a prompt and an output path would be the `NormalizeGPU`
+  substring failure with deliberately arbitrary input. The stronger reason is
+  that the warning would be **false**: the entries do chain. Teaching an
+  operator to distrust a mechanism that works is the cost
+  `allow_interruptible` already pays for reading like a safety switch while
+  guarding nothing. The real gap was that the persistence was an accident of
+  implementation nothing stated and nothing checked, so it is written into
+  `README.md` beside `cmds` and asserted by
+  `TestTransfer_AFetchLeavesTheOutputsOnTheNode`. The tidy-up that would
+  break it is obvious -- `tar --remove-files` to spare the node's disk, or an
+  `rm` between steps -- and without the lab it would land green.
 - **The client's own poll interval hid the entire saving, and only a
   measurement found it.** A flat two-second poll noticed a 0.3-second job up
   to two seconds late, so the marginal cost per job came to 2.08 s served
