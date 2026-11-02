@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Legion112/ember/internal/blob"
 	"github.com/Legion112/ember/internal/httpx"
 )
 
@@ -454,6 +455,12 @@ func unsupported(p Params, s Supported) error {
 		return featureRefusal("vae tiling", "generation_features.vae_tiling")
 	case p.Hires.Enabled && denied(s.Hires):
 		return featureRefusal("the hires pass", "features.hires")
+	case p.InitImage != "" && denied(s.InitImage):
+		// The image and never the strength on its own: staticParams has
+		// already refused a strength with no image, so a job reaching here
+		// with one has the other, and naming the strength would point the
+		// operator at the wrong control.
+		return featureRefusal("an image input", "generation_features.init_image")
 	}
 	return nil
 }
@@ -553,6 +560,54 @@ func staticParams(p Params) error {
 	}
 	if p.OutputCompression < 0 || p.OutputCompression > 100 {
 		return fmt.Errorf("output_compression %d is outside 0 to 100", p.OutputCompression)
+	}
+	if err := staticInitImage(p); err != nil {
+		return err
+	}
+	return nil
+}
+
+// staticInitImage refuses an image input that is wrong on its face.
+//
+// THE REFERENCE'S SHAPE IS CHECKED THROUGH blob.ParseRef AND NOT AGAINST A
+// PATTERN SPELLED HERE. One spelling of what a reference is, so the name a
+// job carries and the name the staging store will look for cannot be two
+// different sets -- a second regular expression in this package would be
+// exactly the drift that made "nodes" two literals and left a lab reading an
+// empty directory. It is also the only check that makes the field safe to
+// store: sixty-four lowercase hex characters cannot be a path, a traversal or
+// a URL, so nothing downstream has to ask whether it is.
+//
+// THE STRENGTH IS REFUSED WITHOUT AN IMAGE, and that refusal is a
+// measurement. A live sd-server answered 202 to `strength: 0.4` with no
+// `init_image`, generated, and echoed no `strength` in `generation_info` at
+// all -- accepted, dropped, reported nowhere. Leaving it representable means
+// an operator sets a strength, pays for a generation and gets a plain
+// text-to-image image back with nothing anywhere saying why.
+//
+// The bound is the server's own: `strength: 1.5` and `strength: -1` are both
+// refused with a 400, and 0 and 1 are both accepted. fraction's "0 means
+// unset" convention is wrong for this field -- which is why Strength is a
+// pointer -- so the comparison is written out rather than reusing it.
+func staticInitImage(p Params) error {
+	if p.InitImage != "" {
+		if _, err := blob.ParseRef(p.InitImage); err != nil {
+			return err
+		}
+	}
+	if p.Strength == nil {
+		return nil
+	}
+	if p.InitImage == "" {
+		return fmt.Errorf("strength %g was set with no image input. sd-server accepts that "+
+			"and silently ignores it -- measured: it generates, and the strength appears "+
+			"nowhere in what it reports back -- so the image it would have been applied to "+
+			"has to be named. Upload one and reference it, or leave strength unset",
+			*p.Strength)
+	}
+	if *p.Strength < 0 || *p.Strength > 1 {
+		return fmt.Errorf("strength %g is outside 0 to 1, which the server refuses outright; "+
+			"0 keeps the whole init image and 1 replaces it", *p.Strength)
 	}
 	return nil
 }

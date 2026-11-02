@@ -432,6 +432,12 @@ func TestServe_RefusesEveryRouteWithoutTheToken(t *testing.T) {
 		{"GET", "/api/offers", ""},
 		{"GET", "/api/nodes", ""},
 		{"GET", "/api/requests", ""},
+		// The one route that takes bytes inbound. Its body is JSON here and
+		// the handler never reads it, because the credential is checked
+		// before anything is read -- which is the property being asserted:
+		// an ungated upload is a loopback port on which any other uid can
+		// write files into the operator's state directory.
+		{"POST", "/api/inputs", body},
 		{"POST", "/api/requests", body},
 		{"POST", "/api/requests/abc/cancel", ""},
 		{"GET", "/api/requests/abc/events", ""},

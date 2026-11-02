@@ -5,12 +5,17 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/jpeg"
-	_ "image/png"
+	"image/png"
+	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -20,7 +25,9 @@ import (
 	"time"
 
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/kb"
 
+	"github.com/Legion112/ember/internal/blob"
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/test/integration/harness"
@@ -523,7 +530,7 @@ func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
 		Schedulers: []string{"discrete"},
 		Limits:     sdserver.Limits{MinWidth: 64, MaxWidth: 2048, MinHeight: 64, MaxHeight: 2048},
 		Supported: sdserver.Supported{
-			ClipSkip: &no, SLG: &no, Hires: &no,
+			ClipSkip: &no, SLG: &no, Hires: &no, InitImage: &no,
 			FlowShift: &yes, ShiftedTimestep: &yes, VAETiling: &yes,
 		},
 	}); err != nil {
@@ -605,6 +612,15 @@ func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
 			"generation_features.slg is false, and the scale is the block's switch"},
 		{"hires pass", "grey|disabled",
 			"features.hires is false, so the whole second pass is unavailable"},
+		// THE FILE PICKER, which is the one control here whose denial costs
+		// an upload as well as a refusal: a greyed picker is a file the
+		// operator never sends, and a live one against a model that takes no
+		// image is bytes staged for a request ember will refuse at enqueue.
+		// The allowed direction is asserted by
+		// TestServe_UIStagesAFileFromARealFilePicker, which picks a file and
+		// generates from it against a server that says yes.
+		{"image", "grey|disabled",
+			"generation_features.init_image is false, so the model takes no image input"},
 		{"flow shift", "lit|enabled",
 			"generation_features.flow_shift is true"},
 		{"shifted timestep", "lit|enabled",
@@ -633,7 +649,8 @@ func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the denial hint: %v\n%s", err, console.text())
 	}
-	for _, name := range []string{"clip skip", "skip-layer guidance", "the hires pass"} {
+	for _, name := range []string{"clip skip", "skip-layer guidance", "the hires pass",
+		"an image input"} {
 		if !strings.Contains(hint, name) {
 			t.Errorf("the hint does not name %q: %q", name, hint)
 		}
@@ -736,4 +753,492 @@ func (c *consoleLog) errors() string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// --- the inbound image path ---
+
+// uploadImage posts raw bytes to the one route that takes them.
+//
+// NO FORM AND NO FILENAME, which is the shape of the route rather than a
+// convenience here: the server derives the key from the content, so there is
+// nothing else to send and nothing a filename could reach.
+func uploadImage(t *testing.T, s served, body []byte) answer {
+	t.Helper()
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/inputs", s.Port)
+	req, err := http.NewRequestWithContext(t.Context(), "POST", url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", fmt.Sprintf("http://127.0.0.1:%d", s.Port))
+	req.Header.Set("Authorization", "Bearer "+s.Token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/inputs: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		t.Fatalf("POST /api/inputs: reading the body: %v", rerr)
+	}
+	return answer{Status: resp.StatusCode, Body: b, Header: resp.Header}
+}
+
+// labPNG is a gradient, encoded here.
+//
+// A REAL IMAGE AND NOT A CANNED BLOB, and a gradient rather than a flat
+// colour: with a low strength the generation keeps most of the input, so an
+// input with structure in it is one whose influence is visible in what comes
+// back. It is also compressible, which keeps the request body small.
+func labPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	im := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			im.Set(x, y, color.RGBA{R: uint8(x * 255 / w), G: uint8(y * 255 / h), B: 128, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, im); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func labRef(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// TestServe_GeneratesADifferentImageFromAnUploadedOne.
+//
+// THE ASSERTION THE WHOLE INBOUND PATH EXISTS FOR, and it is a pixel
+// comparison rather than a plumbing check. `strength`, `img_cfg`,
+// `control_strength`, `ip_adapter_strength` and `increase_ref_index` were all
+// held back from the web UI on the grounds that a control which accepts a
+// value, sends it and changes no pixel reads as working -- so the one of them
+// that ships has to be shown changing a pixel, end to end, through the real
+// routes.
+//
+// TWO GENERATIONS WITH THE SAME SEED, the same prompt, the same geometry and
+// the same step count, differing only in the init image. A server that
+// accepted `init_image` and dropped it -- which is exactly what a live
+// sd-server does with `strength` when no image is attached, measured -- would
+// produce two identical files and fail here. Both arms run on ONE rental,
+// which is also the feature the queue exists for.
+//
+// It carries the route's refusals too, against a real server rather than an
+// httptest one: the bound, the format allow-list and a digest nothing staged.
+func TestServe_GeneratesADifferentImageFromAnUploadedOne(t *testing.T) {
+	l := servableLab(t)
+	cmd, srv, wait := startServe(t, l)
+
+	// ONE SIGNAL, AND THE BODY NEEDS THE OUTPUT. This lab asserts on ember's
+	// own "node ready" count, so it has to stop the process itself and read
+	// what it printed -- and the deferred stop is still there for every path
+	// that returns early. Two unconditional signals is what the first version
+	// did, and the second reported "process already finished": a failing
+	// assertion about the test's own cleanup, which says nothing about ember.
+	stopped := false
+	stop := func() string {
+		if stopped {
+			return ""
+		}
+		stopped = true
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return ""
+		}
+		out := wait()
+		if !strings.Contains(out, "every rental has been destroyed") {
+			t.Errorf("ember exited without reporting the teardown:\n%s", out)
+		}
+		return out
+	}
+	defer func() { _ = stop() }()
+
+	pixels := labPNG(t, 192, 192)
+
+	// THE REFUSALS FIRST, because none of them needs a rental and all of them
+	// are cheaper to read before four minutes of generation.
+	if got := uploadImage(t, srv, []byte("#!/bin/sh\nnot an image\n")); got.Status != 400 {
+		t.Errorf("a shell script was accepted as an image: %d %s", got.Status, got.Body)
+	}
+	over := append(append([]byte(nil), pixels...),
+		bytes.Repeat([]byte{0}, blob.MaxInputBytes+1-len(pixels))...)
+	if got := uploadImage(t, srv, over); got.Status != 413 {
+		t.Errorf("an upload past the bound answered %d, want 413: %s", got.Status, got.Body)
+	}
+	// And a request naming a digest nothing staged is refused before it is
+	// queued, which is the cheapest moment there is.
+	unstaged := labRef([]byte("never uploaded"))
+	if got := ask(t, "POST", srv, "/api/requests", fmt.Sprintf(
+		`{"provider":"local","jobs":[{"prompt":"a cat","init_image":%q}]}`, unstaged,
+	)); got.Status != 400 {
+		t.Errorf("a request naming an unstaged image answered %d, want 400: %s",
+			got.Status, got.Body)
+	}
+
+	// THE UPLOAD, and the id is the content. Posted twice, because content
+	// addressing is the reason one request cannot be served another's bytes:
+	// the same file is one object and the name carries nothing else.
+	first := uploadImage(t, srv, pixels)
+	if first.Status != 201 {
+		t.Fatalf("uploading answered %d: %s", first.Status, first.Body)
+	}
+	var staged struct {
+		ID            string `json:"id"`
+		Format        string `json:"format"`
+		Width, Height int
+		Bytes         int
+	}
+	if err := json.Unmarshal(first.Body, &staged); err != nil {
+		t.Fatal(err)
+	}
+	if staged.ID != labRef(pixels) {
+		t.Errorf("id = %q, want the sha256 of the bytes (%q)", staged.ID, labRef(pixels))
+	}
+	if staged.Format != "png" || staged.Width != 192 || staged.Height != 192 {
+		t.Errorf("staged %+v, want a 192x192 png", staged)
+	}
+	again := uploadImage(t, srv, pixels)
+	var second struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(again.Body, &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != staged.ID {
+		t.Errorf("the same file uploaded twice got two names: %q and %q", staged.ID, second.ID)
+	}
+
+	// THE TWO ARMS. Same seed, same everything, one with the image.
+	const geometry = `"width":192,"height":192,"steps":4,"seed":4242`
+	plain := queueJobs(t, srv, fmt.Sprintf(
+		`{"provider":"local","jobs":[{"prompt":"a paper boat on a slow river",%s,"output":"plain"}]}`,
+		geometry))
+	fromImage := queueJobs(t, srv, fmt.Sprintf(
+		`{"provider":"local","jobs":[{"prompt":"a paper boat on a slow river",%s,"output":"fromimage",`+
+			`"init_image":%q,"strength":0.2}]}`, geometry, staged.ID))
+
+	plainDone := waitForStatus(t, srv, plain, "done", 12*time.Minute)
+	imageDone := waitForStatus(t, srv, fromImage, "done", 12*time.Minute)
+
+	// The stored request carries the DIGEST and not the pixels, which is what
+	// keeps a request row small and the picture in one place.
+	if !strings.Contains(string(getRaw(t, srv, fromImage)), staged.ID) {
+		t.Errorf("the stored request does not name the staged image")
+	}
+
+	plainBytes := fetchImage(t, srv, plainDone)
+	imageBytes := fetchImage(t, srv, imageDone)
+	if len(plainBytes) == 0 || len(imageBytes) == 0 {
+		t.Fatal("one of the two arms produced no image")
+	}
+	// THE ASSERTION. Identical files mean the init image reached nothing.
+	if bytes.Equal(plainBytes, imageBytes) {
+		t.Error("the two arms produced byte-identical images, so the uploaded image " +
+			"changed no pixel: sd-server accepts init_image and drops a parameter it was " +
+			"not given, which is exactly the failure this path exists to avoid")
+	}
+
+	// And one rental served both, which is the saving the queue is for.
+	out := stop()
+	if n := strings.Count(out, "node ready"); n != 1 {
+		t.Errorf("ember rented %d node(s) for two requests, want 1. Output:\n%s", n, out)
+	}
+	if nodes := l.Nodes(t.Context()); len(nodes) != 0 {
+		t.Errorf("%d node(s) survived", len(nodes))
+	}
+}
+
+// getRaw is one request's JSON, for an assertion about a field no view type
+// here models.
+func getRaw(t *testing.T, s served, id string) []byte {
+	t.Helper()
+	return ask(t, "GET", s, "/api/requests/"+id, "").Body
+}
+
+// fetchImage is a finished request's one result, as bytes.
+func fetchImage(t *testing.T, s served, r requestState) []byte {
+	t.Helper()
+	for _, im := range r.Images {
+		if im.Preview {
+			continue
+		}
+		got := ask(t, "GET", s, im.Path, "")
+		if got.Status != http.StatusOK {
+			t.Fatalf("%s: status %d", im.Path, got.Status)
+		}
+		if _, _, err := image.Decode(bytes.NewReader(got.Body)); err != nil {
+			t.Fatalf("%s is not an image (%d bytes): %v", im.Path, len(got.Body), err)
+		}
+		return got.Body
+	}
+	t.Fatalf("request produced no result image: %+v", r.Images)
+	return nil
+}
+
+// TestServe_UIStagesAFileFromARealFilePicker.
+//
+// WHY A BROWSER, AND WHY THIS CONTROL ESPECIALLY. A file picker is the one
+// kind of control that has no meaning outside a browser: there is no File
+// object, no FileList and no `Blob.array_buffer` in a Rust unit test, and
+// `cargo test` can only check that a struct serialises. Everything between
+// the click and the digest -- whether the change handler reads the picked
+// file at all, whether the bytes survive the trip through a Uint8Array,
+// whether the 201 decodes, whether the reference lands in the draft that the
+// Add button clones -- is invisible to every other kind of test in this
+// repository. The three bugs TestServe_UI was written for were of exactly
+// that shape.
+//
+// THE JOIN IS WHAT IS ASSERTED: a file chosen in a real Chrome becomes the
+// sha256 the lab computed itself, on a real queued request, read back through
+// the API. A feature built end to end and never connected passes every test
+// it has, so the assertion crosses the gap rather than checking either side.
+//
+// It also asserts the picker's own feedback, which is the only way an
+// operator can tell a staged file from a refused one -- the geometry and the
+// format the SERVER read out of the header, not what the browser claimed.
+func TestServe_UIStagesAFileFromARealFilePicker(t *testing.T) {
+	requireChrome(t)
+	l := servableLab(t)
+	cmd, srv, wait := startServe(t, l)
+	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
+
+	defer func() {
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return
+		}
+		if out := wait(); !strings.Contains(out, "every rental has been destroyed") {
+			t.Errorf("ember exited without reporting the teardown:\n%s", out)
+		}
+	}()
+
+	// A file on disk, because that is what a picker picks.
+	pixels := labPNG(t, 128, 64)
+	path := filepath.Join(t.TempDir(), "a-picture.png")
+	if err := os.WriteFile(path, pixels, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Headless, chromedp.NoSandbox, chromedp.DisableGPU)
+	alloc, cancelAlloc := chromedp.NewExecAllocator(t.Context(), opts...)
+	defer cancelAlloc()
+	ctx, cancel := chromedp.NewContext(alloc)
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 14*time.Minute)
+	defer cancelTimeout()
+
+	if err := chromedp.Do(ctx,
+		chromedp.Navigate(fmt.Sprintf("%s?t=%s", pageURL, srv.Token))); err != nil {
+		t.Fatalf("navigating to the one-time URL: %v", err)
+	}
+	console := watchConsole(t, ctx)
+
+	// The advanced section is collapsed, correctly, so a person opens it
+	// before they can pick a file.
+	if err := chromedp.Do(ctx,
+		chromedp.WaitVisible(`h1`),
+		chromedp.Click(`//summary[contains(text(), "advanced")]`),
+		chromedp.WaitVisible(`.image-input input[type=file]`),
+	); err != nil {
+		t.Fatalf("opening the advanced section: %v\n%s", err, console.text())
+	}
+
+	// NO STRENGTH CONTROL UNTIL THERE IS AN IMAGE, which is a measurement and
+	// not a layout preference: a live sd-server accepts a strength with no
+	// image, generates, and reports the strength nowhere -- so ember refuses
+	// the combination, and a control that could be set first would be a
+	// control whose only outcome is a refusal at enqueue.
+	before, err := chromedp.Run(ctx, chromedp.Evaluate[int](
+		`document.querySelectorAll('.image-input input[type=number]').length`))
+	if err != nil {
+		t.Fatalf("counting the strength controls: %v\n%s", err, console.text())
+	}
+	if before != 0 {
+		t.Errorf("the strength control is on screen with no image picked")
+	}
+
+	// THE PICKER. DOM.setFileInputFiles, which is what a click on the control
+	// and a choice in the file dialog comes to -- the dialog itself is the
+	// operating system's and not the page's.
+	if err := chromedp.Do(ctx,
+		chromedp.SetUploadFiles(`.image-input input[type=file]`, []string{path}),
+		// The server's own reading of the header, which is what says the
+		// upload was taken rather than refused.
+		chromedp.WaitVisible(`.hint.staged`),
+	); err != nil {
+		t.Fatalf("picking a file: %v\n%s", err, console.text())
+	}
+
+	line, err := chromedp.Run(ctx, chromedp.Text(`.hint.staged`))
+	if err != nil {
+		t.Fatalf("reading the staged line: %v\n%s", err, console.text())
+	}
+	for _, want := range []string{"png", "128x64"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the staged line does not say %q: %q", want, line)
+		}
+	}
+	t.Logf("the picker says: %s", line)
+
+	// And the strength appears, because now there is something for it to
+	// apply to.
+	if err := chromedp.Do(ctx,
+		chromedp.WaitVisible(`.image-input input[type=number]`)); err != nil {
+		t.Fatalf("the strength control did not appear: %v\n%s", err, console.text())
+	}
+
+	// A SMALL GENERATION, set the way a person sets it: select what is there
+	// and type over it. chromedp.SetValue assigns the DOM property and
+	// dispatches no event, so a fine-grained signal never hears about it and
+	// the draft keeps its default -- which is a trap worth naming, because it
+	// is silent and the page still looks right.
+	for _, f := range []struct{ label, value string }{
+		{"width", "192"}, {"height", "192"}, {"steps", "4"}, {"seed", "77"},
+	} {
+		sel := fmt.Sprintf(`//label[span[@class="help" and text()=%q]]/input`, f.label)
+		// End, then enough backspaces to empty whatever was there, then the
+		// value -- all as REAL KEY EVENTS. Extra backspaces on an empty
+		// field do nothing, which is cheaper than asking how many digits the
+		// default has.
+		keys := kb.End + strings.Repeat(kb.Backspace, 8) + f.value
+		if err := chromedp.Do(ctx, chromedp.SendKeys(sel, keys)); err != nil {
+			t.Fatalf("setting %s: %v\n%s", f.label, err, console.text())
+		}
+	}
+	if err := chromedp.Do(ctx,
+		chromedp.SendKeys(`textarea`, "a paper boat on a slow river"),
+	); err != nil {
+		t.Fatalf("queueing a generation: %v\n%s", err, console.text())
+	}
+	// THE STRENGTH IS SET WITH THE STEPPER, AND THAT IS A MEASUREMENT RATHER
+	// THAN A PREFERENCE. A decimal point does not reach an
+	// `<input type=number>` through a synthesized key event: typing `0`, `.`,
+	// `2` leaves the box holding `0` after the second keystroke -- the `.`
+	// appears in neither `value` nor `validity.badInput` -- and the `2` then
+	// lands in front, so ember was posted `20` and refused it. Reproduced at
+	// the desktop as well as here, and it is the automation rather than the
+	// page: the arrow key walks the same box to `0.03` in three presses, and
+	// digits typed in sequence arrive in order. So the lab uses the control
+	// the way the step attribute is for, and nothing in this repository can
+	// assert a fractional value TYPED into a number box.
+	//
+	// Four presses of a 0.05 step is 0.2, which is a fraction and not a
+	// round number, so a request carrying 0 or 1 would not pass this.
+	if err := chromedp.Do(ctx,
+		chromedp.Click(`.image-input input[type=number]`),
+		chromedp.KeyEvent(kb.ArrowUp),
+		chromedp.KeyEvent(kb.ArrowUp),
+		chromedp.KeyEvent(kb.ArrowUp),
+		chromedp.KeyEvent(kb.ArrowUp),
+	); err != nil {
+		t.Fatalf("setting the strength: %v\n%s", err, console.text())
+	}
+	if err := chromedp.Do(ctx, chromedp.Click(`button.primary`)); err != nil {
+		t.Fatalf("clicking generate: %v\n%s", err, console.text())
+	}
+
+	// EITHER A JOB ROW OR THE PAGE'S OWN REASON. Waiting only for the row
+	// turns a refused POST into a timeout with nothing to show for it -- the
+	// first run of this lab spent fourteen minutes that way over a one-line
+	// message that was on screen the whole time. The panel already renders
+	// the server's sentence; reading it is what makes the failure name
+	// itself.
+	if why := waitForQueuedOrRefusal(t, ctx, 90*time.Second); why != "" {
+		t.Fatalf("the page did not queue the generation: %s\n%s", why, console.text())
+	}
+
+	// THE JOIN. The queued request has to name the digest of the file this
+	// test wrote -- not a filename, not a path, not something the browser
+	// made up.
+	id := waitForQueuedRequest(t, srv, 30*time.Second)
+	raw := string(getRaw(t, srv, id))
+	if !strings.Contains(raw, labRef(pixels)) {
+		t.Fatalf("the request the page queued does not name the picked file's digest (%s): %s",
+			labRef(pixels), raw)
+	}
+	if !strings.Contains(raw, `"strength":0.2`) {
+		t.Errorf("the request does not carry the strength that was set: %s", raw)
+	}
+	// The width the lab typed, which is also the check that the key events
+	// above reached the draft at all: at the panel's default of 512 this
+	// generation would be slow enough to time out, and asserting it here
+	// names the cause rather than leaving a timeout to be guessed at.
+	if !strings.Contains(raw, `"width":192`) {
+		t.Fatalf("the typed geometry did not reach the request: %s", raw)
+	}
+
+	// And it generates: the image arrives and is an image.
+	done := waitForStatus(t, srv, id, "done", 12*time.Minute)
+	if len(fetchImage(t, srv, done)) == 0 {
+		t.Error("the generation produced no image")
+	}
+	if err := chromedp.Do(ctx,
+		chromedp.WaitVisible(`.gallery figure:not(.preview) img`)); err != nil {
+		t.Fatalf("waiting for the image on the page: %v\n%s", err, console.text())
+	}
+
+	if errs := console.errors(); errs != "" {
+		t.Errorf("the page logged errors:\n%s", errs)
+	}
+}
+
+// waitForQueuedOrRefusal waits for a job row, and returns why there is not
+// one.
+//
+// One Evaluate rather than two WaitVisibles racing, because the two outcomes
+// are mutually exclusive and a race between them would report whichever
+// happened to be polled first.
+func waitForQueuedOrRefusal(t *testing.T, ctx context.Context, within time.Duration) string {
+	t.Helper()
+	const probe = `(function () {
+		if (document.querySelector('.jobs li')) { return ''; }
+		var e = document.querySelector('p.error');
+		return e ? 'the page says: ' + e.textContent.trim() : 'waiting';
+	})()`
+	deadline := time.Now().Add(within)
+	for {
+		got, err := chromedp.Run(ctx, chromedp.Evaluate[string](probe))
+		if err != nil {
+			return fmt.Sprintf("asking the page what happened: %v", err)
+		}
+		if got != "waiting" {
+			return got
+		}
+		if time.Now().After(deadline) {
+			return fmt.Sprintf("nothing was queued and the page said nothing within %v", within)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// waitForQueuedRequest is the id of the request the page just posted.
+//
+// Polled rather than read out of the page, because the id the UI shows is the
+// one the server chose and the assertion is about the row the server stored.
+func waitForQueuedRequest(t *testing.T, s served, within time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		var list struct {
+			Requests []struct {
+				ID string `json:"id"`
+			} `json:"requests"`
+		}
+		if err := json.Unmarshal(ask(t, "GET", s, "/api/requests", "").Body, &list); err != nil {
+			t.Fatal(err)
+		}
+		if len(list.Requests) > 0 {
+			return list.Requests[0].ID
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the page queued nothing within %v", within)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }

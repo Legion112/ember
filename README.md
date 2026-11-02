@@ -810,6 +810,8 @@ so when reading sd-server's `api.md` beside an `ember.yaml`:
 | `slg.*` | `sample_params.guidance.slg.*` |
 | `vae_tiling.*` | `vae_tiling_params.*` |
 | `clip_skip`, `output_format`, `output_compression`, `hires.*` | the same, top level |
+| `strength` | the same, top level |
+| `init_image` (a web-UI upload) | `init_image`, as bare base64 of the bytes |
 | `output` | nothing — it is the local filename stem |
 
 `cfg` and `guidance` are the two worth knowing: both get called "cfg" in
@@ -817,15 +819,36 @@ conversation and they are different fields. The FLUX.2 recipe sets `cfg: 1`
 with `guidance: 4`, so setting the wrong one generates at the wrong strength
 and nothing reports it.
 
-**What is not typed, and why.** An image input — img2img, inpainting,
-ControlNet, IP-Adapter — is not reachable from `sd.jobs` or from the web UI:
-the API takes images as base64 in the request body, which a YAML file cannot
-hold and the UI has no upload route for. `strength`, `img_cfg`,
-`control_strength`, `ip_adapter_strength` and `increase_ref_index` do nothing
-without one of those images, so they are not typed either. `cache_mode`,
-`cache_option`, `scm_mask`, `scm_policy_dynamic`, `qwen_image_layers` and the
-two `custom_sigmas` are untyped because nothing here knows what values they
-accept.
+**What is not typed, and why.** An image input is reachable from the **web
+UI** and not from `sd.jobs`: the API takes images as base64 in the request
+body, which a YAML file cannot hold, so a file is uploaded to `ember serve`
+and the job names its digest. That is `init_image` and `strength`, and
+["Generating from an image you upload"](#generating-from-an-image-you-upload)
+is the section about it.
+
+The other four image-dependent parameters are still absent, and the reason is
+no longer "there is no upload route" — each was sent to a live sd-server and
+none of them changed anything that could be observed:
+
+| parameter | what the server did with it |
+|---|---|
+| `img_cfg` | accepted at `0`, at `-1` and at `99`; echoed at none of them, on a build that publishes `generation_features.img_cfg` as **true** |
+| `control_strength` | accepted, echoed nowhere; needs `control_image` **and** a ControlNet in the serve argv |
+| `ip_adapter_strength` | accepted, echoed nowhere; needs `ip_adapter_image` **and** an IP-Adapter model |
+| `increase_ref_index` | accepted and echoed as `ref_image_args: ref_index_mode=increase`; needs `ref_images`, which is an edit model's input |
+
+So each of them would be a control that takes a value, sends it and changes no
+pixel, with no flag ember could read to say so in advance. `strength` is the
+one with the opposite evidence: the server echoes
+`generation_info.strength` back, including an explicit `0`, and the two arms
+of a measurement with and without an init image produce different images.
+Inpainting (`mask_image`) is absent because it unblocks none of these — a mask
+is a feature of its own rather than a parameter, and nothing in the list above
+needs one.
+
+`cache_mode`, `cache_option`, `scm_mask`, `scm_policy_dynamic`,
+`qwen_image_layers` and the two `custom_sigmas` are untyped because nothing
+here knows what values they accept.
 
 `lora` is not typed either, and that one is no longer a question about safety.
 `lora[].path` never reaches a path join: the server matches it for equality
@@ -854,14 +877,14 @@ does not record. This is reachable from a config today — `extra` carries a
 is in `AGENTS.md` beside the asset-verification rules, with why ember does
 not read that log.
 
-**What is greyed out, and why.** The six advanced controls that have a feature
-flag in one of the server's two maps — clip skip, flow shift, shifted
-timestep, skip-layer guidance, vae tiling and the hires pass — are visibly
-unavailable in the web UI when the loaded model does not take them, and
-refused at enqueue rather than after a card is rented. A flag the server did
-not publish gates nothing: ember tells "the server says no" apart from "the
-server said nothing", because collapsing the two would grey every one of these
-against any build that does not carry the maps.
+**What is greyed out, and why.** The seven advanced controls that have a
+feature flag in one of the server's two maps — the image input, clip skip,
+flow shift, shifted timestep, skip-layer guidance, vae tiling and the hires
+pass — are visibly unavailable in the web UI when the loaded model does not
+take them, and refused at enqueue rather than after a card is rented. A flag
+the server did not publish gates nothing: ember tells "the server says no"
+apart from "the server said nothing", because collapsing the two would grey
+every one of these against any build that does not carry the maps.
 
 `eta` is the one with no flag in either map, so ember has no advance answer
 about it and does not invent one. The UI says which controls this model denied,
@@ -880,9 +903,10 @@ reach:
 ```yaml
     - prompt: "a cat"
       extra:
-        strength: 0.6
         lora: [{ path: "detail", multiplier: 0.8 }]
-        sample_params: { custom_sigmas: [14.6, 10.0, 0.0] }
+        sample_params:
+          custom_sigmas: [14.6, 10.0, 0.0]
+          guidance: { img_cfg: 1.5 }
 ```
 
 `extra` is a **config-only** field. A request over HTTP has no such key and is
@@ -1546,7 +1570,8 @@ least. Every field in the form explains itself on hover.
 | `max_hourly_usd` and `max_run_usd`, up to the config's | `ports:`, `max_day_usd` and `max_month_usd` |
 | prompt, size, steps, batch count, seed, sampler, scheduler, cfg, guidance, output name | `sd.serve`, `gpu_probe`, `assets:`, `verify:` |
 | clip skip, eta, flow shift, shifted timestep, output format and compression | `extra` |
-| the `hires`, `vae_tiling` and `slg` blocks | an image input and `lora` |
+| the `hires`, `vae_tiling` and `slg` blocks | `lora` |
+| an image it has already uploaded, by digest, and its `strength` | |
 | preview mode and interval | |
 
 A request asking for a *higher* ceiling gets the config's, not a refusal: a UI
@@ -1561,6 +1586,67 @@ upstream of anything a request can influence — `node.MountAt`'s refusal of
 sd-server's request body that ember does not type, including the ones naming
 file paths on the node, so a request that could set it could point a running
 server at weights the config never mentioned.
+
+The image is the one line of that table that moved, and what a request may name
+is a **digest** — sixty-four lowercase hex characters, or it is refused. Not a
+path, not a filename, not a URL. The next section is what that buys and what it
+does not.
+
+### Generating from an image you upload
+
+`ember serve` takes a png or a jpeg from the compose panel's file picker and a
+job generates from it instead of from noise. `strength` is how much of it
+survives: `0` keeps the image, `1` replaces it, and leaving the box empty uses
+the server's own default of `0.75`. An explicit `0` and an empty box are
+different requests, so ember sends them differently.
+
+It is the only inbound byte path in ember, so it is worth saying exactly what
+happens to a file:
+
+1. The browser posts the **bytes** to `POST /api/inputs` — no form, no
+   filename, no declared type. Authenticated and Origin-checked like every
+   other route: an ungated upload would be a loopback port on which any other
+   account on the machine could write files into your state directory.
+2. ember bounds the body at **8 MiB** and **refuses** past it rather than
+   truncating — a truncated image whose header survived still decodes, so a
+   silent cut would stage something that is not the file you picked.
+3. It reads the header with the standard library's `image.DecodeConfig`: a png
+   or a jpeg, with each axis between 1 and **8192**, or it is refused by name.
+   The axis bound is not a size limit — a two-kilobyte png can declare
+   100000x100000, and the thing that would then allocate four bytes per pixel
+   is sd-server, on a rented machine.
+4. It keys the file by the **sha256 of its content**, under
+   `<state_dir>/inputs`. The filename from your disk is discarded rather than
+   sanitised: a name that never reaches a path cannot be a traversal.
+5. The job carries that digest. Loading it re-hashes what it read and refuses a
+   mismatch, so the reference is a claim about content that is checked rather
+   than trusted — and it is checked **three times**: at enqueue, again before
+   anything is rented, and again when the bytes are sent.
+
+```
+$ curl -s -H "Authorization: Bearer $EMBER_SERVE_TOKEN"     --data-binary @boat.png http://127.0.0.1:7777/api/inputs
+{"id":"sha256:4f1c...","format":"png","width":1024,"height":768,"bytes":418233}
+```
+
+**Inputs live under the state directory and not the outputs**, which is a
+decision about lifetime. An uploaded image is an argument to a run rather than
+something a run produced, so it is not a generated image that
+`ember history prune` is free to remove. What cleans it up instead: every
+upload sweeps staged files that **no unfinished request names** and that are
+more than a day old. The age bound is what stops a sweep deleting the file you
+picked a second ago, and it is the same rule `ember store abort --older-than`
+follows — an upload in progress and an abandoned one look the same from here.
+The thing that creates the garbage is the thing that removes it, so the
+directory is bounded by one session's uploads rather than by all of history.
+
+**The server resizes it.** A 1024x768 input asked for at 512x512 comes back
+512x512; there is no need to match the geometry. And `strength` is refused
+without an image, because a live sd-server accepts that combination, generates,
+and reports the strength nowhere — which reads as working.
+
+The whole path is a web-UI feature: `sd.jobs` in `ember.yaml` has no image
+field and `ember up` has no staging directory, so the config path cannot name
+one at all.
 
 ### What bounds a queue
 
@@ -1725,7 +1811,11 @@ not written down gets believed past them:
 The queue and the history are a SQLite database beside the node journal, under
 the state directory. Images are written where `ember up` has always written
 them, one directory per request, and the same path is the key a later storage
-backend would use. Progress is stored as numbered events, so a page reload and
+backend would use. An **uploaded** image is the other way round: it goes in
+`<state_dir>/inputs`, keyed by its own sha256, because it is an argument to a
+run rather than something a run produced — see
+["Generating from an image you upload"](#generating-from-an-image-you-upload)
+for what sweeps it. Progress is stored as numbered events, so a page reload and
 a dropped websocket are the same code path: a client says which sequence number
 it last saw and is told everything since.
 
@@ -1771,6 +1861,18 @@ nil slice marshalled as `null` dropped whole websocket updates, a keyed list
 never re-rendered so the progress row froze, and a cached wasm meant a reload
 after `make web` served the previous app. It is the only thing in the
 repository that can see them.
+
+The file picker is in that lab for the same reason and is the clearest case of
+it: there is no `File`, no `FileList` and no `Blob.arrayBuffer` outside a
+browser, so `cargo test` can check that a struct serialises and nothing else.
+A second lab picks a real file in a real Chrome and asserts that the request
+the page queued names **the sha256 the lab computed itself** — the join
+between the two halves, rather than either half agreeing with itself. A third
+runs the same prompt, seed, size and step count twice on one rental, once with
+an uploaded image and once without, and asserts the two result files
+**differ**: a server that accepted `init_image` and dropped it would produce
+two identical images, and a parameter that changes no pixel is the defect the
+whole inbound path exists to avoid.
 
 ### Stopping it
 

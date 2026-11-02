@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Legion112/ember/internal/blob"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
 	"github.com/Legion112/ember/internal/dockerengine/dockerclient"
@@ -136,16 +137,29 @@ func (d Deps) Clock() time.Time {
 	return time.Now().UTC()
 }
 
-// Paths are the three directories a run reads and writes.
-type Paths struct{ Config, State, Outputs string }
+// Paths are the directories a run reads and writes.
+//
+// Inputs IS UNDER THE STATE DIRECTORY AND NOT UNDER THE OUTPUTS, which is the
+// one thing about it worth reading. An uploaded image is not something a run
+// produced: it is an argument to one, it exists before the request that uses
+// it, and it is what `ember history prune` must not treat as a paid-for
+// result. internal/blob says the rest.
+//
+// Resolved here rather than joined at each call site, for statestore.DirName's
+// reason: the journal's "nodes" subdirectory was a literal in the CLI and a
+// second literal in the lab harness, the two drifted, and a lab asserting
+// that a clean run leaves no records passed while reading an empty directory.
+type Paths struct{ Config, State, Outputs, Inputs string }
 
-// ResolvePaths decides where keys, records and outputs live.
+// ResolvePaths decides where keys, records, outputs and staged inputs live.
 func ResolvePaths(cfg config.Config, d Deps) (Paths, error) {
 	if d.HomeDir != "" {
+		state := filepath.Join(d.HomeDir, "state")
 		return Paths{
 			Config:  filepath.Join(d.HomeDir, "config"),
-			State:   filepath.Join(d.HomeDir, "state"),
+			State:   state,
 			Outputs: filepath.Join(d.HomeDir, "outputs"),
+			Inputs:  filepath.Join(state, blob.InputsDirName),
 		}, nil
 	}
 	c, err := cfg.ConfigDirOrDefault()
@@ -160,7 +174,10 @@ func ResolvePaths(cfg config.Config, d Deps) (Paths, error) {
 	if err != nil {
 		return Paths{}, err
 	}
-	return Paths{Config: c, State: s, Outputs: o}, nil
+	return Paths{
+		Config: c, State: s, Outputs: o,
+		Inputs: filepath.Join(s, blob.InputsDirName),
+	}, nil
 }
 
 // ConfigDir resolves the credentials directory, falling back to the config's

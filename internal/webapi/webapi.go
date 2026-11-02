@@ -101,6 +101,21 @@ type Options struct {
 	Store genstore.Store
 	Blobs blob.Store
 
+	// Inputs is where an uploaded image is staged between the file picker
+	// and the generation that uses it.
+	//
+	// A CONCRETE *blob.Inputs AND NOT AN INTERFACE, which is the opposite of
+	// Blobs beside it. Blobs is an interface because a generated image is
+	// going to live in an S3 bucket one day; a staged input exists for the
+	// minutes between a picker and an enqueue, on the machine running `ember
+	// serve`, and there is no second place for it to be. A handler test
+	// points it at t.TempDir(), which needs no fake.
+	//
+	// Nil is a server with no staging area -- which is what every handler
+	// test that does not care about images passes -- and the upload route
+	// answers 501 rather than panicking. cmd_serve always supplies one.
+	Inputs *blob.Inputs
+
 	// Queue is kicked after an enqueue, so a pushed request starts without
 	// waiting for a poll, and asked to stop one that is generating.
 	//
@@ -233,6 +248,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/config", s.guarded(s.getConfig))
 	s.mux.HandleFunc("GET /api/offers", s.guarded(s.getOffers))
 	s.mux.HandleFunc("GET /api/nodes", s.guarded(s.getNodes))
+
+	// GUARDED LIKE EVERYTHING ELSE, which for the one route that accepts
+	// bytes is the part that matters: an ungated upload is a loopback port on
+	// which any other uid on this machine can write files into the
+	// operator's state directory.
+	s.mux.HandleFunc("POST /api/inputs", s.guarded(s.postInput))
 
 	s.mux.HandleFunc("POST /api/requests", s.guarded(s.postRequest))
 	s.mux.HandleFunc("GET /api/requests", s.guarded(s.listRequests))
@@ -508,8 +529,17 @@ func (s *Server) validateJobs(ctx context.Context, req genstore.Request) error {
 			"after the node is up instead of now", "err", cerr)
 	}
 
-	for i, j := range req.Jobs {
-		sd := j.SD()
+	// The image inputs first, because ValidateStatic builds the request body
+	// and the body refuses a reference with no bytes. It is also the
+	// cheapest refusal in the feature: a reference nothing staged is a
+	// request that can never generate, and this is before it is even
+	// queued.
+	jobs, err := s.resolveInputs(req.Jobs)
+	if err != nil {
+		return err
+	}
+
+	for i, sd := range jobs {
 		if err := sdserver.ValidateStatic(sd, preview, interval); err != nil {
 			return fmt.Errorf("jobs[%d]: %w", i, err)
 		}
