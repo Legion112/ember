@@ -96,6 +96,7 @@ func commands() []command {
 		{"ls", "list nodes ember created, across every configured provider", cmdLs},
 		{"serve", "run the web UI and a queue that drains onto one rental", cmdServe},
 		{"reap", "destroy every node past its deadline", cmdReap},
+		{"spend", "report what the recorded generations cost", cmdSpend},
 		{"offers", "list rentable offers matching a filter", cmdOffers},
 		{"store", "create or destroy persistent storage that outlives a node", cmdStore},
 		{"archs", "print the CUDA architectures ember publishes an image for", cmdArchs},

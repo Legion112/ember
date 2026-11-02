@@ -205,7 +205,89 @@ type Request struct {
 	// Cost is what the rental came to, from provision's own estimate.
 	Cost node.MicroUSD `json:"cost_micro_usd,omitempty"`
 
+	// Rate is what the offer cost per hour, and Elapsed and Billable are how
+	// long the rental ran and how long it was charged for.
+	//
+	// Billable is kept beside Elapsed rather than instead of it, because they
+	// differ wherever a provider has a minimum: a node destroyed after four
+	// seconds on a one-minute minimum costs a minute. An overhead figure
+	// computed against Elapsed would credit ember with a saving the invoice
+	// does not show.
+	Rate     node.Rate     `json:"rate_micro_usd_per_hour,omitempty"`
+	Elapsed  time.Duration `json:"elapsed_ns,omitempty"`
+	Billable time.Duration `json:"billable_ns,omitempty"`
+
+	// LoadMeasured is the model-load span ember timed, and LoadReported what
+	// the server claimed it was.
+	//
+	// Both, because the only measurement anybody has made of these had them
+	// disagreeing by two orders of magnitude: sd-server reported 551ms for
+	// weights that are 56 GiB. Keeping one would mean choosing which figure
+	// to be wrong with.
+	LoadMeasured time.Duration `json:"load_measured_ns,omitempty"`
+	LoadReported time.Duration `json:"load_reported_ns,omitempty"`
+
 	Err string `json:"error,omitempty"`
+}
+
+// JobRun is what one job did, as opposed to what it asked for.
+//
+// SEPARATE FROM Job, AND THAT IS THE POINT. Job is the wire type a browser
+// posts: every field on it is something a request may set. Putting Cost on it
+// would make "what this cost" a field a request could send, which is the same
+// structural refusal that keeps Extra off Job -- a value the operator is
+// billed against must not be settable by the thing being billed. These are
+// written by the queue from the events the run emitted, and only read back.
+//
+// It shares the jobs table with Job because they are two halves of one job:
+// the ask and the outcome. A second table would need the same composite key
+// and a join to answer any question worth asking.
+type JobRun struct {
+	Req ReqID `json:"req"`
+
+	// Idx is 1-based, matching how a job is labelled in output and in the
+	// events that report it.
+	Idx int `json:"idx"`
+
+	Started time.Time `json:"started,omitempty"`
+	Ended   time.Time `json:"ended,omitempty"`
+
+	// Cost is this job's own card time, which is not its share of the bill.
+	// The rental also paid for provisioning, the image pull and the asset
+	// verify once for everything it served, and that difference is the entire
+	// saving the served shape exists for.
+	Cost node.MicroUSD `json:"cost_micro_usd,omitempty"`
+
+	Images int   `json:"images,omitempty"`
+	Bytes  int64 `json:"bytes,omitempty"`
+
+	// Passes is how many sampling passes ran and Steps the steps across all
+	// of them.
+	//
+	// Steps is summed from each pass's own declared total, never counted from
+	// the frames ember saw: ember deduplicates progress on the step, so at a
+	// poll slower than the card samples it observes fewer frames than there
+	// were steps, and a count of frames would measure the poll interval
+	// instead of the work. Passes is observed, so a pass shorter than one
+	// poll could in principle be missed.
+	//
+	// Steps and not Job.Steps is the right denominator for it/s: Job.Steps is
+	// one pass, and a pass restarts for each batch item, each high- and
+	// low-noise stage and each highres pass.
+	Passes int   `json:"passes,omitempty"`
+	Steps  int64 `json:"steps,omitempty"`
+}
+
+// Sampling is how long this job took.
+//
+// Zero when either end is missing rather than a duration measured against the
+// zero time, which would be two thousand years and would poison every average
+// it reached.
+func (j JobRun) Sampling() time.Duration {
+	if j.Started.IsZero() || j.Ended.IsZero() || j.Ended.Before(j.Started) {
+		return 0
+	}
+	return j.Ended.Sub(j.Started)
 }
 
 // Validate refuses a request this store should not hold.
@@ -276,6 +358,138 @@ type Image struct {
 	At      time.Time `json:"at"`
 }
 
+// GroupBy is what a spend aggregate is grouped by.
+//
+// A closed set, and checked, because it reaches a SQL GROUP BY. A free-form
+// column name there would be the one place in this package where a caller's
+// string becomes part of a statement.
+type GroupBy string
+
+const (
+	// ByTotal is one row for everything matched.
+	ByTotal GroupBy = ""
+
+	ByProvider GroupBy = "provider"
+	ByGPU      GroupBy = "gpu"
+	ByDay      GroupBy = "day"
+)
+
+// Valid reports whether g is a grouping this package implements.
+func (g GroupBy) Valid() bool {
+	switch g {
+	case ByTotal, ByProvider, ByGPU, ByDay:
+		return true
+	}
+	return false
+}
+
+// GroupBys is every grouping, so a command's flag help and this list cannot
+// disagree.
+func GroupBys() []GroupBy { return []GroupBy{ByProvider, ByGPU, ByDay} }
+
+// SpendQuery narrows an aggregate.
+//
+// A zero Since or Until means unbounded at that end, which is what "what has
+// ember ever cost" asks for.
+type SpendQuery struct {
+	Since time.Time
+	Until time.Time
+	By    GroupBy
+}
+
+// Bucket is one group of an aggregate.
+//
+// Measured facts only. Every ratio an operator wants -- cost per image, it/s,
+// the sampling share of the bill -- is a method below rather than a field,
+// because a stored quotient is a number that can be wrong while the terms it
+// came from are right.
+type Bucket struct {
+	// Key names the group: the provider, the card, or the day as
+	// YYYY-MM-DD. Empty for ByTotal.
+	Key string `json:"key,omitempty"`
+
+	Requests int `json:"requests"`
+	Jobs     int `json:"jobs"`
+	Images   int `json:"images"`
+
+	Bytes int64 `json:"bytes,omitempty"`
+
+	// RunCost is what the rentals came to and JobCost the card time inside
+	// them. They are different questions and the gap between them is the
+	// per-rental overhead -- provisioning, the image pull, the asset verify,
+	// the model load -- which a batch pays once for everything it serves.
+	//
+	// RunCost sums requests.cost, which is written only on the request that
+	// OPENED each rental, so a rental is counted once however many requests
+	// rode along on it. Summing a per-request share instead would understate
+	// it; attributing the whole rental to each would multiply it.
+	RunCost node.MicroUSD `json:"run_cost_micro_usd"`
+	JobCost node.MicroUSD `json:"job_cost_micro_usd"`
+
+	// Steps is the sampling steps across every pass, and Sampling the time
+	// the jobs themselves took. Billable is what the rentals were charged
+	// for, which bounds Sampling from above.
+	Steps    int64         `json:"steps"`
+	Sampling time.Duration `json:"sampling_ns"`
+	Billable time.Duration `json:"billable_ns"`
+
+	// Unrecorded is how many matched requests ran before these columns
+	// existed, and so contribute nothing to the figures above.
+	//
+	// Counted and reported rather than quietly excluded. A total that is
+	// missing a month of history and does not say so is the clean-bill-of-
+	// health failure `ember ls --all` exits non-zero to avoid, in a column of
+	// money.
+	Unrecorded int `json:"unrecorded,omitempty"`
+}
+
+// PerImage is what one image cost of rental.
+//
+// Of rental and not of card time, because the rental is the invoice. Zero
+// images gives zero rather than a division by nothing.
+func (b Bucket) PerImage() node.MicroUSD {
+	if b.Images <= 0 {
+		return 0
+	}
+	return node.MicroUSD(int64(b.RunCost) / int64(b.Images))
+}
+
+// Overhead is what the rentals cost beyond the jobs themselves.
+//
+// Never negative. JobCost is card time measured inside the rental and RunCost
+// is the rental, so RunCost should bound it -- but a rental whose cost event
+// never arrived has RunCost 0 with jobs that did run, and reporting that as a
+// negative overhead would read as a refund.
+func (b Bucket) Overhead() node.MicroUSD {
+	if b.RunCost <= b.JobCost {
+		return 0
+	}
+	return b.RunCost - b.JobCost
+}
+
+// StepsPerSecond is the sampling rate across this bucket's jobs.
+//
+// Computed from Steps, which counts every pass, and not from what the jobs
+// asked for: a pass restarts for each batch item and each highres pass, so an
+// it/s built from the requested step count understates every batched job.
+func (b Bucket) StepsPerSecond() float64 {
+	if b.Sampling <= 0 || b.Steps <= 0 {
+		return 0
+	}
+	return float64(b.Steps) / b.Sampling.Seconds()
+}
+
+// SamplingShare is the fraction of billable rental time spent generating.
+//
+// The rest is the overhead a batch exists to pay once: provisioning, the
+// image pull, the store read, the model load.
+func (b Bucket) SamplingShare() float64 {
+	if b.Billable <= 0 || b.Sampling <= 0 {
+		return 0
+	}
+	return b.Sampling.Seconds() / b.Billable.Seconds()
+}
+
 // Filter narrows a listing.
 type Filter struct {
 	// Status, empty for every status.
@@ -312,6 +526,42 @@ type Store interface {
 	// work outstanding and the operator's request sits in a queue nothing is
 	// draining.
 	ClaimNext(ctx context.Context, runID string, c Compat) (Request, bool, error)
+
+	// UpdateJob applies fn to what one job did and writes it back.
+	//
+	// Read-modify-write rather than a setter per fact, because the facts
+	// arrive separately: unit_started carries the start, job_images the files
+	// and bytes, job_progress the passes, unit_cost the end and the money.
+	// A setter per event would be four statements that each have to remember
+	// not to clobber the others.
+	//
+	// It writes only the execution columns. The job's prompt and geometry are
+	// what was asked for and are not writable here, for the reason Update
+	// cannot touch Jobs: a job whose ask changed after it ran is a record of
+	// something that did not happen.
+	UpdateJob(ctx context.Context, id ReqID, idx int, fn func(*JobRun)) error
+
+	// JobRuns returns what each of a request's jobs did, by index.
+	//
+	// A job nothing has reported on is still returned, zeroed, so a
+	// half-finished request does not read as a shorter one. An absent request
+	// is no rows and no error, as Images and Events are: this is a "list the
+	// children of" read, not a lookup.
+	JobRuns(ctx context.Context, id ReqID) ([]JobRun, error)
+
+	// Spend aggregates what was spent, in the store rather than in Go.
+	//
+	// IN SQL BECAUSE THE ALTERNATIVE IS WHAT THIS REPLACED. The only
+	// aggregate ember had was a Go loop over one request's entire event
+	// stream, and the facts it summed were inside a JSON blob per event -- so
+	// "what did a week cost, by card" meant parsing every row of the table
+	// that grows per step per job per rental. The columns exist so this can
+	// be a SUM.
+	//
+	// Derived figures are computed on the way out and never stored: it/s is a
+	// division, and a stored quotient is a number that can disagree with the
+	// terms it came from.
+	Spend(ctx context.Context, q SpendQuery) ([]Bucket, error)
 
 	// Update applies fn to a request and writes it back.
 	//

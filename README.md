@@ -1202,6 +1202,79 @@ Cancelling a **queued** request is a button. Cancelling one that is already
 generating is not: it would mean destroying the node, which would take every
 other request on the same rental with it. Stop `ember serve` to end a rental.
 
+### What it cost
+
+Everything needed to say what a job cost was being **emitted** from the
+beginning — integer-microdollar cost, measured against reported durations,
+elapsed against billable, the pass and the step within it — and almost none of
+it was **queryable**. It went into one opaque JSON blob per event, and the
+`jobs` table, the row a job *is*, had no execution columns at all: no started,
+no ended, no cost, no steps sampled. The only aggregate anywhere in ember was
+a Go loop over one request's entire event stream, and nothing called it.
+
+So every measurement in this file was computed by hand from a run somebody
+watched, which means nothing trends any of them and nobody would notice
+ember's own overhead regressing.
+
+```
+$ ember spend --by gpu
+card          reqs  jobs images      rental   card time    overhead  per image steps/s
+a100-80g         1     4      4       $1.79       $1.52       $0.27    $0.4475    0.04
+rtx4090          2     9      8       $1.39       $0.76       $0.63   $0.17375    0.07
+
+total: 3 request(s), 12 image(s), $3.18 of rental, $2.28 of card time
+90% of billable rental time was spent generating.
+1 request(s) ran before ember recorded per-job figures, so they contribute
+their rental cost and none of their images: per image is an upper bound here,
+and steps/s is computed only over what was recorded. Nothing backfills them.
+```
+
+`--by` takes `provider`, `gpu` or `day`; `--since` and `--until` are UTC dates
+and the period is half-open, so consecutive periods tile without counting a
+day twice. `--json` prints the rows with money as integer microdollars, and
+without the derived figures: cost per image and steps/s are divisions of
+columns that are there, and a stored quotient is a number that can be wrong
+while its terms are right.
+
+Four things it deliberately does not do.
+
+**The two cost columns are not interchangeable.** The rental is what the
+provider charges; card time is what the jobs themselves took. A batch pays
+provisioning, the image pull, the store read and the model load once for
+everything it serves, and the gap between the columns is that overhead —
+measured, now, rather than estimated by hand at 7%. `rental` is summed over
+the request that *opened* each rental, so a rental is counted once however
+many requests rode along on it.
+
+**It cannot group by model.** Nothing records which model served a request:
+`sd.serve` is config rather than request, and the only stored copy is a single
+cached capability row that the next rental overwrites. Grouping by it would
+mean guessing, which is the `a100-40g` is not `a100-80g` mistake one layer up.
+Recording it is a column written at claim time and a small follow-up.
+
+**`ember up` is not in here.** It prints its cost and keeps nothing — only
+`ember serve` writes to the generation history — so about half the
+measurements in this file came from runs this command cannot see. Making `up`
+record too is the largest remaining question and its own change.
+
+**Nothing backfills.** A request from before these columns existed has its
+rental cost and no per-job figures, and `ember spend` says how many it had to
+leave out on every run. The facts are in those requests' event bodies, so a
+backfill is possible — and it would have to re-derive the step counts from
+progress frames whose poll interval is unknown for those runs, which is the
+one number this schema is careful not to infer. "ember did not record it then"
+is the honest answer.
+
+The step count is worth one more line, because it is the easiest figure here
+to get wrong. A pass restarts for each batch item, each high- and low-noise
+stage and each highres pass, so the `steps` a job asked for is the steps of
+*one* pass and an it/s built from it understates every batched job. And the
+steps of a pass are read off that pass's own declared total rather than
+counted from the frames ember saw: ember deduplicates progress on the step, so
+at a poll slower than the card samples it observes fewer frames than there
+were steps, and a count of frames would measure the poll interval instead of
+the work.
+
 ## Video
 
 [`ember.video.example.yaml`](ember.video.example.yaml) is the configuration

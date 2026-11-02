@@ -32,7 +32,7 @@ const FileName = "generations.db"
 // internal/statestore's reason: reading a newer layout as an older one drops
 // columns, and the column it would drop is the one that says a request is
 // still running.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // migrations takes an existing file forward, one version per entry:
 // migrations[0] moves a version-1 file to version 2.
@@ -78,6 +78,44 @@ var migrations = [][]string{
 		// already does, and which the next rental repairs because PutCaps
 		// runs on every one of them.
 		`DELETE FROM meta WHERE key = 'caps'`,
+	},
+
+	// 2 -> 3: what a job and a rental actually did.
+	//
+	// Every figure here was already being emitted and none of it was
+	// queryable, which is the whole of #32: `grep -rn 'SUM(' internal/genstore/`
+	// returned nothing, the only aggregate in the program was a Go loop over
+	// one request's whole event stream, and every measurement in README was
+	// computed by hand from a run somebody watched.
+	//
+	// Added as columns rather than read out of events.body on demand, on the
+	// write-through precedent requests.node and requests.cost already set.
+	// The alternative is JSON-parsing every row of the table that grows per
+	// step per job per rental, which is fine for one monthly total and is the
+	// wrong foundation for grouping by card.
+	//
+	// NOTHING BACKFILLS, and that is not an oversight. The facts are in the
+	// event bodies of requests that already ran, so a backfill is possible --
+	// and it would have to re-derive passes and steps from progress frames
+	// whose poll interval is unknown for those runs, which is the one number
+	// this schema is careful not to infer. A row from before this version
+	// reads as zero, `ember spend` says how many it had to leave out, and the
+	// honest version of "what did last month cost" is "ember did not record
+	// it then".
+	{
+		`ALTER TABLE jobs ADD COLUMN started_unix INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN ended_unix INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN cost INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN images INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN passes INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN steps_done INTEGER NOT NULL DEFAULT 0`,
+
+		`ALTER TABLE requests ADD COLUMN rate INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN elapsed_ns INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN billable_ns INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN load_measured_ns INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN load_reported_ns INTEGER NOT NULL DEFAULT 0`,
 	},
 }
 
@@ -170,6 +208,28 @@ CREATE TABLE IF NOT EXISTS requests (
 	started_unix  INTEGER NOT NULL DEFAULT 0,
 	ended_unix    INTEGER NOT NULL DEFAULT 0,
 	cost          INTEGER NOT NULL DEFAULT 0,
+
+	-- The rental's own facts, promoted out of events.body for the reason the
+	-- jobs columns above were.
+	--
+	-- billable is not elapsed, and both are kept: a node destroyed after four
+	-- seconds on a provider with a one-minute minimum costs a minute, and an
+	-- overhead computed against the elapsed time would credit ember with a
+	-- saving the invoice does not show.
+	rate          INTEGER NOT NULL DEFAULT 0,
+	elapsed_ns    INTEGER NOT NULL DEFAULT 0,
+	billable_ns   INTEGER NOT NULL DEFAULT 0,
+
+	-- The model load, as ember timed it and as the server claimed.
+	--
+	-- Both, because they disagreed by two orders of magnitude on the one
+	-- measurement anybody has made: sd-server reported 551ms for weights that
+	-- are 56 GiB while the other arm of the same run spent 80-96s per image
+	-- re-reading them. Storing one would mean choosing which figure to be
+	-- wrong with, and the disagreement is itself the finding #30 turns on.
+	load_measured_ns INTEGER NOT NULL DEFAULT 0,
+	load_reported_ns INTEGER NOT NULL DEFAULT 0,
+
 	err           TEXT    NOT NULL DEFAULT ''
 );
 
@@ -193,6 +253,44 @@ CREATE TABLE IF NOT EXISTS jobs (
 	-- The optional parameters, as the JSON of sdserver.Params. See
 	-- migrations for why this is one column rather than one per field.
 	params      TEXT    NOT NULL DEFAULT '{}',
+
+	-- WHAT HAPPENED, as opposed to what was asked for above.
+	--
+	-- Every one of these was already emitted and none was queryable: they
+	-- lived inside events.body, one opaque JSON blob per event, so "what did
+	-- an image cost on this card" meant parsing every row of the largest
+	-- table in the schema. They are columns for the reason requests.node and
+	-- requests.cost are -- something needs to join on them -- and the event
+	-- stream stays the append-only truth beside them. A disagreement between
+	-- the two is resolved in the stream's favour and is a bug in the writer.
+	--
+	-- Derived figures are deliberately absent. it/s is steps_done over the
+	-- span, computed in the query: a stored quotient is a number that can be
+	-- wrong, and money is stored as microdollars and formatted late for the
+	-- same reason.
+	started_unix INTEGER NOT NULL DEFAULT 0,
+	ended_unix   INTEGER NOT NULL DEFAULT 0,
+	cost         INTEGER NOT NULL DEFAULT 0,
+	images       INTEGER NOT NULL DEFAULT 0,
+	bytes        INTEGER NOT NULL DEFAULT 0,
+
+	-- passes is how many sampling passes were observed, and steps_done the
+	-- steps across all of them.
+	--
+	-- Two numbers because one would lie. A pass restarts for each batch item,
+	-- each high- and low-noise stage and each highres pass, so jobs.steps --
+	-- what was asked for -- is the steps of ONE pass and the real iteration
+	-- count is that multiplied by however many there were. An it/s computed
+	-- from jobs.steps understates every batched or highres job.
+	--
+	-- steps_done is summed from each pass's own declared total rather than
+	-- counted from the frames ember saw, and that distinction matters: ember
+	-- deduplicates progress on the step, so at a poll slower than the card
+	-- samples it OBSERVES fewer frames than there were steps. A count of
+	-- frames would be a measurement of the poll interval. The pass count is
+	-- observed, so a pass shorter than one poll could in principle be missed.
+	passes       INTEGER NOT NULL DEFAULT 0,
+	steps_done   INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (req, idx)
 );
 
@@ -364,7 +462,8 @@ func (s *SQLite) Enqueue(ctx context.Context, r Request) (ReqID, error) {
 // shifts is whichever one happens to be next.
 const requestColumns = `id, created_unix, status, provider, gpu, offer, ttl_ns,
 	max_hourly, max_run, preview, preview_every, run_id, node,
-	started_unix, ended_unix, cost, err`
+	started_unix, ended_unix, cost, rate, elapsed_ns, billable_ns,
+	load_measured_ns, load_reported_ns, err`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -376,13 +475,16 @@ func scanRequest(sc scanner) (Request, error) {
 		id, status                    string
 		created, started, ended       int64
 		ttl, hourly, maxRun, cost     int64
+		rate, elapsed, billable       int64
+		loadMeasured, loadReported    int64
 		provider, gpu, offer          string
 		preview, runID, nodeID, errTx string
 		previewEvery                  int
 	)
 	if err := sc.Scan(&id, &created, &status, &provider, &gpu, &offer, &ttl,
 		&hourly, &maxRun, &preview, &previewEvery, &runID, &nodeID,
-		&started, &ended, &cost, &errTx); err != nil {
+		&started, &ended, &cost, &rate, &elapsed, &billable,
+		&loadMeasured, &loadReported, &errTx); err != nil {
 		return Request{}, err
 	}
 	r = Request{
@@ -400,6 +502,11 @@ func scanRequest(sc scanner) (Request, error) {
 		RunID:           runID,
 		Node:            nodeID,
 		Cost:            node.MicroUSD(cost),
+		Rate:            node.Rate(rate),
+		Elapsed:         time.Duration(elapsed),
+		Billable:        time.Duration(billable),
+		LoadMeasured:    time.Duration(loadMeasured),
+		LoadReported:    time.Duration(loadReported),
 		Err:             errTx,
 	}
 	// Zero stays zero rather than becoming the epoch: "this never started"
@@ -583,10 +690,14 @@ func (s *SQLite) Update(ctx context.Context, id ReqID, fn func(*Request)) error 
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE requests SET status = ?, offer = ?, run_id = ?, node = ?,
-			started_unix = ?, ended_unix = ?, cost = ?, err = ?
+			started_unix = ?, ended_unix = ?, cost = ?,
+			rate = ?, elapsed_ns = ?, billable_ns = ?,
+			load_measured_ns = ?, load_reported_ns = ?, err = ?
 		WHERE id = ?`,
 		string(r.Status), r.Offer, r.RunID, r.Node,
-		unixOrZero(r.Started), unixOrZero(r.Ended), int64(r.Cost), r.Err, string(id))
+		unixOrZero(r.Started), unixOrZero(r.Ended), int64(r.Cost),
+		int64(r.Rate), int64(r.Elapsed), int64(r.Billable),
+		int64(r.LoadMeasured), int64(r.LoadReported), r.Err, string(id))
 	if err != nil {
 		return fmt.Errorf("update request %s: %w", id, err)
 	}
