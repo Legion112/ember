@@ -66,10 +66,30 @@ type Config struct {
 
 	// MaxHourlyUSD and MaxRunUSD are decimal strings, parsed into integer
 	// microdollars. They are strings rather than floats on purpose: a YAML
-	// float for 0.29 is 0.28999999999999998, and a budget that is sometimes
+	// float for 2.01 is 2.0099999999999998, which times a million truncates
+	// to 2009999, and a budget that is sometimes
 	// wrong by a rounding error is a budget nobody trusts.
 	MaxHourlyUSD string `yaml:"max_hourly_usd"`
 	MaxRunUSD    string `yaml:"max_run_usd"`
+
+	// MaxDayUSD and MaxMonthUSD bound what every rental in a UTC calendar
+	// day or month may come to together. Decimal strings for the reason the
+	// two above are.
+	//
+	// THEY BOUND A SEQUENCE OF RENTALS, which nothing did. max_hourly_usd
+	// bounds a card and max_run_usd bounds one rental, and `ember serve` is
+	// the first thing here that can produce a sequence without the operator
+	// being at the keyboard for each: thirty queued requests at $1.79/hour
+	// on a one-hour TTL are inside every other ceiling and are $54. They are
+	// read by `ember serve` only, where a queue drains unattended; `ember up`
+	// is one rental the operator started themselves.
+	//
+	// A request cannot narrow either, let alone widen one -- there is no
+	// field for them on the wire type, so a browser is never consulted about
+	// the limit that stops it. See internal/queue's ceiling.go for the
+	// calendar-rather-than-rolling decision and what it costs.
+	MaxDayUSD   string `yaml:"max_day_usd"`
+	MaxMonthUSD string `yaml:"max_month_usd"`
 
 	// Dirs, resolved from the environment when empty.
 	ConfigDir string `yaml:"config_dir"`
@@ -679,6 +699,33 @@ func (c Config) Budgets() (hourly node.Rate, run node.MicroUSD, err error) {
 		run = v
 	}
 	return hourly, run, nil
+}
+
+// PeriodCeilings returns the per-day and per-month rental ceilings.
+//
+// Separate from Budgets because the two are checked against different things:
+// Budgets bounds one offer and one rental, and these bound every rental in a
+// period together -- which needs the generation history and therefore cannot
+// be answered by a pure function of this file.
+//
+// Zero means no ceiling for that period, as it does everywhere else here, so
+// a config that sets neither behaves exactly as it did before they existed.
+func (c Config) PeriodCeilings() (day, month node.MicroUSD, err error) {
+	if c.MaxDayUSD != "" {
+		v, perr := node.ParseUSD(c.MaxDayUSD)
+		if perr != nil {
+			return 0, 0, fmt.Errorf("max_day_usd: %w", perr)
+		}
+		day = v
+	}
+	if c.MaxMonthUSD != "" {
+		v, perr := node.ParseUSD(c.MaxMonthUSD)
+		if perr != nil {
+			return 0, 0, fmt.Errorf("max_month_usd: %w", perr)
+		}
+		month = v
+	}
+	return day, month, nil
 }
 
 // ParsePorts turns the "name:remote[:local]" entries into port maps.

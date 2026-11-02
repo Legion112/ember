@@ -114,8 +114,9 @@ max_run_usd: "1.00"
 	}
 }
 
-// TestBudgets_AreParsedAsDecimalStringsNotFloats. A YAML float for 0.29 is
-// 0.28999999999999998, and a budget wrong by a rounding error is one nobody
+// TestBudgets_AreParsedAsDecimalStringsNotFloats. A YAML float for 2.01 is
+// 2.0099999999999998, which times a million truncates to 2009999, and a
+// budget wrong by a rounding error is one nobody
 // trusts.
 func TestBudgets_AreParsedAsDecimalStringsNotFloats(t *testing.T) {
 	cfg := Config{MaxHourlyUSD: "0.29"}

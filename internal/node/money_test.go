@@ -7,8 +7,8 @@ import (
 )
 
 // TestParseUSD_DoesNotRoundTripThroughFloat is the reason this function is
-// hand-written. strconv.ParseFloat("0.29")*1e6 is 289999.99999999994, which
-// truncates to 289999 and makes a price compare as cheaper than the provider's
+// hand-written. strconv.ParseFloat("2.01")*1e6 is 2009999.9999999998, which
+// truncates to 2009999 and makes a price compare as cheaper than the provider's
 // own page says it is.
 func TestParseUSD_DoesNotRoundTripThroughFloat(t *testing.T) {
 	for _, tc := range []struct {

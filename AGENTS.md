@@ -713,6 +713,80 @@ that sentence made unrepresentable rather than merely tested.
   queued request still claimable, because a reader that had claimed it would
   leave the queue drained and a request "running" against a rental nothing
   holds.
+- **`max_hourly_usd` bounds a card, `max_run_usd` bounds a rental, and
+  nothing bounded a sequence of them.** `ember serve` is the first thing here
+  that can produce a sequence without the operator being at the keyboard for
+  each: thirty queued requests at $1.79/hour on a one-hour TTL are inside
+  every ceiling ember had and are $54. `max_day_usd` and `max_month_usd` bound
+  a UTC calendar period, checked after the offer is chosen and before anything
+  is created -- the same moment and the same arithmetic `max_run_usd` uses, so
+  the figure a period is charged and the figure one rental is bounded by
+  cannot come apart. This is NOT the mid-run meter refused above: that one
+  needed a clock, a price and a running total kept correct *while* a rental is
+  in flight, and this needs the completed cost of finished rentals, which is
+  already recorded, numbered and durable. One more `SUM` over rows that exist.
+- **A request is not asked about the period ceiling, which is stronger than
+  narrowing it.** Every other ceiling here follows "a request may narrow the
+  config's and never widen them", through `queue.Narrow`'s `smaller`. These
+  have no field on the wire type at all, so the limit that stops a browser is
+  one the browser cannot name -- the `extra` refusal applied to money rather
+  than to parameters.
+- **It projects rather than reports, and that is the difference between a
+  ceiling and a report.** A check that refuses only once a period has already
+  been exceeded is a ceiling every period breaches by one rental, and one
+  rental is the $54 this exists for. The projection is the offer's price over
+  the *narrowed* TTL, because that is the deadline the node will actually get.
+- **A calendar period, and the hole it leaves is written down.** An invoice is
+  what the operator is defending against and an invoice is calendar, so a
+  rolling window would be a second time concept for a worse match. The cost is
+  that a day ceiling resets at midnight UTC and a queue can spend one day's
+  allowance twice in two hours across the boundary; what bounds that is the
+  month ceiling, which is why both exist and why the month is the one to set
+  if only one is set. UTC for the reason `ember spend`'s day bucket is UTC: a
+  ceiling that moves with a laptop cannot be reasoned about.
+- **It refuses rather than quietly renting something cheaper.** Narrowing
+  `max_run_usd` to the remaining headroom was the first design and would have
+  reused the existing mechanism exactly -- and it would have meant an operator
+  who asked for an H100 getting a 4090 because the month was nearly spent.
+  ember exists to measure what a card costs, and a run that silently happened
+  on different hardware is a measurement nobody can use.
+- **A free rental is never refused by a money ceiling.** The local provider's
+  price is zero, so its projection is zero and it adds nothing to any period.
+  Refusing one because a paid month is spent would stop the one kind of run
+  that costs nothing, which is the opposite of what the ceiling is for.
+- **"I could not read what has been spent" is not "it is allowed", and a
+  configured ceiling with no ledger is a refusal.** Both are the rule that
+  makes `ember ls --all` exit non-zero over a provider it could not ask: an
+  operator who wrote `max_month_usd` has said unattended spending must stop
+  somewhere, and "probably fine" is the one answer a spend ceiling must never
+  give. The second cannot happen through `ember serve`, which always wires the
+  store; it is a refusal because a ceiling that silently does nothing is worse
+  than one that was never configured.
+- **It counts rentals and not store standing charges, which is a known gap.**
+  A store bills by the gigabyte-month whether or not anything runs and
+  `reconcile.MonthlyTotal` already prices one, so a ceiling that ignores a
+  $40/month store is wrong by a known amount. Counting it would mean a
+  provider scan inside the drain loop, and a provider that could not be
+  reached would leave two choices: block the queue, which is worse than the
+  gap, or carry on without that store's charge -- which is the gap with extra
+  steps and a false sense that it was covered.
+- **It bites at selection and not at enqueue, although enqueue would be
+  kinder.** #31 suggested both: a warning when the request is queued and a
+  refusal when it is selected. Refusing at enqueue is a FALSE refusal across a
+  period boundary -- work queued on the 30th for next month would be rejected
+  although the queue would have run it after the turnover -- and a warning
+  field in the enqueue response that the page does not render is the "built
+  end to end and never connected" failure this repository has paid for three
+  times. What is built instead costs nothing and is not dead: `ember serve`
+  prints where both periods stand at startup, so an operator knows their
+  headroom before they queue thirty requests, and a refused request carries
+  the reason, which the page shows and `ember history` prints.
+- **The ceiling's own input has no gap, unlike `ember spend`'s per-job
+  figures.** `requests.cost` was a column before the execution columns
+  existed, so every rental ember has ever recorded contributes to a period
+  total. Worth stating because the command beside it has to warn that its
+  other columns are incomplete, and a reader could reasonably assume the same
+  caveat applies here.
 - **Two parts of #27 were refused, and here is why.** It asked for
   `ember spend` to default to the current calendar month: a default that
   silently excludes everything older is the "a total missing part of its
@@ -754,8 +828,14 @@ A leaked node bills by the hour in silence. These are not style preferences.
   float64, so a budget ceiling built by arithmetic occasionally refuses an
   offer at exactly the ceiling and occasionally admits one above it. A budget
   that is sometimes wrong by a rounding error is a budget nobody trusts.
-  `ParseUSD` is hand-written for the same reason: `ParseFloat("0.29")*1e6` is
-  289999.
+  `ParseUSD` is hand-written for the same reason: `ParseFloat("2.01")*1e6` is
+  2009999.9999999998, which truncates to 2009999 -- a price that compares as
+  cheaper than the provider's. **`ParseFloat("0.29")*1e6` is exactly 290000**,
+  which this document and seven comments claimed was 289999 until a
+  reinstatement test refused to go red over it. That is the stronger argument
+  rather than a weaker one: the error cancels for 0.29 and does not for 2.01,
+  so there is no way to tell by looking which prices survive the trip, and the
+  only safe rule is not to take it.
 - **TTL is mandatory and the deadline is derived in one place.** The deadline
   is written into the provider's label, the local state record and the node's
   own self-destruct timer; three copies computed at three call sites are three
