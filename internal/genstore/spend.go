@@ -184,8 +184,7 @@ func (s *SQLite) Spend(ctx context.Context, q SpendQuery) ([]Bucket, error) {
 		       COALESCE(SUM(j.cost), 0),
 		       COALESCE(SUM(j.steps), 0),
 		       COALESCE(SUM(j.span), 0),
-		       SUM(CASE WHEN r.ended_unix != 0 AND COALESCE(j.n, 0) > 0
-		                     AND COALESCE(j.recorded, 0) = 0
+		       SUM(CASE WHEN r.ended_unix != 0 AND COALESCE(j.recorded, 0) = 0
 		                THEN 1 ELSE 0 END)
 		FROM requests r
 		LEFT JOIN (` + jobSideByRequest + `) j ON j.req = r.id

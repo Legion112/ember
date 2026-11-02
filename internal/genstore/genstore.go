@@ -174,6 +174,38 @@ func (j Job) SD() sdserver.Job {
 	}
 }
 
+// FromSD is the inverse of SD, for a batch that came from a config file
+// rather than over a wire.
+//
+// IT DROPS Extra, AND THAT IS THE SEAL RATHER THAN AN OMISSION. There is no
+// field here to put it in, deliberately -- see this type's own comment -- so
+// recording a config's `extra:` map would mean adding one, and the field that
+// reaches every untyped part of the generation API would then exist on the
+// type a browser posts. The seal is worth more than the fidelity, so what is
+// recorded of such a job is its typed ask and the event stream's own
+// description of it, and the honest statement is that the recorded ask of a
+// job using `extra:` is INCOMPLETE rather than wrong. Nothing else is lost:
+// `ember up` is the only caller, a request over HTTP cannot carry Extra in
+// the first place, and the costs and timings -- which are what #47 is about
+// -- come from the events either way.
+func FromSD(j sdserver.Job) Job {
+	return Job{
+		Prompt:         j.Prompt,
+		NegativePrompt: j.NegativePrompt,
+		Width:          j.Width,
+		Height:         j.Height,
+		Steps:          j.Steps,
+		BatchCount:     j.BatchCount,
+		Seed:           j.Seed,
+		Sampler:        j.Sampler,
+		Scheduler:      j.Scheduler,
+		CFG:            j.CFG,
+		Guidance:       j.Guidance,
+		Output:         j.Output,
+		Params:         j.Params,
+	}
+}
+
 // Request is a batch of jobs queued as one unit.
 //
 // A BATCH AND NOT A JOB, because the whole argument for the served shape is
@@ -351,11 +383,28 @@ func (j JobRun) Sampling() time.Duration {
 // On the way in, because a row nothing can run is worse than a refusal: it
 // sits in the queue, the operator sees it pending, and nothing ever picks it
 // up.
-func (r Request) Validate() error {
+func (r Request) Validate() error { return r.validate(true) }
+
+// ValidateRun is Validate for a run that is ALREADY HAPPENING -- what Adopt
+// records.
+//
+// THE JOBS ARE THE ONLY DIFFERENCE, and they are the whole reason there are
+// two of these. Validate refuses a batch with none because such a row would
+// sit in the queue being skipped forever: it "would rent a card, load the
+// weights and generate nothing", which is a statement about work nobody has
+// done yet. Two of the three shapes `ember up` has have never had a job at
+// all -- a forwarded session has ports and no batch, and a `cmds` run has
+// argv ember deliberately does not read -- so applying that refusal to a
+// record of what already ran would refuse to record the cheapest thing ember
+// does and the easiest to leak. Zero jobs there is a fact, not a request
+// nothing can satisfy.
+func (r Request) ValidateRun() error { return r.validate(false) }
+
+func (r Request) validate(needJobs bool) error {
 	if r.Provider == "" {
 		return errors.New("a request names no provider")
 	}
-	if len(r.Jobs) == 0 {
+	if needJobs && len(r.Jobs) == 0 {
 		return errors.New("a request with no jobs would rent a card, load the weights and generate nothing")
 	}
 	if r.TTL <= 0 {
@@ -745,6 +794,47 @@ func (e Entry) Wall() time.Duration {
 type Store interface {
 	// Enqueue records a request as queued and returns its id.
 	Enqueue(ctx context.Context, r Request) (ReqID, error)
+
+	// Adopt records a run that is already happening and returns its id. It is
+	// how `ember up` enters the history.
+	//
+	// IT IS NOT Enqueue, AND THE STATUS IS THE REASON. Enqueue writes
+	// StatusQueued whatever the caller said, because that is what entering a
+	// queue means -- and a queued row is exactly what ClaimNext takes. An
+	// `ember up` row written that way would be claimable: an `ember serve`
+	// running in another terminal, which is the ordinary setup for somebody
+	// who has both, would pick it up, rent a SECOND card and generate the
+	// batch a second time from the row describing the run already in flight.
+	// One mistaken status, two GPUs. So this writes StatusRunning, which no
+	// claim will take, and the row is terminal from the queue's point of view
+	// the moment it exists.
+	//
+	// IT IS WRITTEN BEFORE THE CREATE CALL, on the rule internal/provision
+	// already follows for the journal: "the intent record is written before
+	// the create call", because the window between asking for a machine and
+	// reading the answer is where a rental nothing recorded is born. So a run
+	// whose create call failed, and a run whose node never became ready but
+	// billed anyway, both have a row -- and both are runs that can cost money.
+	//
+	// THE JOBS ARE OPTIONAL HERE, unlike Enqueue: see ValidateRun. Two of
+	// `ember up`'s three shapes have none.
+	//
+	// It names no more columns than Enqueue does. Everything a run produces --
+	// the node, the cost, the rate, the memory figures, the model -- is
+	// written afterwards by whatever watched the run, for the reason JobRun is
+	// separate from Job: a value the operator is billed against must not be
+	// settable by the thing being billed.
+	//
+	// Its one unhappy interaction is with Interrupt, whose premise -- anything
+	// running belonged to a process that is gone -- an `ember up` in another
+	// terminal makes false. A serve started beside a live `up` marks that
+	// run interrupted, and the run's own ending writes over it a moment
+	// later. Said out loud rather than fixed, because the alternative is a
+	// per-row holder and a liveness check, and the direction this gets wrong
+	// is transient and self-correcting; the direction it gets RIGHT is an
+	// `ember up` killed with SIGKILL, whose row would otherwise read as
+	// running forever.
+	Adopt(ctx context.Context, r Request) (ReqID, error)
 
 	// Get returns one request with its jobs, or ErrNotFound.
 	Get(ctx context.Context, id ReqID) (Request, error)

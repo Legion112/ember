@@ -512,21 +512,68 @@ func (s *SQLite) Enqueue(ctx context.Context, r Request) (ReqID, error) {
 	// a row in the history that never happened.
 	r.Status = StatusQueued
 
+	if err := s.insert(ctx, r, time.Time{}); err != nil {
+		return "", err
+	}
+	return r.ID, nil
+}
+
+// Adopt records a run that is already happening.
+//
+// StatusRunning and not StatusQueued, which is the whole reason this is not
+// Enqueue: see the Store interface for what a claimable `ember up` row would
+// cost. Started is set here because the run has started -- this is called
+// before the create call -- so Entry.Wall is its own span from the beginning
+// rather than from whenever something first wrote to the row.
+func (s *SQLite) Adopt(ctx context.Context, r Request) (ReqID, error) {
+	if err := r.ValidateRun(); err != nil {
+		return "", err
+	}
+	if r.ID == "" {
+		r.ID = NewReqID()
+	}
+	if r.Created.IsZero() {
+		r.Created = s.at()
+	}
+	r.Status = StatusRunning
+	started := r.Started
+	if started.IsZero() {
+		started = r.Created
+	}
+
+	if err := s.insert(ctx, r, started); err != nil {
+		return "", err
+	}
+	return r.ID, nil
+}
+
+// insert writes the ask, and nothing a run produces.
+//
+// ONE SPELLING FOR TWO ENTRY POINTS. Enqueue and Adopt differ by the status
+// and by whether the run has already started, and in nothing else -- so the
+// column list, the job rows and the parameter encoding live here. Two
+// statements would be two places to remember what this one deliberately does
+// NOT name: cost, rate, node, run_id, the memory columns and the model are
+// written by whatever watched the run, so a caller that set them on the way in
+// would have them dropped. That is the same structural refusal that keeps
+// Extra off Job, applied to the columns an operator is billed against.
+func (s *SQLite) insert(ctx context.Context, r Request, started time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", fmt.Errorf("begin: %w", err)
+		return fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO requests
 			(id, created_unix, status, provider, gpu, offer, ttl_ns, max_hourly, max_run,
-			 preview, preview_every)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			 preview, preview_every, started_unix)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		string(r.ID), r.Created.UnixMilli(), string(r.Status), r.Provider, r.GPU, r.Offer,
-		int64(r.TTL), int64(r.MaxHourly), int64(r.MaxRun), r.Preview, r.PreviewInterval)
+		int64(r.TTL), int64(r.MaxHourly), int64(r.MaxRun), r.Preview, r.PreviewInterval,
+		unixOrZero(started))
 	if err != nil {
-		return "", fmt.Errorf("record request %s: %w", r.ID, err)
+		return fmt.Errorf("record request %s: %w", r.ID, err)
 	}
 
 	for i, j := range r.Jobs {
@@ -536,7 +583,7 @@ func (s *SQLite) Enqueue(ctx context.Context, r Request) (ReqID, error) {
 		// job it was.
 		params, err := json.Marshal(j.Params)
 		if err != nil {
-			return "", fmt.Errorf("encode the parameters of job %d of request %s: %w", i+1, r.ID, err)
+			return fmt.Errorf("encode the parameters of job %d of request %s: %w", i+1, r.ID, err)
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO jobs
@@ -547,14 +594,14 @@ func (s *SQLite) Enqueue(ctx context.Context, r Request) (ReqID, error) {
 			j.BatchCount, j.Seed, j.Sampler, j.Scheduler, j.CFG, j.Guidance, j.Output,
 			params)
 		if err != nil {
-			return "", fmt.Errorf("record job %d of request %s: %w", i+1, r.ID, err)
+			return fmt.Errorf("record job %d of request %s: %w", i+1, r.ID, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit request %s: %w", r.ID, err)
+		return fmt.Errorf("commit request %s: %w", r.ID, err)
 	}
-	return r.ID, nil
+	return nil
 }
 
 // requestColumns is the one spelling of the SELECT list.

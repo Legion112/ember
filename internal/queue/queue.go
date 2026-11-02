@@ -33,7 +33,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path"
 	"path/filepath"
 	"sync"
 	"time"
@@ -146,13 +145,6 @@ func (q *Queue) at() time.Time {
 // sdserver.WriteImages opens an os.Root over it.
 func (q *Queue) dirOf(id genstore.ReqID) string {
 	return filepath.Join(q.Outputs, string(id))
-}
-
-// keyOf is the same file as the blob store names it: relative to Outputs,
-// which is what that store is rooted at. The two are derived from one field
-// so they cannot point at different places.
-func (q *Queue) keyOf(id genstore.ReqID, name string) string {
-	return path.Join(string(id), name)
 }
 
 func (q *Queue) out() io.Writer {
@@ -333,6 +325,14 @@ func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat ge
 		// An empty name is written as empty: a server that reported no model
 		// (neither --model nor --diffusion-model named) is a fact, and
 		// inventing a value here is the mistake the column exists to end.
+		//
+		// The model_resident event carries the same name, so the OPENER has
+		// it written twice with the same value. That is not two sources of
+		// truth -- both read one /capabilities response -- but two carriers
+		// of it, and each is the only one available on its own path: the
+		// queue holds the app.Served and `ember up` holds nothing but a
+		// sink. A rider is why this write cannot be dropped in favour of the
+		// event: the rental's own events reach the opener's sink alone.
 		q.set(req.ID, func(r *genstore.Request) { r.Model = s.Caps().Model })
 		err := q.generate(ctx, s, req)
 		q.finish(ctx, req.ID, err)
@@ -468,58 +468,27 @@ func (q *Queue) release(ids ...genstore.ReqID) {
 // WHICH REQUEST GETS THE RENTAL'S COST is a real question with no tidy answer,
 // so the answer is written down: node_ready and run_cost go to the request
 // that opened the rental, because it is the one that paid for it to exist.
-// Every request that rode along gets its own per-job card time, which
-// q.batchSink records -- and those two figures differ by exactly the
-// per-rental overhead this whole shape exists to pay once. Summing the
-// per-request figures and calling it the bill would understate it; attributing
-// the whole rental to every request would multiply it.
-func (q *Queue) lifecycle(opener genstore.ReqID) report.Sink {
-	s := q.sinkFor(opener)
-	return report.SinkFunc(func(e report.Event) {
-		s.Emit(e)
-		// Written through to the row as well, so `ember ls`'s node and this
-		// request can be joined without reading the event stream.
-		switch e.Kind {
-		case report.KindNodeReady:
-			q.set(opener, func(r *genstore.Request) { r.Node = e.Node })
-		case report.KindRunCost:
-			q.set(opener, func(r *genstore.Request) {
-				r.Cost = e.Cost
-				// The rest of the rental's own facts, promoted out of the
-				// event body for the reason Cost was: billable is what the
-				// invoice charges and elapsed is what the clock said, and an
-				// overhead figure computed against the wrong one credits
-				// ember with a saving that is not there.
-				r.Rate, r.Elapsed, r.Billable = e.Rate, e.Elapsed, e.Billable
-			})
-		case report.KindModelResident:
-			q.set(opener, func(r *genstore.Request) {
-				r.LoadMeasured, r.LoadReported = e.Measured, e.Reported
-			})
-		case report.KindNodeMemory:
-			// To the opener, like the rest of the rental's own facts: the
-			// memory limit is the NODE's, and every request that rode along
-			// ran under the same one. Writing it to each would be the same
-			// multiplication that attributing the whole rental's cost to
-			// every request would be.
-			q.set(opener, func(r *genstore.Request) {
-				r.MemCgroup = e.MemCgroup
-				r.MemLimit, r.MemCurrent = e.MemLimit, e.MemCurrent
-				r.MemTotal, r.MemCached = e.MemTotal, e.MemCached
-				r.AssetBytes = e.Bytes
-			})
-		}
-		// Flushed at once: these arrive from a deferred teardown, and a
-		// buffered destroy_failed is a buffer nobody will drain.
-		s.flush(context.WithoutCancel(context.Background()))
-	})
-}
+// Every request that rode along gets its own per-job card time, which its own
+// sink records -- and those two figures differ by exactly the per-rental
+// overhead this whole shape exists to pay once. Summing the per-request
+// figures and calling it the bill would understate it; attributing the whole
+// rental to every request would multiply it.
+//
+// It is the opener's ordinary sink and nothing more, which is the point: the
+// write-through of those events to the row lives in Recorder, where `ember up`
+// reaches the same code rather than a second copy of it. What makes "only the
+// opener is charged" true is that these events are emitted HERE, to this one
+// request's sink, and a rider's sink never sees them.
+func (q *Queue) lifecycle(opener genstore.ReqID) report.Sink { return q.sinkFor(opener) }
 
+// set applies fn to a request row, off the event path.
+//
+// Only drain's model write uses it now: everything else a rental learns is
+// written through by Recorder, from the events it already emits. WithoutCancel
+// for Recorder.set's reason -- a teardown's context is already cancelled on
+// Ctrl-C, and the row is the only record of what the rental cost.
 func (q *Queue) set(id genstore.ReqID, fn func(*genstore.Request)) {
-	// WithoutCancel: this runs from a teardown whose context is already
-	// cancelled on Ctrl-C, and the row is the only record of what the rental
-	// cost.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), writeTimeout)
 	defer cancel()
 	if err := q.Store.Update(ctx, id, fn); err != nil {
 		q.log().Error("could not record a rental's lifecycle", "request", id, "err", err)
@@ -536,8 +505,14 @@ func (q *Queue) sinkFor(id genstore.ReqID) *sink {
 	if s, ok := q.sinks[id]; ok {
 		return s
 	}
-	buf := &recorder{q: q, id: id}
-	s := &sink{Stream: report.NewStream(q.at, buf), buf: buf}
+	rec := &Recorder{
+		Store: q.Store, Req: id, Now: q.at, Log: q.log(),
+		// The blob key, because this request's images are served by the web
+		// UI out of a store rooted at Outputs -- see Recorder.Key, and
+		// dirOf, which names the same path on disk.
+		Key: func(name string) string { return BlobKey(id, name) },
+	}
+	s := &sink{Stream: report.NewStream(q.at, rec), buf: rec}
 	q.sinks[id] = s
 	return s
 }
@@ -564,226 +539,11 @@ func (q *Queue) forget(id genstore.ReqID) {
 // in for tests a program that does not exist.
 type sink struct {
 	*report.Stream
-	buf *recorder
+	buf *Recorder
 }
 
 // flush writes whatever is buffered.
-func (s *sink) flush(ctx context.Context) { s.buf.flush(ctx) }
-
-// recorder buffers events and writes them to the store.
-//
-// BUFFERED BECAUSE A PREVIEW IS A POLL. awaitJob emits a progress event per
-// distinct sampling step, and the preview lab measured seventeen frames for a
-// six-step generation -- so a write per event is a transaction per frame on
-// the path that is meant to be reporting progress rather than causing it.
-type recorder struct {
-	q  *Queue
-	id genstore.ReqID
-
-	mu   sync.Mutex
-	buf  []report.Event
-	last time.Time
-
-	// passes is each job's sampling passes and the step total each one
-	// declared: job index -> pass -> that pass's total_steps.
-	//
-	// ACCUMULATED HERE RATHER THAN COUNTED FROM THE FRAMES, because ember
-	// deduplicates progress on the step -- so at a poll slower than the card
-	// samples, it sees fewer frames than there were steps and a count of
-	// frames would measure the poll interval instead of the work. Each pass
-	// declares its own total, which is a fact about the generation, so the
-	// steps of a pass are read off one frame of it rather than tallied.
-	//
-	// In memory and written through at the points a job is already causing a
-	// write: progress arrives once per step, and FLUX.2 at 2048x2048 measured
-	// 140 seconds per step, so a write per frame would be a transaction on
-	// the path that exists to report progress rather than to cause it.
-	passes map[int]map[int]int
-}
-
-// sawPass notes a pass and what it says its length is.
-func (r *recorder) sawPass(job, pass, total int) {
-	if r.passes == nil {
-		r.passes = map[int]map[int]int{}
-	}
-	if r.passes[job] == nil {
-		r.passes[job] = map[int]int{}
-	}
-	// The largest total seen for a pass wins. A pass reports the same total on
-	// every frame of it, so this is normally an assignment; taking the max
-	// means a frame that arrived with a smaller figure -- a highres pass whose
-	// total grows as it is set up -- cannot shorten a pass that already
-	// reported more.
-	if total > r.passes[job][pass] {
-		r.passes[job][pass] = total
-	}
-}
-
-// sampled is how many passes a job ran and how many steps across all of them.
-func (r *recorder) sampled(job int) (passes int, steps int64) {
-	for _, total := range r.passes[job] {
-		passes++
-		steps += int64(total)
-	}
-	return passes, steps
-}
-
-// flushEvery and flushAfter bound how far behind a watching client can be.
-//
-// BOTH, AND THE TIME ONE IS THE IMPORTANT ONE. A count alone looked
-// sufficient and is not: progress arrives once per sampling step, and FLUX.2
-// at 2048x2048 measured 140 seconds per step -- so "flush every eight events"
-// is twenty minutes of silence on exactly the generation somebody is watching.
-// A time bound makes the latency a property of the clock instead of a property
-// of how slow the card is.
-//
-// The count still earns its place at the other end: sd15 at 256x256 samples in
-// 0.3s and the preview lab measured seventeen frames for six steps, where a
-// write per event would be a transaction per frame on the path that is meant
-// to be reporting progress rather than causing it.
-const (
-	flushEvery = 8
-	flushAfter = 250 * time.Millisecond
-)
-
-func (r *recorder) Emit(e report.Event) {
-	r.mu.Lock()
-	r.buf = append(r.buf, e)
-	due := len(r.buf) >= flushEvery || r.q.at().Sub(r.last) >= flushAfter
-	if e.Kind == report.KindJobProgress && e.TotalSteps > 0 {
-		r.sawPass(e.Index, e.Pass, e.TotalSteps)
-	}
-	// An image is written through whatever the clock says: it is the thing
-	// the operator is waiting for, and a gallery that lags behind the file on
-	// disk looks broken.
-	urgent := e.Kind == report.KindJobImages || e.Kind == report.KindRunFailed
-	r.mu.Unlock()
-
-	if e.Kind == report.KindJobImages {
-		r.q.recordImages(r.id, e, false)
-	}
-	// A PREVIEW FRAME IS AN IMAGE TOO, and nothing recorded it.
-	//
-	// The frame was written to the run directory, the images table has had a
-	// `preview` column since it was created, the handler has answered
-	// `?preview=1` with `Cache-Control: no-store` since it was written, and
-	// the page has looked for `i.preview` since it was written -- and no row
-	// was ever inserted with it set, so every one of those was dead code and
-	// the UI showed a step counter advancing beside no picture at all. The
-	// whole feature was built end to end and never connected, which is the
-	// closed loop AGENTS.md records for previews one layer down: everything
-	// agreed with itself and nothing had been observed.
-	if e.Kind == report.KindJobProgress && len(e.Wrote) > 0 {
-		r.q.recordImages(r.id, e, true)
-	}
-
-	// AND THE JOB'S ROW, which is the half #32 is about. Every figure here
-	// was already in the event body and queryable from nowhere: the jobs
-	// table had no execution columns at all, so "what did an image cost on
-	// this card" meant JSON-parsing every row of the table that grows per
-	// step per job per rental.
-	//
-	// Written at the three moments a job already causes a write rather than
-	// on every event, and the middle one matters for a run that is
-	// interrupted: the images are recorded as they are produced, because they
-	// were paid for, and the steps behind them are recorded with them.
-	switch {
-	case e.Kind == report.KindUnitStarted && e.Unit == report.UnitJob:
-		r.recordJob(e.Index, func(j *genstore.JobRun) { j.Started = e.At })
-
-	case e.Kind == report.KindJobImages:
-		passes, steps := r.sampledLocked(e.Index)
-		r.recordJob(e.Index, func(j *genstore.JobRun) {
-			j.Images, j.Bytes = e.Files, e.Bytes
-			j.Passes, j.Steps = passes, steps
-		})
-
-	case e.Kind == report.KindUnitCost && e.Unit == report.UnitJob:
-		passes, steps := r.sampledLocked(e.Index)
-		r.recordJob(e.Index, func(j *genstore.JobRun) {
-			j.Ended, j.Cost = e.At, e.Cost
-			j.Passes, j.Steps = passes, steps
-		})
-	}
-
-	if due || urgent {
-		r.flush(context.Background())
-	}
-}
-
-// sampledLocked reads the pass tally under the lock.
-func (r *recorder) sampledLocked(job int) (int, int64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.sampled(job)
-}
-
-// recordJob writes one job's execution facts through to its row.
-//
-// Off the event stream's own hot path in the sense that matters: a failure is
-// logged and not returned, for the reason flush does it -- losing a figure is
-// not a reason to abandon a generation that is already paid for. The log line
-// names the index, because an off-by-one between the 1-based job number the
-// events carry and the key the table uses would write every figure to nowhere
-// and leave the columns at zero with nothing saying so.
-func (r *recorder) recordJob(idx int, fn func(*genstore.JobRun)) {
-	if idx <= 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 10*time.Second)
-	defer cancel()
-	if err := r.q.Store.UpdateJob(ctx, r.id, idx, fn); err != nil {
-		r.q.log().Warn("could not record what a job did",
-			"request", r.id, "job", idx, "err", err)
-	}
-}
-
-// flush writes what is buffered.
-func (r *recorder) flush(ctx context.Context) {
-	r.mu.Lock()
-	es := r.buf
-	r.buf = nil
-	r.last = r.q.at()
-	r.mu.Unlock()
-
-	if len(es) == 0 {
-		return
-	}
-	if err := r.q.Store.AppendEvents(ctx, r.id, es); err != nil {
-		// Logged and not returned: losing a progress line is not a reason to
-		// abandon a generation that is already paid for.
-		r.q.log().Warn("could not record progress", "request", r.id, "events", len(es), "err", err)
-	}
-}
-
-// recordImages joins the files a job wrote to the request that asked for them.
-//
-// The names come off the event, which got them from sdserver.WriteImages --
-// the one place that decides what an image is called. Deriving them here would
-// be a second spelling of the same rule, and the two would drift the first
-// time a stem is sanitised differently, leaving the gallery pointing at files
-// that are not on disk.
-// A preview row is overwritten rather than accumulated: AddImage keys on
-// (request, job, index, preview), and the frame on disk is written over on
-// every distinct step, so one row per job tracks the file for the whole
-// generation.
-func (q *Queue) recordImages(id genstore.ReqID, e report.Event, preview bool) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 10*time.Second)
-	defer cancel()
-
-	for i, f := range e.Wrote {
-		im := genstore.Image{
-			Req: id, Job: e.Index, Index: i,
-			Key:     q.keyOf(id, f.Name),
-			Bytes:   f.Bytes,
-			Preview: preview,
-			At:      q.at(),
-		}
-		if err := q.Store.AddImage(ctx, im); err != nil {
-			q.log().Warn("could not record an image", "request", id, "key", im.Key, "err", err)
-		}
-	}
-}
+func (s *sink) flush(ctx context.Context) { s.buf.Flush(ctx) }
 
 // Cost is gone, and what replaced it is the point of the change that removed
 // it.

@@ -745,17 +745,46 @@ func TestRunServed_SaysWhatBeingResidentSaves(t *testing.T) {
 		t.Errorf("reported the server's load_elapsed_seconds instead of the measured span: %q", out.String())
 	}
 
-	// One job saves nothing, so it says nothing.
+	// One job saves nothing, so it says nothing -- AND STILL RECORDS THE
+	// FACT, which is the half only a database reader sees.
+	//
+	// The gate used to be on the emitter, so a batch of one sent no event at
+	// all: no load span and no model name reached the row, in the columns #30
+	// and #32 added to explain exactly this -- and `ember up` with one job is
+	// how most of README's measurements were taken. It is in report.Text now,
+	// where a decision about a line of prose belongs. Moving it back makes
+	// the second half of this test fail while the first still passes, which
+	// is the shape of the bug: the output is identical either way.
 	var single strings.Builder
+	var events []report.Event
+	collect := report.SinkFunc(func(e report.Event) { events = append(events, e) })
 	f2 := newFakeSD(t)
 	_, d2 := f2.start(t)
-	if err := runServed(t.Context(), &single, report.Text(&single), d2, liveServer(), spec,
-		testRun(sdserver.Job{Prompt: "a"}),
+	if err := runServed(t.Context(), &single, report.Multi(report.Text(&single), collect),
+		d2, liveServer(), spec, testRun(sdserver.Job{Prompt: "a"}),
 		session.Options{Log: discardLog()}, filepath.Join(t.TempDir(), "r2"), 0); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(single.String(), "paid once rather than") {
 		t.Errorf("a single-job run claimed a saving: %q", single.String())
+	}
+	var resident *report.Event
+	for i := range events {
+		if events[i].Kind == report.KindModelResident {
+			resident = &events[i]
+		}
+	}
+	if resident == nil {
+		t.Fatalf("a single-job run emitted no model_resident event, so nothing recorded "+
+			"its load span or which model served it: %v", events)
+	}
+	if resident.Measured <= 0 {
+		t.Error("the event carries no measured load span")
+	}
+	// The name off /capabilities and never off sd.serve: an operator can edit
+	// that file between two rentals.
+	if resident.Model != "sd15.gguf" {
+		t.Errorf("model = %q, want the name the server reported", resident.Model)
 	}
 }
 

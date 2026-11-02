@@ -205,6 +205,24 @@ type Event struct {
 	Cost  node.MicroUSD `json:"cost_micro_usd,omitempty"`
 	Spent node.MicroUSD `json:"spent_micro_usd,omitempty"`
 
+	// Model is what the generation server said it had loaded, as its own
+	// /capabilities response names it.
+	//
+	// ON THE EVENT BECAUSE THE SINK IS ALL SOME READERS HAVE. The queue holds
+	// an app.Served and reads the model off it directly; `ember up` holds a
+	// report.Sink and nothing else, so without this the one command every
+	// measurement in README was taken with would record a dash in the column
+	// `ember spend --by model` groups on -- and the ledger's footnote, which
+	// says a dash means the run never reached a node, would be wrong about
+	// exactly those runs. A caption that is true of one mode and wrong for
+	// another reads as working, which is the defect this field exists to
+	// avoid rather than one it fixes.
+	//
+	// It is a RESPONSE and never a reading of `sd.serve`: an operator can
+	// edit that file between two rentals, so the config answers "what would
+	// run now" where the question is "what ran then".
+	Model string `json:"model,omitempty"`
+
 	// Measured is a span ember timed itself; Reported is what the thing being
 	// measured claimed.
 	//

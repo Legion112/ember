@@ -1827,10 +1827,37 @@ which would stamp every row in the history with whatever is loaded today. A
 request from before the column, or one that never reached a node, groups under
 a dash and `ember history` says how many it had to leave unnamed.
 
-**`ember up` is not in here.** It prints its cost and keeps nothing — only
-`ember serve` writes to the generation history — so about half the
-measurements in this file came from runs this command cannot see. Making `up`
-record too is the largest remaining question and its own change.
+**`ember up` is in here now**, which it was not when these columns were
+added: `ember serve` was the only writer to the history, so the command every
+measurement in this file was taken with printed its cost to a terminal and
+kept nothing. It records by default — there is no flag to remember, and
+nothing to opt into — and a database that will not open prints one line and
+does not stop the run, because refusing to rent would be ember declining to do
+the thing it is for because it could not take notes.
+
+What it records depends on which shape it ran, and the difference is
+deliberate:
+
+| `ember up` | what is recorded |
+|---|---|
+| with `sd:` jobs | the rental, and a row per job: its cost, span, images, passes and steps, as a queued generation gets |
+| with `cmds` | the rental, and each step's cost and span **as events**. No job rows: a step is not a job, and images-per-step and steps-per-second are not things an `ffmpeg` invocation has |
+| forwarding ports | the rental. That is the whole record, and it is the cheapest thing ember does and the easiest to leak |
+
+The last two have no jobs, so their per-job columns are a **dash** and never a
+zero, and both readers say how many rows they had to leave out. A column of
+zeros in a money ledger reads as free.
+
+Two things are not recorded and are worth naming. A run refused **before** the
+create call — an unpinned image, a budget that would not admit the offer, a
+store that does not exist — has no row, because nothing was rented and nothing
+billed; a run that got as far as asking a provider for a machine always does,
+including one whose create call failed, because that is the window where a
+rental nothing recorded is born. And `ember up` writes no `images` rows: its
+files go into a timestamped run directory it prints to you, which no gallery
+serves and `ember history rm` must not offer to remove. The image counts and
+bytes are columns on the job either way, which is what the ledger and the
+aggregate read.
 
 **Nothing backfills.** A request from before these columns existed has its
 rental cost and no per-job figures, and `ember spend` says how many it had to
@@ -1867,19 +1894,30 @@ when (utc)       request          status      provider   card          jobs imag
 2026-10-31 18:02 5f324627337df6f5 done        runpod     rtx4090          5      5     17m0s       $0.89      $0.475 sd15-Q8_0.gguf
 2026-10-29 09:14 15d87a1aae672727 done        runpod     a100-80g         4      4    41m12s       $1.79       $1.52 flux2-dev-Q8_0.gguf
 2026-10-24 11:40 1393e5b386595420 done        runpod     rtx4090          1      -     33m0s        $0.5           - -
+2026-10-22 14:05 9c1ee0f3a8d7b215 done        runpod     rtx4090          0      -     1m30s       $0.07           - -
 
-total: 4 request(s), 12 image(s), $3.18 of rental, $2.28 of card time
+total: 5 request(s), 12 image(s), $3.25 of rental, $2.28 of card time
 1 request(s) rode along on a rental another request opened, so their rental
 cost is a dash rather than zero: the node was charged once, to whichever
 request paid for it to exist.
 1 request(s) finished with no per-job figures -- from before ember recorded
 them, or without a job completing -- so their images and card time are a dash
 rather than zero. Nothing backfills them.
+1 request(s) have no jobs: `ember up` forwarding ports, or running `cmds`,
+records what it rented and what that cost and has no per-job figures to
+report. A `cmds` run's per-step costs are in its event stream.
 1 request(s) have no model: they never reached a node, or they ran before
 ember recorded which model served a request. Nothing backfills them -- the only
 stored copy of a past model is a cached capability row the next rental
 overwrites.
 ```
+
+The last row is an `ember up` that forwarded a port for ninety seconds: no
+jobs, no images, seven cents of rental. It is in the table because the
+alternative is a rental nothing can see, and its per-job cells are dashes
+because there was never a per-job figure to lose — which is a different fact
+from the row above it, where there was one and it went missing. The two have
+separate footnotes for that reason.
 
 The model column is last for one reason: it is the only cell whose width is
 not ember's to choose. A model is a filename, and `flux2-dev-Q8_0.gguf` is
@@ -1910,7 +1948,11 @@ A dash in the model column is a third fact and not one of those two: nobody
 read a model for that request, because it never reached a node or because it
 ran before ember recorded which model served one. It is said out loud under
 the table for the reason the other two are — a column of dashes otherwise
-reads as ember having lost the names.
+reads as ember having lost the names. A row with no jobs is left out of that
+count on purpose: it started no generation server, so there was no
+`/capabilities` response to read a model from, and counting it would have made
+the footnote claim an `ember up` that forwarded a port successfully "never
+reached a node".
 
 **It reports what each node said about its memory.** `--memory` prints the
 same rows with the memory facts instead of the costs:
@@ -1988,8 +2030,9 @@ database  128.0 KiB   ~/.local/share/ember/state/generations.db
 outputs   34.7 MiB    ~/.local/share/ember/outputs
           9 file(s)
 
-3.9 MiB under outputs is named by no image row. `ember up` writes into this
-tree and records nothing, so `ember history rm` can never reach it.
+3.9 MiB under outputs is named by no image row. `ember up` writes a timestamped
+run directory here and records no image rows for it, so `ember history rm`
+can never reach these.
 
 140 event rows are older than history.keep_events (720h0m0s);
 see `ember history prune`.
@@ -1998,9 +2041,10 @@ see `ember history prune`.
 **The third figure is the one that would otherwise mislead.** `ember serve`
 writes a request's images under its own request id, which is what the `images`
 rows name; `ember up` writes a timestamped run directory into the same tree
-and records nothing at all. Without that line an operator reads one total,
-removes every request's images, frees a fraction of it and concludes ember is
-broken. The database figure includes SQLite's write-ahead log, which is disk
+and records no image rows for it — it records the rental and what each job did,
+and its files are yours rather than a gallery's. Without that line an operator
+reads one total, removes every request's images, frees a fraction of it and
+concludes ember is broken. The database figure includes SQLite's write-ahead log, which is disk
 in use and can be larger than the file beside it.
 
 **What may be removed is a retention decision, and it is not the one the

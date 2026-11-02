@@ -131,7 +131,7 @@ func (s *SQLite) History(ctx context.Context, f Filter) ([]Entry, error) {
 		e.JobCost = node.MicroUSD(jobCost)
 		e.Sampling = time.Duration(span)
 		e.Rode = rode
-		e.Unrecorded = unrecorded(ended, e.Jobs, recorded)
+		e.Unrecorded = unrecorded(ended, recorded)
 		out = append(out, e)
 	}
 	return out, rows.Err()
@@ -158,8 +158,18 @@ func (s *SQLite) History(ctx context.Context, f Filter) ([]Entry, error) {
 // SQL would be a second spelling of Status.Terminal() -- and every path that
 // ends a request writes the end: the queue on done and failed, the API on
 // cancel, Interrupt on a restart.
-func unrecorded(ended int64, jobs int, recorded int64) bool {
-	return ended != 0 && jobs > 0 && recorded == 0
+//
+// IT USED TO REQUIRE A JOB, AND THAT CONDITION COULD NOT FIRE. Validate
+// refuses a queued request with no jobs, so `jobs > 0` was true of every row
+// any reachable state could produce -- the dead half of a seal, which this
+// file already removed one of. Adopt makes it reachable, and the answer it
+// then gives is the right one: an `ember up` that forwarded ports, or one that
+// ran `cmds`, pays for a rental and reports no per-job figures at all, which
+// is precisely what this flag means. Both readers then print a dash rather
+// than a zero and say how many rows they had to leave out, which is the
+// behaviour a column of zeros in a money ledger must never have.
+func unrecorded(ended, recorded int64) bool {
+	return ended != 0 && recorded == 0
 }
 
 // filterWhere bounds a listing, with every value as a parameter.

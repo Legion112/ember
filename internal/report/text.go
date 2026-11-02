@@ -57,6 +57,17 @@ func render(e Event) string {
 		return fmt.Sprintf("starting %s\n", e.Cmd)
 
 	case KindModelResident:
+		// SILENT FOR A SINGLE JOB, AND THAT GATE BELONGS HERE. "paid once
+		// rather than 1 times" is not a saving and was not printed, so the
+		// emitter used to decide not to send the event at all -- which meant
+		// a batch of one recorded no load span and no model name either, in
+		// the columns #30 and #32 added to explain exactly this. The event
+		// is the fact and the line is derived from it, so a presentation
+		// decision moves to the renderer and the fact is always recorded.
+		// `ember up`'s output is unchanged, which TestText_* asserts.
+		if e.Total <= 1 {
+			return ""
+		}
 		// Rounded here rather than by the emitter, so the rounding is part of
 		// the one spelling of this line. Measured by ember and not read from
 		// sd-server's load_elapsed_seconds; Event.Measured says why.
