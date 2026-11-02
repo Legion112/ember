@@ -2,6 +2,7 @@ package sdserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -75,7 +76,7 @@ func New(dial func(ctx context.Context, network, addr string) (net.Conn, error))
 func (c Client) Capabilities(ctx context.Context) (Capabilities, error) {
 	var w wireCapabilities
 	if err := c.HTTP.Get(ctx, pathCapabilities, &w); err != nil {
-		return Capabilities{}, fmt.Errorf("read sd-server capabilities: %w", err)
+		return Capabilities{}, fmt.Errorf("read sd-server capabilities: %w", refusal(err))
 	}
 	return mapCapabilities(w), nil
 }
@@ -84,7 +85,7 @@ func (c Client) Capabilities(ctx context.Context) (Capabilities, error) {
 func (c Client) ModelStatus(ctx context.Context) (ModelStatus, error) {
 	var w wireModelStatus
 	if err := c.HTTP.Get(ctx, pathModelStatus, &w); err != nil {
-		return ModelStatus{}, fmt.Errorf("read sd-server model status: %w", err)
+		return ModelStatus{}, fmt.Errorf("read sd-server model status: %w", refusal(err))
 	}
 	st, err := mapModelStatus(w)
 	if err != nil {
@@ -109,7 +110,7 @@ func (c Client) Submit(ctx context.Context, j Job, preview string, interval int)
 	}
 	var w wireAccepted
 	if err := c.HTTP.Post(ctx, pathImageGen, body, &w); err != nil {
-		return "", fmt.Errorf("submit job to sd-server: %w", err)
+		return "", fmt.Errorf("submit job to sd-server: %w", refusal(err))
 	}
 	if w.ID == "" {
 		// A job that was accepted and whose id did not come back is a job
@@ -129,7 +130,7 @@ func (c Client) Poll(ctx context.Context, id string) (State, error) {
 	}
 	var w wireJob
 	if err := c.HTTP.Get(ctx, pathJobs+id, &w); err != nil {
-		return State{}, fmt.Errorf("poll sd-server job %s: %w", id, err)
+		return State{}, fmt.Errorf("poll sd-server job %s: %w", id, refusal(err))
 	}
 	st, err := mapJob(w)
 	if err != nil {
@@ -144,10 +145,80 @@ func (c Client) Cancel(ctx context.Context, id string) error {
 		return errors.New("no job id to cancel")
 	}
 	if err := c.HTTP.Post(ctx, pathJobs+id+"/cancel", struct{}{}, nil); err != nil {
-		return fmt.Errorf("cancel sd-server job %s: %w", id, err)
+		return fmt.Errorf("cancel sd-server job %s: %w", id, refusal(err))
 	}
 	return nil
 }
+
+// refusal turns a non-2xx that carried sd-server's own error envelope into the
+// sentence that envelope holds.
+//
+// IT EXISTS BECAUSE THE ENVELOPE WAS TYPED, FIXTURED AND CONNECTED TO NOTHING.
+// sd-server spells `error` two ways in one API -- an object on a failed job,
+// and a string beside a separate `code` on a request it rejects outright.
+// decodeAPIError has read both since this package was written, but
+// wireErrorEnvelope was decoded by *nothing except its own unit test*: every
+// non-2xx reached the operator as httpx's raw body instead. So a job submitted
+// to a server whose weights are not loaded printed
+//
+//	submit job to sd-server: POST http://127.0.0.1:1234/sdcpp/v1/img_gen:
+//	status 503 Service Unavailable: {"code":"model_not_loaded","error":"No model is loaded"}
+//
+// -- the reason, as JSON, inside a sentence about a status code. The same
+// closed loop as queue.Cost and the unrecorded preview frame: a half that
+// agreed with itself and crossed no gap. testdata/error_model_not_loaded.json
+// is now that exact body, captured from the CPU image by the preview lab, and
+// it is read on this path rather than only by a test that unmarshals it.
+//
+// A body that is not the envelope is handed back untouched. httpx's own
+// message already carries it verbatim, and replacing it with a guess would
+// drop the only text that says what happened -- which is the failure this
+// whole function exists to end, reached from the other direction.
+func refusal(err error) error {
+	var se *httpx.StatusError
+	if !errors.As(err, &se) {
+		return err
+	}
+	var env wireErrorEnvelope
+	if json.Unmarshal([]byte(se.Body), &env) != nil {
+		return err
+	}
+	if env.Error == "" && env.Code == "" {
+		return err
+	}
+	return &refused{api: &APIError{Code: env.Code, Message: env.Error}, status: se}
+}
+
+// refused is a request sd-server rejected, as opposed to a job that was
+// accepted and then failed.
+//
+// The two are different in kind and the operator's next move differs: a
+// refusal means nothing was generated and nothing was billed for sampling,
+// while a failed job has already spent the card time. State.Err carries the
+// second; this carries the first.
+type refused struct {
+	api    *APIError
+	status *httpx.StatusError
+}
+
+// Error leads with the server's own words. The status code is kept because it
+// is the difference between "the weights are not loaded" (503) and "ember sent
+// something this build will not accept" (4xx), and StatusText is left out for
+// httpx's reason: an unassigned code has none, and a message built around it
+// silently loses the number.
+//
+// It does not name sd-server, because every caller already does -- "submit job
+// to sd-server: refused with status 503: ..." rather than the same name twice
+// in one sentence. app.runJobs spells a *failed job* "sd-server refused it",
+// and the two readings should not be one phrase.
+func (e *refused) Error() string {
+	return fmt.Sprintf("refused with status %d: %s", e.status.Code, e.api.Error())
+}
+
+// Unwrap lists both, so errors.As finds the server's refusal and the response
+// that carried it. A chain that kept only one would make the choice for every
+// future caller.
+func (e *refused) Unwrap() []error { return []error{e.api, e.status} }
 
 // NotReadyError is the model never becoming loadable.
 //

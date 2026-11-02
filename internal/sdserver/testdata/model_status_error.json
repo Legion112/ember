@@ -1,8 +1,10 @@
 {
-  "state": "error",
-  "recipe": "flux2-dev",
-  "models": {},
-  "error": "failed to open /models/flux2-dev-Q8_0.gguf: No such file or directory",
+  "error": "Model initialization failed; check the server log for component compatibility and memory errors",
+  "load_elapsed_seconds": 0.00154113,
+  "models": {
+    "model": "checkpoints/notamodel.gguf"
+  },
+  "recipe": "sd1-checkpoint",
   "revision": 2,
-  "load_elapsed_seconds": 0.31
+  "state": "error"
 }

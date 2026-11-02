@@ -1,8 +1,7 @@
 {
-  "state": "empty",
-  "recipe": null,
-  "models": {},
   "error": null,
-  "revision": 1,
-  "load_elapsed_seconds": 0
+  "load_elapsed_seconds": null,
+  "models": {},
+  "recipe": null,
+  "state": "empty"
 }

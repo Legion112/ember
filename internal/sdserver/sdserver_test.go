@@ -157,11 +157,23 @@ func TestModelStatus_EveryState(t *testing.T) {
 		load  time.Duration
 		hasEr bool
 	}{
+		// Captured: a server up with no weights. Its load_elapsed_seconds is
+		// JSON **null** where the guessed fixture said 0 -- which decodes
+		// into a float64 as a no-op rather than an error, so the guess passed
+		// for a reason that had nothing to do with being right. The same
+		// null-is-not-zero asymmetry that took a websocket envelope down one
+		// layer up, where serde's `default` covers a missing field and not a
+		// present null.
 		{"model_status_empty.json", ModelEmpty, 0, false},
 		{"model_status_loading.json", ModelLoading, 0, false},
 		// Captured: a 1.76 GB sd15 checkpoint off a warm page cache.
 		{"model_status_ready.json", ModelReady, 248 * time.Millisecond, false},
-		{"model_status_error.json", ModelError, 310 * time.Millisecond, true},
+		// Captured: `models/load` handed a file that is not a model. 1.5ms,
+		// because the loader gives up as soon as it cannot read a version out
+		// of the header -- nothing like the third of a second the guess
+		// invented, and the reason the figure is pinned is that it is the one
+		// an operator reads beside "never loaded the weights".
+		{"model_status_error.json", ModelError, 2 * time.Millisecond, true},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			c := newTestClient(t, serveFile(t, tc.file))
@@ -329,8 +341,16 @@ func TestPoll_DecodesTheFinishedImage(t *testing.T) {
 	}
 }
 
-// The object form of `error`. The string form is covered by
-// TestDecodeAPIError_ReadsBothShapesSDServerUses.
+// The object form of `error`, from a captured failure. The string form is
+// covered by TestSubmit_ReportsTheServersOwnRefusal, which reads it on the
+// path an operator meets it rather than by unmarshalling a fixture.
+//
+// Both halves of the guess this fixture replaced were invented: the code
+// `invalid_request` appears nowhere in the server binary, and the message
+// described a width check it does not perform -- it rounds a width it does not
+// like. What a real failed job says is `generation_failed` and
+// `generate_image returned no results`, which is deliberately generic: the
+// reason is in the server's own log, and ember surfaces that through KindLog.
 func TestPoll_ReportsAFailedJobsOwnReason(t *testing.T) {
 	c := newTestClient(t, serveFile(t, "job_failed.json"))
 	st, err := c.Poll(t.Context(), "job_7f3a")
@@ -340,8 +360,16 @@ func TestPoll_ReportsAFailedJobsOwnReason(t *testing.T) {
 	if st.Err == nil {
 		t.Fatal("no error on a failed job")
 	}
-	if st.Err.Code != "invalid_request" || !strings.Contains(st.Err.Message, "multiple of 16") {
+	if st.Err.Code != "generation_failed" || !strings.Contains(st.Err.Message, "no results") {
 		t.Errorf("err = %+v", *st.Err)
+	}
+	// Beside the error object, and this is the combination no guess had: a
+	// failed job carries `result: null` and no images. The captured cancel
+	// carries the same-shaped error object beside a status that is *not* a
+	// failure, which is why the status is read first and the error second --
+	// reading the error first made every successful cancel look like a crash.
+	if len(st.Images) != 0 {
+		t.Errorf("a failed job yielded %d image(s)", len(st.Images))
 	}
 }
 
@@ -416,18 +444,119 @@ func TestDecodeB64_AcceptsADataURL(t *testing.T) {
 	}
 }
 
+// The string form, on the path an operator meets it: a 503 whose body is
+// sd-server's own refusal.
+//
+// WHAT THIS FIXES. wireErrorEnvelope was typed, fixtured and decoded by
+// nothing but a test that unmarshalled the fixture into it -- so a submission
+// to a server with no weights reached the operator as httpx's raw body, with
+// the reason sitting inside a sentence about a status code. The body here is
+// the captured one, byte for byte, which is also the only reason this test is
+// evidence rather than ember agreeing with itself.
+//
+// The guess held, and that is worth recording too: api.md's field list
+// implied exactly `{"error":"No model is loaded","code":"model_not_loaded"}`
+// and a real 503 says the same thing. A convention that only ever reports its
+// own vindication stops being read, and so does one that only reports
+// corrections.
+func TestSubmit_ReportsTheServersOwnRefusal(t *testing.T) {
+	body := fixture(t, "error_model_not_loaded.json")
+	c := newTestClient(t, serveJSON(http.StatusServiceUnavailable, string(body)))
+
+	_, err := c.Submit(t.Context(), Job{Prompt: "a paper boat"}, PreviewNone, 0)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	var api *APIError
+	if !errors.As(err, &api) {
+		t.Fatalf("the refusal does not reach the caller as an *APIError: %v", err)
+	}
+	if api.Code != "model_not_loaded" || api.Message != "No model is loaded" {
+		t.Errorf("refusal = %+v", *api)
+	}
+	// The reason leads, because that is what the operator does something
+	// about. The status code is kept because 503 and 4xx mean different
+	// next moves.
+	if !strings.Contains(err.Error(), "No model is loaded") || !strings.Contains(err.Error(), "503") {
+		t.Errorf("err = %q, want the server's sentence and the status", err)
+	}
+	// The response is still reachable, so nothing that wants the code or the
+	// raw body has lost it.
+	var se *httpx.StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusServiceUnavailable {
+		t.Errorf("the status error is no longer in the chain: %v", err)
+	}
+}
+
+// Every method translates it, because every one of them can be refused: a
+// capability read before the weights are in, a poll of a job the server has
+// purged, a cancel for one that finished. A method that forgot would print
+// JSON while its neighbours printed a reason.
+func TestEveryCall_ReportsTheServersOwnRefusal(t *testing.T) {
+	c := newTestClient(t, serveJSON(http.StatusServiceUnavailable,
+		`{"code":"model_not_loaded","error":"No model is loaded"}`))
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"Capabilities", func() error { _, err := c.Capabilities(t.Context()); return err }},
+		{"ModelStatus", func() error { _, err := c.ModelStatus(t.Context()); return err }},
+		{"Submit", func() error { _, err := c.Submit(t.Context(), Job{Prompt: "x"}, PreviewNone, 0); return err }},
+		{"Poll", func() error { _, err := c.Poll(t.Context(), "j"); return err }},
+		{"Cancel", func() error { return c.Cancel(t.Context(), "j") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var api *APIError
+			if err := tc.call(); !errors.As(err, &api) {
+				t.Errorf("err = %v, want the server's own refusal", err)
+			}
+		})
+	}
+}
+
+// A non-2xx that is not the envelope is handed back exactly as httpx built it.
+//
+// The body is then the only text that says what happened -- an HTML error page
+// from something in front of the server, a bare 502, a truncated reply -- and
+// replacing it with a guessed sentence would lose it. That is the same failure
+// this translation exists to end, reached from the other direction.
+func TestRefusal_LeavesEverythingElseAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		code       int
+	}{
+		{"not JSON at all", "<html>502 Bad Gateway</html>", 502},
+		{"JSON that is not the envelope", `{"detail":"nope"}`, 400},
+		{"an envelope with nothing in it", `{"error":"","code":""}`, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, serveJSON(tc.code, tc.body))
+			err := c.Cancel(t.Context(), "j")
+			var api *APIError
+			if errors.As(err, &api) {
+				t.Fatalf("invented a refusal from %q: %+v", tc.body, *api)
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.body) {
+				t.Errorf("err = %v, want httpx's own message carrying the body", err)
+			}
+		})
+	}
+
+	// A transport failure is not a refusal either: nothing was answered, so
+	// there is no envelope to read and no status to report.
+	c := Client{HTTP: httpx.Client{BaseURL: "http://127.0.0.1:1", HTTP: &http.Client{Timeout: time.Second}}}
+	err := c.Cancel(t.Context(), "j")
+	var api *APIError
+	if err == nil || errors.As(err, &api) {
+		t.Errorf("err = %v, want a transport failure and not a refusal", err)
+	}
+}
+
 func TestDecodeAPIError_ReadsBothShapesSDServerUses(t *testing.T) {
 	// The whole reason this function exists: one API, two JSON types for one
 	// field name. A client written against either alone reports a JSON
 	// complaint in place of the reason the other endpoint gave.
-	var env wireErrorEnvelope
-	if err := json.Unmarshal(fixture(t, "error_model_not_loaded.json"), &env); err != nil {
-		t.Fatal(err)
-	}
-	if env.Error != "No model is loaded" || env.Code != "model_not_loaded" {
-		t.Fatalf("envelope = %+v", env)
-	}
-
 	for _, tc := range []struct {
 		name, raw, want string
 	}{

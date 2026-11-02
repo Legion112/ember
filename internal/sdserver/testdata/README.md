@@ -36,6 +36,73 @@ setting `EMBER_CAPTURE_DIR` on that lab.
 generation stopped at step 2. It is evidence, and it is the most expensive
 thing any fixture here has corrected.
 
+`job_failed.json`, `model_status_error.json`, `model_status_empty.json` and
+`error_model_not_loaded.json` were captured by the two failure labs in the
+same file — `TestPreview_AFailedJobCarriesTheObjectFormOfError` and
+`TestPreview_AModelThatCannotLoadIsAnErrorStateAndNotASilence`. They are the
+four that decide what an operator reads when a run goes wrong, and all four
+were guesses until this. Nothing in them is machine-specific: the only paths
+are relative model ids under a model root the lab itself names, and the
+timestamps are the server's own milliseconds.
+
+**A failed job says less than the guess did, and the gap is the finding.** The
+guessed fixture carried `{"code":"invalid_request","message":"width must be a
+multiple of 16"}` and both halves were invented — `invalid_request` appears
+nowhere in the server binary, and a width it does not like is *rounded* rather
+than refused. A real failure says `{"code":"generation_failed","message":
+"generate_image returned no results"}`, which is the generic answer: the
+reason was `VAE tile size must be at least 32 image pixels on this axis`, and
+that sentence exists only in the server's own log, which ember passes through
+as `KindLog`. The same thing the cancel capture showed from the other side —
+a client that read the outcome out of the log would call a cancel a crash, and
+one that reads only the API's `message` cannot say why a generation failed.
+What the object form *does* carry is the combination: an error object beside
+`status: "failed"`, `result: null`, `cancel_requested: false` and a `started`
+the guess did not have.
+
+**`load_elapsed_seconds` is `null` on a server with no weights**, where the
+guessed `model_status_empty.json` said `0`. It decodes into ember's `float64`
+as a no-op rather than an error, so the guess passed for a reason that had
+nothing to do with being right — the same null-is-not-zero asymmetry that took
+a websocket envelope down in `internal/webapi`, where serde's `default` covers
+a field that is missing and not one that is present and null. A fixture that
+passes by accident is the one worth replacing.
+
+**The model-status `error` is a string, now checked rather than assumed.**
+That is what this README said nobody had confirmed, and
+`mapModelStatus` reads it as a `*string` while a job's `error` goes through
+`decodeAPIError` because it is an object. A loader that spelled it the job's
+way would not print a worse message — the whole response would fail to decode
+and ember would complain about Go structs. The lab asserts the JSON *type*
+against the bytes, because a decoded struct cannot tell the two apart
+afterwards. It is one build and one loader path; a third spelling from
+somewhere else in the loader remains possible and is now a named risk rather
+than an unexamined assumption.
+
+**The string form was right, and that is recorded too.**
+`error_model_not_loaded.json` had been written from api.md's field list as
+`{"error":"No model is loaded","code":"model_not_loaded"}`, and a real 503
+from `POST /img_gen` on a weightless server says exactly that. A convention
+that only ever reports its own corrections stops being read.
+
+**What was wrong was the code that read it.** `wireErrorEnvelope` was typed,
+fixtured and decoded by *nothing but the test that unmarshalled the fixture
+into it*: every non-2xx reached the operator as httpx's raw body, so the
+reason arrived as JSON inside a sentence about a status code. `sdserver.refusal`
+reads it on all five calls now, and the lab asserts against a live 503 that
+the shape it reads is the shape a server sends. The third thing in this
+repository found written, covered and connected to nothing; see `queue.Cost`.
+
+**`state: "error"` is unreachable on ember's own startup path**, which is why
+the lab provokes it through `POST /sdcpp/v1/models/load` — a route ember never
+calls, because it hands the weights to sd-server as argv. A `--model` that is
+not a model makes the process exit 1 *before it opens its port*, with `get sd
+version from file failed` on stderr and nothing listening, which the lab also
+asserts: that is the premise `orExited` was written on and nothing had checked
+it. So the status this fixture holds is a state a server reports about a load
+ember did not ask for; what ember reads from it — the field names, their JSON
+types, the shape of the envelope beside them — is the same code either way.
+
 **A cancelled job carries an error object.** `{"code":"cancelled","message":
 "job cancelled by client"}` sits beside `"status": "cancelled"`, with `result`
 null — and `app.runJobs` tested `State.Err` *before* the status, so every
@@ -73,56 +140,87 @@ for one.
 They also corrected the guesses, on the first run, after a node was already
 up: **`capabilities.model` is an object** -- `{"name","path","stem"}` -- and
 not the string api.md's field list implies, and `models/status` carries no
-`revision`. The guessed fixture said `"model": "flux2-dev"` and decoded
+`revision` on a command-line load. (It does carry one after a `models/load`,
+as the captured error status shows, so "no `revision`" was true of the
+response in front of us and not of the endpoint -- which is the narrower claim
+a single capture can support.) The guessed fixture said `"model": "flux2-dev"` and decoded
 happily, which is exactly how a doc-derived shape passes its own test and
 fails the service. Everything else held: `samplers`, `schedulers`,
 `preview_modes` and `limits` are shaped as documented, and `limits` carries
 two upscale bounds ember does not read.
 
-## Source: `examples/server/api.md` at stable-diffusion.cpp `77b72a2`
+## Per file: captured or guessed
 
-Every file in the table below was written from the documented field lists at
-the revision both workload images pin, and **none of them has been seen on the
-wire.** What they pin is that ember's wire structs decode the *documented*
-shape, which is weaker than it sounds: a field the server spells differently,
-omits, or sends as a different JSON type decodes to a zero value here and
-passes. That is precisely what `capabilities.model` did.
+| file | endpoint | captured? | what it exercises |
+|---|---|---|---|
+| `capabilities.json` | `GET /sdcpp/v1/capabilities` | **captured** — CUDA build, sd15 Q8_0, RTX 2080 Ti | every allow-list `Validate` reads, and `features.cancel_generating` |
+| `model_status_ready.json` | `GET /sdcpp/v1/models/status` | **captured** — same run | the state `WaitModel` stops on |
+| `model_status_empty.json` | same | **captured** — `make test-preview-lab`, a CPU server started with `--model-dir` and no model | a server up with no weights, and `load_elapsed_seconds: null` |
+| `model_status_error.json` | same | **captured** — same lab, after `models/load` on a file that is not a model | the state `WaitModel` refuses on, and that `error` is a JSON **string** |
+| `model_status_loading.json` | same | **guessed** | the state `WaitModel` retries |
+| `job_accepted.json` | `POST /sdcpp/v1/img_gen` | **guessed** | the 202, and that the id is read from `id` rather than parsed out of `poll_url` |
+| `job_generating.json` | `GET /sdcpp/v1/jobs/{id}` | **captured** — preview lab, six steps at `preview_interval` 1 | a preview frame, its pass and its step |
+| `job_completed.json` | same | **captured** — same run | the finished image |
+| `job_cancelled.json` | same | **captured** — cancel lab, a sixty-step job stopped at step 2 | an error object beside a status that is **not** a failure |
+| `job_failed.json` | same | **captured** — failure lab, vae tiling with a one-pixel tile | the **object** form of `error`, beside `result: null` |
+| `job_queued.json` | same | **guessed** | `queue_position` while queued |
+| `error_model_not_loaded.json` | any request the server refuses | **captured** — failure lab, `POST /img_gen` with no weights (503) | the **string** form of `error`, beside a separate `code` |
 
-| file | endpoint | what it is meant to exercise |
-|---|---|---|
-| `model_status_empty.json` | `GET /sdcpp/v1/models/status` | a server up with no weights, the state it reports before a load finishes |
-| `model_status_loading.json` | same | the state `WaitModel` retries |
-| `model_status_error.json` | same | the state it refuses on, with the server's own message |
-| `job_accepted.json` | `POST /sdcpp/v1/img_gen` | the 202, and that the id is read from `id` rather than parsed back out of `poll_url` |
-| `job_queued.json` | `GET /sdcpp/v1/jobs/{id}` | `queue_position` while queued |
-| `job_failed.json` | same | the **object** form of `error` |
-| `error_model_not_loaded.json` | model management | the **string** form of `error`, beside a separate `code` |
+The last two shapes are the point of having both. sd-server spells `error` two
+different ways in one API — a string beside a `code` for a request it rejects
+outright, an object for a job that failed after being accepted — so a client
+written against either one alone decodes the other as nothing and reports a
+JSON complaint in place of the reason. `decodeAPIError` reads the object form
+and `refusal` reads the string one, and both are now exercised against bytes a
+server sent.
 
-The last two are the point of having both. sd-server spells `error` two
-different ways in one API — a string for model management, an object for a
-failed job — so a client written against either one alone decodes the other as
-nothing and reports a JSON complaint in place of the reason. `decodeAPIError`
-reads both and these two files are what hold it to that.
+## What provoking a failure took, and what it did not take
 
-## Replacing a guess with evidence
+**No bypass, and none was added.** `Validate` still refuses a sampler the
+server does not list and a width past `limits.max_width`, which is why the
+README used to say a failed job could not be captured: reaching around it
+needs a deliberate hole, and this package already decided once that an escape
+hatch for a test is an escape hatch.
 
-The three `model_status_*` files above are still written from the field list:
-a load that is in progress, and one that failed, are both states a healthy
-local run does not produce on demand. `model_status_error.json` is the one
-most worth replacing, because its `error` is a free-text string from
-somewhere in the loader and nothing has checked that it is a string in every
-case.
+The input that works is one **every check ember has accepts**: vae tiling
+switched on with `tile_size_w` and `tile_size_h` of 1. `ValidateStatic`
+refuses a negative tile and nothing else, because the server publishes no tile
+bound in `limits`; `Validate` has no list to check it against. The server
+samples the whole job and then fails in the decoder, where the tiles are used
+— so a failed job is a job that has already been paid for, which is the
+difference between it and a refusal.
 
-`job_queued.json` and `job_failed.json` are the job-lifecycle guesses that
-remain. Both are states a healthy run does not produce on demand: the queue is
-empty because ember submits one job at a time on purpose, and a failure has to
-be provoked. `job_failed.json` is the one that matters more, because it
-carries the object form of `error` and nothing has confirmed that a real
-failed job spells it that way.
+**It is left representable on purpose.** This build's log names a minimum of
+32 image pixels per axis; no *response* does. Refusing below it here would be
+reading a bound out of an error string — the `allowedCudaVersions` mistake,
+which is a schema or a log read in place of a published value — and it would
+make the only honest route to a real failed job unreachable, trading evidence
+for an invented limit. If upstream ever publishes the bound in `limits`,
+`Validate` should refuse it there and this lab should change with it.
 
-Provoking one is cheap now that the preview lab exists — a job naming a
-sampler the server does not know, or a width past `limits.max_width`. The
-reason it is not done here is that `Validate` refuses both before they reach
-the wire, which is the behaviour ember wants; reaching around it needs a
-deliberate hole, and this package already decided once that an escape hatch
-for a test is an escape hatch.
+## The three that are still guesses, and what each would need
+
+`model_status_loading.json` — **a model whose load outlasts a poll.** The
+state is reachable only through `models/load`, since a `--model` load finishes
+before the port opens, and sd15 loads in **93 ms** by mmap on this machine.
+Catching it would mean polling inside a sub-100 ms window, which is a lab that
+fails when the page cache is warm. What it needs is a model set large enough
+that loading takes seconds — the FLUX.2 set, which is a rented node — or a
+model root on deliberately slow storage. Not a bypass, and not a GPU: a slow
+read.
+
+`job_queued.json` — **a second job in flight, which ember never produces.**
+`runJobs` submits one at a time on purpose, so sd-server's own queue is one
+job deep by construction and `queue_position` is 0 in every response ember
+will ever see. Capturing a non-zero one is three lines in a lab and would
+describe a state that exists only if that invariant breaks; what the fixture
+pins meanwhile is that ember decodes `queued` and prints the number without
+reasoning about it.
+
+`job_accepted.json` — **the 202's bytes, which `Submit` throws away.** ember
+decodes the body, keeps `id` and discards the rest, so capturing this needs a
+raw POST from the lab that creates a job nothing is going to collect. One
+field in it is already known wrong: `created` is written as Unix **seconds**,
+and the captured `job_completed.json` and `job_cancelled.json` both carry
+**milliseconds** for the same field name on the same object. ember reads
+neither it nor `poll_url`, which is why this one is last.

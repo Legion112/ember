@@ -1956,6 +1956,49 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `preview_modes`, `limits` and the whole job lifecycle. `capabilities.json`
   and `model_status_ready.json` are captured now, and
   `internal/sdserver/testdata/README.md` says which still are not.
+- **The error envelope was typed, fixtured, covered and read by nothing.**
+  sd-server spells `error` two ways in one API and `decodeAPIError` has read
+  both since the package was written -- but `wireErrorEnvelope`, the string
+  form, was decoded only by the test that unmarshalled its fixture into it.
+  Every non-2xx reached the operator as httpx's raw body instead, so a
+  generation asked for before the weights were in printed
+  `status 503 Service Unavailable: {"code":"model_not_loaded","error":"No
+  model is loaded"}` -- the reason, as JSON, inside a sentence about a status
+  code. The fourth thing found in this repository written, covered and
+  connected to nothing, after `queue.Cost`, the unrecorded preview frame and
+  the preview column; and the unit test could not see it, because a test that
+  decodes a fixture by hand proves the *shape* is readable and nothing about
+  whether anything reads it. `sdserver.refusal` is on all five calls now, and
+  a lab asserts it against a live 503.
+- **A failed job names a generic code and the reason is in the log.** A real
+  failure says `generation_failed` / `generate_image returned no results`
+  while the server's own stderr says `VAE tile size must be at least 32 image
+  pixels on this axis`. The guessed fixture had invented both halves --
+  `invalid_request` is in no part of this binary, and a width it dislikes is
+  rounded rather than refused -- so a reader would have expected the API to
+  explain a failure it only reports. The mirror of the cancel capture, where
+  the log said "sampling failed" about a job the API called `cancelled`:
+  neither source is sufficient, and which one answers which question is not
+  guessable from a field list.
+- **A failure provoked through a hole proves nothing, so the input is one
+  every check accepts.** `Validate` refuses a sampler the server does not
+  list and a width past `limits.max_width`, which is why a failed job was
+  recorded as uncapturable -- reaching around it needs an escape hatch, and
+  an escape hatch for a test is an escape hatch. What works instead is vae
+  tiling with a one-pixel tile: `ValidateStatic` refuses a negative tile and
+  nothing else, because no response publishes a tile bound. It stays
+  representable deliberately -- the minimum of 32 is in a log and in no
+  response, so refusing below it would be the `allowedCudaVersions` mistake
+  with a log in place of the schema, and it would trade the only honest route
+  to a real failed job for an invented limit.
+- **`state: "error"` is on the far side of a port that never opens.** ember
+  hands the weights to sd-server as argv, and a `--model` that is not a model
+  exits 1 *before listening*, with `get sd version from file failed` on
+  stderr -- which is the premise `orExited` was written on and which nothing
+  had checked. So `model_status_error.json` is captured by driving
+  `models/load`, a route ember never calls, on a server started with no
+  weights. A fixture's capture route is worth writing down when it is not the
+  route the program takes: what it proves is the decode, not the reachability.
 - **The deferral above was answered by the image it had ruled out.** It was
   recorded as "no GPU-less runner can start sd-server", which is true of the
   CUDA build and was never true of the CPU one: the upstream release zip has

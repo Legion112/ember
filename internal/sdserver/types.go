@@ -197,8 +197,16 @@ type wireErrorObject struct {
 	Message string `json:"message"`
 }
 
-// wireErrorEnvelope is the model-management form: a string `error` beside a
-// separate `code`.
+// wireErrorEnvelope is the form every outright refusal uses: a string `error`
+// beside a separate `code`.
+//
+// Observed on `POST /img_gen` against a server with no weights
+// (`{"code":"model_not_loaded","error":"No model is loaded"}`, 503) and on
+// `POST /models/load` with a file that is not a model
+// (`{"code":"model_load_failed",...}`, 400), so it is not only model
+// management as this comment once said -- it is the shape of any request the
+// server will not take. Read by refusal, which is what puts the sentence in
+// front of the operator instead of httpx's raw body.
 type wireErrorEnvelope struct {
 	Error string `json:"error"`
 	Code  string `json:"code"`
