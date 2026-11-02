@@ -170,7 +170,16 @@ func (p *Provider) Offers(ctx context.Context, f node.Filter) ([]node.Offer, err
 		VRAM:     0,
 		Price:    0,
 		Region:   "localhost",
-		Label:    "a container on this machine's docker daemon, free",
+
+		// Nobody can take this machine away but the operator sitting at it,
+		// so the promise is honest here in a way it is on no marketplace.
+		// Stated rather than left at the zero value: ReclaimUnknown is
+		// refused unless `allow_interruptible` is set, which would mean the
+		// free provider -- the one every lab and every first run uses --
+		// answering "no capacity" on a laptop.
+		Reclaim: node.ReclaimNever,
+
+		Label: "a container on this machine's docker daemon, free",
 	}
 
 	// A card on this machine is a real offer, and the only free one ember

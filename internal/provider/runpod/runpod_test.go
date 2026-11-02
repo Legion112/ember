@@ -70,10 +70,10 @@ func TestProvider_NameAndCaps(t *testing.T) {
 	}
 	// Secure cloud is RunPod's own hardware and is not reclaimed underneath
 	// the operator; community hosts are somebody else's machines.
-	if c.Interruptible {
+	if c.InterruptibleTier {
 		t.Error("secure cloud should not be marked interruptible")
 	}
-	if (&Provider{Cloud: "COMMUNITY"}).Caps().Interruptible != true {
+	if (&Provider{Cloud: "COMMUNITY"}).Caps().InterruptibleTier != true {
 		t.Error("community cloud must be marked interruptible")
 	}
 }
@@ -176,6 +176,106 @@ func TestOffers_AppliesTheFilter(t *testing.T) {
 	}
 	if len(offers) != 1 || !strings.Contains(string(offers[0].Token), "A100 80GB") {
 		t.Fatalf("got %+v", offers)
+	}
+}
+
+// TestOffers_CommunityOffersSayTheyCanBeReclaimed is the half of the defect
+// that was a filter comparing against a field nothing set.
+//
+// node.Offer carried an Interruptible bool that no provider ever assigned,
+// provider.Caps carried a different field of the same name that was assigned
+// correctly and read by nothing, so the reclaim guard refused nothing for the
+// life of the code -- and runpod_cloud: COMMUNITY rented reclaimable hardware
+// with allow_interruptible at its default of false.
+func TestOffers_CommunityOffersSayTheyCanBeReclaimed(t *testing.T) {
+	p := newTestProvider(t, serveFile(t, "gpus.json"))
+	p.Cloud = cloudCommunity
+
+	// The opt-in, because without it the whole listing is refused -- which is
+	// the behaviour change, asserted on its own below.
+	offers, err := p.Offers(t.Context(), node.Filter{AllowInterruptible: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offers) == 0 {
+		t.Fatal("the community tier quoted nothing, so this proves nothing")
+	}
+	for _, o := range offers {
+		if o.Reclaim != node.ReclaimAnyTime {
+			t.Errorf("community offer %s does not say ReclaimAnyTime; the filter reads the "+
+				"offer and not the capability, so it would be rented with no opt-in", o.Token)
+		}
+	}
+
+	// And the secure tier is the promise, or the opt-in would be mandatory
+	// for everyone.
+	p.Cloud = cloudSecure
+	secure, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secure) == 0 {
+		t.Fatal("the secure tier quoted nothing")
+	}
+	for _, o := range secure {
+		if o.Reclaim != node.ReclaimNever {
+			t.Errorf("secure offer %s does not say ReclaimNever, so every secure run would "+
+				"need allow_interruptible", o.Token)
+		}
+	}
+}
+
+// TestOffers_CommunityWithoutTheOptInRefusesAndNamesTheKey is the behaviour
+// change, stated as an assertion.
+//
+// An operator on the community tier who has never touched allow_interruptible
+// now gets nothing. "no offers matched" would read as "that card is sold out
+// everywhere" and send them to try another one, which is the wrong story --
+// the same one the datacentre refusal in Offers exists to avoid.
+func TestOffers_CommunityWithoutTheOptInRefusesAndNamesTheKey(t *testing.T) {
+	p := newTestProvider(t, serveFile(t, "gpus.json"))
+	p.Cloud = cloudCommunity
+
+	_, err := p.Offers(t.Context(), node.Filter{})
+	if !errors.Is(err, node.ErrNoCapacity) {
+		t.Fatalf("got %v, want ErrNoCapacity", err)
+	}
+	for _, want := range []string{"allow_interruptible", "runpod_cloud: SECURE", "reclaimed mid-run"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q, so it reads as sold-out hardware: %v", want, err)
+		}
+	}
+}
+
+// TestCPUOffers_ReclaimComesFromTheTierAndNotThePrice: the CPU catalogue
+// quotes securePerVcpu and nothing else, so a community-configured run is
+// quoted a secure rate -- but Create still sends Cloud: p.cloud(), so the
+// machine it gets is a community one and can be taken back. Reading the
+// reclaim answer off the price would promise ReclaimNever about a pod that is
+// not, and losing one mid-download leaves a short file on the store that the
+// next run reads as present.
+func TestCPUOffers_ReclaimComesFromTheTierAndNotThePrice(t *testing.T) {
+	p := newTestProvider(t, serveFile(t, "cpus.json"))
+	p.Cloud = cloudCommunity
+
+	offers, err := p.Offers(t.Context(), node.Filter{CPUOnly: true, AllowInterruptible: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offers) == 0 {
+		t.Fatal("no CPU offers, so this proves nothing")
+	}
+	for _, o := range offers {
+		if o.Reclaim != node.ReclaimAnyTime {
+			t.Errorf("CPU offer %s is quoted at a secure rate and created on the community "+
+				"tier, and says it cannot be reclaimed", o.Token)
+		}
+	}
+
+	// And the refusal reaches this path too, which is the one that would
+	// otherwise have had the guard silently inert on half the catalogue.
+	if _, err := p.Offers(t.Context(), node.Filter{CPUOnly: true}); !errors.Is(err, node.ErrNoCapacity) {
+		t.Errorf("got %v, want ErrNoCapacity naming allow_interruptible", err)
 	}
 }
 

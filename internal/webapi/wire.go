@@ -177,6 +177,11 @@ type offerView struct {
 
 	// Interruptible means the provider can take it back mid-run, which is a
 	// property an operator must see before choosing it rather than discover.
+	//
+	// A bool on the wire for a node.Reclaim with three states, because the
+	// page has one question to answer and "the provider did not say" is
+	// treated as yes everywhere else -- node.Reclaim.Interruptible is the one
+	// place that collapse is decided.
 	Interruptible bool `json:"interruptible"`
 
 	// VCPU is non-zero only for a machine with no card.
@@ -211,7 +216,7 @@ func viewOffers(ls []app.OfferListing) offersView {
 				Provider: string(o.Provider), Token: string(o.Token), GPU: string(o.GPU),
 				Count: o.GPUCount, VRAMGiB: int(o.VRAM / node.MiBPerGiB),
 				Price: rate(o.Price), Region: o.Region,
-				Interruptible: o.Interruptible, VCPU: o.VCPU, Label: o.Label,
+				Interruptible: o.Reclaim.Interruptible(), VCPU: o.VCPU, Label: o.Label,
 			})
 		}
 		out.Listings = append(out.Listings, lv)

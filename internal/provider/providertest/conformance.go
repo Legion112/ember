@@ -117,6 +117,7 @@ var conformanceChecks = []conformanceCheck{
 	{"every offer belongs to this provider", checkOffersBelongHere},
 	{"every offer matches the filter it was given", checkOffersMatchTheFilter},
 	{"an offer is priced as the capability says", checkOfferPriceMatchesFree},
+	{"every offer says whether it can be reclaimed", checkOffersSayWhetherTheyCanBeReclaimed},
 	{"every tolerated platform port is named", checkPlatformPorts},
 	{"create returns a handle that names a machine", checkCreateReturnsANamedHandle},
 	{"list finds by label what create made", checkListFindsWhatCreateMade},
@@ -234,6 +235,56 @@ func checkOfferPriceMatchesFree(ctx context.Context, p provider.Provider) error 
 			return fmt.Errorf("%s is not free and offer %s is priced at zero; "+
 				"on a paid provider that is a declined quote rather than a free machine, and every budget check against it passes",
 				p.Name(), o.Token)
+		}
+	}
+	return nil
+}
+
+// checkOffersSayWhetherTheyCanBeReclaimed is the check whose absence was the
+// bug.
+//
+// node.Offer carried an `Interruptible bool` that no provider ever assigned
+// while provider.Caps carried a different field of the same name that was
+// assigned correctly and read by nothing, so Filter.Match's reclaim guard
+// compared against a constant false for the life of the code. It ran on every
+// offer, passed on every offer and refused none -- and `runpod_cloud:
+// COMMUNITY` rented reclaimable hardware with `allow_interruptible` at its
+// default of false. Nothing could have caught it but a check that crosses the
+// two layers, which is what this suite is for.
+//
+// Network-free like everything else here: it asks the provider it was handed
+// what it offers and what it claims, and compares the two. Caps.Interruptible
+// was left out of this suite on the belief that confirming it needed a
+// reclaim to actually happen; it does not. What is checkable without renting
+// anything is whether the provider's answers agree with each other, and that
+// is the half that was wrong.
+func checkOffersSayWhetherTheyCanBeReclaimed(ctx context.Context, p provider.Provider) error {
+	offers, err := p.Offers(ctx, node.Filter{AllowInterruptible: true})
+	if err != nil {
+		return fmt.Errorf("Offers: %w", err)
+	}
+	tier := p.Caps().InterruptibleTier
+	for _, o := range offers {
+		// The direction that leaks, and the one that produced this issue. A
+		// provider that never populates the field hands back offers ember
+		// refuses by default -- so the symptom is `ember up` reading "no
+		// capacity" against a full catalogue, or, with the opt-in set,
+		// renting reclaimable hardware the operator was never warned about.
+		if o.Reclaim == node.ReclaimUnknown {
+			return fmt.Errorf("offer %s leaves Reclaim at ReclaimUnknown; "+
+				"a provider that does not say is treated as reclaimable, so the filter refuses it "+
+				"unless allow_interruptible is set -- which reads as no capacity against a full catalogue. "+
+				"Say node.ReclaimNever or node.ReclaimAnyTime", o.Token)
+		}
+		// Caps is a claim about the whole tier, so an offer disagreeing with
+		// it means one of the two is lying and the filter reads the offer.
+		// The claim being true while an offer says ReclaimNever is the
+		// expensive direction: that offer is rented with no opt-in and can
+		// vanish mid-render.
+		if tier && o.Reclaim != node.ReclaimAnyTime {
+			return fmt.Errorf("%s says Caps.InterruptibleTier and offer %s does not say ReclaimAnyTime; "+
+				"Filter.Match reads the offer and not the capability, so that machine is rented "+
+				"without allow_interruptible and can be taken back mid-generation", p.Name(), o.Token)
 		}
 	}
 	return nil

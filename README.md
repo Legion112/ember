@@ -490,7 +490,7 @@ never heard of, so the next one cannot arrive silently.
 data_centers: [US-IL-1, EU-RO-1]   # RunPod only; empty lets RunPod choose
 disk_gib: 80                       # RunPod only; the container disk
 runpod_cloud: COMMUNITY            # or SECURE, which is RunPod's own default
-allow_interruptible: true          # see the warning below
+allow_interruptible: true          # required by COMMUNITY; see below
 
 # where ember keeps its own files; all three are resolved when empty
 config_dir: ~/.config/ember        # keys and credentials.yaml
@@ -518,18 +518,37 @@ is deliberately *not* the config one: pins and node records are machine-local
 facts about running nodes, and a config directory synced between machines would
 carry pins for nodes the other machine cannot see.
 
-> **`allow_interruptible` currently changes nothing, and that is a finding
-> rather than a feature.** It sets `node.Filter.AllowInterruptible`, which
-> admits an offer whose `Interruptible` field is true — and **no provider in
-> ember sets that field on an offer**. RunPod's community tier is reported one
-> level up, as a provider capability (`Caps().Interruptible`), which the filter
-> does not consult. So the switch has nothing to permit yet: leaving it false
-> excludes nothing, and setting it true admits nothing. What it is *not* is a
-> guard against renting interruptible hardware — `runpod_cloud: COMMUNITY`
-> rents exactly that, with `allow_interruptible` left at its default. It is
-> documented here as an opt-in that is waiting for a provider to mark an offer,
-> because a key that reads like a safety switch and is not one is worse than a
-> key nobody can find.
+`allow_interruptible` bids on hardware the provider can take back mid-run. It
+defaults to false, which refuses it — and **`runpod_cloud: COMMUNITY` needs it
+set**, because every community pod runs on a machine somebody else owns and can
+reclaim. The two keys are one decision spelled in two places: `runpod_cloud`
+picks the tier and `allow_interruptible` says whether ember will rent from it.
+
+> **Behaviour change.** Until this was fixed, `runpod_cloud: COMMUNITY` rented
+> reclaimable hardware with `allow_interruptible` left at its default. The
+> guard read an `Interruptible` field on the offer that **no provider ever
+> set** — the only field of that name anything assigned was the provider-level
+> `Caps().Interruptible` one layer up, which the filter never consulted — so it
+> ran on every offer and refused none. A community-tier config that worked
+> before now gets no offers at all until `allow_interruptible: true` is added,
+> and the refusal says so by name rather than reading as "that card is sold out
+> everywhere". Setting it restores exactly the previous behaviour, with the
+> difference that it is now a choice somebody made.
+
+What a reclaim costs is the one failure ember's TTL and journal do not cover:
+the node goes away without ember destroying it, mid-generation, and whatever it
+had produced that was not fetched yet is gone. A batch brings each result home
+as it is produced for the same reason, so the loss is bounded by one step
+rather than by the whole run.
+
+An offer that does not say either way counts as reclaimable. That is the whole
+shape of the fix rather than a detail: a provider author who forgets to
+populate `node.Offer.Reclaim` gets their offers refused, not rented, which is
+the direction `Caps.PublicSSH` already defaults in. `provider.Caps` carries a
+separate `InterruptibleTier` for a provider whose whole catalogue is
+reclaimable — RunPod's community tier is one — and
+`providertest.RunConformance` fails a provider whose offers and capability
+disagree, or whose offers say nothing at all.
 
 ### Several results from one rental
 

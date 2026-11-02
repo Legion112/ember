@@ -30,6 +30,12 @@ func offer(provider node.ProviderID, token string, price node.Rate) node.Offer {
 	return node.Offer{
 		Provider: provider, Token: node.OfferToken(token),
 		GPU: "rtx4090", GPUCount: 1, VRAM: 24576, Price: price,
+
+		// Stated, because node.ReclaimUnknown is refused by every filter
+		// whose AllowInterruptible is false -- which is every filter in this
+		// file. A helper that left it out would turn each test below into a
+		// test of the reclaim guard and of nothing it was written for.
+		Reclaim: node.ReclaimNever,
 	}
 }
 
@@ -109,6 +115,36 @@ func TestFilterOffers_DropsInvalidOffers(t *testing.T) {
 	got := FilterOffers(node.Filter{}, []node.Offer{bad, offer("p", "ok", 1)})
 	if len(got) != 1 || got[0].Token != "ok" {
 		t.Fatalf("an unusable offer survived: %v", got)
+	}
+}
+
+// TestRefusedForReclaim_NamesOnlyTheOffersTheKeyWouldAdmit: an empty offer
+// list has two causes that read as one. "nothing matched" sends the operator
+// to try a different card when the real answer may be that every card on this
+// tier is reclaimable and one config key says no.
+func TestRefusedForReclaim_NamesOnlyTheOffersTheKeyWouldAdmit(t *testing.T) {
+	spot := offer("p", "spot", 100000)
+	spot.Reclaim = node.ReclaimAnyTime
+	unsaid := offer("p", "unsaid", 100000)
+	unsaid.Reclaim = node.ReclaimUnknown
+	dearSpot := offer("p", "dear-spot", 900000)
+	dearSpot.Reclaim = node.ReclaimAnyTime
+	in := []node.Offer{spot, unsaid, dearSpot, offer("p", "ok", 100000), offer("p", "", 1)}
+
+	f := node.Filter{MaxPrice: 500000}
+	// The dear one is over the ceiling and the invalid one has no token, so
+	// neither would be admitted by flipping the key. Blaming them on it would
+	// tell the operator to set a key that changes nothing for them -- which
+	// is the whole failure mode this function exists to avoid, inverted.
+	if got := RefusedForReclaim(f, in); got != 2 {
+		t.Errorf("RefusedForReclaim = %d, want the two the opt-in would admit", got)
+	}
+
+	// Nothing to report once the operator has opted in: the key is already
+	// true, so no offer was refused for it.
+	f.AllowInterruptible = true
+	if got := RefusedForReclaim(f, in); got != 0 {
+		t.Errorf("RefusedForReclaim with the opt-in set = %d, want 0", got)
 	}
 }
 

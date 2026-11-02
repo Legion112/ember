@@ -98,7 +98,14 @@ func (p *Provider) Caps() provider.Caps {
 
 		// Secure cloud pods are not reclaimed under the operator. Community
 		// hosts are somebody else's machines and can go away.
-		Interruptible: strings.EqualFold(p.Cloud, cloudCommunity),
+		//
+		// Through reclaimOf, so this claim and the Reclaim stamped on every
+		// offer are one derivation of one fact. Two readings of p.Cloud
+		// would be two sources of truth for the same thing, and the one that
+		// disagreed would be the one that let a reclaimable pod be rented --
+		// the Offer.VCPU rule, applied to the field that used to be read by
+		// nothing.
+		InterruptibleTier: reclaimOf(p.cloud()).Interruptible(),
 
 		// No tag API: ember's label lives in the pod name, which is why
 		// ParseLabel is strict rather than a substring match.
@@ -213,7 +220,34 @@ func (p *Provider) Offers(ctx context.Context, f node.Filter) ([]node.Offer, err
 			"waiting for capacity there and creating a store somewhere else",
 			node.ErrNoCapacity, f.Region)
 	}
-	return provider.FilterOffers(f, offers), nil
+	return p.filter(f, offers)
+}
+
+// filter narrows the catalogue and explains an empty answer the one way it
+// cannot be read off the result.
+//
+// With runpod_cloud: COMMUNITY every offer is reclaimable, so an operator who
+// has not set allow_interruptible gets nothing back at all -- and "no offers
+// matched" reads as "that card is sold out everywhere" and sends them off to
+// try another one. It is the same wrong story the datacentre refusal above
+// exists to avoid, and it has to be told here rather than in
+// provision.PickOffer: this is the last place that still holds the unfiltered
+// list and knows the tier, because the offers the reclaim guard drops are
+// dropped by the FilterOffers call on the line below.
+func (p *Provider) filter(f node.Filter, offers []node.Offer) ([]node.Offer, error) {
+	kept := provider.FilterOffers(f, offers)
+	if len(kept) > 0 {
+		return kept, nil
+	}
+	if n := provider.RefusedForReclaim(f, offers); n > 0 {
+		return nil, fmt.Errorf("%w: all %d of RunPod's matching %s offers can be reclaimed mid-run, "+
+			"and allow_interruptible is false. A reclaimed pod goes away without ember destroying "+
+			"it, mid-generation, and whatever it had produced that was not fetched yet is gone.\n"+
+			"Set allow_interruptible: true to bid on them anyway, or runpod_cloud: SECURE for "+
+			"hardware RunPod owns and does not take back",
+			node.ErrNoCapacity, n, p.cloud())
+	}
+	return kept, nil
 }
 
 // Create starts a pod and returns its handle.
@@ -452,12 +486,12 @@ func (p *Provider) cpuOffers(ctx context.Context, f node.Filter) ([]node.Offer, 
 		return nil, fmt.Errorf("list runpod cpu types: %w", err)
 	}
 
-	offers := mapCPUOffers(resp.Cpus, f.Region, f.MinCount)
+	offers := mapCPUOffers(resp.Cpus, p.cloud(), f.Region, f.MinCount)
 	if f.Region != "" && len(offers) == 0 && len(resp.Cpus) > 0 {
 		return nil, fmt.Errorf("%w: no CPU machine is available in %s, where the store lives",
 			node.ErrNoCapacity, f.Region)
 	}
-	return provider.FilterOffers(f, offers), nil
+	return p.filter(f, offers)
 }
 
 // CatalogueSnapshot reads both catalogues once, for the availability history.

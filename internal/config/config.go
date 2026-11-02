@@ -61,8 +61,17 @@ type Config struct {
 	// GPU and MinVRAMGiB narrow the offers considered.
 	GPU        string `yaml:"gpu"`
 	MinVRAMGiB int    `yaml:"min_vram_gib"`
-	AllowSpot  bool   `yaml:"allow_interruptible"`
-	Region     string `yaml:"region"`
+
+	// AllowInterruptible bids on hardware the provider can take back
+	// mid-run. False, the default, is the safe answer and now the effective
+	// one: it reaches node.Filter.AllowInterruptible, which is read against
+	// an offer's node.Reclaim.
+	//
+	// It was spelled AllowSpot here while the key is allow_interruptible and
+	// the filter field is AllowInterruptible -- a third name for one switch,
+	// in a feature whose defect was two fields sharing one name.
+	AllowInterruptible bool   `yaml:"allow_interruptible"`
+	Region             string `yaml:"region"`
 
 	// MaxHourlyUSD and MaxRunUSD are decimal strings, parsed into integer
 	// microdollars. They are strings rather than floats on purpose: a YAML
@@ -666,7 +675,7 @@ func (c Config) Filter() (node.Filter, error) {
 	f := node.Filter{
 		GPU:                node.NormalizeGPU(c.GPU),
 		MinVRAM:            node.MiB(c.MinVRAMGiB) * 1024,
-		AllowInterruptible: c.AllowSpot,
+		AllowInterruptible: c.AllowInterruptible,
 		Region:             c.Region,
 	}
 	if c.MinVRAMGiB < 0 {

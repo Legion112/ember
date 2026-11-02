@@ -749,7 +749,7 @@ func cpuCatalogue() []cpuType {
 }
 
 func TestMapCPUOffers_PricesPerMachineAndSortsCheapestFirst(t *testing.T) {
-	got := mapCPUOffers(cpuCatalogue(), "EU-RO-1", 0)
+	got := mapCPUOffers(cpuCatalogue(), cloudSecure, "EU-RO-1", 0)
 	if len(got) != 2 {
 		t.Fatalf("got %d offers, want the two with capacity: %+v", len(got), got)
 	}
@@ -775,7 +775,7 @@ func TestMapCPUOffers_PricesPerMachineAndSortsCheapestFirst(t *testing.T) {
 }
 
 func TestMapCPUOffers_HonoursTheRequestedCores(t *testing.T) {
-	got := mapCPUOffers(cpuCatalogue(), "EU-RO-1", 8)
+	got := mapCPUOffers(cpuCatalogue(), cloudSecure, "EU-RO-1", 8)
 	if got[0].VCPU != 8 {
 		t.Fatalf("vcpu = %d, want 8", got[0].VCPU)
 	}
@@ -786,11 +786,11 @@ func TestMapCPUOffers_HonoursTheRequestedCores(t *testing.T) {
 	// Below the family minimum is raised to it rather than refused: asking
 	// for one core is asking for the cheapest machine, and that is what the
 	// minimum is.
-	if raised := mapCPUOffers(cpuCatalogue(), "EU-RO-1", 1); raised[0].VCPU != 2 {
+	if raised := mapCPUOffers(cpuCatalogue(), cloudSecure, "EU-RO-1", 1); raised[0].VCPU != 2 {
 		t.Errorf("vcpu = %d, want the family minimum", raised[0].VCPU)
 	}
 	// Above the maximum is dropped, because the provider would refuse it.
-	if over := mapCPUOffers(cpuCatalogue(), "EU-RO-1", 64); len(over) != 0 {
+	if over := mapCPUOffers(cpuCatalogue(), cloudSecure, "EU-RO-1", 64); len(over) != 0 {
 		t.Errorf("got %+v for more cores than any family has", over)
 	}
 }
@@ -798,11 +798,11 @@ func TestMapCPUOffers_HonoursTheRequestedCores(t *testing.T) {
 func TestMapCPUOffers_SkipsASiteWithNoCapacity(t *testing.T) {
 	// A store pins placement, so a family listed everywhere but unavailable
 	// where the weights are is not an offer.
-	if got := mapCPUOffers(cpuCatalogue(), "XX-NOWHERE-9", 0); len(got) != 0 {
+	if got := mapCPUOffers(cpuCatalogue(), cloudSecure, "XX-NOWHERE-9", 0); len(got) != 0 {
 		t.Errorf("got %+v for a datacentre nothing is in", got)
 	}
 	// Without a region the global availability is what counts.
-	if got := mapCPUOffers(cpuCatalogue(), "", 0); len(got) != 2 {
+	if got := mapCPUOffers(cpuCatalogue(), cloudSecure, "", 0); len(got) != 2 {
 		t.Errorf("got %d offers unfiltered, want 2", len(got))
 	}
 }

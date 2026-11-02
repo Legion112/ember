@@ -37,12 +37,61 @@ func TestFilter_PriceCeilingIsInclusive(t *testing.T) {
 // paid for half a render, and that should be a choice.
 func TestFilter_InterruptibleIsOptIn(t *testing.T) {
 	o := validOffer()
-	o.Interruptible = true
+	o.Reclaim = ReclaimAnyTime
 	if (Filter{}).Match(o) {
 		t.Fatal("the zero Filter must not match an interruptible offer")
 	}
 	if !(Filter{AllowInterruptible: true}).Match(o) {
 		t.Fatal("AllowInterruptible must admit it")
+	}
+}
+
+// TestFilter_AnOfferThatSaidNothingIsRefused is the regression test for the
+// defect: the guard above used to read an Offer.Interruptible bool that no
+// provider assigned, so it refused nothing for the life of the code while
+// `runpod_cloud: COMMUNITY` rented reclaimable hardware with
+// allow_interruptible at its default.
+//
+// The fix is not "populate the field" -- a provider can forget again. It is
+// that the zero value is the unsafe answer, so forgetting is refused rather
+// than rented. This asserts the zero value itself, which is the only form of
+// the assertion a future provider cannot sidestep.
+func TestFilter_AnOfferThatSaidNothingIsRefused(t *testing.T) {
+	o := validOffer()
+	o.Reclaim = ReclaimUnknown
+	if o.Validate() != nil {
+		t.Fatal("the offer has to be otherwise valid, or this proves nothing")
+	}
+	if (Filter{}).Match(o) {
+		t.Error("an offer whose provider never said whether it can be reclaimed was admitted; " +
+			"a provider that forgets the field must not get the permissive answer")
+	}
+	if !(Filter{AllowInterruptible: true}).Match(o) {
+		t.Error("the opt-in must admit it: the operator has said they will take the risk")
+	}
+
+	// And the CPU arm, which had its own copy of the guard before this and
+	// is now the same one line.
+	cpu := Offer{Provider: "runpod", Token: "cpu3c", VCPU: 2, Price: 60000}
+	if (Filter{CPUOnly: true}).Match(cpu) {
+		t.Error("a CPU machine whose provider never said was admitted; losing one mid-download " +
+			"leaves a short file on the store that the next run reads as present")
+	}
+}
+
+// TestReclaim_OnlyAPromiseIsSafe pins the direction of the collapse. A value
+// added to this type later is interruptible until its author says otherwise,
+// the way node.State.Billable is true for everything but StateDestroyed.
+func TestReclaim_OnlyAPromiseIsSafe(t *testing.T) {
+	for r, want := range map[Reclaim]bool{
+		ReclaimUnknown: true,
+		ReclaimAnyTime: true,
+		ReclaimNever:   false,
+		Reclaim(99):    true,
+	} {
+		if got := r.Interruptible(); got != want {
+			t.Errorf("Reclaim(%d).Interruptible() = %v, want %v", r, got, want)
+		}
 	}
 }
 
@@ -78,8 +127,8 @@ func TestFilter_CPUOnlyIsExclusiveBothWays(t *testing.T) {
 	// A run that wanted a card and silently got a CPU box fails at the
 	// workload; one that wanted a cheap downloader and got a 4090 costs
 	// fifteen times what it meant to. Neither may happen by default.
-	cpu := Offer{Provider: "runpod", Token: "cpu3c", GPU: "cpu3c", VCPU: 2, Price: 60000}
-	gpu := Offer{Provider: "runpod", Token: "t", GPU: NormalizeGPU("rtx4090"), GPUCount: 1, VRAM: GiB(24), Price: 890000}
+	cpu := Offer{Provider: "runpod", Token: "cpu3c", GPU: "cpu3c", VCPU: 2, Price: 60000, Reclaim: ReclaimNever}
+	gpu := Offer{Provider: "runpod", Token: "t", GPU: NormalizeGPU("rtx4090"), GPUCount: 1, VRAM: GiB(24), Price: 890000, Reclaim: ReclaimNever}
 
 	if (Filter{}).Match(cpu) {
 		t.Error("an ordinary filter matched a CPU machine")
@@ -96,7 +145,7 @@ func TestFilter_CPUOnlyIsExclusiveBothWays(t *testing.T) {
 }
 
 func TestFilter_CPUOnlyStillHonoursPriceRegionAndInterruptible(t *testing.T) {
-	cpu := Offer{Provider: "runpod", Token: "cpu3c", VCPU: 2, Price: 60000, Region: "EU-RO-1"}
+	cpu := Offer{Provider: "runpod", Token: "cpu3c", VCPU: 2, Price: 60000, Region: "EU-RO-1", Reclaim: ReclaimNever}
 
 	if (Filter{CPUOnly: true, MaxPrice: 50000}).Match(cpu) {
 		t.Error("a CPU machine over the ceiling matched")
@@ -108,7 +157,7 @@ func TestFilter_CPUOnlyStillHonoursPriceRegionAndInterruptible(t *testing.T) {
 		t.Error("a CPU machine in the wrong datacentre matched; a store pins placement")
 	}
 	spot := cpu
-	spot.Interruptible = true
+	spot.Reclaim = ReclaimAnyTime
 	if (Filter{CPUOnly: true}).Match(spot) {
 		t.Error("an interruptible CPU machine matched without AllowInterruptible")
 	}
@@ -118,7 +167,7 @@ func TestFilter_CPUOnlyIgnoresGPUCriteria(t *testing.T) {
 	// A CPU offer has no card, no VRAM and no count. Comparing them would
 	// mean a GPU model name matched against a processor family, which is how
 	// a filter stops matching anything for a reason nobody can see.
-	cpu := Offer{Provider: "runpod", Token: "cpu3c", GPU: "cpu3c", VCPU: 2, Price: 60000}
+	cpu := Offer{Provider: "runpod", Token: "cpu3c", GPU: "cpu3c", VCPU: 2, Price: 60000, Reclaim: ReclaimNever}
 	f := Filter{CPUOnly: true, GPU: NormalizeGPU("rtx4090"), MinVRAM: GiB(80), MinCount: 4}
 	if !f.Match(cpu) {
 		t.Error("CPU matching was blocked by GPU criteria that cannot apply to it")
