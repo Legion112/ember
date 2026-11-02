@@ -39,9 +39,27 @@ type Provider interface {
 	// nothing else. No waiting, no retrying.
 	Inspect(ctx context.Context, h node.Handle) (node.Node, error)
 
-	// Destroy removes the machine. It must treat "no such machine" as
-	// success: the goal of destroy is that the node is gone, and it is.
-	Destroy(ctx context.Context, h node.Handle) error
+	// Destroy removes the machine and everything this provider created
+	// alongside it. It must treat "no such machine" as success: the goal of
+	// destroy is that the node is gone, and it is.
+	//
+	// runID is passed rather than re-derived from the machine, because the
+	// machine is the one thing that may already be gone. The local provider
+	// used to read the run id off the container's own label in order to find
+	// the bridge network beside it; a container removed by `docker rm`, a
+	// prune or a crashed lab made that inspect return not-found, which is
+	// success, so the run id stayed empty and Destroy returned nil over a
+	// network that is still there. Every caller has the run id in hand
+	// already -- provision is destroying a run it created, reap has it from
+	// the finding, and `ember down` reads it off the record -- so nothing is
+	// being asked for that was not already known.
+	//
+	// It may be empty, and then a provider may only clean up what it can
+	// still see. That is `ember down` on a handle with no local record and no
+	// container left to inspect, which is the one case where nothing anywhere
+	// knows which run the leftovers belong to; LeftoverAPI is what closes it.
+	// A provider with nothing beside the node ignores it.
+	Destroy(ctx context.Context, h node.Handle, runID node.RunID) error
 
 	// List reports every machine this provider holds that ember created,
 	// found by label rather than by local records. It is what makes an orphan
@@ -98,6 +116,18 @@ type Caps struct {
 	// a nil type assertion at the moment a run is about to start. Same
 	// direction as PublicSSH above, for the same reason.
 	Stores bool
+
+	// Leftovers means this provider creates objects beside a node that can
+	// outlive it, and that it implements LeftoverAPI.
+	//
+	// False -- the zero value -- means a node is the only thing a run creates
+	// here, so there is nothing for a sweep to find. That is the right default
+	// in the same direction as the two fields above: a provider author who
+	// forgets this gets "nothing to sweep" rather than a nil type assertion,
+	// and a provider that genuinely has leftovers cannot hide them by
+	// accident, because providertest.AssertLeftoverCapsMatch fails when the
+	// claim and the interface disagree in either direction.
+	Leftovers bool
 }
 
 // StoreAPI is the subset of a provider that manages persistent stores.
@@ -131,6 +161,37 @@ type StoreAPI interface {
 	// StoreDestroy removes a store and everything on it. Not found counts as
 	// success, as node destruction does.
 	StoreDestroy(ctx context.Context, h node.StoreHandle) error
+}
+
+// LeftoverAPI is the subset of a provider that can see and remove what a run
+// created beside its node.
+//
+// Separate from Provider rather than two more methods on it, for the reason
+// StoreAPI is separate: most providers rent one object per run and have
+// nothing to sweep, and a Provider that must stub these is a Provider that can
+// stub them wrongly. Caps.Leftovers says whether a given provider satisfies
+// this, and providertest.AssertLeftoverCapsMatch -- which every provider's own
+// test calls -- checks that the two agree, so the claim cannot drift from the
+// fact in either direction.
+//
+// Nothing here destroys a node or a store. These are the three resources in
+// ember with three different lifetimes, and the split is what stops one
+// Destroy from being able to mean any of them.
+type LeftoverAPI interface {
+	// LeftoverList reports every object ember created beside a node whose
+	// node is no longer there.
+	//
+	// Found by label and never from a local record, because a leftover is by
+	// definition what is left when the node and usually the record are both
+	// gone. It reports them whether or not their deadline has passed:
+	// deciding what may be removed is reconcile's job and the deadline is how
+	// it decides, so a lister that filtered would be a second place for that
+	// rule to live.
+	LeftoverList(ctx context.Context) ([]node.Leftover, error)
+
+	// LeftoverDestroy removes one. Not found counts as success, as node and
+	// store destruction do.
+	LeftoverDestroy(ctx context.Context, h node.LeftoverHandle) error
 }
 
 // StorePrefix marks a store ember created.

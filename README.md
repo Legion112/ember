@@ -141,6 +141,32 @@ never look like "nothing is running". Each record also names the process
 holding its node, so a run killed with `SIGKILL` is reported as billing with
 nobody watching instead of printing `ok`.
 
+**A destroy that succeeded can still leave something behind.** On the local
+provider a node is two objects — the container and the bridge network it sits
+on — and `Destroy` used to find the network by reading the run id off the
+container, which does not work when something else removed the container
+first. Nothing bills for a bridge network, so the leak is silent until Docker
+has subnetted its whole address pool and every local run fails at once with an
+error naming Docker rather than ember. The run id now travels into `Destroy`
+from the caller, which already had it, and `ember ls` reports any network whose
+node is gone as a `leftover` while `ember reap` removes it:
+
+```
+$ ember ls
+leftover       local/ember-0123456789abcdef  network left behind by run 0123456789abcdef, whose
+                                             node is gone; nothing bills for it and nothing else
+                                             will remove it. Remove it with: ember reap
+$ ember reap
+destroyed 0 of 0 expired node(s)
+removed 1 of 1 leftover(s)
+```
+
+A leftover counts towards the exit-2 attention total, unlike a store: ember
+cannot tell a store that is finished with from one being kept, and it can tell
+that a network whose node is gone is garbage. One inside its deadline is not
+reported, because `Create` makes the network before the container and a live
+run would otherwise look identical to wreckage for that moment.
+
 ## Workload images
 
 ember runs **one container that is both the node and the workload**, so the

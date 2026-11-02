@@ -23,7 +23,7 @@ func (s stub) Create(context.Context, node.CreateRequest) (node.Handle, error) {
 	return node.Handle{}, nil
 }
 func (s stub) Inspect(context.Context, node.Handle) (node.Node, error) { return node.Node{}, nil }
-func (s stub) Destroy(context.Context, node.Handle) error              { return nil }
+func (s stub) Destroy(context.Context, node.Handle, node.RunID) error  { return nil }
 func (s stub) List(context.Context) ([]node.Node, error)               { return nil, nil }
 
 func offer(provider node.ProviderID, token string, price node.Rate) node.Offer {

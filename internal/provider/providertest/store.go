@@ -114,6 +114,29 @@ func AssertStoreCapsMatch(t *testing.T, p provider.Provider) {
 	}
 }
 
+// AssertLeftoverCapsMatch checks that Caps.Leftovers and provider.LeftoverAPI
+// agree, in both directions.
+//
+// The same shape as AssertStoreCapsMatch above, and here for the same reason:
+// reconcile asks a provider for its leftovers only when the cap says to, so a
+// provider that implements the interface and forgets the flag is never swept
+// -- and a bridge network per run leaks invisibly until Docker has subnetted
+// its whole address pool. A cap is a claim about code, and a claim nothing
+// checks is a comment.
+func AssertLeftoverCapsMatch(t *testing.T, p provider.Provider) {
+	t.Helper()
+	_, implements := p.(provider.LeftoverAPI)
+	claims := p.Caps().Leftovers
+	switch {
+	case claims && !implements:
+		t.Errorf("%s says Caps.Leftovers but does not implement provider.LeftoverAPI; "+
+			"ember would decide to sweep it and then fail the type assertion", p.Name())
+	case implements && !claims:
+		t.Errorf("%s implements provider.LeftoverAPI but does not say Caps.Leftovers, "+
+			"so nothing will ever ask it what a destroyed node left behind", p.Name())
+	}
+}
+
 var (
 	_ provider.Provider = (*StoreProvider)(nil)
 	_ provider.StoreAPI = (*StoreProvider)(nil)

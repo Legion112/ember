@@ -49,6 +49,19 @@ const (
 	// RunPod" must never render as a clean bill of health.
 	KindUnreachable
 
+	// KindLeftover is something a run created beside its node that outlived
+	// it -- a Docker bridge network whose node container is gone.
+	//
+	// It needs attention, unlike KindStore below, and the difference is that
+	// ember can tell. A store existing is the expected state and ember cannot
+	// know whether the weights on it are still wanted; a network whose node
+	// is gone is unambiguously garbage, and nothing but `ember reap` will ever
+	// remove it. Nothing bills for one, which is why this went unnoticed for
+	// the life of the lab harness -- the cost is that Docker runs out of
+	// address pools and every local run fails at once, weeks later, with an
+	// error naming Docker instead of ember.
+	KindLeftover
+
 	// KindStore is a persistent store and what it costs per month.
 	//
 	// Informational, and deliberately not attention-worthy. A store existing
@@ -78,6 +91,7 @@ var kindNames = map[Kind]string{
 	KindExpired:       "expired",
 	KindDestroyFailed: "destroy-failed",
 	KindUnreachable:   "unreachable",
+	KindLeftover:      "leftover",
 	KindStore:         "store",
 }
 
@@ -121,6 +135,14 @@ type Finding struct {
 	// Store is the store this finding is about, where it is about one.
 	Store *node.Store
 
+	// Leftover is the object this finding is about, where it is about one.
+	//
+	// A third pointer rather than one `any`, for the reason StoreHandle is not
+	// Handle: Reap destroys nodes and must never be handed either of the
+	// others, and a field it has to type-assert is a field it can assert
+	// wrongly. The guard in Reap reads the pointers directly.
+	Leftover *node.Leftover
+
 	// Monthly is what that store costs every month.
 	//
 	// Separate from Accrued because the two are different claims and reading
@@ -131,11 +153,34 @@ type Finding struct {
 	Monthly node.MicroUSD
 }
 
+// RunID is the run this finding is about, where it is about one.
+//
+// The node's label first and the record second, which is the same order
+// everything else here trusts them in: the label is the source of truth and
+// the journal is a cache. A finding has at least one of the two in every case
+// that reaches Destroy, so this is what lets reap clean up a run's leftovers
+// without the provider having to re-derive the run id from a container that
+// may already be gone.
+func (f Finding) RunID() node.RunID {
+	if f.Node.RunID != "" {
+		return f.Node.RunID
+	}
+	if f.Record != nil {
+		return f.Record.RunID
+	}
+	return ""
+}
+
 func (f Finding) String() string {
 	id := "-"
 	switch {
 	case f.Store != nil:
 		id = f.Store.Handle.String()
+	case f.Leftover != nil:
+		// The name, not the handle. The handle's id is the daemon's own hash,
+		// which is what removal needs and not what an operator matches against
+		// `docker network ls`.
+		id = string(f.Provider) + "/" + f.Leftover.Name
 	case !f.Node.Handle.IsZero():
 		id = f.Node.Handle.String()
 	case f.Record != nil:
@@ -387,15 +432,15 @@ func Reap(ctx context.Context, reg *provider.Registry, store *statestore.Store, 
 		if f.Kind != KindExpired {
 			continue
 		}
-		// A store is never reaped, whatever kind it somehow arrived as.
-		// Destroy here takes a node.Handle, and a store finding carries a
-		// zero one -- so without this the call would be made against an empty
-		// handle and the error blamed on the provider. The guard is cheap and
-		// the failure it prevents is the expensive one: these are the two
-		// resources with different lifetimes, and the whole reason StoreAPI
-		// is a separate interface is that nothing which destroys a node
-		// should ever be handed a store.
-		if f.Store != nil {
+		// A store or a leftover is never reaped here, whatever kind it
+		// somehow arrived as. Destroy takes a node.Handle, and neither of
+		// those findings carries one -- so without this the call would be
+		// made against an empty handle and the error blamed on the provider.
+		// The guard is cheap and the failure it prevents is the expensive
+		// one: these are three resources with three different lifetimes, and
+		// the whole reason StoreAPI and LeftoverAPI are separate interfaces
+		// is that nothing which destroys a node should ever be handed either.
+		if f.Store != nil || f.Leftover != nil {
 			continue
 		}
 		p, err := reg.Get(f.Provider)
@@ -405,7 +450,7 @@ func Reap(ctx context.Context, reg *provider.Registry, store *statestore.Store, 
 			}
 			continue
 		}
-		if err := p.Destroy(ctx, f.Node.Handle); err != nil && !errors.Is(err, node.ErrNotFound) {
+		if err := p.Destroy(ctx, f.Node.Handle, f.RunID()); err != nil && !errors.Is(err, node.ErrNotFound) {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("destroy %s: %w", f.Node.Handle, err)
 			}

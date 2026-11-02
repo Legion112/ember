@@ -318,3 +318,57 @@ func TestOffers_RunPodIsRegisteredWithACredential(t *testing.T) {
 		t.Errorf("exit = %d, want %d: a provider that could not be asked is a finding (%v)", ExitCode(err), ExitFindings, err)
 	}
 }
+
+// TestDown_RemovesTheNetworkOfANodeSomethingElseAlreadyRemoved is the bug, at
+// the layer that has to carry the run id for the provider to find it.
+//
+// `ember down` reads the record before destroying rather than only after,
+// because the run id is how a provider finds what the node was created
+// alongside -- and the container that used to carry it is the one thing that
+// may already be gone.
+func TestDown_RemovesTheNetworkOfANodeSomethingElseAlreadyRemoved(t *testing.T) {
+	d := labDeps(t)
+	e := d.Engine.(*dockerengine.RecordingEngine)
+
+	const runID = "0123456789abcdef"
+	netID, err := e.NetworkCreate(t.Context(), "ember-"+runID, map[string]string{
+		dockerengine.LabelRunID: runID,
+		local.LabelKind:         "network",
+		local.LabelLabel:        "ember-" + runID + "-99999999999",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = netID
+
+	// The record ember wrote before the create call. The container is not
+	// here: something else removed it, which is the premise.
+	store, err := app.OpenStore(filepath.Join(d.HomeDir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(statestore.Record{
+		RunID:    runID,
+		Provider: local.Name,
+		NodeID:   "c-already-gone",
+		Phase:    statestore.PhaseReady,
+		Created:  time.Now(),
+		Deadline: time.Now().Add(time.Hour),
+		Label:    "ember-" + runID + "-99999999999",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runDown([]string{"local/c-already-gone"}, &out, d); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	if n := e.Networks(); len(n) != 0 {
+		t.Errorf("down reported success and left %d network(s): %+v", len(n), n)
+	}
+	// And the record went with it, which is the half that already worked.
+	recs, err := store.List()
+	if err != nil || len(recs) != 0 {
+		t.Errorf("records = %+v, %v; the node is gone so ember ls must stop reporting it", recs, err)
+	}
+}

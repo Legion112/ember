@@ -839,3 +839,40 @@ func withNode(
 	}
 	return WithNode(ctx, p, spec, offer, o, fn)
 }
+
+// TestWithNode_DestroyCarriesTheRunID.
+//
+// A provider finds what the node was created alongside by run id -- the local
+// provider's bridge network is labelled with it -- and the container that used
+// to carry that label is the one thing that may already be gone when destroy
+// runs. provision has always had the run id in hand, because it is destroying
+// a run it created itself; what it did not do was pass it, so `local.Destroy`
+// re-derived it from the container and silently cleaned up nothing whenever
+// something else had removed it first.
+//
+// Asserted here rather than only in the lab: without this, the Go suite was
+// entirely indifferent to provision dropping the argument, and the only thing
+// that noticed was a test that needs Docker.
+func TestWithNode_DestroyCarriesTheRunID(t *testing.T) {
+	p := providertest.NewRecordingProvider("test")
+
+	err := withNode(t.Context(), p, spec(t), opts(t), func(context.Context, Session) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runs := p.DestroyedRuns()
+	if len(runs) != 1 {
+		t.Fatalf("Destroy was called %d time(s), want once", len(runs))
+	}
+	if runs[0] == "" {
+		t.Fatal("destroy was given no run id, so a provider cannot find what the node left behind")
+	}
+	// And it is the run ember recorded, not some other token: a destroy
+	// carrying the wrong run id would remove another run's network.
+	if _, err := node.ParseRunID(string(runs[0])); err != nil {
+		t.Errorf("destroy was given %q, which is not a run id: %v", runs[0], err)
+	}
+}

@@ -360,7 +360,13 @@ func (p *Provider) List(ctx context.Context) ([]node.Node, error) {
 }
 
 // Destroy removes the pod, treating "no such pod" as success.
-func (p *Provider) Destroy(ctx context.Context, h node.Handle) error {
+//
+// The run id is ignored, and Caps.Leftovers is false to say so in a form a
+// caller can branch on: a pod is the only object a run creates here. A store
+// is not one of these -- it outlives every node deliberately, and removing it
+// as a side effect of a destroy is the mistake StoreAPI is a separate
+// interface to prevent.
+func (p *Provider) Destroy(ctx context.Context, h node.Handle, _ node.RunID) error {
 	if err := p.HTTP.Delete(ctx, "/v2/pods/"+url.PathEscape(h.ID)); err != nil {
 		return fmt.Errorf("destroy runpod pod %s: %w", h.ID, err)
 	}

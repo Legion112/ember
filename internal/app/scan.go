@@ -52,6 +52,12 @@ type Scanned struct {
 	Nodes  []reconcile.Finding
 	Stores []reconcile.Finding
 
+	// Leftovers is what a destroyed node left behind -- a bridge network
+	// whose node container is gone. Separate from Nodes for the same reason
+	// Stores is: it is removed through a different interface, and the count
+	// reap prints for it is not a count of anything that was billing.
+	Leftovers []reconcile.Finding
+
 	Registry *provider.Registry
 	Store    *statestore.Store
 	Config   config.Config
@@ -73,20 +79,29 @@ func Scan(ctx context.Context, cfgPath string, d Deps) (Scanned, error) {
 		return Scanned{}, err
 	}
 
+	// One clock for the whole sweep. Two time.Now() calls would mean a node
+	// and the network beside it could be judged against different instants,
+	// and the pair that disagrees is the pair where one is expired and the
+	// other is not.
+	now := time.Now()
+
 	listings, errs := reconcile.Collect(ctx, reg)
-	nodes := reconcile.Scan(listings, errs, records, time.Now())
+	nodes := reconcile.Scan(listings, errs, records, now)
 
 	stores, storeErrs := reconcile.CollectStores(ctx, reg)
 	configured := map[node.ProviderID]string{}
 	if cfg.HasStore() {
 		configured[node.ProviderID(cfg.Provider)] = cfg.Store.Name
 	}
+	leftovers, leftoverErrs := reconcile.CollectLeftovers(ctx, reg)
+
 	return Scanned{
-		Nodes:    nodes,
-		Stores:   reconcile.ScanStores(stores, storeErrs, configured),
-		Registry: reg,
-		Store:    store,
-		Config:   cfg,
+		Nodes:     nodes,
+		Stores:    reconcile.ScanStores(stores, storeErrs, configured),
+		Leftovers: reconcile.ScanLeftovers(leftovers, leftoverErrs, now),
+		Registry:  reg,
+		Store:     store,
+		Config:    cfg,
 	}, nil
 }
 
