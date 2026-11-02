@@ -21,6 +21,14 @@ id_ed25519*
 # the same grants to anybody who clones and runs an agent here.
 .claude/settings.local.json
 
+# Agent worktrees. Claude Code cuts one of these per delegated task, and each
+# is a whole second checkout of this repository -- so with three tasks in
+# flight, `git add -A` from the root stages three copies of the tree, and the
+# only sign anything is wrong is a diff with thirty thousand files in it. They
+# are machine state with a lifetime of one task, which is the same argument
+# the permission file above is ignored for.
+.claude/worktrees/
+
 # The built web UI. `make web` writes these into internal/webapi/dist beside
 # the committed placeholder index.html, which exists because //go:embed fails
 # at compile time on a pattern that matches nothing -- so `go build ./...`
