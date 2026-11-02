@@ -165,7 +165,6 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 			Log: o.Log,
 		},
 		Outputs: ps.Outputs,
-		Out:     out,
 		Log:     logger,
 	}
 

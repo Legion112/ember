@@ -209,6 +209,40 @@ moment it imports a sibling, the sibling's dependencies become its own.
   checkpoint in the tree. The SKIP grep now shares the recipe line with the
   test and runs from a captured status, because a failing line stops the
   target and "it failed **and** it skipped" is two problems rather than one.
+- **Code written, covered and connected to nothing was found eight times by
+  accident, and the ninth was found by a detector.** This document counted
+  them: `queue.Cost`, the unrecorded preview frame, `sdserver.Client.Cancel`,
+  `sortedKeys`, `blob.Delete`, `RateFromFloat`, `wireErrorEnvelope` and
+  `node.Offer.Interruptible`. Two were money defects and one was an
+  operator-facing error path; **none was found by a test**, because in every
+  case the tests passed -- the suite and the code agreed with each other and
+  neither was connected to the program. `unused` is enabled and found one of
+  the eight. It cannot find the rest: a test caller is a caller to the
+  compiler, golangci-lint v2.15.0 exposes none of staticcheck's
+  tests-aware settings (`whole-program` and `check-exported` are refused by
+  the config schema), and the only lever -- the global `run.tests: false` --
+  stops every linter looking at test files *and* still reports only
+  unexported identifiers in a non-main package, which five of the eight were
+  not. So `cmd/check-coverage`'s `TestNoProductionDeadCode` loads the tree
+  through `go/packages` and fails on a function with no production caller. It
+  is a test and not a subcommand of the binary it lives in, because the guard
+  whose subject is "nobody looked" must not need somebody to invoke it. The
+  hard part is types: a method satisfying an interface something uses is used
+  even where nothing names it, and the version that could not see that
+  reported a hundred and thirty-six fakes -- not a noisy detector but one
+  somebody deletes in the first week. `Recording*` fakes are classified by
+  file for the same reason, and a reference *from* a fake is a test
+  reference, which is how `genstore.JobRun.Sampling` surfaced. The baseline
+  it landed on is thirty-two symbols, each named with the reason it was not
+  deleted, printed on every run and allowed only to shrink: an entry the
+  guard stops reporting fails, so a waiver cannot outlive the function it
+  waived -- the `imagelabs` typo reached from the other direction. Fields and
+  types are out of scope and that is stated rather than silent, so
+  `node.Offer.Interruptible` would still not be caught: a wire field is
+  written by reflection, and a field-level version would report every one of
+  them. The ninth instance was `Queue.Out` and its accessor -- a writer
+  `ember serve` set, read by two tests, carrying nothing for the life of the
+  field. The thirty-third is now a build failure rather than a lucky catch.
 - **Every provider is held to `providertest.RunConformance`, because the
   guarantees are not in the interface.** `provider.Provider` is six methods
   and says nothing about Destroy being idempotent, about a label surviving
