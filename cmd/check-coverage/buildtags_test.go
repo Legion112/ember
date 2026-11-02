@@ -153,7 +153,7 @@ func TestNoWorkflowSpellsItsOwnVetTags(t *testing.T) {
 		t.Fatalf("read the workflow directory: %v", err)
 	}
 
-	checked := 0
+	checked, scripts := 0, 0
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
@@ -169,6 +169,7 @@ func TestNoWorkflowSpellsItsOwnVetTags(t *testing.T) {
 			t.Fatalf("parse %s: %v", name, err)
 		}
 		for _, script := range runScripts(doc) {
+			scripts++
 			for i, line := range strings.Split(script, "\n") {
 				code, _, _ := strings.Cut(line, "#")
 				if strings.Contains(code, "go vet") && strings.Contains(code, "-tags") {
@@ -180,6 +181,14 @@ func TestNoWorkflowSpellsItsOwnVetTags(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("read no workflow files; the walk is broken, not the workflows")
+	}
+	// A walk that found no scripts inspected nothing, and this one can get
+	// there without an error: a mapping whose keys are not all strings
+	// decodes as map[any]any, so a single such key anywhere in a workflow
+	// would have silently hidden every `run:` in that file. Both map shapes
+	// are handled, and this is the assertion that says so.
+	if scripts == 0 {
+		t.Fatalf("parsed %d workflow files and found no run: scripts; the walk is broken, not the workflows", checked)
 	}
 }
 
@@ -376,16 +385,27 @@ func makeVetTags(t *testing.T, root string) map[string]bool {
 // what is wanted here is every shell script in the file however it is nested.
 func runScripts(node any) []string {
 	var out []string
+	visit := func(key any, val any) []string {
+		if k, ok := key.(string); ok && k == "run" {
+			if s, ok := val.(string); ok {
+				return []string{s}
+			}
+		}
+		return runScripts(val)
+	}
 	switch v := node.(type) {
 	case map[string]any:
 		for k, val := range v {
-			if k == "run" {
-				if s, ok := val.(string); ok {
-					out = append(out, s)
-					continue
-				}
-			}
-			out = append(out, runScripts(val)...)
+			out = append(out, visit(k, val)...)
+		}
+	case map[any]any:
+		// yaml.v3 decodes a mapping into map[string]any only when every key
+		// is a string. `on:` is the one key in a GitHub workflow that a YAML
+		// implementation might hand back as a bool, and one such key makes
+		// the whole file this shape -- so a walk that knew only the first
+		// shape would skip every script in it and report success.
+		for k, val := range v {
+			out = append(out, visit(k, val)...)
 		}
 	case []any:
 		for _, item := range v {
