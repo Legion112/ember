@@ -2352,6 +2352,127 @@ and the flags in this repository's own image. The first real run is a
 calibration — it costs money, and what it produces is a number and a fixture
 rather than a pass or a fail.
 
+## An open code model, over one forward
+
+[`ember.code-model.example.yaml`](ember.code-model.example.yaml) serves an
+open code model on a rented card and forwards it to `127.0.0.1:8080`, so an
+editor or a coding agent on this machine talks to an open model. It needed no
+new code: the forwards run *alongside* the workload rather than instead of it,
+so a server as the `cmd` and a `ports` entry beside it has always been a
+supported shape. `llama-server` does not exit, so [a node rented to run
+something stops when it has run it](#two-properties-that-outrank-features)
+never fires, and the node holds until Ctrl-C, `--hold`, or the TTL.
+
+```yaml
+cmd:   [llama-server, --model, /models/coder.gguf, --host, 127.0.0.1, --port, "8080"]
+ports: [llm:8080]
+ttl:   8h
+```
+
+**The TTL is a hard stop, not a session length.** This is the part to decide
+before you start rather than to discover at hour eight. The deadline is
+written in three places — the provider's label, the local journal record, and
+the node's own self-destruct timer — and the third is armed from an
+environment variable that `embernode` reads *once*, at container start.
+Nothing on the node listens for a change, so a running node's deadline is not
+re-armable. At the deadline the endpoint your editor is pointed at goes away,
+mid-sentence if that is where you are, and the remedy is a new node, another
+read of the weights off the store, and a new forward. The ceiling above
+whatever you write is a day.
+
+That stays the answer rather than becoming a feature, and the three copies are
+why: three copies computed at three call sites are three copies that can
+disagree, and the one that disagrees is the one that does not stop the bill. A
+re-arm has to update all three atomically — including a timer armed from an
+immutable environment variable, which means changing *how* a node learns its
+deadline — and that is the one invariant the money discipline here rests on.
+Trading it for not having to restart a session is not a trade this repository
+makes quietly.
+
+**Nothing stops the bill while you read.** A coding agent's card is busy while
+a completion streams and idle while you read it, think, edit and run tests —
+the lowest duty cycle any workload here has been pointed at, billed by the
+hour of wall clock. There is no idle-stop, and ember cannot infer one from the
+tunnel: `tunnel.Forwarder` pipes bytes with `io.Copy` and counts none of them,
+and an idle TCP connection is still a connection, so an editor holding a
+keep-alive open looks identical to one being typed into. What "idle" means
+here is "no tokens generated for N minutes", which lives in the server's own
+payload — the thing ember reads only for `sd:`, and only with a written
+reason. So `ttl` and `--hold` are the whole of it, and the honest use of this
+configuration is a session you intended to have rather than one left running.
+
+### What it does not protect you from
+
+The forward is loopback on **both** ends and neither end is configurable. The
+local end can only be named through `loopback.Bind`, whose field is unexported
+— and both families are bound, so a client that resolves `localhost` to `::1`
+first does not read connection-refused on a working tunnel. The remote end is
+built by `tunnel.RemoteLoopback(port)`, which takes a port and not an address,
+because SSH's `direct-tcpip` connects anywhere the node can reach — another
+tenant, the provider's metadata service, the open internet — and a free-form
+remote host would make every ember node an open relay billed to you.
+
+So nothing off this machine can reach the model. What is left:
+
+- **Every uid on your own machine can.** The endpoint has no authentication,
+  and a loopback port is not a boundary between local users. That is the same
+  threat `ember serve`'s token is about, arriving from the other direction.
+- **The provider has root on the node.** Your prompts are your source code,
+  and they travel to a machine somebody else owns. SSH protects them in
+  transit and from nobody else; `runpod_cloud: COMMUNITY` makes the owner a
+  stranger rather than a company.
+- **`--host 0.0.0.0` is not what would publish it, and ember now says so.** A
+  workload port is never published — `exposure.PortRequest`'s `public` field is
+  unexported, only `SSHPort()` sets it, and the post-create check destroys the
+  node if the provider published anything else. An operator who writes
+  `0.0.0.0` has concluded something false, so ember prints a warning naming the
+  flag, the address and its position in the argv, before anything is rented. It
+  is a warning and not a refusal because `cmd` is opaque argv on purpose:
+  refusing would be ember claiming to know what `--host` means to a program it
+  has never heard of. On the **local** provider the belief is partly true — the
+  container sits on a Docker bridge, so a `0.0.0.0` bind really is reachable
+  from this machine at the container's address.
+- **A store is a channel between runs.** It is writable by every node that
+  mounts it and there is no read-only mount, so the digest in `assets:` is what
+  stands in for one. It matters more here than anywhere else in this
+  repository: a substituted image model produces a picture that looks wrong, and
+  a substituted code model produces code you paste.
+
+### The image is the one piece that does not exist
+
+An ember workload image has to carry `embernode` and sshd — ember runs the
+workload as `ssh host command`, so an image that is only a server has nothing
+to connect to — and this repository builds no such image for an LLM server.
+An off-the-shelf `llama.cpp` image cannot be used as it stands for that
+reason. So the `image:` line in that file is a sentence rather than a value,
+and ember refuses it by the rule that already exists:
+
+```
+ember: image "EMBER-HAS-NO-LLM-WORKLOAD-IMAGE-SEE-THIS-FILES-HEADER" has no
+tag: pin it to a tag or a digest, or two runs will not have measured the same
+software
+```
+
+Everything else in the file is real. The weights are pinned to a digest that
+was read from Hugging Face rather than guessed — the tree API's `lfs.oid` and
+the `X-Linked-ETag` on a HEAD of the resolve URL both answer it, which is two
+independent confirmations for two requests and no bytes downloaded — and
+`store create`, `store push`, `store ls` and `store verify` need no node and
+no image, so the store half can be done today. That is deliberate: a committed
+example whose placeholder reads as a value is what
+[#18](https://github.com/Legion112/ember/issues/18) is about, and the loudest
+placeholder is one whose refusal quotes itself.
+
+### Whether to do this at all
+
+An eight-hour working day at $1.00/hour is $8.00, and twenty of them is about
+$160 a month for a card that is idle most of those eight hours. That figure is
+as much the point of this configuration as the endpoint is: this is the
+workload where renting is least favourable, and ember exists to make that a
+decision backed by a measurement instead of a spec sheet. `ember spend` is
+where the number lands, and it is worth having even when it argues against the
+feature.
+
 ## Design notes
 
 Things worked out but not built, kept where the reasoning was fresh rather

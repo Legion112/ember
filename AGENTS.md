@@ -1464,6 +1464,39 @@ that sentence made unrepresentable rather than merely tested.
   never parsed from input.** `direct-tcpip` connects anywhere the node can
   reach, including the provider's metadata service; a free-form remote host
   makes every ember node an open relay billed to the operator.
+- **A non-loopback bind in `cmd` is reported, and the report is about a belief
+  rather than a hole.** `sdserver.ServeCommand` can refuse a listen flag
+  outright because it knows it is building sd-server's argv and appends the
+  address itself. A `cmd`-based server has no such seal -- the operator writes
+  the argv -- and `llama-server --host 0.0.0.0` on a rented machine *looks*
+  like the ComfyUI exposure this threat model is written against. It is not:
+  `exposure.PortRequest`'s `public` field is unexported, only `SSHPort()` sets
+  it, a workload port goes through `exposure.Internal`, and the post-create
+  check destroys a node whose provider published anything else. So what
+  `--host 0.0.0.0` reveals is that somebody concluded the bind address is what
+  makes their endpoint reachable, and `workload.NonLoopbackBinds` says so
+  before anything is rented. **A warning and not a refusal**, because `cmd` is
+  opaque argv on purpose: refusing would be ember claiming to know what
+  `--host` means to a program it has never heard of, and the first config
+  whose `--host` names the server to *talk to* would be a config ember will
+  not run. "A warning is not a security control" still holds and is exactly
+  why this is not one -- the control is the unexported field. The one place
+  the belief is partly true is the local provider, where the container sits on
+  a Docker bridge and the bind is reachable from this machine at the
+  container's address, which is not an internet exposure and is not nothing.
+- **`netip` decides, so this is not `rejectSecrets`' mistake reached from the
+  other side.** That function deliberately does not scan `cmd`, because a
+  prompt is arbitrary English and "a token of affection" is a legitimate
+  prompt. Nothing here pattern-matches a string: a value is reported only
+  after its flag name matched a short allow-list of listen spellings *and*
+  `netip` parsed it as an address that is not loopback. A prompt is one argv
+  element, so it can never be mistaken for a flag name, and single-letter
+  flags are excluded outright -- `-b` is a bind address to one program and a
+  batch size to llama.cpp, and a finding about a batch size is the false
+  positive that teaches an operator to stop reading these. The limit is
+  written down rather than hidden: `--host localhost` is not reported,
+  although a name is never proof of loopback, because it is the node's
+  resolver that would answer and not this machine's.
 
 ## Money
 
@@ -1618,6 +1651,37 @@ A leaked node bills by the hour in silence. These are not style preferences.
   own self-destruct timer; three copies computed at three call sites are three
   copies that can disagree, and the one that disagrees is the one that does not
   stop the bill.
+- **The deadline is not re-armable, and an interactive session restarts
+  instead.** Asked for by #37, and refused: `cmd` plus `ports` already serves
+  a code model to an editor over one forward, so the thing that does not
+  survive a multi-hour session is the TTL. `cmd/embernode`'s `armDeadline`
+  reads `EMBER_TTL_SECONDS` **once**, at container start, and nothing on the
+  node listens for a change -- so a re-arm is not a flag, it is a change to
+  *how* a node learns its deadline (a file it re-reads, or a heartbeat it
+  requires), plus two more copies to update atomically. That is the one
+  invariant above, traded for not having to restart a session. So the answer
+  is "pick the hours you mean and accept them", written down rather than
+  implied: `ttl` is a hard stop and not a session length, the endpoint goes
+  away mid-sentence if that is where you are, and the remedy is a new node, a
+  new read of the weights and a new forward. A follow-up that wants it has to
+  design the deadline's delivery first and the CLI second.
+- **There is no idle-stop, and nothing in ember can see the traffic that
+  would justify one.** The other half of #37, refused for a different reason:
+  a code model held open with nobody typing is the lowest-duty-cycle workload
+  here, billed by the hour of wall clock, which is exactly the failure "a node
+  rented to run something stops when it has run it" exists to prevent. But
+  `tunnel.Forwarder.pipe` joins the two ends with `io.Copy` and discards both
+  byte counts, and nothing else observes a forward at all -- so the only
+  signal available today is "a connection exists", which an editor holding a
+  keep-alive open satisfies forever. Bytes would not be enough either: a
+  heartbeat and a streaming completion are both bytes. What "idle" means for
+  an interactive session is "no tokens generated for N minutes", which lives
+  in the server's own payload -- the thing ember reads only for `sd:`, and
+  only with a written reason. An `--idle-stop` built on the wrong signal
+  destroys a node mid-thought, which is the one mistake that would make the
+  feature not worth having. Same shape as the false-"abandoned" refusal: it
+  answers "not idle" for everything it cannot be sure of, and here that is
+  everything.
 - **Destroy runs on `context.WithoutCancel`.** Ctrl-C cancels the context the
   run was using, and a destroy call on that context fails instantly — the
   single most likely way to leak a GPU.
@@ -1630,6 +1694,22 @@ A leaked node bills by the hour in silence. These are not style preferences.
 - **Images are pinned to a tag or a digest; `:latest` is refused.** The point
   of ember is to measure what a model costs and how long it takes, and two runs
   a week apart that both say `:latest` may not have run the same software.
+- **A placeholder in a committed config is a sentence whose refusal quotes
+  it.** `ember.video.example.yaml` carries `REPLACE_WITH_THE_DIGEST_PUSH_PRINTS`
+  where a digest goes, which is #18: it refuses, correctly, but it reads as a
+  configuration with a typo in it rather than as a template. So
+  `ember.code-model.example.yaml`'s one missing value -- there is no ember
+  workload image carrying an LLM server, because an image has to carry
+  `embernode` and sshd and this repository builds none -- is written as
+  `EMBER-HAS-NO-LLM-WORKLOAD-IMAGE-SEE-THIS-FILES-HEADER`, with no tag, so the
+  existing pin rule refuses it and the error *is* the instruction. Everything
+  else in that file is real, and the split is stated in its header: `store
+  create`, `store push`, `store ls` and `store verify` need no node and no
+  image, so the half that can be run today is runnable and the half that
+  cannot refuses by name. The weights' digest came from Hugging Face's own
+  `lfs.oid` and the `X-Linked-ETag` on a HEAD of the resolve URL, which agree
+  -- two confirmations for two requests and no bytes, which is the calibration
+  habit the RunPod volume API set rather than a number somebody invented.
 - **The refusal covers the node image too, because there is only one image.**
   `node-image.yml`'s comment said `node.Spec` refuses a `:latest` *workload*
   image, which reads as though the node image arrives by some other path and
