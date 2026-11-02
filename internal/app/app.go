@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"time"
 
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
@@ -95,6 +96,16 @@ type Deps struct {
 	// claiming otherwise was the only thing standing in for this field.
 	CloudBaseURL string
 
+	// Now overrides the clock the availability collector stamps samples with.
+	//
+	// The one injected value that is not a collaborator, and it is here
+	// rather than inside the collector because observed_at is the only field
+	// no provider supplies -- so what the file records has to be the instant
+	// the caller recorded, and a test that could not pin it could not assert
+	// which day file a sample lands in. The day boundary is exactly where a
+	// sample goes into the wrong file.
+	Now func() time.Time
+
 	// S3BaseURL redirects the store upload endpoint.
 	//
 	// Separate from CloudBaseURL because they are separate services on
@@ -111,6 +122,18 @@ func (d Deps) Credentials(configDir string) (config.Credentials, error) {
 		return *d.Creds, nil
 	}
 	return config.LoadCredentials(configDir)
+}
+
+// Clock is the time this run should call now.
+//
+// UTC, always. Every timestamp ember keeps is UTC -- the spend period, the
+// label's deadline, the catalogue's day files -- and a local-time sample would
+// land in a different day file depending on where the operator was sitting.
+func (d Deps) Clock() time.Time {
+	if d.Now != nil {
+		return d.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // Paths are the three directories a run reads and writes.

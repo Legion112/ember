@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/Legion112/ember/internal/catalogue"
 	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
@@ -268,20 +270,13 @@ func availabilityOf(g gpuType) string {
 // rank orders RunPod's availability levels. An unrecognised level sorts above
 // NONE and below LOW: ember should not hide a GPU because the API grew a word
 // it does not know, nor claim it is plentiful.
-func rank(a string) int {
-	switch a {
-	case "HIGH":
-		return 3
-	case "MEDIUM":
-		return 2
-	case "LOW":
-		return 1
-	case availabilityNone, "":
-		return 0
-	default:
-		return 1
-	}
-}
+//
+// The ordering itself lives in catalogue.Level, because the availability
+// history reads these levels back years later and needs the same answer. Two
+// copies of one ordering is two places for "what does a word nobody has seen
+// mean" to be decided differently -- and the two would disagree about exactly
+// the level neither was written for.
+func rank(a string) int { return catalogue.Level(a).Rank() }
 
 // bestRegion names a site that actually has capacity, so `ember offers` does
 // not print a data centre with none as though it were where the node would
@@ -508,4 +503,118 @@ func availabilityOrUnknown(a string) string {
 		return "unknown"
 	}
 	return a
+}
+
+// --- availability history --------------------------------------------------
+
+// gpuSamples turns one catalogue read into rows for the series.
+//
+// ONE ROW PER SITE, NEVER ONE PER CARD. mapOffers above collapses a card's
+// datacentres into a single offer at bestRegion(g), which is the right answer
+// for renting and the wrong one to keep: the per-site rows it throws away are
+// the entire measurement. The live catalogue reported an RTX 4090 as NONE
+// overall while its US-IL-1 entry read LOW, so a file holding only the summary
+// would record "unavailable" for a card that was rentable all along -- data
+// that looks like an answer, which is worse than none.
+//
+// Nothing is filtered. mapOffers drops a tier that does not sell the card, a
+// zero price and a card with no capacity anywhere, because an offer ember
+// cannot rent is noise. Here each of those is the observation: "this card was
+// unavailable everywhere at this hour" is what answers whether a card worth
+// buying is one that is persistently unrentable.
+//
+// Pure and total, like everything else in this file: the clock arrives as an
+// argument so the row that lands in a day file is decided by the caller that
+// recorded it.
+func gpuSamples(gpus []gpuType, now time.Time) []catalogue.Sample {
+	out := make([]catalogue.Sample, 0, len(gpus))
+	for _, g := range gpus {
+		base := catalogue.Sample{
+			ObservedAt: now,
+			Provider:   Name,
+			Kind:       catalogue.KindGPU,
+			ID:         g.ID,
+			Name:       g.Name,
+			Overall:    catalogue.Level(g.Availability),
+			Secure: catalogue.Tier{
+				Offered:  g.Secure,
+				Price:    node.RateFromUSD(g.Price.Secure),
+				MaxCount: g.MaxCount.Secure,
+			},
+			Community: catalogue.Tier{
+				Offered:  g.Community,
+				Price:    node.RateFromUSD(g.Price.Community),
+				MaxCount: g.MaxCount.Community,
+			},
+			MemoryGiB: g.Memory,
+		}
+		if len(g.DataCenters) == 0 {
+			// A type RunPod named no site for. The captured catalogue has
+			// three of these and every one reads NONE overall, which is a
+			// correlation and not a promise -- so the row is kept rather
+			// than dropped, because a card that vanishes from the series is
+			// indistinguishable from a card that was never offered, and the
+			// first is the answer to "is this card persistently
+			// unrentable".
+			//
+			// Availability is left unreported rather than filled in from
+			// Overall: a summary written into the site column is exactly the
+			// row this function refuses to produce, and catalogue.Sample.Level
+			// is what reads the summary back for a row that has no site.
+			out = append(out, base)
+			continue
+		}
+		for _, dc := range g.DataCenters {
+			s := base
+			s.Datacentre = dc.ID
+			s.Availability = catalogue.Level(dc.Availability)
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// cpuSamples is the same for the CPU catalogue.
+//
+// Collected because the question it answers is about the store too: `ember
+// store sync` rents the cheapest CPU machine it can find to download weights
+// onto a volume, and that volume is in one datacentre -- so "is a $0.06/hour
+// box reliably available in the site holding the weights" has the same shape
+// as the GPU question and the same absence of any history to answer it from.
+//
+// The price is per vCPU per hour, which is what the endpoint quotes.
+// mapCPUOffers multiplies it by a core count to get a per-machine rate
+// because that is what a budget compares against; the core count is a
+// property of a run and not of the catalogue, so it is not applied to a row
+// that will be read back in a year. catalogue.Kind is what says which of the
+// two a price is.
+func cpuSamples(cpus []cpuType, now time.Time) []catalogue.Sample {
+	out := make([]catalogue.Sample, 0, len(cpus))
+	for _, c := range cpus {
+		base := catalogue.Sample{
+			ObservedAt: now,
+			Provider:   Name,
+			Kind:       catalogue.KindCPU,
+			ID:         c.ID,
+			Name:       c.Name,
+			Overall:    catalogue.Level(c.Availability),
+			// There is no community price for a CPU family: the endpoint
+			// quotes securePerVcpu and serverlessPerVcpu, and serverless is
+			// not a pod. So the community tier is not offered rather than
+			// offered at zero, which is the distinction mapOffers makes
+			// between "declined to quote" and "free".
+			Secure: catalogue.Tier{Offered: true, Price: node.RateFromUSD(c.Price.SecurePerVcpu)},
+		}
+		if len(c.DataCenters) == 0 {
+			out = append(out, base)
+			continue
+		}
+		for _, dc := range c.DataCenters {
+			s := base
+			s.Datacentre = dc.ID
+			s.Availability = catalogue.Level(dc.Availability)
+			out = append(out, s)
+		}
+	}
+	return out
 }

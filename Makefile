@@ -81,7 +81,7 @@ COVERPROFILE := coverage.out
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99
+COVER_PKGS := internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99
 COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,internal/dockerengine/dockerclient
 # internal/assets is below the rest because the paths it cannot reach are
 # filesystem failures with no portable way to provoke: a rename that fails
@@ -99,6 +99,15 @@ COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/c
 # run may still be finishing. internal/blob is at 97 and the one thing it
 # cannot reach is an os.OpenRoot that fails after the MkdirAll beside it
 # succeeded, which needs a race.
+#
+# internal/catalogue is at 96 against a measured 96.1, and what it cannot
+# reach is internal/assets' list one more time: a write, an fsync and a close
+# that fail on a file this process has just created, plus a read of a day file
+# that exists and cannot be opened. Every decision is covered -- what counts
+# as capacity, what a level nobody has seen means, which day file a sample
+# lands in, which rows a period includes, and the refusal of a batch with one
+# unplaceable row in it. Those are the ones that would corrupt a series
+# nothing can rebuild.
 #
 # internal/queue is at 94 against a measured 95.5. What it cannot reach is the
 # one line that hands a resolved plan to provision.WithNode, which needs a real

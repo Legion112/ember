@@ -196,6 +196,35 @@ documented 133 s to a measured 40 s moves the break-even from roughly six
 runs a month to five. The conclusion was robust because the pull dominates,
 which is worth knowing even when a measurement agrees with you.
 
+### What the public OpenAPI document said about availability, 2026-11-02
+
+Read while building the availability collector (`ember catalogue snapshot`).
+Free and unauthenticated, from `api.runpod.io/v2/openapi.json` — the catalogue
+endpoints themselves answer `401 {"detail":"missing bearer token"}` without a
+key, so this is as far as calibration goes without spending one.
+
+- **`AvailabilityLevel` is exactly `NONE | LOW | MEDIUM | HIGH`.** Four
+  levels, which is why sampling faster than hourly buys nothing. The
+  collector still stores the string verbatim and ranks an unknown word
+  between NONE and MEDIUM: an enum is a promise about today, and a day file
+  is read years later.
+- **`availability` and `dataCenters` are not required** on `GpuType` or
+  `CpuType`. The captured `gpus.json` already shows three entries with no
+  `dataCenters` at all, so the collector keeps a row for them rather than
+  dropping the type — and leaves its site level *unreported* rather than
+  copying the summary in.
+- **`include=AVAILABILITY` requires `product`**, in the endpoint's own
+  description, matching the 400 the CPU endpoint answers without it.
+
+One contradiction worth recording, because it points the wrong way:
+`CudaVersionAvailability`'s description says its version is *"suitable for
+`gpu.allowedCudaVersions` on pod create"*, and `POST /v2/pods` declares no
+such property. That is the field that made every create fail with `422
+additional properties 'allowedCudaVersions' not allowed`. The description has
+not caught up with the request body — the same lesson a third time, one level
+further down: a schema is not a response, and a description is not even a
+schema.
+
 ### `cpus.json`
 
 The CPU catalogue, captured live on 2026-10-30, trimmed to two families.

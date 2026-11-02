@@ -100,6 +100,7 @@ func commands() []command {
 		{"history", "list the generations ember has run, newest first", cmdHistory},
 		{"offers", "list rentable offers matching a filter", cmdOffers},
 		{"store", "create or destroy persistent storage that outlives a node", cmdStore},
+		{"catalogue", "record what a provider has available, and read the series back", cmdCatalogue},
 		{"archs", "print the CUDA architectures ember publishes an image for", cmdArchs},
 		{"images", "assemble an images: block from the digests a build published", cmdImages},
 	}
@@ -134,8 +135,19 @@ func usage(out io.Writer) {
 	outf(out, "ember rents a GPU node, runs a container on it, and destroys it.\n\nusage: ember <subcommand> [flags]\n\n")
 	cs := commands()
 	sort.Slice(cs, func(i, j int) bool { return cs[i].name < cs[j].name })
+	// Width from the longest name rather than a literal. It was %-8s, and
+	// `catalogue` is nine characters: the summary column jumped a space out
+	// on that one line and lined up with nothing. Found by reading the
+	// output, which is also the only way it could have been found -- every
+	// test here asserts on substrings.
+	width := 0
 	for _, c := range cs {
-		outf(out, "  %-8s %s\n", c.name, c.summary)
+		if len(c.name) > width {
+			width = len(c.name)
+		}
+	}
+	for _, c := range cs {
+		outf(out, "  %-*s %s\n", width, c.name, c.summary)
 	}
 	outf(out, "\nRun ember <subcommand> -h for the flags of one subcommand.\n")
 }

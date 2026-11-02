@@ -93,13 +93,15 @@ different image would prove nothing about what the provider pulls.
 | `internal/httpx` | one place for timeouts, body closing and readable API errors |
 | `internal/provision` | rent, wait, hold, destroy — with the money discipline |
 | `internal/statestore` | the journal that makes an orphan findable |
+| `internal/catalogue` | the availability series — append-only, and the one thing no later run can backfill |
 | `internal/sshx` + `sshexec` | run one command on a node, stream its output |
 | `internal/transfer` | bring the outputs home — tar over SSH, into an `os.Root` |
 | `internal/workload` | run the command the node was rented for, streaming |
 | `internal/reconcile` | pure scan over providers and records — what `ls` and `reap` act on |
 | `internal/session`, `internal/config`, `internal/cli` | wiring |
 
-Every verb is implemented: `up`, `down`, `ls`, `reap`, `offers`, `version`.
+Every verb is implemented: `up`, `down`, `ls`, `reap`, `offers`, `catalogue`,
+`version`.
 `ls` asks every provider rather than trusting the local records, and exits 2
 when anything needs attention — including a provider it could not reach.
 
@@ -997,6 +999,135 @@ attack. `/workspace` is refused too: it is the provider's default mount path
 *and* where ember writes outputs, so a store there bills for every render for
 as long as the store exists.
 
+### Which site will still have the card next month
+
+A store makes the datacentre a commitment. `volumeId` is immutable after
+create, the volume lives in exactly one site, and every node that mounts it is
+placed there — so the question stops being "where can I rent a 4090 today" and
+becomes "which site will reliably have one for as long as the weights are
+there". Moving later means a second store somewhere else and re-uploading: 56
+GiB at this link's measured 67 Mbps is 1h52m.
+
+RunPod cannot answer it. `availability` is a bare `HIGH|MEDIUM|LOW|NONE` on a
+card and on each of its datacentres, with **no timestamp and no window**;
+both live OpenAPI documents were checked and neither has anything historical.
+Every read is a point sample, and nothing on the provider's side remembers the
+previous one. **This is the only data in ember that cannot be collected
+later.**
+
+```bash
+ember catalogue snapshot
+```
+
+```
+observed 2026-11-02T10:00:00Z
+  runpod     3 gpu row(s), 1 cpu row(s), 2 site(s), 1 type(s) with no site named
+appended 4 row(s) to ~/.local/state/ember/catalogue/2026-11-02.jsonl
+
+This is the first snapshot here, and its whole value is the series: one
+sample answers nothing a live `ember offers` does not. Schedule it hourly --
+cron or a systemd timer, see README -- because an hour nobody sampled cannot
+be sampled later.
+```
+
+Two free GETs — `/v2/catalog/gpus` and `/v2/catalog/cpus`, both with
+`include=AVAILABILITY&product=POD`. No pod, no GPU, nothing billed. It writes
+**one row per type per datacentre** into an append-only JSON Lines file, one
+file per day, and the only field RunPod does not supply is `observed_at`.
+
+**Per site, never the global summary.** The live catalogue has reported an RTX
+4090 as `NONE` overall while its `US-IL-1` entry read `LOW` — the observation
+`hasCapacity` exists for. A collector that stored the summary would record
+"unavailable" for cards that were rentable all along, which is worse than no
+data: it is data that looks like an answer. The summary is kept beside each
+site's level precisely so the report can say how often the two disagree.
+
+```bash
+ember catalogue report
+```
+
+```
+  site           samples  rentable  high   med   low  none  unseen  masked  secure         community
+
+cpu  cpu3c  (Compute-Optimized)
+  EU-RO-1              3      100%     3     0     0     0       0       0  $0.03/hr       -
+
+gpu  AMD Instinct MI300X OAM  (MI300X, 192 GiB)
+  (no site)*           3        0%     0     0     0     3       0       0  $2.39/hr       -
+
+gpu  NVIDIA GeForce RTX 4090  (RTX 4090, 24 GiB)
+  EU-RO-1              3      100%     3     0     0     0       0       3  $0.89/hr       $0.34/hr
+  US-IL-1              3      100%     0     0     3     0       0       3  $0.89/hr       $0.34/hr
+
+* the provider named no datacentre for this type in those samples, so the
+  levels shown are its overall summary -- the only figure it gave.
+
+12 sample(s) in 4 row(s) over 1 day file, 2026-11-02T10:00:00Z to 2026-11-02T12:00:00Z.
+The series covers 2 hour(s). Availability moves on the scale of a day, so this is
+closer to a point sample than to a history -- it becomes an answer after weeks.
+```
+
+That is real output, from three hourly snapshots against a catalogue shaped
+like the captured one — the levels are a real response rather than this hour's.
+`masked` is the column the summary is stored for: three samples where the
+card's overall figure said `NONE` while the site had capacity. `unseen` counts
+samples where the provider gave no level at all, which is **not** the same as
+`NONE` — a site that reported nothing prints `-` in `rentable` rather than 0%,
+because 0% means "never available" and would send an operator to move a store
+over an absent field.
+
+`--gpu` matches as `ember up --gpu` does, so `--gpu h100` finds
+`NVIDIA H100 80GB HBM3` and `--gpu a100` does not match an A1000. `--kind
+gpu|cpu`, `--since`/`--until` (UTC dates, half-open as `ember spend`'s period
+is) and `--json` narrow it further. Exit 2 means the reader found lines it
+could not place or files it did not read — a series quietly missing part of
+itself is the clean-bill-of-health failure `ember ls --all` exits non-zero to
+avoid, over a file nothing can rebuild.
+
+**Scheduled from outside ember.** A process that must stay running to collect
+data is a process that will be found stopped, so there is no daemon: hourly is
+plenty, because capacity is four levels rather than a number and sampling
+faster than it can visibly change buys nothing.
+
+```
+# crontab -e
+17 * * * * cd ~/work && /usr/local/bin/ember catalogue snapshot >> ~/.local/state/ember/catalogue.log 2>&1
+```
+
+```ini
+# ~/.config/systemd/user/ember-catalogue.service
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work
+ExecStart=/usr/local/bin/ember catalogue snapshot
+
+# ~/.config/systemd/user/ember-catalogue.timer
+[Timer]
+OnCalendar=hourly
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+systemctl --user enable --now ember-catalogue.timer
+```
+
+The file is append-only and nothing in ember rewrites it: the value is
+entirely in the series, and a format that can rewrite history is one that can
+lose it to a bug in the writer. A day's rows go out in one write, because two
+embers appending at once — an hourly timer and a run by hand — must not
+interleave half a line into the one file that cannot be regenerated. Removing
+old days is `rm`, where the operator can see what they are destroying.
+
+The capability is RunPod-specific on purpose: `provider.CatalogueAPI` is an
+optional interface gated on `Caps.Catalogue`, in the shape `StoreAPI` and
+`LeftoverAPI` already use, and its row type lives in `internal/catalogue`
+rather than in `internal/node` because two cloud tiers with separate prices
+and separate per-pod ceilings is this provider's product and not the domain. A
+closed interface invented from one example is a mistake this repository has
+named twice.
+
 ## The web UI
 
 `ember serve` runs a local web UI and a queue that drains onto **one rental**.
@@ -1494,9 +1625,11 @@ Things worked out but not built, kept where the reasoning was fresh rather
 than in a commit message nobody will search for.
 
 - [Collecting GPU availability over time](docs/gpu-availability-history.md) —
-  RunPod reports capacity only as it is right now, and a store pins every
-  future run to one datacentre, so "which site reliably has this card" is a
-  question a single sample cannot answer and nobody is recording.
+  **built**, as `ember catalogue snapshot` and `ember catalogue report`; the
+  note is kept as the reasoning the implementation follows, and says where the
+  two differ. RunPod reports capacity only as it is right now, and a store
+  pins every future run to one datacentre, so "which site reliably has this
+  card" is a question a single sample cannot answer.
 
 ## Licence
 

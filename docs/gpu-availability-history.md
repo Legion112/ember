@@ -1,7 +1,9 @@
 # Collecting GPU availability over time
 
-**Status: not implemented. This is a design note, written while the reason for
-it was fresh.**
+**Status: implemented, as `ember catalogue snapshot` and `ember catalogue
+report`. See README. This note is kept because it is the argument the
+implementation follows rather than a record of a decision; where the two
+differ, the differences are listed at the bottom.**
 
 ## The question
 
@@ -129,3 +131,70 @@ The argument for starting *soon*, rather than never: this is the only kind of
 data that cannot be backfilled. Every day without a collector is a day that
 cannot be recovered later, and the decision it informs — which datacentre
 holds the weights — gets harder to change the longer the store exists.
+
+That argument won. The store path is further along than it was when the
+paragraph above was written — `store create`, `rm`, `push`, `sync`, `ls`,
+`verify` and `abort` all exist and a live store run happened — so one of its
+two clauses weakened and the backfill argument did not. The report says the
+objection out loud every time it runs: a series under a week prints *"closer
+to a point sample than to a history"*, which is this section rendered as
+output rather than left in a document nobody re-reads.
+
+## Where the implementation differs from the note above
+
+Four places, each because writing the code answered a question the note did
+not ask.
+
+**`cloud` is not a column; two tiers are.** The table above derives a `cloud`
+field because "secure and community have separate capacity". They have
+separate *prices*, separate *per-pod ceilings* and separate "is it offered at
+all" flags — but **availability is one level per site, not one per tier**,
+in both the captured response and the live v2 schema. One row per cloud would
+have duplicated a single observation into two rows and made the series look
+like twice the measurement it is. So a row carries `secure` and `community`
+as nested tiers, each with its own quote and ceiling, and one `availability`.
+
+**A type with no datacentre still gets a row.** Three of the four entries in
+the captured catalogue list no `dataCenters` array at all — the field is not
+required by the schema — and every one of those reads `NONE` overall. Skipping
+them would make a card that is sold out everywhere indistinguishable from a
+card that was never offered, and *"is this card persistently unrentable"* is
+one of the four questions this file exists to answer. Such a row has an empty
+`datacentre`, its `availability` stays **unreported** rather than being filled
+in from the summary, and the report marks it with a `*` and a footnote so a
+summary is never read as a site.
+
+**"Not reported" is a third state, beside NONE and a level.** The note treats
+availability as four levels. An absent field is a fifth answer and it is not
+`NONE`: one is the provider saying there is nothing, the other is the provider
+not saying. They are counted in separate columns, and a site that only ever
+reported nothing shows `-` for its rentable share rather than 0%.
+
+**CPU types are collected in the same file and the same shape**, with
+`kind: cpu` and the price per vCPU per hour, which is what the endpoint
+quotes. There is no `price_unit` column: `kind` already decides it, and a
+second field saying the same thing is a second thing that can disagree.
+
+## What was checked for free while building it, 2026-11-02
+
+`api.runpod.io/v2/openapi.json` is public and unauthenticated, so this cost
+nothing and confirmed three things the code depends on:
+
+- `AvailabilityLevel` enumerates exactly `NONE`, `LOW`, `MEDIUM`, `HIGH`.
+  Which is why an unrecognised level is **kept verbatim and ranked between
+  NONE and MEDIUM** rather than refused: an enum is a promise about today and
+  this file is read years later.
+- `availability` and `dataCenters` are **not** in `GpuType`'s or `CpuType`'s
+  required list, so the two absences above are the schema's own position and
+  not just an artefact of one capture.
+- `include=AVAILABILITY` *"requires `product`"*, in the endpoint's own
+  description. ember spells both in one constant per catalogue rather than
+  building them at three call sites.
+
+And one thing worth writing down because it reads the other way: the schema's
+`CudaVersionAvailability` description points at `gpu.allowedCudaVersions` *"on
+pod create"*, while `POST /v2/pods` still declares no such property. That is
+the field AGENTS.md records as having broken every create — the documentation
+string has not caught up with the request body, which is the same lesson a
+third time: a schema is not a response, and a description is not even a
+schema.

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Legion112/ember/internal/catalogue"
 	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/node"
 )
@@ -117,6 +118,17 @@ type Caps struct {
 	// direction as PublicSSH above, for the same reason.
 	Stores bool
 
+	// Catalogue means this provider reports point-in-time capacity worth
+	// recording, and that it implements CatalogueAPI.
+	//
+	// False -- the zero value -- means there is nothing here to collect, so a
+	// provider author who forgets the field gets "nothing to sample" rather
+	// than a nil type assertion from an hourly timer nobody is watching.
+	// Same direction as the three fields above, and
+	// providertest.AssertCatalogueCapsMatch fails when the claim and the
+	// interface disagree in either direction.
+	Catalogue bool
+
 	// Leftovers means this provider creates objects beside a node that can
 	// outlive it, and that it implements LeftoverAPI.
 	//
@@ -192,6 +204,42 @@ type LeftoverAPI interface {
 	// LeftoverDestroy removes one. Not found counts as success, as node and
 	// store destruction do.
 	LeftoverDestroy(ctx context.Context, h node.LeftoverHandle) error
+}
+
+// CatalogueAPI is the subset of a provider that can report what it currently
+// has, in a shape worth keeping.
+//
+// MODELLED ON ONE PROVIDER, ON PURPOSE. RunPod publishes availability as a
+// bare level per card and per datacentre, with no timestamp and no history of
+// its own, and that is the shape catalogue.Sample has: two cloud tiers with
+// separate prices and separate per-pod ceilings, one level per site, and a
+// global summary kept because it disagrees with the sites. None of that is a
+// fact about renting GPUs in general -- it is a fact about this provider's
+// product, and a closed interface invented from one example is the mistake
+// node.Leftover's Kind field and the driver-interface-from-one-server warning
+// in AGENTS.md both name.
+//
+// What would have to be true before this became general: a second provider
+// reporting capacity as a graded level per site rather than as a count of
+// machines or a spot price, and no history of its own to read instead. Then
+// the tiers would be the field to fix first, since "secure and community" is
+// the part most likely to be meaningless elsewhere. Until then this is an
+// optional interface gated on Caps.Catalogue -- the shape StoreAPI and
+// LeftoverAPI already use -- so a provider that has nothing to sample says so
+// in a field rather than by stubbing a method it cannot answer.
+type CatalogueAPI interface {
+	// CatalogueSnapshot reads the provider's catalogue once and returns one
+	// sample per type per site.
+	//
+	// The clock is a parameter and not time.Now() inside. ObservedAt is the
+	// only field the provider does not supply and the entire reason the file
+	// is kept, so it is passed in by the caller that is about to record it --
+	// which also means a test can pin the instant, and the instant is what
+	// decides which day file a sample lands in.
+	//
+	// It is free to call: a catalogue read runs no machine and spends
+	// nothing, which is the argument for sampling hourly from a timer.
+	CatalogueSnapshot(ctx context.Context, now time.Time) ([]catalogue.Sample, error)
 }
 
 // StorePrefix marks a store ember created.
