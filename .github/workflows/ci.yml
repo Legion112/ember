@@ -42,6 +42,22 @@ jobs:
             exit 1
           fi
 
+      # The dependency list in AGENTS.md and the direct requirements in go.mod
+      # have to say the same thing, and until this step nothing checked that
+      # they did: `go build` adds a requirement without fixing its
+      # `// indirect` marker, so four deliberate dependencies sat recorded as
+      # nobody's decision. It matters because TestOTelStaysIndirect reads that
+      # marker as the evidence for #33's refusal of an OpenTelemetry SDK.
+      #
+      # Asked of make for the reason the vet step below gives at length, and
+      # the Makefile target carries the rest of the argument -- including why
+      # this is not a Go test (it resolves modules, and `go test ./...` must
+      # need no network) and why the module cache makes that resolution free
+      # here. It runs before vet because it is the cheapest gate in the job
+      # and the one whose failure has a one-line fix.
+      - name: go.mod is tidy
+        run: make tidy-check
+
       # Asked of make rather than spelled here, the way the publishing
       # workflow asks it for the image tag. This step used to write out
       # `-tags='integration imagelab'` itself, which made three
