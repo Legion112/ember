@@ -475,7 +475,9 @@ make every clean run look like a problem.
 
 Nothing secret is ever passed as a command-line flag, because
 `/proc/<pid>/cmdline` is world-readable — on a rented machine, readable by
-whoever else is on that host.
+whoever else is on that host, and on this one readable by every other account.
+`serve_token`, which is `ember serve`'s own credential, lives in the same file
+for that reason and has no flag either.
 
 ### Placement, disk and where ember keeps things
 
@@ -1392,6 +1394,11 @@ page. Without `make web`, `ember serve` says so and the JSON API under
       --port         loopback port to serve on (default 7777)
 ```
 
+**Every request needs a token**, and there is no flag for it — see
+[What is guarded, and what is not](#what-is-guarded-and-what-is-not). It comes
+from `EMBER_SERVE_TOKEN` or `serve_token` in `credentials.yaml`, and otherwise
+ember mints one and prints the URL that carries it.
+
 **One rental, drained, with no idle wait.** A request is a batch of jobs; while
 a node is up the queue keeps claiming newly queued requests whose provider and
 card match, and sends their jobs to the `sd-server` that is already holding the
@@ -1542,23 +1549,63 @@ wrong unit silently removed the hourly ceiling, the run ceiling and the price
 filter together. Write `"0"` for no limit, or a figure of at least
 `"0.000001"`.
 
-### What is not guarded
+### What is guarded, and what is not
 
-**There is no authentication.** The server listens on loopback only and nothing
-it serves is reachable from another machine — but any page open in the
-operator's browser can reach a loopback port, and the browser hides only the
-*response*. CORS is not a control here.
+**Every request needs a token.** This section used to open by saying there was
+no authentication, which was true and is not any more.
 
-What bounds the damage is **`--allow-paid`, which is off by default**: without
-it `ember serve` refuses every provider that is not free, so a cross-site POST
-to a default invocation can start a free local container and spend nothing.
-That is the reason the flag exists and the reason it defaults off.
+The server listens on loopback only and nothing it serves is reachable from
+another machine — but **a loopback port is reachable by every uid on this
+machine**, and a request with no `Origin` header is deliberately allowed,
+because that is what `curl` and every script an operator writes send. So before
+the token, a second account on a shared workstation, a devcontainer, or
+anything reaching an `ssh -L` forward could `POST /api/requests` and, under
+`--allow-paid`, rent an H100 on the operator's card. That is the threat the
+credential is for: **a client that is not the operator's own page.**
 
-Two things that are not authentication are checked anyway, on every route: the
-`Origin` must be this server's own, and the `Host` must be a loopback name at
-this port. The second is the DNS rebinding case, where an attacker's domain
-resolves to 127.0.0.1 and their page is therefore same-origin with its own
-name — which passes the first check and fails the second.
+`ember serve` resolves it from, in order, `EMBER_SERVE_TOKEN` in the
+environment, `serve_token` in `credentials.yaml`, or `crypto/rand` — and prints
+a URL ending in `?t=<token>` when it minted one. Opening that line is the whole
+of the browser setup: the server exchanges the token for an `HttpOnly;
+SameSite=Strict` cookie and redirects to the same path without it, so the
+address bar, the session history and every `Referer` the page sends carry
+nothing. The cookie is then carried on `fetch`, on the gallery's `<img src>`
+and on the websocket handshake alike, which is why there is no token-handling
+code in the frontend at all.
+
+A minted token lives in the process and is written nowhere, so it changes on
+restart. Set `serve_token` for one that does not — that is what a bookmark and
+a script against the local API both want.
+
+**There is no `--token` flag, and there will not be one.** `/proc/<pid>/cmdline`
+is world-readable, so a credential in argv is readable by every uid on the box
+for the life of the process — which is precisely the uid this token keeps out.
+A lab reads the running server's own `cmdline` and fails if the token is in it.
+
+`--allow-paid` **is unchanged and still off by default**: without it
+`ember serve` refuses every provider that is not free. Authentication answers
+*who is asking* and `--allow-paid` is a ceiling on what the answer permits, and
+this project does not trade one control for the other.
+
+The two checks that are **not** authentication are still made, on every route,
+and the credential is additive rather than a replacement — all three or
+nothing. The `Origin` must be this server's own, and the `Host` must be a
+loopback name at this port; the second is the DNS rebinding case, where an
+attacker's domain resolves to 127.0.0.1 and their page is therefore same-origin
+with its own name, which passes the first check and fails the second.
+
+**What the token does not do**, said plainly because a control whose limits are
+not written down gets believed past them:
+
+- It does not defend against **your own uid, or root**. Either can read
+  `EMBER_SERVE_TOKEN` out of `/proc/<pid>/environ`, read `credentials.yaml`,
+  ptrace the process, or read the browser profile holding the cookie. A secret
+  held by a uid cannot authenticate against that uid.
+- It does not **expire or rotate**. It is a bearer token; anyone who learns it
+  holds it until the process restarts, which is how you revoke one.
+- It does not make a **public listener** acceptable. `loopback.Bind` stays
+  sealed, and widening it was not needed for any of this. The deployment story
+  is still an SSH forward, which the token is what makes safe to use.
 
 ### Where the state goes
 
@@ -1584,16 +1631,26 @@ make test-serve-lab      # one rental drained by a queue, and the real UI
 
 The first group runs on every pull request and is the security half: that the
 server answers on both loopback families and on none of this machine's other
-addresses, that a page from somewhere else is refused, that a paid provider is
+addresses, that a page from somewhere else is refused, that **every route
+including `/ws` is refused without the token** and nothing is queued by the
+attempt, that the one-time URL comes back as a `SameSite=Strict` cookie, that
+the token is not in the running process's `argv`, that a paid provider is
 refused without the flag, that SIGINT destroys the rental and says so, and that
 SIGKILL leaves exactly one finding `ember ls` reports as needing attention.
 
 `make test-serve-lab` needs [`ember:sd`](#workload-images) and a Chrome or
 Chromium binary. It queues a three-job batch, waits until it is generating,
 queues a second request, and asserts from ember's own output that **one** node
-served both — then drives the real page in a real browser: offers listed,
-prompt typed, generate clicked, the sampling step advancing, and an image that
-decodes.
+served both — then drives the real page in a real browser: refused with no
+credential, then the one-time URL opened, the token gone from the address bar,
+offers listed, prompt typed, generate clicked, the sampling step advancing, and
+an image that decodes.
+
+Both directions in one browser, because every claim about the cookie is a claim
+about Chrome rather than about ember: that a 303 leaves the token out of the
+history, that the cookie reaches an `<img src>`, and — the one no Go test can
+stand in for — that Chrome attaches a `SameSite=Strict` cookie to a websocket
+handshake, which is how the progress row learns anything at all.
 
 That browser lab is not completeness. Three bugs in this feature were invisible
 to every Go test and every `cargo test` and obvious the moment a page loaded: a

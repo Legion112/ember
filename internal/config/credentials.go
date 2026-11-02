@@ -19,6 +19,18 @@ const CredentialsFile = "credentials.yaml"
 const (
 	EnvRunPod = "RUNPOD_API_KEY"
 	EnvVast   = "VAST_API_KEY"
+
+	// EnvServeToken is `ember serve`'s credential.
+	//
+	//nolint:gosec // G101: this is the name of a variable, not its value.
+	//
+	// AN ENVIRONMENT VARIABLE OR THIS FILE, NEVER A FLAG. /proc/<pid>/cmdline
+	// is world-readable, so a token passed as a flag value is readable by
+	// every uid on the box for the life of the process -- which is precisely
+	// the uid the credential exists to keep out. /proc/<pid>/environ is
+	// readable only by the process's own owner, and this file is refused
+	// unless it is 0600.
+	EnvServeToken = "EMBER_SERVE_TOKEN"
 )
 
 // Credentials are the provider tokens for this run.
@@ -29,6 +41,16 @@ const (
 type Credentials struct {
 	RunPod node.Secret
 	Vast   node.Secret
+
+	// ServeToken is the credential `ember serve` requires on every request.
+	//
+	// OPTIONAL HERE AND MANDATORY THERE. `ember serve` mints one per process
+	// when this is empty, so there is no unauthenticated configuration to
+	// reach -- what setting it buys is a STABLE credential, which is what
+	// makes a bookmark survive a restart and what a script against the local
+	// API needs. It lives beside the provider tokens because it is the same
+	// kind of thing with the same handling: 0600, node.Secret, never argv.
+	ServeToken node.Secret
 
 	// S3 is the key pair for RunPod's S3-compatible endpoint, which uploads
 	// to a store without renting anything.
@@ -47,6 +69,7 @@ type credentialsFile struct {
 	Vast        string `yaml:"vast_api_key"`
 	S3AccessKey string `yaml:"runpod_s3_access_key"`
 	S3Secret    string `yaml:"runpod_s3_secret"`
+	ServeToken  string `yaml:"serve_token"`
 }
 
 // LoadCredentials reads tokens from the environment, then from dir.
@@ -86,6 +109,7 @@ func LoadCredentials(dir string) (Credentials, error) {
 			AccessKey: strings.TrimSpace(f.S3AccessKey),
 			Secret:    secretOrZero(f.S3Secret),
 		}
+		c.ServeToken = secretOrZero(f.ServeToken)
 	case os.IsNotExist(err):
 		// Fine. Nothing requires a credentials file.
 	default:
@@ -98,6 +122,9 @@ func LoadCredentials(dir string) (Credentials, error) {
 	}
 	if v := strings.TrimSpace(os.Getenv(EnvVast)); v != "" {
 		c.Vast = node.NewSecret([]byte(v))
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvServeToken)); v != "" {
+		c.ServeToken = node.NewSecret([]byte(v))
 	}
 	// Both halves move together. Overriding one from the environment and
 	// leaving the other from the file would pair an access key with somebody

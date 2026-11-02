@@ -69,6 +69,7 @@ func TestServe_AnswersOnBothLoopbackFamilies(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			authorize(req)
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatalf("%s did not answer: %v", host, err)

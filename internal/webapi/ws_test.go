@@ -3,6 +3,7 @@ package webapi
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -38,7 +39,12 @@ func dialWS(t *testing.T, url string) *websocket.Conn {
 	t.Helper()
 	ctx, cancel := contextWithTimeout(t, 5*time.Second)
 	defer cancel()
-	c, resp, err := websocket.Dial(ctx, url, nil)
+	// The credential, as a non-browser client carries it. coder/websocket CAN
+	// set a request header from Go; it is a browser that cannot, which is why
+	// the page's carrier is a cookie instead.
+	c, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + string(testToken.Bytes())}},
+	})
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}

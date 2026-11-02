@@ -26,6 +26,26 @@ import (
 
 const testPort = 7777
 
+// testToken is the credential every request in this package carries.
+//
+// Minted rather than a literal, and minted ONCE for the test binary rather
+// than per harness, so the helpers below can authorise a request without
+// threading a value through every call site. Fresh each run, because a
+// hard-coded token is one somebody would reach for in production.
+var testToken = NewToken()
+
+// authorize makes a request look like it came from something that holds the
+// token.
+//
+// THE HEADER AND NOT THE COOKIE, because that is the carrier a non-browser
+// client uses and these tests are not a browser. The cookie half is what the
+// chromedp lab proves, since whether Chrome attaches a SameSite=Strict cookie
+// to a websocket handshake is a question for Chrome.
+func authorize(r *http.Request) *http.Request {
+	r.Header.Set("Authorization", "Bearer "+string(testToken.Bytes()))
+	return r
+}
+
 // harness is a server with no Docker, no provider account and no card.
 //
 // Everything worth a test here is a decision about a request, which is why
@@ -94,7 +114,7 @@ func newHarness(t *testing.T, mut ...func(*Options)) *harness {
 			},
 			MaxHourlyUSD: "1.00",
 		},
-		Registry: reg, Store: store, Blobs: blobs, Port: testPort,
+		Registry: reg, Store: store, Blobs: blobs, Port: testPort, Token: testToken,
 	}
 	for _, m := range mut {
 		m(&o)
@@ -119,6 +139,7 @@ func (h *harness) do(t *testing.T, method, path, body string) *httptest.Response
 	}
 	r.Host = fmt.Sprintf("127.0.0.1:%d", testPort)
 	r.Header.Set("Origin", fmt.Sprintf("http://127.0.0.1:%d", testPort))
+	authorize(r)
 
 	w := httptest.NewRecorder()
 	h.Handler().ServeHTTP(w, r)
@@ -160,7 +181,7 @@ func TestGuard_RefusesAPageFromSomewhereElse(t *testing.T) {
 		{"a name that merely ends in localhost", fmt.Sprintf("http://localhost.evil.test:%d", testPort)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r := httptest.NewRequest("POST", "/api/requests", strings.NewReader(oneJob))
+			r := authorize(httptest.NewRequest("POST", "/api/requests", strings.NewReader(oneJob)))
 			r.Host = fmt.Sprintf("127.0.0.1:%d", testPort)
 			r.Header.Set("Origin", c.origin)
 			w := httptest.NewRecorder()
@@ -193,7 +214,10 @@ func TestGuard_RefusesAHostThatIsNotThisServer(t *testing.T) {
 		"notaport",
 	} {
 		t.Run(host, func(t *testing.T) {
-			r := httptest.NewRequest("GET", "/api/config", nil)
+			// AUTHORISED, so the 403 below is the Host check's and not the
+			// credential's. A refusal test that could pass for either
+			// reason proves neither.
+			r := authorize(httptest.NewRequest("GET", "/api/config", nil))
 			r.Host = host
 			w := httptest.NewRecorder()
 			h.Handler().ServeHTTP(w, r)
@@ -226,7 +250,7 @@ func TestGuard_AcceptsWhatTheOperatorsOwnToolingSends(t *testing.T) {
 		{"curl, with no Origin at all", "127.0.0.1:7777", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r := httptest.NewRequest("GET", "/api/config", nil)
+			r := authorize(httptest.NewRequest("GET", "/api/config", nil))
 			r.Host = c.host
 			if c.origin != "" {
 				r.Header.Set("Origin", c.origin)
@@ -951,7 +975,7 @@ func TestNew_RefusesWithoutAStore(t *testing.T) {
 }
 
 func TestNew_DefaultsThePort(t *testing.T) {
-	s, err := New(Options{Store: genstore.NewRecordingStore()})
+	s, err := New(Options{Store: genstore.NewRecordingStore(), Token: testToken})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1026,7 +1050,7 @@ func TestStatic_AClientRenderedRouteGetsTheApp(t *testing.T) {
 
 func TestStatic_IsGuardedToo(t *testing.T) {
 	h := newHarness(t)
-	r := httptest.NewRequest("GET", "/", nil)
+	r := authorize(httptest.NewRequest("GET", "/", nil))
 	r.Host = "evil.example:7777"
 	w := httptest.NewRecorder()
 	h.Handler().ServeHTTP(w, r)

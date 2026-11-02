@@ -34,6 +34,7 @@ package webapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -116,6 +117,22 @@ type Options struct {
 	// call and that one is.
 	AllowPaid bool
 
+	// Token is the credential every request has to carry.
+	//
+	// MANDATORY, AND THAT IS THE POINT. New refuses a zero value, so an
+	// unauthenticated `ember serve` is not a configuration this program can
+	// be in -- there is no flag that turns it off and no branch that skips
+	// the check. The alternative was an optional token, which closes the
+	// threat only for the operator who read the documentation; the one who
+	// did not is the one with another account on the machine.
+	//
+	// It is node.Secret so that a stray slog.Any or %v prints a fingerprint
+	// rather than the credential to a port that can rent GPUs. It never
+	// reaches argv: cmd_serve reads it from EMBER_SERVE_TOKEN or
+	// credentials.yaml, or mints one, because /proc/<pid>/cmdline is
+	// world-readable and that is the same second-uid threat the token is for.
+	Token node.Secret
+
 	// Port is the port this server answers for. The guard compares the Host
 	// header against it, so it has to be the real one.
 	Port uint16
@@ -133,6 +150,13 @@ type Server struct {
 	mux  *http.ServeMux
 	port string
 
+	// tokenDigest is what every presented credential is compared against.
+	//
+	// Computed once so the comparison is a fixed thirty-two bytes whatever
+	// arrived -- see tokenMatches, where hashing both sides is what keeps the
+	// token's length and its matching prefix out of the response time.
+	tokenDigest [sha256.Size]byte
+
 	// scan is injected so a handler test does not need a Docker daemon. The
 	// production value asks the providers.
 	scan func(ctx context.Context) (app.Scanned, error)
@@ -143,10 +167,27 @@ func New(o Options) (*Server, error) {
 	if o.Store == nil {
 		return nil, errors.New("webapi needs a store: a queue nothing records is a queue nothing can report")
 	}
+	// A SERVER WITH NO CREDENTIAL IS NOT CONSTRUCTIBLE. Every listener here
+	// is loopback, and a loopback port is reachable by every uid on the
+	// machine -- so a zero token is the configuration where the account next
+	// door can queue a paid rental, and refusing it is what makes that
+	// unrepresentable rather than merely documented. webapi.NewToken mints
+	// one; there is no flag and no option that gets past this.
+	if o.Token.IsZero() {
+		return nil, errors.New("webapi needs a token: every listener is loopback and a loopback " +
+			"port is reachable by every uid on this machine, so a server with no credential lets " +
+			"another account queue a rental. Use webapi.NewToken, or set serve_token in " +
+			"credentials.yaml")
+	}
 	if o.Port == 0 {
 		o.Port = DefaultPort
 	}
-	s := &Server{opts: o, mux: http.NewServeMux(), port: strconv.Itoa(int(o.Port))}
+	s := &Server{
+		opts:        o,
+		mux:         http.NewServeMux(),
+		port:        strconv.Itoa(int(o.Port)),
+		tokenDigest: sha256.Sum256(o.Token.Bytes()),
+	}
 	s.routes()
 	return s, nil
 }
@@ -158,8 +199,31 @@ func (s *Server) log() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// URL is what `ember serve` prints.
+// URL is this server's address, with no credential in it.
 func (s *Server) URL() string { return "http://127.0.0.1:" + s.port + "/" }
+
+// TokenURL is the line `ember serve` prints for the operator to open.
+//
+// 127.0.0.1 AND NOT localhost, which matters because of what it sets: the
+// cookie exchange.go hands back is scoped to the host in the address bar and
+// not to the port, so a UI reached as "localhost" shares a cookie namespace
+// with every other local development server on that name. The address does
+// not.
+//
+// It is printed on stdout and nowhere else. Nothing logs it, no error body
+// carries it, and the URL the browser is left on after the exchange has no
+// token in it at all.
+func (s *Server) TokenURL() string {
+	return s.URL() + "?" + tokenParam + "=" + string(s.opts.Token.Bytes())
+}
+
+// TokenFingerprint is the token as it is safe to repeat.
+//
+// node.Secret's own discipline: carry the credential, print a fingerprint.
+// `ember serve` prints this beside a configured token so an operator can tell
+// which of two credentials a running server is using without the server
+// echoing one back at them.
+func (s *Server) TokenFingerprint() string { return s.opts.Token.Fingerprint() }
 
 // Handler is the whole surface, exported so a test can drive it with
 // httptest and no listener.
@@ -183,18 +247,29 @@ func (s *Server) routes() {
 	s.mux.Handle("/", s.static())
 }
 
-// guarded wraps a handler in the Origin and Host checks.
+// guarded wraps a handler in the Host and Origin checks and the credential.
 //
 // EVERY ROUTE, not only the mutating ones. A read is a side channel: a page on
 // another site cannot see the response, but it can time it and it can tell
 // whether it succeeded -- and `GET /api/requests` is a list of the operator's
 // prompts. There is nothing to be gained by letting a foreign page ask.
+//
+// ALL THREE OR NOTHING, and the credential comes LAST. The two header checks
+// cost nothing and bound a browser; the credential is what bounds everything
+// that is not one, which is where a second uid on this machine and a shared
+// SSH forward both live. Neither replaces the other, so neither is skipped
+// when the other passes -- a request that fails the Host check never reaches
+// the compare, and one that passes it still has to prove who it is.
 func (s *Server) guarded(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := guard(r, s.port); err != nil {
 			s.log().Warn("refused a request that did not come from this server's own page",
 				"path", r.URL.Path, "origin", r.Header.Get("Origin"), "host", r.Host, "err", err)
 			s.fail(w, http.StatusForbidden, err)
+			return
+		}
+		if err := s.authenticate(r); err != nil {
+			s.refuseCredential(w, r)
 			return
 		}
 		h(w, r)

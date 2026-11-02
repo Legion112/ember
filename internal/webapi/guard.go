@@ -8,7 +8,13 @@ import (
 	"strings"
 )
 
-// THERE IS NO AUTHENTICATION HERE, AND THIS IS WHAT STANDS IN FOR IT.
+// THESE TWO CHECKS ARE NOT AUTHENTICATION, AND NOW THEY DO NOT HAVE TO BE.
+//
+// They used to be the whole control, and this comment used to open by saying
+// so. auth.go is the credential that runs after them, for the threat these
+// two cannot see at all: a client that is not a browser, where no Origin is
+// sent and none is required. What follows is still the reason these exist and
+// still the reason they are not enough on their own.
 //
 // WHAT THE THREAT ACTUALLY IS. Nothing is listening off this machine, so it is
 // not an attacker on the network. It is any web page the operator has open:
@@ -39,8 +45,11 @@ import (
 // one on a cross-origin fetch. The Host check applies regardless, so a
 // rebinding attack does not get in through that door.
 //
-// WHERE THE TOKEN WOULD GO is this function: one middleware, one header, and
-// the seam is already the only thing every mutating route passes through.
+// THAT ALLOWANCE IS EXACTLY THE HOLE auth.go CLOSES. A second uid on this
+// machine sends no Origin either, and is indistinguishable here from the
+// operator's own curl. The credential is what tells them apart; these two
+// checks are kept because they are free and because a browser is still a
+// different threat from a shell.
 
 // guard refuses a request that a page on another site could have made.
 //

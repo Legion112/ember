@@ -2,6 +2,7 @@ package webapi
 
 import (
 	"embed"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -120,6 +121,23 @@ func (s *Server) serveFS(f fs.FS) http.Handler {
 			s.fail(w, http.StatusForbidden, err)
 			return
 		}
+		// THE ONE PLACE A TOKEN MAY ARRIVE IN A URL, and only on the app's
+		// own route -- an allow-list of exactly one path shape rather than a
+		// query parameter the whole server honours.
+		//
+		// This is also why the page itself is behind the credential rather
+		// than served to anyone: without an exchange, the one route a browser
+		// navigates to would be the one route with no check on it, and the
+		// token would have to reach the page through a fragment and be
+		// replayed by script on every call. The server consuming it here
+		// keeps the whole surface gated and the page unchanged.
+		if isAppRoute(r.URL.Path) && s.exchange(w, r) {
+			return
+		}
+		if err := s.authenticate(r); err != nil {
+			s.refuseUI(w, r)
+			return
+		}
 		// NOTHING HERE IS CACHED, and that is a decision rather than
 		// laziness. `make web` writes ember.js and ember_bg.wasm under names
 		// that do not change between builds, so a browser holding the
@@ -136,12 +154,45 @@ func (s *Server) serveFS(f fs.FS) http.Handler {
 		// A client-rendered app owns its own routes, so anything that is not
 		// a file is the app's own path. Without this, a reload on
 		// /requests/abc is a 404.
-		if r.URL.Path == "/" || !strings.Contains(path.Base(r.URL.Path), ".") {
+		if isAppRoute(r.URL.Path) {
 			s.serveApp(w, r, f)
 			return
 		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+// isAppRoute is a path the client-rendered app owns rather than a file.
+//
+// Factored out because the token exchange is scoped to exactly this set: the
+// routes a browser navigates to, and not /ember.js or an image.
+func isAppRoute(p string) bool {
+	return p == "/" || !strings.Contains(path.Base(p), ".")
+}
+
+// refuseUI answers a browser that arrived without the credential.
+//
+// PLAIN TEXT AND NOT THE JSON the API routes answer with, and not HTML
+// either. This is the response an operator sees when they type
+// localhost:7777 from memory or open a bookmark from before a restart, and a
+// one-line JSON object rendered raw in a browser reads as "ember is broken"
+// -- which is the failure mode that gets a control turned off rather than
+// used. Plain text renders readably in every browser and carries no markup to
+// get wrong.
+//
+// The status is the same 403 every other refusal gives, and the body is
+// errNoCredential's own sentence: one message for a missing token, a wrong
+// one and a stale cookie alike.
+func (s *Server) refuseUI(w http.ResponseWriter, r *http.Request) {
+	s.log().Warn("refused a page load that carried no credential this server accepts",
+		"path", r.URL.Path)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusForbidden)
+	if _, err := io.WriteString(w, "ember serve\n\n"+errNoCredential.Error()+"\n"); err != nil {
+		s.log().Debug("could not write the refusal", "err", err)
+	}
 }
 
 // serveApp writes the page: what `make web` built, or the committed
