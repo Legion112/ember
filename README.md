@@ -395,6 +395,17 @@ frames, every step from 1/6 to 6/6, each a decodable PNG. It also checks that
 the server binds `127.0.0.1` and nothing else. Twenty-one seconds on a laptop;
 build the image first with `make workload-sd MODEL=/path/to/a.gguf`.
 
+It also drives the two ways a served run goes wrong, which is what an operator
+reads when it does. A load that cannot succeed exits **before** the port opens,
+so `get sd version from file failed` arrives at once rather than after
+`ready_timeout`; and a request the server refuses outright — a generation asked
+for before the weights are in — now reports the server's own sentence,
+`submit job to sd-server: refused with status 503: model_not_loaded: No model
+is loaded`, in place of the JSON body it used to print inside a message about
+a status code. A job that fails *after* being accepted reports its own code and
+message, and the reason behind a generic one is in the server's log, which
+ember streams.
+
 Set `EMBER_CAPTURE_DIR` on it to write the server's own responses out as
 fixtures — `internal/sdserver/testdata/README.md` records, per file, whether a
 fixture was captured from a running server or written from documentation, and

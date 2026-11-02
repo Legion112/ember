@@ -36,8 +36,10 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/jpeg"
@@ -45,6 +47,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -415,6 +418,358 @@ func TestPreview_ACancelForAJobThatDoesNotExistIsRefused(t *testing.T) {
 	t.Logf("an unknown job id answers: %v", err)
 }
 
+// labBadRoot is a model root seeded with a file that is not a model.
+//
+// Seeded out-of-band through Docker rather than through anything under test,
+// for the reason the SIGKILL labs seed state that way: a production interface
+// widened so a test can write a file is a production interface shaped by a
+// test's convenience.
+const labBadRoot = "/tmp/ember-lab-badroot"
+
+// labBadModel is the id sd-server's own scan gives that file: a relative path
+// under the model root and its category directory, which is what `models/load`
+// accepts in place of a filesystem path.
+const labBadModel = "checkpoints/notamodel.gguf"
+
+// TestPreview_AModelThatCannotLoadIsAnErrorStateAndNotASilence replaces the
+// two fixtures that decide what an operator reads when a load fails.
+//
+// `model_status_error.json` and `error_model_not_loaded.json` were both
+// written from examples/server/api.md, and they are the pair that matters
+// most, because sd-server spells `error` two ways in one API: a string beside
+// a separate `code` for a request it rejects outright, an object for a job
+// that failed after being accepted. A client written against one alone
+// reports a JSON unmarshalling complaint in place of the reason -- which is
+// the whole argument for decodeAPIError, held up until now by two guesses.
+//
+// WHAT THE CAPTURE ROUTE HAS TO BE, AND WHY. ember hands the weights to
+// sd-server as argv, and a `--model` that is not a model makes the process
+// *exit before it listens* -- asserted below, because it is the reason this
+// lab cannot simply point ember's own serve command at a bad path and read
+// the status. `state: "error"` lives on the far side of a port that never
+// opens. So the lab starts a server with no weights at all, which is a state
+// ember's own argv can produce too (a config whose sd.serve names no model),
+// and then drives `POST /sdcpp/v1/models/load` -- a route ember never calls
+// -- to make the loader fail while the server is still answering. No bypass
+// of Validate, no hole in sdserver: a real sd-server failing to read a real
+// file, over the same SSH channel ember uses.
+func TestPreview_AModelThatCannotLoadIsAnErrorStateAndNotASilence(t *testing.T) {
+	l := harness.New(t)
+	n, client := labNodeAndDialer(t, l, "loadfail")
+
+	// 1. ember's own startup path cannot reach state=error at all: the server
+	//    dies rather than reporting. AGENTS.md records this failure from a
+	//    live run ("get sd version from file failed"), and `orExited` exists
+	//    because of it -- a server that died has to be noticed at once rather
+	//    than at ready_timeout, which on a rented A100 was thirty cents of
+	//    polling a process that was already gone. Nothing had checked it.
+	doomed, err := sdserver.ServeCommand([]string{"sd-server", "--model", "/etc/hostname"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCtx, stopDoomed := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer stopDoomed()
+	stdout, wait, err := sshexec.New(client.SSH()).Run(exitCtx, sshx.Command{
+		Path: doomed[0], Args: doomed[1:],
+	})
+	if err != nil {
+		t.Fatalf("starting the doomed sd-server: %v", err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, stdout) }()
+
+	// THE EXIT IS COLLECTED ON A CHANNEL AND NOT WAITED FOR INLINE, and the
+	// reinstatement pass is why. `ssh.Session.Wait` does not return while the
+	// remote process is alive, so a bare wait() here cannot time out:
+	// cancelling the context closes the session and no exit status ever
+	// arrives -- the defect that wedged `ember up` for twenty-three minutes
+	// after a SIGTERM, and that sdserver's own exit goroutine exists for. The
+	// outcome this assertion is about is "the server did *not* exit", so the
+	// short spelling makes the one result worth reporting the one that hangs:
+	// handed a real model instead of /etc/hostname, the inline version stopped
+	// answering and go test killed it fifteen minutes later with no assertion
+	// printed at all. The goroutine outlives the timeout branch, which is what
+	// the deferred cancel above is for.
+	done := make(chan error, 1)
+	go func() { done <- wait() }()
+
+	var exit *sshx.ExitError
+	select {
+	case err := <-done:
+		switch {
+		case err == nil:
+			t.Error("sd-server accepted a file that is not a model and exited cleanly; " +
+				"ember's model wait would then be the thing that reports it, and the " +
+				"status it polls would be the fixture this lab provokes another way")
+		case !errors.As(err, &exit):
+			t.Fatalf("sd-server failed in a way that is not an exit status: %v", err)
+		default:
+			// The loader's own sentence, on stderr. ember surfaces it through
+			// KindLog, and it is the only text that says which path was wrong
+			// -- `models/status` never gets the chance to.
+			if !strings.Contains(exit.Stderr, "get sd version from file failed") {
+				t.Errorf("exit %d, but stderr does not carry the loader's reason:\n%s",
+					exit.Code, exit.Stderr)
+			}
+			t.Logf("a --model that is not a model exits %d before listening: %s",
+				exit.Code, firstErrorLine(exit.Stderr))
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("sd-server was handed a file that is not a model and is still running "+
+			"thirty seconds later; the load failure this lab rests on has stopped being "+
+			"one, so `state: %q` may now be reachable the way an operator would meet it",
+			sdserver.ModelError)
+	}
+	// Nothing was left listening, which is what makes the state unreachable
+	// rather than merely awkward to reach.
+	if out := l.ExecOut(t.Context(), n.ID, "ss", "-H", "-ltn"); strings.Contains(out, fmt.Sprint(sdserver.Port)) {
+		t.Errorf("something is listening on %d after the load failed:\n%s", sdserver.Port, out)
+	}
+
+	// 2. A model root holding a file that is not a model, seeded through
+	//    Docker before the server starts so sd-server's own scan finds it.
+	l.Exec(t.Context(), n.ID, "mkdir", "-p", path.Join(labBadRoot, "checkpoints"))
+	l.Exec(t.Context(), n.ID, "sh", "-c",
+		"printf 'this is not a model\\n' > "+path.Join(labBadRoot, labBadModel))
+
+	srv := startServerOn(t, n, client, []string{"sd-server", "--model-dir", labBadRoot}, false)
+	capture := captureDir(t)
+
+	// 3. A server up with no weights. The guessed fixture said
+	//    `load_elapsed_seconds: 0`; a real one says **null**, which decodes
+	//    into ember's float64 as a no-op rather than an error -- true of Go
+	//    and not of serde, which is the asymmetry that took a websocket
+	//    envelope down one layer up. Worth a captured fixture precisely
+	//    because it passes by accident.
+	st, err := srv.client.ModelStatus(t.Context())
+	if err != nil {
+		t.Fatalf("model status on a server with no weights: %v", err)
+	}
+	if st.State != sdserver.ModelEmpty {
+		t.Errorf("state = %v, want empty", st.State)
+	}
+	if capture != "" {
+		_, body, rerr := labRequest(t, srv, http.MethodGet, "/sdcpp/v1/models/status", nil)
+		if rerr != nil {
+			t.Fatalf("capturing the empty status: %v", rerr)
+		}
+		captureBody(t, filepath.Join(capture, "model_status_empty.json"), body)
+	}
+
+	// 4. THE STRING FORM, on the path an operator actually meets it. A job
+	//    submitted to a server with no weights is refused with
+	//    `{"code":"model_not_loaded","error":"No model is loaded"}` and a
+	//    503. Until this lab, wireErrorEnvelope was decoded by nothing but
+	//    its own unit test: every non-2xx reached the operator as httpx's raw
+	//    body, so the reason arrived as JSON inside a sentence about a status
+	//    code. sdserver.refusal is what reads it, and this is the assertion
+	//    that the shape it reads is the shape a server sends.
+	_, serr := srv.client.Submit(t.Context(), sdserver.Job{
+		Prompt: "a paper boat",
+		Width:  labWidth, Height: labHeight,
+		Steps: labSteps,
+	}, sdserver.PreviewNone, 0)
+	if serr == nil {
+		t.Fatal("a server with no weights accepted a generation")
+	}
+	var api *sdserver.APIError
+	if !errors.As(serr, &api) {
+		t.Errorf("submit error does not carry the server's own refusal, so an "+
+			"operator reads JSON instead of a reason: %v", serr)
+	} else if api.Code != "model_not_loaded" || api.Message == "" {
+		t.Errorf("refusal = %+v, want a code and a message", *api)
+	}
+	t.Logf("a generation with no weights is refused: %v", serr)
+	if capture != "" {
+		code, body, rerr := labRequest(t, srv, http.MethodPost, "/sdcpp/v1/img_gen",
+			[]byte(`{"prompt":"a paper boat","width":64,"height":64}`))
+		if rerr != nil {
+			t.Fatalf("capturing the refusal: %v", rerr)
+		}
+		if code != http.StatusServiceUnavailable {
+			t.Errorf("a generation with no weights answered %d, want 503", code)
+		}
+		captureBody(t, filepath.Join(capture, "error_model_not_loaded.json"), body)
+	}
+
+	// 5. A load that fails, with the server still up to be asked about it.
+	load := fmt.Sprintf(`{"recipe":"sd1-checkpoint","models":{"model":%q}}`, labBadModel)
+	code, body, err := labRequest(t, srv, http.MethodPost, "/sdcpp/v1/models/load", []byte(load))
+	if err != nil {
+		t.Fatalf("asking the server to load a file that is not a model: %v", err)
+	}
+	if code == http.StatusOK {
+		t.Fatalf("the server loaded a file that is not a model: %s", body)
+	}
+	t.Logf("models/load answered %d: %s", code, strings.TrimSpace(string(body)))
+
+	last, err := sdserver.WaitModel(t.Context(), srv.client, 30*time.Second, io.Discard, testLogger(io.Discard))
+	if err == nil {
+		t.Fatalf("the weights became ready after a failed load (%v)", last)
+	}
+	var notReady *sdserver.NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("a failed load is not reported as a model that never loaded: %v", err)
+	}
+	// ONE poll, not thirty seconds of them. ModelError is a refusal and not a
+	// retry: a load that failed has already read what it was going to read,
+	// and waiting costs the whole timeout on a card that will never generate.
+	if notReady.Polls != 1 {
+		t.Errorf("polls = %d, want 1: a failed load must not be retried on a billing card",
+			notReady.Polls)
+	}
+	if notReady.Last != sdserver.ModelError {
+		t.Errorf("last state = %v, want error", notReady.Last)
+	}
+	// The server's own words reach the operator. An empty Message here is the
+	// failure this fixture exists to pin: NotReadyError would then print "last
+	// state error" and nothing about which file or why.
+	if notReady.Message == "" {
+		t.Error("the refusal carries no message, so the operator reads a state and no reason")
+	}
+	t.Logf("WaitModel refused after %d poll(s): %v", notReady.Polls, err)
+
+	// 6. THE JSON TYPE of that message, which is the thing nobody had
+	//    checked. mapModelStatus reads `error` as a *string, while a job's
+	//    error is read through decodeAPIError because it is an object. If a
+	//    loader failure ever spelled it the job's way, ember would not print a
+	//    worse message -- it would fail to decode the response at all and say
+	//    so about Go structs. This asserts against the bytes, because the
+	//    decoded struct cannot tell the two apart after the fact.
+	_, raw, err := labRequest(t, srv, http.MethodGet, "/sdcpp/v1/models/status", nil)
+	if err != nil {
+		t.Fatalf("reading the error status: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("the error status is not an object: %v", err)
+	}
+	if got := string(fields["error"]); !strings.HasPrefix(got, `"`) {
+		t.Errorf("models/status spells `error` as %s, and ember reads it as a string; "+
+			"a non-string there is a decode failure for the whole response rather than "+
+			"a worse message", got)
+	}
+	if capture != "" {
+		captureBody(t, filepath.Join(capture, "model_status_error.json"), raw)
+	}
+}
+
+// labFailingJob is a job every check ember has accepts and sd-server cannot
+// finish.
+//
+// WHY THIS ONE. A job failure had to be provoked without reaching around
+// Validate -- an escape hatch for a test is an escape hatch, which this
+// package decided once already for the RunPod mapper's sealed branch. So the
+// input is one ember's own types permit and its own validation passes: vae
+// tiling switched on with a one-pixel tile. ValidateStatic refuses a negative
+// tile and nothing else, because the server publishes no tile bound in
+// `limits`; Validate has no list to check it against. The server samples the
+// whole job and then fails in the decoder, where the tiles are used.
+//
+// It is left representable on purpose. A minimum of 32 is in this build's log
+// and in no response: refusing below it here would be reading a bound out of
+// an error string, which is the `allowedCudaVersions` mistake -- and it would
+// make the only honest route to a real failed job unreachable, trading
+// evidence for an invented limit.
+func labFailingJob() sdserver.Job {
+	return sdserver.Job{
+		Prompt: "a paper boat",
+		Width:  labWidth, Height: labHeight,
+		Steps:   labSteps,
+		Sampler: "euler",
+		Seed:    1234,
+		Output:  "boat",
+		Params: sdserver.Params{
+			VAETiling: sdserver.VAETiling{Enabled: true, TileSizeW: 1, TileSizeH: 1},
+		},
+	}
+}
+
+// TestPreview_AFailedJobCarriesTheObjectFormOfError replaces the last
+// job-lifecycle guess that matters.
+//
+// `job_failed.json` carried `{"code":"invalid_request","message":"width must
+// be a multiple of 16"}`, and both halves of that were invented: this build
+// has no `invalid_request` code anywhere in it, and it rounds a width it does
+// not like rather than refusing one. What a real failure says is
+// `{"code":"generation_failed","message":"generate_image returned no
+// results"}` -- the object form the fixture guessed right, around a code and a
+// sentence it guessed wrong.
+//
+// The combination is what a fixture cannot be reasoned into: an error object
+// beside `status: "failed"`, `result: null`, `cancel_requested: false` and a
+// `started` the guess did not have. It is the mirror of what the cancel
+// capture found -- an error object beside a status that is *not* a failure,
+// which made every successful cancel read as a crash -- and the two together
+// are why the status is read before the error rather than after.
+func TestPreview_AFailedJobCarriesTheObjectFormOfError(t *testing.T) {
+	l := harness.New(t)
+	srv := startLabServer(t, l)
+
+	caps, err := srv.client.Capabilities(t.Context())
+	if err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
+	job := labFailingJob()
+	// Both of ember's refusals pass it, which is the point: no bypass was
+	// needed and none was added. If a later Validate learns to refuse this,
+	// this lab fails here and says what it was for.
+	if err := sdserver.ValidateStatic(job, sdserver.PreviewProj, 1); err != nil {
+		t.Fatalf("the failing job is refused by ValidateStatic, so it no longer provokes "+
+			"a server-side failure: %v", err)
+	}
+	if err := sdserver.Validate(job, caps); err != nil {
+		t.Fatalf("the failing job is refused by Validate, so it no longer provokes "+
+			"a server-side failure: %v", err)
+	}
+
+	id, err := srv.client.Submit(t.Context(), job, sdserver.PreviewProj, 1)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	obs := pollToCompletion(t, srv, id)
+
+	// 1. It failed, and it is not a cancel. The two carry the same-shaped
+	//    error object and differ only in the status, so a client reading the
+	//    error first cannot tell them apart -- which is exactly what
+	//    app.runJobs did until a real cancel was captured.
+	if obs.final.Status != sdserver.StatusFailed {
+		t.Fatalf("status = %v, want failed (err: %v)", obs.final.Status, obs.final.Err)
+	}
+
+	// 2. The server's own reason reached ember, as an object.
+	if obs.final.Err == nil {
+		t.Fatal("a failed job carried no error: the operator is told a generation failed " +
+			"and nothing about why")
+	}
+	if obs.final.Err.Code == "" || obs.final.Err.Message == "" {
+		t.Errorf("err = %+v, want both a code and a message", *obs.final.Err)
+	}
+
+	// 3. Nothing was produced. A failed job that carried images would mean
+	//    ember writing a partial result to disk under the name the operator
+	//    asked for.
+	if len(obs.final.Images) != 0 {
+		t.Errorf("a failed job came back with %d image(s)", len(obs.final.Images))
+	}
+
+	t.Logf("a real failed job says: %v (after %d polls, %d preview frames)",
+		obs.final.Err, obs.polls, len(obs.previews))
+}
+
+// firstErrorLine picks the loader's first [E] line out of a server's stderr.
+//
+// For the log line only: the whole stderr is in the assertion's message when
+// something is wrong, and a one-line summary is what a passing lab should
+// print.
+func firstErrorLine(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "[E]") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return strings.TrimSpace(stderr)
+}
+
 // TestPreview_TheServerListensOnLoopbackOnly closes a deferral that was
 // recorded rather than quietly skipped.
 //
@@ -462,8 +817,20 @@ type labServer struct {
 // A lab that dialled the port itself would be proving that this file works.
 func startLabServer(t *testing.T, l *harness.Lab) labServer {
 	t.Helper()
+	n, client := labNodeAndDialer(t, l, "preview")
+	return startServerOn(t, n, client, []string{"sd-server", "--model", labModel}, true)
+}
 
-	n := mintAndStartImage(t, l, "preview", sdImageUnderTest(t))
+// labNodeAndDialer brings a node up and opens the connection to it.
+//
+// Split out of startLabServer because the failure labs below need the node
+// before the server: one of them runs a doomed sd-server that exits instead of
+// listening, and then a second one on the same node. A node per server would
+// pay for an image start and an SSH handshake to prove a thing about a process.
+func labNodeAndDialer(t *testing.T, l *harness.Lab, name string) (labNode, *sshdial.Client) {
+	t.Helper()
+
+	n := mintAndStartImage(t, l, name, sdImageUnderTest(t))
 
 	trust, err := hostkey.Pinned(fingerprintOf(t, n.Pair))
 	if err != nil {
@@ -474,8 +841,18 @@ func startLabServer(t *testing.T, l *harness.Lab) labServer {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	return n, client
+}
 
-	argv, err := sdserver.ServeCommand([]string{"sd-server", "--model", labModel})
+// startServerOn runs one sd-server on an existing node and waits for its port.
+//
+// waitModel is false for a server started with no weights at all, which is
+// what the load-failure lab needs: WaitModel would sit on `empty` until its
+// timeout, and `empty` is the state that lab is there to assert.
+func startServerOn(t *testing.T, n labNode, client *sshdial.Client, serve []string, waitModel bool) labServer {
+	t.Helper()
+
+	argv, err := sdserver.ServeCommand(serve)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,8 +909,10 @@ func startLabServer(t *testing.T, l *harness.Lab) labServer {
 	}
 
 	c := sdserver.New(client.DialContext)
-	if _, err := sdserver.WaitModel(t.Context(), c, 5*time.Minute, io.Discard, testLogger(io.Discard)); err != nil {
-		t.Fatalf("the model never became ready: %v", err)
+	if waitModel {
+		if _, err := sdserver.WaitModel(t.Context(), c, 5*time.Minute, io.Discard, testLogger(io.Discard)); err != nil {
+			t.Fatalf("the model never became ready: %v", err)
+		}
 	}
 	return labServer{node: n, client: c, dialer: client}
 }
@@ -618,27 +997,60 @@ func captureDir(t *testing.T) string {
 func captureRaw(t *testing.T, srv labServer, id, path string) {
 	t.Helper()
 
+	_, body, err := labRequest(t, srv, http.MethodGet, "/sdcpp/v1/jobs/"+id, nil)
+	if err != nil {
+		t.Logf("capture %s: %v", path, err)
+		return
+	}
+	captureBody(t, path, body)
+}
+
+// labRequest sends one request to sd-server over the SSH channel and hands
+// back the status and the body exactly as they arrived.
+//
+// It exists for two things ember's own client cannot do and should not learn
+// to: reading the *bytes* of a response -- a fixture is evidence about what
+// the server sent, and a decoded struct is evidence about what ember made of
+// it -- and reaching `POST /sdcpp/v1/models/load`, which ember never calls
+// because it hands the weights to sd-server as argv. Widening sdserver.Client
+// for either would be a production interface shaped by a test's convenience,
+// the rule that kept stdin off sshx.Runner.
+func labRequest(t *testing.T, srv labServer, method, path string, body []byte) (int, []byte, error) {
+	t.Helper()
+
 	hc := &http.Client{Transport: &http.Transport{DialContext: srv.dialer.DialContext}}
-	url := fmt.Sprintf("http://127.0.0.1:%d/sdcpp/v1/jobs/%s", sdserver.Port, id)
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", sdserver.Port, path)
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), method, url, rdr)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		t.Logf("capture %s: %v", path, err)
-		return
+		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Logf("capture %s: %v", path, err)
-		return
+		return resp.StatusCode, nil, err
 	}
+	return resp.StatusCode, raw, nil
+}
 
-	// Indented so the committed fixture is readable in a diff. The base64
-	// bodies stay as they arrived -- a fixture with the image stripped out
-	// would not exercise the decode that the stripping hid.
+// captureBody writes one observed response under a fixture's name.
+//
+// Indented so the committed fixture is readable in a diff. The base64 bodies
+// stay as they arrived -- a fixture with the image stripped out would not
+// exercise the decode that the stripping hid.
+func captureBody(t *testing.T, path string, body []byte) {
+	t.Helper()
+
 	var pretty any
 	if err := json.Unmarshal(body, &pretty); err == nil {
 		if out, err := json.MarshalIndent(pretty, "", "  "); err == nil {

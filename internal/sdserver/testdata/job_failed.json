@@ -1,13 +1,15 @@
 {
-  "id": "job_7f3a",
+  "cancel_requested": false,
+  "completed": 1793651648530,
+  "created": 1793651647470,
+  "error": {
+    "code": "generation_failed",
+    "message": "generate_image returned no results"
+  },
+  "id": "job_1a19df823ee_00000000",
   "kind": "img_gen",
-  "status": "failed",
-  "created": 1762000000,
-  "completed": 1762000002,
   "queue_position": 0,
   "result": null,
-  "error": {
-    "code": "invalid_request",
-    "message": "width must be a multiple of 16"
-  }
+  "started": 1793651647471,
+  "status": "failed"
 }
