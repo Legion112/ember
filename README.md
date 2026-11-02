@@ -385,6 +385,7 @@ make lint
 make cover-check
 make test-integration   # Docker labs; needs a working Docker daemon
 make test-preview-lab   # the served path against a real sd-server, no GPU
+make reap-labs          # clear every ember-labelled object off the daemon
 ```
 
 `make test-preview-lab` is the one that watches a generation happen. It starts
@@ -414,6 +415,19 @@ sshd, a real SSH handshake against a pinned host key, a real forward, and a
 find. Nothing in them skips — a missing daemon or image is a hard failure
 naming the command that fixes it, because a lab that skips itself reports
 success for a security control that never ran.
+
+**One suite at a time per Docker daemon.** A lab's cleanup removes every
+ember-labelled container, network and volume the run produced — found by the
+label rather than by a list the harness kept, which is what catches the leaked
+bridge network nobody thought to look for. Two checkouts on one machine used to
+make that a whole-daemon delete and destroyed each other's nodes mid-test, so a
+suite now takes an advisory lock on the daemon: a second one waits, says who it
+is waiting for, and after ten minutes fails naming the process that is holding
+it. Anything ember-labelled that was *already* on the daemon when the lock was
+taken is left strictly alone — not counted, not reported, not removed — so a
+container you started by hand, or one a `SIGKILL`ed lab left yesterday,
+survives the suite. `make reap-labs` is what clears those; it refuses while a
+suite holds the lock.
 
 Go 1.27. The Makefile prefers `~/sdk/go1.27.0` when present so the compiler
 cannot drift from what `go.mod` declares.

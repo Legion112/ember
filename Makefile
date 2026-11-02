@@ -126,7 +126,12 @@ GO_LDFLAGS := -X github.com/Legion112/ember/internal/cli.Version=$(VERSION)
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
 COVER_PKGS := internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99
-COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,internal/dockerengine/dockerclient
+# cmd/reap-labs joins the other cmd mains here for their reason and one of its
+# own: every statement in it is a Docker call or a line of output, the decisions
+# it could get wrong live in test/integration/harness/labdaemon, and a unit test
+# for it would have to be given a daemon to delete things on -- which is a lab,
+# gated twice, and not the `go test ./...` the gate runs.
+COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/check-coverage,cmd/reap-labs,internal/dockerengine/dockerclient
 # internal/assets is below the rest because the paths it cannot reach are
 # filesystem failures with no portable way to provoke: a rename that fails
 # after the digest matched, a chmod that fails after the rename, a close that
@@ -182,7 +187,19 @@ COVER_OVERALL := 94
 # labs and a rented pod run the same bytes.
 LAB_IMAGE := ember:lab
 
-.PHONY: all build web web-check web-test test-serve-lab test test-race cover cover-check vet fmt lint docker-build test-integration test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
+# Where a lab target's output is kept, so the `--- SKIP` gate can read it back.
+#
+# Keyed to this checkout, because it used to be four fixed paths under /tmp and
+# two worktrees of this repository on one machine share those. `tee` truncates
+# the file as the second run starts, so the first run's
+# `grep -- '--- SKIP'` then greps a log belonging to somebody else -- and what
+# it is asserting is that no lab reported success for something that never ran.
+# Same shape as AssertNoStray reading a daemon another run had emptied, and the
+# same reason the lab lock exists: several checkouts on one machine is now the
+# normal way this is developed.
+LAB_LOG_DIR := /tmp/ember-labs-$(notdir $(CURDIR))
+
+.PHONY: all build web web-check web-test test-serve-lab test test-race cover cover-check vet fmt lint docker-build test-integration reap-labs test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
 
 all: fmt vet test build
 
@@ -429,10 +446,11 @@ test-image-labs:
 	@docker image inspect $(SD_CUDA_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(SD_CUDA_IMAGE) is missing. Build it with:"; \
 		echo "  make workload-sd-cuda CUDA_ARCH=$(CUDA_ARCH)"; exit 1; }
+	@mkdir -p $(LAB_LOG_DIR)
 	EMBER_SD_CUDA_IMAGE=$(SD_CUDA_IMAGE) EMBER_CUDA_ARCH=$(CUDA_ARCH) \
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
-		-run 'TestWorkloadImage_' | tee /tmp/ember-image-labs-sm$(CUDA_ARCH).log
-	@if grep -q -- '--- SKIP' /tmp/ember-image-labs-sm$(CUDA_ARCH).log; then \
+		-run 'TestWorkloadImage_' | tee $(LAB_LOG_DIR)/image-labs-sm$(CUDA_ARCH).log
+	@if grep -q -- '--- SKIP' $(LAB_LOG_DIR)/image-labs-sm$(CUDA_ARCH).log; then \
 		echo "a lab skipped itself"; exit 1; fi
 
 # The served path against a real sd-server, including the progress stream.
@@ -456,10 +474,11 @@ test-preview-lab:
 	@docker image inspect $(SD_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(SD_IMAGE) is missing. Build it with:"; \
 		echo "  make workload-sd MODEL=/path/to/a.gguf"; exit 1; }
+	@mkdir -p $(LAB_LOG_DIR)
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v \
 		-timeout 25m ./test/integration/... \
-		-run 'TestPreview_' | tee /tmp/ember-preview-lab.log
-	@if grep -q -- '--- SKIP' /tmp/ember-preview-lab.log; then \
+		-run 'TestPreview_' | tee $(LAB_LOG_DIR)/preview-lab.log
+	@if grep -q -- '--- SKIP' $(LAB_LOG_DIR)/preview-lab.log; then \
 		echo "a lab skipped itself"; exit 1; fi
 
 # `ember serve` end to end: one rental drained by a queue, and the real UI in
@@ -485,10 +504,11 @@ test-serve-lab: web
 	@docker image inspect $(LAB_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(LAB_IMAGE) is missing. Build it with:"; \
 		echo "  make docker-build"; exit 1; }
+	@mkdir -p $(LAB_LOG_DIR)
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v \
 		-timeout 30m ./test/integration/... \
-		-run 'TestServe_' | tee /tmp/ember-serve-lab.log
-	@if grep -q -- '--- SKIP' /tmp/ember-serve-lab.log; then \
+		-run 'TestServe_' | tee $(LAB_LOG_DIR)/serve-lab.log
+	@if grep -q -- '--- SKIP' $(LAB_LOG_DIR)/serve-lab.log; then \
 		echo "a lab skipped itself"; exit 1; fi
 
 # The labs a publish must pass, named once so CI and a laptop run the same set.
@@ -512,10 +532,11 @@ test-image-labs-publish:
 	@docker image inspect $(LAB_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(LAB_IMAGE) is missing. Build it with:"; \
 		echo "  make docker-build"; exit 1; }
+	@mkdir -p $(LAB_LOG_DIR)
 	EMBER_SD_CUDA_IMAGE=$(SD_CUDA_IMAGE) EMBER_CUDA_ARCH=$(CUDA_ARCH) \
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
-		-run $(PUBLISH_LABS) | tee /tmp/ember-publish-labs-sm$(CUDA_ARCH).log
-	@if grep -q -- '--- SKIP' /tmp/ember-publish-labs-sm$(CUDA_ARCH).log; then \
+		-run $(PUBLISH_LABS) | tee $(LAB_LOG_DIR)/publish-labs-sm$(CUDA_ARCH).log
+	@if grep -q -- '--- SKIP' $(LAB_LOG_DIR)/publish-labs-sm$(CUDA_ARCH).log; then \
 		echo "a lab skipped itself"; exit 1; fi
 
 # Publishing the CUDA image from this machine, as an equal of the CI workflow.
@@ -574,6 +595,18 @@ print-%:
 # a missing image is a hard failure naming the command that fixes it.
 test-integration: docker-build
 	EMBER_INTEGRATION=1 $(GO) test -tags=integration -count=1 -timeout 20m -v ./test/integration/...
+
+# Clear every ember-labelled object off the local daemon.
+#
+# A developer tool and not an assertion, which is why it is a target of its own
+# and why nothing in CI calls it. The labs used to do this implicitly -- each
+# one's cleanup force-removed every ember-labelled container, network and
+# volume on the daemon, which is why two suites at once deleted each other's
+# live nodes. They now leave alone whatever was there before the suite started,
+# so a container from a run that was SIGKILLed yesterday survives, and this is
+# how it goes. It refuses while a suite holds the lab lock.
+reap-labs:
+	$(GO) run ./cmd/reap-labs
 
 clean:
 	rm -rf $(BIN) $(COVERPROFILE)
