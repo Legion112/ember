@@ -14,7 +14,9 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::api;
-use crate::model::{Config, Envelope, Job, NewRequest, Offers, Progress, Request, RequestList};
+use crate::model::{
+    Config, Envelope, Hires, Job, NewRequest, Offers, Progress, Request, RequestList, VaeTiling,
+};
 
 /// App is the whole page.
 #[component]
@@ -514,6 +516,287 @@ fn JobForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
                  cannot be checked until the first rental."
             </p>
         </Show>
+
+        // COLLAPSED, because the five rows above are the whole job on almost
+        // every run and a panel that opens with thirty controls is a panel
+        // nobody reads. Everything in here is optional and unset by default:
+        // an untouched advanced section posts exactly the body it posted
+        // before this section existed.
+        <details>
+            <summary>"advanced"</summary>
+            <AdvancedForm config=config draft=draft/>
+        </details>
+    }
+}
+
+/// AdvancedForm is the optional parameters.
+///
+/// Its own component rather than more markup in JobForm, because JobForm was
+/// already the longest view here and these controls share nothing with the
+/// ones above except the draft they write to.
+///
+/// WHAT IS NOT HERE. `strength`, `img_cfg`, `control_strength`,
+/// `ip_adapter_strength` and `increase_ref_index` all need an image input,
+/// which this UI has no way to supply -- the API takes images as base64 in
+/// the request body and there is no upload route. A control that cannot
+/// affect the generation reads as working, which is worse than its absence.
+/// `cache_mode`, `scm_mask`, `qwen_image_layers` and the two `custom_sigmas`
+/// are absent because nothing here knows their value sets; they stay
+/// reachable from `ember.yaml`'s `extra`.
+#[component]
+fn AdvancedForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
+    view! {
+        <div class="row">
+            <label><Help text="clip skip" title="How many of the text encoder's last layers to skip. Many SD1.5 finetunes are trained for 2. Empty leaves the model's own default, which is not 0 -- so an empty box and a 0 are different requests and ember sends them differently."/>
+                <input type="number" placeholder="model"
+                    prop:value=move || shown(draft.get().clip_skip)
+                    on:input=move |ev| draft.update(|j| j.clip_skip = numo(&ev))
+                />
+            </label>
+            <label><Help text="eta" title="Noise added back at each step by the ancestral samplers. 0 is the deterministic path and a real value, so empty means 'leave it to the server' and 0 does not."/>
+                <input type="number" step="0.01" placeholder="server"
+                    prop:value=move || shown(draft.get().eta)
+                    on:input=move |ev| draft.update(|j| j.eta = numfo(&ev))
+                />
+            </label>
+            <label><Help text="flow shift" title="Shifts the flow-matching timestep schedule, which the rectified-flow models (FLUX, SD3) use. Empty leaves the server's own, which is not 0."/>
+                <input type="number" step="0.1" placeholder="server"
+                    prop:value=move || shown(draft.get().flow_shift)
+                    on:input=move |ev| draft.update(|j| j.flow_shift = numfo(&ev))
+                />
+            </label>
+            <label><Help text="shifted timestep" title="Offsets the timestep the sampler starts from. The server's own default is 0, so here 0 and empty mean the same thing."/>
+                <input type="number"
+                    prop:value=move || draft.get().shifted_timestep
+                    on:input=move |ev| draft.update(|j| j.shifted_timestep = num(&ev))
+                />
+            </label>
+        </div>
+
+        <div class="row">
+            <label>
+                <Help text="format" title="The image format the server encodes in. The menu is the server's own list, and a name outside it is refused at enqueue rather than after a rental."/>
+                {move || match config.get().caps {
+                    Some(c) if !c.output_formats.is_empty() => view! {
+                        <select on:change=move |ev| draft.update(|j| j.output_format = event_target_value(&ev))>
+                            <option value="">"default"</option>
+                            <For each=move || c.output_formats.clone() key=|s| s.clone() let:s>
+                                <option value=s.clone()>{s.clone()}</option>
+                            </For>
+                        </select>
+                    }.into_any(),
+                    _ => view! {
+                        <input placeholder="png"
+                            prop:value=move || draft.get().output_format
+                            on:input=move |ev| draft.update(|j| j.output_format = event_target_value(&ev))
+                        />
+                    }.into_any(),
+                }}
+            </label>
+            <label><Help text="compression" title="Quality for jpeg and webp, 1 to 100. png ignores it. 0 leaves the server's default of 100."/>
+                <input type="number" min="0" max="100"
+                    prop:value=move || draft.get().output_compression
+                    on:input=move |ev| draft.update(|j| j.output_compression = num(&ev))
+                />
+            </label>
+        </div>
+
+        // Each block is gated on its own switch and sent only when the switch
+        // is on. Unchecking it removes the whole object from the request
+        // rather than sending it with enabled false, so what is on screen and
+        // what is on the wire cannot disagree.
+        <div class="row">
+            <label><Help text="hires pass" title="Generates at a smaller size and then re-samples at a larger one, which is how a detailed large image is made without sampling the whole thing at full size. Turning it on with nothing else set uses the server's own scale and denoising."/>
+                <input type="checkbox"
+                    prop:checked=move || draft.get().hires.is_some()
+                    on:change=move |ev| {
+                        let on = event_target_checked(&ev);
+                        draft.update(|j| j.hires = if on {
+                            Some(Hires { enabled: true, ..Default::default() })
+                        } else {
+                            None
+                        });
+                    }
+                />
+            </label>
+        </div>
+        <Show when=move || draft.get().hires.is_some()>
+            <div class="row">
+                <label>
+                    <Help text="upscaler" title="How the smaller image is enlarged before the second pass. The menu is the server's own list: a model-backed upscaler resolves to a file in the server's upscaler directory, so a name it did not publish is refused here rather than being passed to a path join on the node."/>
+                    {move || match config.get().caps {
+                        Some(c) if !c.upscalers.is_empty() => view! {
+                            <select on:change=move |ev| {
+                                let v = event_target_value(&ev);
+                                draft.update(|j| if let Some(h) = j.hires.as_mut() { h.upscaler = v });
+                            }>
+                                <option value="">"default"</option>
+                                <For each=move || c.upscalers.clone() key=|s| s.clone() let:s>
+                                    <option value=s.clone()>{s.clone()}</option>
+                                </For>
+                            </select>
+                        }.into_any(),
+                        _ => view! {
+                            <input placeholder="Latent"
+                                on:input=move |ev| {
+                                    let v = event_target_value(&ev);
+                                    draft.update(|j| if let Some(h) = j.hires.as_mut() { h.upscaler = v });
+                                }
+                            />
+                        }.into_any(),
+                    }}
+                </label>
+                <label><Help text="scale" title="How much larger the second pass is. 2 doubles each side, so it samples four times the area. 0 leaves the server's default of 2."/>
+                    <input type="number" step="0.1"
+                        prop:value=move || draft.get().hires.map(|h| h.scale).unwrap_or_default()
+                        on:input=move |ev| { let v = numf(&ev);
+                            draft.update(|j| if let Some(h) = j.hires.as_mut() { h.scale = v }); }
+                    />
+                </label>
+                <label><Help text="hires steps" title="Sampling steps for the second pass. 0 leaves it to the server. This is paid on top of the first pass, so it is a second helping of the main price knob."/>
+                    <input type="number"
+                        prop:value=move || draft.get().hires.map(|h| h.steps).unwrap_or_default()
+                        on:input=move |ev| { let v = num(&ev);
+                            draft.update(|j| if let Some(h) = j.hires.as_mut() { h.steps = v }); }
+                    />
+                </label>
+                <label><Help text="denoising" title="How much of the enlarged image the second pass is allowed to rewrite, 0 to 1. Low keeps the composition and adds detail; high reinvents it. 0 leaves the server's default of 0.7."/>
+                    <input type="number" step="0.05" min="0" max="1"
+                        prop:value=move || draft.get().hires.map(|h| h.denoising_strength).unwrap_or_default()
+                        on:input=move |ev| { let v = numf(&ev);
+                            draft.update(|j| if let Some(h) = j.hires.as_mut() { h.denoising_strength = v }); }
+                    />
+                </label>
+                <label><Help text="target w" title="An explicit second-pass width instead of a scale. Checked against the server's own limits before anything is rented. 0 means use the scale."/>
+                    <input type="number"
+                        prop:value=move || draft.get().hires.map(|h| h.target_width).unwrap_or_default()
+                        on:input=move |ev| { let v = num(&ev);
+                            draft.update(|j| if let Some(h) = j.hires.as_mut() { h.target_width = v }); }
+                    />
+                </label>
+                <label><Help text="target h" title="An explicit second-pass height instead of a scale. 0 means use the scale."/>
+                    <input type="number"
+                        prop:value=move || draft.get().hires.map(|h| h.target_height).unwrap_or_default()
+                        on:input=move |ev| { let v = num(&ev);
+                            draft.update(|j| if let Some(h) = j.hires.as_mut() { h.target_height = v }); }
+                    />
+                </label>
+                <label><Help text="tile" title="Tile size for a model-backed upscaler, which lets it enlarge an image larger than its own working size. 0 leaves the server's default."/>
+                    <input type="number"
+                        prop:value=move || draft.get().hires.map(|h| h.upscale_tile_size).unwrap_or_default()
+                        on:input=move |ev| { let v = num(&ev);
+                            draft.update(|j| if let Some(h) = j.hires.as_mut() { h.upscale_tile_size = v }); }
+                    />
+                </label>
+            </div>
+        </Show>
+
+        <div class="row">
+            <label><Help text="vae tiling" title="Decodes the latent in overlapping tiles instead of all at once, which is how a large image fits in VRAM that could not hold the whole decode. Costs a little time and can leave faint seams."/>
+                <input type="checkbox"
+                    prop:checked=move || draft.get().vae_tiling.is_some()
+                    on:change=move |ev| {
+                        let on = event_target_checked(&ev);
+                        draft.update(|j| j.vae_tiling = if on {
+                            Some(VaeTiling { enabled: true, ..Default::default() })
+                        } else {
+                            None
+                        });
+                    }
+                />
+            </label>
+        </div>
+        <Show when=move || draft.get().vae_tiling.is_some()>
+            <div class="row">
+                <label><Help text="tile w" title="Tile width for the decode, in latent units. 0 leaves the server's own."/>
+                    <input type="number"
+                        prop:value=move || draft.get().vae_tiling.map(|t| t.tile_size_w).unwrap_or_default()
+                        on:input=move |ev| { let v = num(&ev);
+                            draft.update(|j| if let Some(t) = j.vae_tiling.as_mut() { t.tile_size_w = v }); }
+                    />
+                </label>
+                <label><Help text="tile h" title="Tile height for the decode, in latent units. 0 leaves the server's own."/>
+                    <input type="number"
+                        prop:value=move || draft.get().vae_tiling.map(|t| t.tile_size_h).unwrap_or_default()
+                        on:input=move |ev| { let v = num(&ev);
+                            draft.update(|j| if let Some(t) = j.vae_tiling.as_mut() { t.tile_size_h = v }); }
+                    />
+                </label>
+                <label><Help text="overlap" title="How much neighbouring tiles share, 0 to 1. More overlap hides the seams and costs more decode. 0 leaves the server's default of 0.5."/>
+                    <input type="number" step="0.05" min="0" max="1"
+                        prop:value=move || draft.get().vae_tiling.map(|t| t.target_overlap).unwrap_or_default()
+                        on:input=move |ev| { let v = numf(&ev);
+                            draft.update(|j| if let Some(t) = j.vae_tiling.as_mut() { t.target_overlap = v }); }
+                    />
+                </label>
+                <label><Help text="rel w" title="Tile width as a fraction of the image rather than an absolute size, 0 to 1. 0 means use the absolute tile width."/>
+                    <input type="number" step="0.05" min="0" max="1"
+                        prop:value=move || draft.get().vae_tiling.map(|t| t.rel_size_w).unwrap_or_default()
+                        on:input=move |ev| { let v = numf(&ev);
+                            draft.update(|j| if let Some(t) = j.vae_tiling.as_mut() { t.rel_size_w = v }); }
+                    />
+                </label>
+                <label><Help text="rel h" title="Tile height as a fraction of the image, 0 to 1. 0 means use the absolute tile height."/>
+                    <input type="number" step="0.05" min="0" max="1"
+                        prop:value=move || draft.get().vae_tiling.map(|t| t.rel_size_h).unwrap_or_default()
+                        on:input=move |ev| { let v = numf(&ev);
+                            draft.update(|j| if let Some(t) = j.vae_tiling.as_mut() { t.rel_size_h = v }); }
+                    />
+                </label>
+            </div>
+        </Show>
+
+        // Scale is the switch here rather than a checkbox, because upstream's
+        // own "off" IS a zero scale: a checkbox would be a second way to say
+        // the same thing and the two could disagree.
+        <div class="row">
+            <label><Help text="slg scale" title="Skip-layer guidance: re-runs some of the model's own layers with their output suppressed and pushes away from it. Scale is the switch -- 0 is off, and ember sends no skip-layer block at all, so the layers below do nothing until this is set."/>
+                <input type="number" step="0.1"
+                    prop:value=move || draft.get().slg.map(|s| s.scale).unwrap_or_default()
+                    on:input=move |ev| {
+                        let v = numf(&ev);
+                        draft.update(|j| {
+                            if v == 0.0 {
+                                j.slg = None;
+                            } else {
+                                j.slg.get_or_insert_with(Default::default).scale = v;
+                            }
+                        });
+                    }
+                />
+            </label>
+        </div>
+        <Show when=move || draft.get().slg.is_some()>
+            <div class="row">
+                <label><Help text="slg layers" title="Which of the model's layers to skip, as a comma-separated list. Upstream's own default is 7,8,9. Which layers help is model-specific and found by trying."/>
+                    <input placeholder="7,8,9"
+                        on:input=move |ev| { let v = layers(&ev);
+                            draft.update(|j| if let Some(s) = j.slg.as_mut() { s.layers = v }); }
+                    />
+                </label>
+                <label><Help text="layer start" title="When in sampling the skipping begins, as a fraction of the run, 0 to 1. Upstream's default is 0.01."/>
+                    <input type="number" step="0.01" min="0" max="1"
+                        prop:value=move || draft.get().slg.map(|s| s.layer_start).unwrap_or_default()
+                        on:input=move |ev| { let v = numf(&ev);
+                            draft.update(|j| if let Some(s) = j.slg.as_mut() { s.layer_start = v }); }
+                    />
+                </label>
+                <label><Help text="layer end" title="When the skipping stops, as a fraction of the run, 0 to 1. Upstream's default is 0.2. A start after the end is refused before anything is rented."/>
+                    <input type="number" step="0.01" min="0" max="1"
+                        prop:value=move || draft.get().slg.map(|s| s.layer_end).unwrap_or_default()
+                        on:input=move |ev| { let v = numf(&ev);
+                            draft.update(|j| if let Some(s) = j.slg.as_mut() { s.layer_end = v }); }
+                    />
+                </label>
+            </div>
+        </Show>
+
+        <p class="hint">
+            "An image input -- img2img, inpainting, ControlNet, IP-Adapter -- and LoRA
+             are not here: the API takes images as base64 in the request body and ember
+             has no upload route yet. They are reachable from "<code>"ember.yaml"</code>
+            "'s "<code>"extra"</code>", which a request may not set."
+        </p>
     }
 }
 
@@ -816,6 +1099,43 @@ fn num64(ev: &leptos::ev::Event) -> i64 {
 
 fn numf(ev: &leptos::ev::Event) -> f64 {
     event_target_value(ev).trim().parse().unwrap_or(0.0)
+}
+
+/// numo and numfo read a field whose zero is a real value.
+///
+/// An empty box is None and is not sent at all; a box holding 0 is Some(0) and
+/// is. clip_skip and eta both default to something other than zero on the
+/// server -- -1 and null -- so collapsing "empty" into 0 the way `num` does
+/// would turn "leave it alone" into an instruction. Unparseable is None rather
+/// than 0 for the same reason: a half-typed "-" must not post a value.
+fn numo(ev: &leptos::ev::Event) -> Option<i32> {
+    event_target_value(ev).trim().parse().ok()
+}
+
+fn numfo(ev: &leptos::ev::Event) -> Option<f64> {
+    event_target_value(ev).trim().parse().ok()
+}
+
+/// layers reads a comma-separated list of layer indices.
+///
+/// Unparseable entries are dropped rather than refused, because this is typed
+/// into live: "7,8," while adding a ninth is a normal intermediate state and
+/// clearing the field on every keystroke would make it impossible to use. The
+/// server checks the result, and so does ember before anything is rented.
+fn layers(ev: &leptos::ev::Event) -> Vec<i32> {
+    event_target_value(ev)
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect()
+}
+
+/// shown turns an optional number back into a box's contents.
+///
+/// An empty string for None, so the control reads as "not set" rather than as
+/// a 0 the operator did not type -- which would then be posted on the next
+/// edit to any other field.
+fn shown<T: std::fmt::Display>(v: Option<T>) -> String {
+    v.map(|v| v.to_string()).unwrap_or_default()
 }
 
 /// urlish escapes the few characters a GPU name or a provider could carry.

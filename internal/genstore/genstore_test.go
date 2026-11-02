@@ -2,10 +2,12 @@ package genstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -828,4 +830,192 @@ func seqOf(es []report.Event) int64 {
 		return 0
 	}
 	return es[0].Seq
+}
+
+// A version-1 file is brought forward rather than broken.
+//
+// THIS IS THE BUG THE MIGRATION LIST EXISTS FOR, and it was latent for the
+// life of the schema: migrate refused a file from the future and did nothing
+// at all about a file from the past, because the schema is
+// `CREATE TABLE IF NOT EXISTS` -- a no-op against a table that already
+// exists. So the first column ever added would have been absent from every
+// database written before it, Open would have succeeded, the version check
+// would have passed, and the failure would have arrived as
+// "table jobs has no column named params" the next time an operator queued a
+// request, with their whole history in a file ember could no longer write to.
+//
+// Built by hand as a version-1 file rather than by checking out the old code,
+// because what has to be proved is that TODAY'S ember reads YESTERDAY'S file.
+func TestOpen_MigratesAVersionOneFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, FileName)
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The version-1 schema, as it was: jobs with no params column. Only the
+	// tables this test touches, since the rest were unchanged.
+	for _, stmt := range []string{
+		`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO meta (key, value) VALUES ('schema_version', '1')`,
+		`CREATE TABLE requests (
+			id TEXT PRIMARY KEY, created_unix INTEGER NOT NULL, status TEXT NOT NULL,
+			provider TEXT NOT NULL, gpu TEXT NOT NULL DEFAULT '', offer TEXT NOT NULL DEFAULT '',
+			ttl_ns INTEGER NOT NULL, max_hourly INTEGER NOT NULL DEFAULT 0,
+			max_run INTEGER NOT NULL DEFAULT 0, preview TEXT NOT NULL DEFAULT '',
+			preview_every INTEGER NOT NULL DEFAULT 0, run_id TEXT NOT NULL DEFAULT '',
+			node TEXT NOT NULL DEFAULT '', started_unix INTEGER NOT NULL DEFAULT 0,
+			ended_unix INTEGER NOT NULL DEFAULT 0, cost INTEGER NOT NULL DEFAULT 0,
+			err TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE jobs (
+			req TEXT NOT NULL, idx INTEGER NOT NULL, prompt TEXT NOT NULL DEFAULT '',
+			negative TEXT NOT NULL DEFAULT '', width INTEGER NOT NULL DEFAULT 0,
+			height INTEGER NOT NULL DEFAULT 0, steps INTEGER NOT NULL DEFAULT 0,
+			batch_count INTEGER NOT NULL DEFAULT 0, seed INTEGER NOT NULL DEFAULT 0,
+			sampler TEXT NOT NULL DEFAULT '', scheduler TEXT NOT NULL DEFAULT '',
+			cfg REAL NOT NULL DEFAULT 0, guidance REAL NOT NULL DEFAULT 0,
+			output TEXT NOT NULL DEFAULT '', PRIMARY KEY (req, idx))`,
+		`CREATE TABLE events (req TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
+			body TEXT NOT NULL, PRIMARY KEY (req, seq))`,
+		`CREATE TABLE images (req TEXT NOT NULL, job INTEGER NOT NULL, idx INTEGER NOT NULL,
+			preview INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL,
+			bytes INTEGER NOT NULL DEFAULT 0, at_unix INTEGER NOT NULL,
+			PRIMARY KEY (req, job, idx, preview))`,
+		// A request already in the file, so the migration has to preserve
+		// history rather than merely succeed against an empty table.
+		`INSERT INTO requests (id, created_unix, status, provider, ttl_ns)
+			VALUES ('old1', 1000, 'queued', 'local', 600000000000)`,
+		`INSERT INTO jobs (req, idx, prompt, steps) VALUES ('old1', 1, 'an older cat', 12)`,
+		// A capability cache written by the old code: complete for what it
+		// knew about and silent about the two lists added with this version.
+		`INSERT INTO meta (key, value) VALUES ('caps',
+			'{"Model":"sd15.gguf","Samplers":["euler"],"Schedulers":["karras"]}')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed a version-1 file: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("a version-1 file was refused: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// The version moved.
+	var v string
+	if err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != fmt.Sprint(schemaVersion) {
+		t.Errorf("schema version = %q, want %d", v, schemaVersion)
+	}
+
+	// The old request is still there, and reads with an empty Params rather
+	// than failing to decode the column's default.
+	got, err := s.Get(context.Background(), "old1")
+	if err != nil {
+		t.Fatalf("the migrated file lost its history: %v", err)
+	}
+	if len(got.Jobs) != 1 || got.Jobs[0].Prompt != "an older cat" {
+		t.Fatalf("jobs = %+v, want the seeded one", got.Jobs)
+	}
+	if !got.Jobs[0].Params.SLG.IsZero() || got.Jobs[0].Params.ClipSkip != nil {
+		t.Errorf("params = %+v, want the zero value for a pre-migration job", got.Jobs[0].Params)
+	}
+
+	// The stale capability cache is GONE rather than carried forward
+	// incomplete. Kept, its empty output_formats would read as "the server
+	// does not report formats" and refuse a correct one, blaming the server
+	// for a field ember never asked about -- so "nothing has asked yet",
+	// which is true, is the better answer. The next rental re-caches it.
+	if _, ok, err := s.Caps(context.Background()); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Error("a capability cache from before the new lists survived the migration")
+	}
+
+	// And the new column is writable, which is the half that would have
+	// failed at runtime rather than at open.
+	two := 2
+	id, err := s.Enqueue(context.Background(), Request{
+		Provider: "local", TTL: time.Minute,
+		Jobs: []Job{{Prompt: "a newer cat", Params: sdserver.Params{ClipSkip: &two}}},
+	})
+	if err != nil {
+		t.Fatalf("the migrated file cannot be written to: %v", err)
+	}
+	back, err := s.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Jobs[0].Params.ClipSkip == nil || *back.Jobs[0].Params.ClipSkip != 2 {
+		t.Errorf("clip_skip = %v, want 2", back.Jobs[0].Params.ClipSkip)
+	}
+}
+
+// Every optional parameter survives the round trip through the JSON column.
+//
+// One column holds all of them, so a field missing from the struct's tags --
+// or a pointer silently flattened to its zero -- would lose a parameter the
+// operator set and generate at the server's default instead. Checked by
+// comparing the whole struct rather than field by field, so a field added
+// later is covered without anybody remembering to add an assertion.
+func TestEnqueue_RoundTripsEveryParameter(t *testing.T) {
+	skip, eta, shift := 2, 0.0, 3.5
+	want := sdserver.Params{
+		ClipSkip: &skip, Eta: &eta, FlowShift: &shift,
+		ShiftedTimestep: 4, OutputFormat: "webp", OutputCompression: 90,
+		SLG: sdserver.SLG{Layers: []int{7, 8, 9}, LayerStart: 0.01, LayerEnd: 0.2, Scale: 2.5},
+		Hires: sdserver.Hires{
+			Enabled: true, Upscaler: "Latent", Scale: 2, TargetWidth: 1024,
+			TargetHeight: 768, Steps: 10, DenoisingStrength: 0.7, UpscaleTileSize: 128,
+		},
+		VAETiling: sdserver.VAETiling{
+			Enabled: true, TileSizeW: 512, TileSizeH: 256,
+			TargetOverlap: 0.5, RelSizeW: 0.25, RelSizeH: 0.125,
+		},
+	}
+
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			roundTripParams(t, s, want)
+		})
+	}
+}
+
+// roundTripParams is the body both stores run, so the fake cannot be kinder
+// than the database about a field it forgot to carry.
+func roundTripParams(t *testing.T, s Store, want sdserver.Params) {
+	t.Helper()
+	id, err := s.Enqueue(context.Background(), Request{
+		Provider: "local", TTL: time.Minute,
+		Jobs: []Job{{Prompt: "a cat", Params: want}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Jobs[0].Params, want) {
+		t.Errorf("params round-tripped as\n %+v\nwant\n %+v", got.Jobs[0].Params, want)
+	}
+	// And a pointer holding zero came back as a pointer holding zero rather
+	// than as nil: eta 0 is a real instruction to the sampler.
+	if got.Jobs[0].Params.Eta == nil || *got.Jobs[0].Params.Eta != 0 {
+		t.Errorf("eta = %v, want a pointer to 0", got.Jobs[0].Params.Eta)
+	}
+	// SD carries them to the client, which is the only reason they are stored.
+	if !reflect.DeepEqual(got.Jobs[0].SD().Params, want) {
+		t.Errorf("SD() dropped the parameters: %+v", got.Jobs[0].SD().Params)
+	}
 }

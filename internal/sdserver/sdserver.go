@@ -304,6 +304,48 @@ func Validate(j Job, caps Capabilities) error {
 	if j.Steps < 0 {
 		return fmt.Errorf("steps %d is negative", j.Steps)
 	}
+	if err := validateParams(j.Params, caps); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateParams checks the optional parameters against the server's lists.
+//
+// Both names here are checked against a list the server published rather than
+// against a pattern, which is the allow-list rule and not merely tidiness for
+// the upscaler: api.md resolves a model-backed upscaler as
+// `--hires-upscalers-dir / (name + ext)`, so the name reaches a path join on
+// the node. "Not in the list the server gave us" is a refusal ember can make
+// without knowing how sd-server handles a hostile name -- which nothing here
+// has evidence about either way.
+//
+// An empty list is "this build did not report that capability" and refuses,
+// as it does for samplers. Guessing in either direction is how a name nobody
+// checked reaches a path join.
+func validateParams(p Params, caps Capabilities) error {
+	if p.OutputFormat != "" {
+		if len(caps.OutputFormats) == 0 {
+			return fmt.Errorf("output_format %q cannot be checked: the server reported no format list", p.OutputFormat)
+		}
+		if !slices.Contains(caps.OutputFormats, p.OutputFormat) {
+			return fmt.Errorf("output_format %q is not one this server has (%s)", p.OutputFormat, strings.Join(caps.OutputFormats, ", "))
+		}
+	}
+	if p.Hires.Upscaler != "" {
+		if len(caps.Upscalers) == 0 {
+			return fmt.Errorf("hires upscaler %q cannot be checked: the server reported no upscaler list", p.Hires.Upscaler)
+		}
+		if !slices.Contains(caps.Upscalers, p.Hires.Upscaler) {
+			return fmt.Errorf("hires upscaler %q is not one this server has (%s)", p.Hires.Upscaler, strings.Join(caps.Upscalers, ", "))
+		}
+	}
+	if err := within("hires target_width", p.Hires.TargetWidth, caps.Limits.MinWidth, caps.Limits.MaxWidth); err != nil {
+		return err
+	}
+	if err := within("hires target_height", p.Hires.TargetHeight, caps.Limits.MinHeight, caps.Limits.MaxHeight); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -326,7 +368,79 @@ func ValidateStatic(j Job, preview string, interval int) error {
 	if _, err := j.Body(preview, interval); err != nil {
 		return err
 	}
+	if err := staticParams(j.Params); err != nil {
+		return err
+	}
 	return ValidateOutput(j.Output)
+}
+
+// staticParams refuses the optional parameters that are wrong on their face.
+//
+// None of these needs a server, so none of them should cost a rental to
+// discover. The bounds are the ones upstream's own defaults sit inside --
+// denoising 0.7, slg layers 0.01 to 0.2, compression 100 -- and a value
+// outside them is a typo rather than a preference. A negative value is the
+// case that matters: upstream clamps a non-positive preview_interval to 1,
+// so somebody writing a negative number to mean "off" buys the most
+// expensive setting there is, and the same habit applied to a scale or a
+// strength is worth refusing before it is applied to something that bills.
+func staticParams(p Params) error {
+	// -1 is the model's own default and the only negative with a meaning.
+	if p.ClipSkip != nil && *p.ClipSkip < -1 {
+		return fmt.Errorf("clip_skip %d is below -1, which is the model's own default", *p.ClipSkip)
+	}
+	if err := fraction("slg layer_start", p.SLG.LayerStart); err != nil {
+		return err
+	}
+	if err := fraction("slg layer_end", p.SLG.LayerEnd); err != nil {
+		return err
+	}
+	if p.SLG.LayerEnd != 0 && p.SLG.LayerStart > p.SLG.LayerEnd {
+		return fmt.Errorf("slg layer_start %g is after layer_end %g, so the range is empty",
+			p.SLG.LayerStart, p.SLG.LayerEnd)
+	}
+	for _, l := range p.SLG.Layers {
+		if l < 0 {
+			return fmt.Errorf("slg layer %d is negative", l)
+		}
+	}
+	if p.Hires.Scale < 0 {
+		return fmt.Errorf("hires scale %g is negative", p.Hires.Scale)
+	}
+	if p.Hires.Steps < 0 {
+		return fmt.Errorf("hires steps %d is negative", p.Hires.Steps)
+	}
+	if err := fraction("hires denoising_strength", p.Hires.DenoisingStrength); err != nil {
+		return err
+	}
+	if p.Hires.UpscaleTileSize < 0 {
+		return fmt.Errorf("hires upscale_tile_size %d is negative", p.Hires.UpscaleTileSize)
+	}
+	if p.VAETiling.TileSizeW < 0 || p.VAETiling.TileSizeH < 0 {
+		return fmt.Errorf("vae tiling tile size %dx%d is negative",
+			p.VAETiling.TileSizeW, p.VAETiling.TileSizeH)
+	}
+	if err := fraction("vae tiling target_overlap", p.VAETiling.TargetOverlap); err != nil {
+		return err
+	}
+	if err := fraction("vae tiling rel_size_w", p.VAETiling.RelSizeW); err != nil {
+		return err
+	}
+	if err := fraction("vae tiling rel_size_h", p.VAETiling.RelSizeH); err != nil {
+		return err
+	}
+	if p.OutputCompression < 0 || p.OutputCompression > 100 {
+		return fmt.Errorf("output_compression %d is outside 0 to 100", p.OutputCompression)
+	}
+	return nil
+}
+
+// fraction refuses a value outside 0 to 1, where 0 means unset.
+func fraction(name string, v float64) error {
+	if v < 0 || v > 1 {
+		return fmt.Errorf("%s %g is outside 0 to 1", name, v)
+	}
+	return nil
 }
 
 func within(name string, v, minimum, maximum int) error {

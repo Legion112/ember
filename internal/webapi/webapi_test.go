@@ -931,3 +931,173 @@ func progress(n int64) []report.Event {
 	}
 	return es
 }
+
+// The optional parameters reach the store, and come back on the request view.
+//
+// Four layers sit between the body and the generation call -- newJob,
+// genstore.Job, a JSON column, sdserver.Job -- and each one is a place a field
+// can be dropped by a mapping literal that forgot it. A dropped field is
+// silent in the worst way: the request is accepted, the image is generated at
+// the server's default, and the page shows the setting the operator typed.
+//
+// Both directions in one test, because the outbound half reuses the inbound
+// type and would otherwise look covered by it.
+func TestPostRequest_CarriesTheOptionalParameters(t *testing.T) {
+	h := newHarness(t)
+	body := `{"provider":"local","jobs":[{
+		"prompt":"a cat","clip_skip":2,"eta":0,"flow_shift":3.5,
+		"shifted_timestep":4,"output_format":"png","output_compression":90,
+		"slg":{"layers":[7,8,9],"layer_start":0.01,"layer_end":0.2,"scale":2.5},
+		"hires":{"enabled":true,"upscaler":"Latent","scale":2,"steps":10,
+		         "denoising_strength":0.7,"target_width":1024,"target_height":768,
+		         "upscale_tile_size":128},
+		"vae_tiling":{"enabled":true,"tile_size_w":512,"tile_size_h":256,
+		              "target_overlap":0.5,"rel_size_w":0.25,"rel_size_h":0.125}
+	}]}`
+	w := h.do(t, "POST", "/api/requests", body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
+	}
+	id := decode[map[string]string](t, w)["id"]
+
+	// What the store holds is what the generation call will be built from.
+	r, err := h.store.Get(t.Context(), genstore.ReqID(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := r.Jobs[0].Params
+	if p.ClipSkip == nil || *p.ClipSkip != 2 {
+		t.Errorf("clip_skip = %v, want 2", p.ClipSkip)
+	}
+	// Zero through a pointer, which is the case a plain int would lose.
+	if p.Eta == nil || *p.Eta != 0 {
+		t.Errorf("eta = %v, want a pointer to 0", p.Eta)
+	}
+	if p.FlowShift == nil || *p.FlowShift != 3.5 {
+		t.Errorf("flow_shift = %v, want 3.5", p.FlowShift)
+	}
+	if p.ShiftedTimestep != 4 || p.OutputFormat != "png" || p.OutputCompression != 90 {
+		t.Errorf("scalars = %+v", p)
+	}
+	if p.SLG.Scale != 2.5 || len(p.SLG.Layers) != 3 || p.SLG.LayerEnd != 0.2 {
+		t.Errorf("slg = %+v", p.SLG)
+	}
+	if !p.Hires.Enabled || p.Hires.Upscaler != "Latent" || p.Hires.Steps != 10 ||
+		p.Hires.DenoisingStrength != 0.7 || p.Hires.TargetWidth != 1024 ||
+		p.Hires.UpscaleTileSize != 128 {
+		t.Errorf("hires = %+v", p.Hires)
+	}
+	if !p.VAETiling.Enabled || p.VAETiling.TileSizeW != 512 || p.VAETiling.RelSizeH != 0.125 {
+		t.Errorf("vae tiling = %+v", p.VAETiling)
+	}
+
+	// And back out, so the page that exists to say what was asked for does.
+	one := decode[requestView](t, h.do(t, "GET", "/api/requests/"+id, ""))
+	j := one.Jobs[0]
+	if j.ClipSkip == nil || *j.ClipSkip != 2 {
+		t.Errorf("view clip_skip = %v", j.ClipSkip)
+	}
+	if j.Hires == nil || j.Hires.Upscaler != "Latent" {
+		t.Errorf("view hires = %+v", j.Hires)
+	}
+	if j.SLG == nil || j.SLG.Scale != 2.5 {
+		t.Errorf("view slg = %+v", j.SLG)
+	}
+	if j.VAETiling == nil || j.VAETiling.TileSizeW != 512 {
+		t.Errorf("view vae tiling = %+v", j.VAETiling)
+	}
+}
+
+// A job with none of this set renders without the three empty blocks.
+//
+// The blocks are pointers so the view of an ordinary job is the view it was
+// before they existed. Three `{}`s on every row is not a bug in the data, but
+// it is a page telling an operator that something is configured when nothing
+// is -- and a reader of the JSON cannot tell "sent empty" from "sent".
+func TestRequestView_OmitsTheBlocksAJobDidNotSet(t *testing.T) {
+	h := newHarness(t)
+	id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
+
+	raw := h.do(t, "GET", "/api/requests/"+id, "").Body.String()
+	for _, key := range []string{`"slg"`, `"hires"`, `"vae_tiling"`, `"clip_skip"`} {
+		if strings.Contains(raw, key) {
+			t.Errorf("the view carries %s for a job that set nothing: %s", key, raw)
+		}
+	}
+}
+
+// A parameter that is wrong on its face is refused with a 400, before a card.
+//
+// These go through the same sdserver.ValidateStatic the config path uses, so
+// what is refused here and what is refused in ember.yaml cannot drift. The
+// upscaler case is the one that matters: it is checked against the server's
+// published list, so it only refuses once caps are cached -- which is why the
+// harness seeds them.
+func TestPostRequest_RefusesAParameterOutsideItsRange(t *testing.T) {
+	h := newHarness(t)
+	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+		Samplers: []string{"euler"}, OutputFormats: []string{"png"},
+		Upscalers: []string{"Latent"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ name, body, want string }{
+		{"clip_skip below -1",
+			`{"provider":"local","jobs":[{"prompt":"a","clip_skip":-2}]}`, "clip_skip"},
+		{"denoising above 1",
+			`{"provider":"local","jobs":[{"prompt":"a","hires":{"enabled":true,"denoising_strength":2}}]}`,
+			"denoising_strength"},
+		{"an empty slg range",
+			`{"provider":"local","jobs":[{"prompt":"a","slg":{"scale":1,"layer_start":0.5,"layer_end":0.1}}]}`,
+			"layer_end"},
+		{"compression above 100",
+			`{"provider":"local","jobs":[{"prompt":"a","output_compression":101}]}`, "output_compression"},
+		{"a tiling overlap above 1",
+			`{"provider":"local","jobs":[{"prompt":"a","vae_tiling":{"enabled":true,"target_overlap":3}}]}`,
+			"target_overlap"},
+		{"a format the server does not have",
+			`{"provider":"local","jobs":[{"prompt":"a","output_format":"tiff"}]}`, "output_format"},
+		{"an upscaler the server does not have",
+			`{"provider":"local","jobs":[{"prompt":"a","hires":{"enabled":true,"upscaler":"../etc/passwd"}}]}`,
+			"upscaler"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := h.do(t, "POST", "/api/requests", c.body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+			}
+			if got := decode[map[string]string](t, w)["error"]; !strings.Contains(got, c.want) {
+				t.Errorf("error = %q, want it to mention %q", got, c.want)
+			}
+		})
+	}
+}
+
+// extra is still absent, and the absence is still structural.
+//
+// The parameters above widen what a request may say; this is the assertion
+// that they did not widen HOW it says it. The decoder refuses unknown fields,
+// so a body naming `extra` is a 400 and not a silent drop -- which is the
+// stronger of the two outcomes and worth pinning, because a later change to
+// tolerate unknown fields would turn this refusal into exactly the silent
+// acceptance the seal exists to prevent. `extra` reaches every untyped field
+// of the generation API, including the ones naming file paths on the node.
+func TestPostRequest_ExtraStillCannotBeSet(t *testing.T) {
+	h := newHarness(t)
+	w := h.do(t, "POST", "/api/requests",
+		`{"provider":"local","jobs":[{"prompt":"a","extra":{"diffusion_model":"/etc/shadow"}}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+	}
+	if got := decode[map[string]string](t, w)["error"]; !strings.Contains(got, "extra") {
+		t.Errorf("error = %q, want it to name the field it refused", got)
+	}
+
+	// And the same for the nested blocks, which are the new surface: an
+	// unknown key inside one must not be accepted either.
+	w = h.do(t, "POST", "/api/requests",
+		`{"provider":"local","jobs":[{"prompt":"a","hires":{"enabled":true,"model_path":"/etc/shadow"}}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("a nested unknown field was accepted: %d %s", w.Code, w.Body.String())
+	}
+}

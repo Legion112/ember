@@ -108,6 +108,14 @@ pub struct Caps {
     pub preview_modes: Vec<String>,
     #[serde(default)]
     pub limits: Limits,
+
+    /// The server's own allow-lists for the output format and the hires
+    /// upscaler, read for the same reason `samplers` is: a menu built from
+    /// them cannot offer a name that enqueue will refuse.
+    #[serde(default, deserialize_with = "nullable")]
+    pub output_formats: Vec<String>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub upscalers: Vec<String>,
 }
 
 /// What the server will let this UI offer.
@@ -226,6 +234,102 @@ pub struct Job {
     pub guidance: f64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output: String,
+
+    /// The optional parameters.
+    ///
+    /// `Option` where the server's default is not zero, because 0 is a real
+    /// value for all three: `clip_skip: 0` and `eta: 0` are things a model is
+    /// told, and the server's own defaults are -1 and null. A plain i32 here
+    /// would make "leave it alone" and "set it to zero" the same request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_skip: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_shift: Option<f64>,
+
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub shifted_timestep: i32,
+
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output_format: String,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub output_compression: i32,
+
+    /// The nested blocks, sent only when they hold something.
+    ///
+    /// `Option` and not a plain struct so that a job with none of this set
+    /// posts the body it used to post. That is not tidiness: the panel builds
+    /// one draft and clones it per job, and three empty objects on every
+    /// request would be three objects the server has to be asked about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slg: Option<Slg>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hires: Option<Hires>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vae_tiling: Option<VaeTiling>,
+}
+
+/// Skip-layer guidance.
+///
+/// `scale` is the switch: ember sends no block at all when it is zero, which
+/// is upstream's own "off", so layers with no scale configure nothing.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct Slg {
+    #[serde(
+        default,
+        deserialize_with = "nullable",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub layers: Vec<i32>,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub layer_start: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub layer_end: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub scale: f64,
+}
+
+/// The second, higher-resolution pass.
+///
+/// `enabled` gates the block, because the server fills its own defaults in:
+/// enabled alone is a complete request for upstream's scale and denoising.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct Hires {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub upscaler: String,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub scale: f64,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub target_width: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub target_height: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub steps: i32,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub denoising_strength: f64,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub upscale_tile_size: i32,
+}
+
+/// Decoding the latent in tiles, which is how a large image fits in VRAM that
+/// could not hold it whole.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct VaeTiling {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub tile_size_w: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub tile_size_h: i32,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub target_overlap: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub rel_size_w: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub rel_size_h: f64,
 }
 
 fn is_zero_i32(v: &i32) -> bool {
@@ -931,6 +1035,95 @@ mod tests {
         assert!(!body.contains("sampler"));
         // And nothing that could carry a file path on the node.
         assert!(!body.contains("extra"));
+    }
+
+    /// The optional parameters are sent when set and absent when not.
+    ///
+    /// `Some(0)` is the case worth pinning: the server's own default for
+    /// clip_skip is -1 and for eta is null, so a zero the operator typed has
+    /// to reach the wire while an untouched field does not. An `i32` with a
+    /// zero-is-unset rule -- which is right for every field above -- would be
+    /// wrong here and would look identical in the struct.
+    #[test]
+    fn a_zero_the_operator_typed_is_sent_and_an_empty_box_is_not() {
+        let body = serde_json::to_string(&Job {
+            prompt: "a cat".into(),
+            clip_skip: Some(0),
+            eta: Some(0.0),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(body.contains("\"clip_skip\":0"), "{body}");
+        assert!(body.contains("\"eta\":0.0"), "{body}");
+
+        let bare = serde_json::to_string(&Job {
+            prompt: "a cat".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!bare.contains("clip_skip"), "{bare}");
+        assert!(!bare.contains("eta"), "{bare}");
+        // And the three blocks are absent rather than empty objects, so an
+        // ordinary job posts the body it posted before they existed.
+        assert!(!bare.contains("slg"), "{bare}");
+        assert!(!bare.contains("hires"), "{bare}");
+        assert!(!bare.contains("vae_tiling"), "{bare}");
+    }
+
+    /// A block that is set travels whole, under the names ember accepts.
+    ///
+    /// The names here are ember's own and not upstream's -- `vae_tiling`
+    /// rather than `vae_tiling_params`, `slg` at the top of the job rather
+    /// than inside `sample_params.guidance` -- so a rename on either side
+    /// would make the page post fields the server silently ignores. The Go
+    /// side has its own test that each one lands where upstream names it;
+    /// this is the half that checks the page and the handler agree.
+    #[test]
+    fn a_block_that_is_set_travels_whole() {
+        let body = serde_json::to_string(&Job {
+            prompt: "a cat".into(),
+            hires: Some(Hires {
+                enabled: true,
+                upscaler: "Latent".into(),
+                scale: 2.0,
+                steps: 10,
+                denoising_strength: 0.7,
+                ..Default::default()
+            }),
+            vae_tiling: Some(VaeTiling {
+                enabled: true,
+                tile_size_w: 512,
+                ..Default::default()
+            }),
+            slg: Some(Slg {
+                layers: vec![7, 8, 9],
+                layer_start: 0.01,
+                layer_end: 0.2,
+                scale: 2.5,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        for want in [
+            "\"hires\":{",
+            "\"enabled\":true",
+            "\"upscaler\":\"Latent\"",
+            "\"denoising_strength\":0.7",
+            "\"vae_tiling\":{",
+            "\"tile_size_w\":512",
+            "\"slg\":{",
+            "\"layers\":[7,8,9]",
+            "\"scale\":2.5",
+        ] {
+            assert!(body.contains(want), "{want} missing from {body}");
+        }
+
+        // And it decodes back, because the same type is what a request view
+        // returns: a job on screen has to be the job that was queued.
+        let back: Job = serde_json::from_str(&body).unwrap();
+        assert_eq!(back.hires.unwrap().steps, 10);
+        assert_eq!(back.slg.unwrap().layers, vec![7, 8, 9]);
+        assert_eq!(back.vae_tiling.unwrap().tile_size_w, 512);
     }
 
     /// The server sends fields this build may not know; decoding must not

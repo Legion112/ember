@@ -145,6 +145,17 @@ type Capabilities struct {
 	Schedulers   []string
 	PreviewModes []string
 	Limits       Limits
+
+	// OutputFormats and Upscalers are allow-lists, in the sense the
+	// conventions mean: a name from one of these is a name the server said it
+	// has, and anything else is refused here rather than at submission time.
+	//
+	// Upscalers matters more than it looks. api.md resolves a model-backed
+	// upscaler as `--hires-upscalers-dir / (name + ext)`, so the name reaches
+	// a path join on the node. Checking it against the server's own list is
+	// what keeps a name from being a path component ember chose to trust.
+	OutputFormats []string
+	Upscalers     []string
 }
 
 // APIError is the server's structured refusal.
@@ -276,11 +287,21 @@ func mapModelStatus(w wireModelStatus) (ModelStatus, error) {
 }
 
 func mapCapabilities(w wireCapabilities) Capabilities {
+	// Flattened to the names. A nil list stays nil rather than becoming an
+	// empty slice, because Validate reads "the server reported no list" off
+	// the length and has to be able to tell that from "the server reported an
+	// empty list" -- the WithExposed distinction, one package over.
+	var ups []string
+	for _, u := range w.Upscalers {
+		ups = append(ups, u.Name)
+	}
 	return Capabilities{
-		Model:        w.Model.Name,
-		Samplers:     append([]string(nil), w.Samplers...),
-		Schedulers:   append([]string(nil), w.Schedulers...),
-		PreviewModes: append([]string(nil), w.PreviewModes...),
+		Model:         w.Model.Name,
+		Samplers:      append([]string(nil), w.Samplers...),
+		Schedulers:    append([]string(nil), w.Schedulers...),
+		PreviewModes:  append([]string(nil), w.PreviewModes...),
+		OutputFormats: append([]string(nil), w.OutputFormats...),
+		Upscalers:     ups,
 		Limits: Limits{
 			MinWidth:      w.Limits.MinWidth,
 			MaxWidth:      w.Limits.MaxWidth,
@@ -303,6 +324,16 @@ func mapCapabilities(w wireCapabilities) Capabilities {
 //
 // So: ember types what it validates, reports or defaults, and Extra reaches
 // everything else. Nothing in the API is unreachable from a config.
+//
+// The line moved once, and the reason it moved is worth keeping. The first
+// cut typed eleven fields, which was the right place while the only caller
+// was a config file an operator edits by hand -- Extra is a map in YAML and
+// costs nothing to write. A browser changed that: `extra` is structurally
+// refused over HTTP, so an untyped field is not merely inconvenient from the
+// web UI but unreachable, and the UI shipped able to send eleven of the
+// fifty-one parameters the server reports with nothing saying which forty it
+// could not. Params holds the ones that are path-free and affect a
+// text-to-image run; its doc comment names what is still left out and why.
 type Job struct {
 	Prompt         string
 	NegativePrompt string
@@ -325,11 +356,133 @@ type Job struct {
 	// Output is the local filename stem. It never reaches the server.
 	Output string
 
+	// Params are the rest of what a text-to-image generation can be told.
+	// Separate from the fields above because those are the ones every job
+	// has and every renderer prints; these are optional and mostly unset.
+	Params Params
+
 	// Extra is merged into the request after the typed fields. A key that
 	// collides with one ember set is refused rather than resolved -- see
 	// Body.
 	Extra map[string]any
 }
+
+// Params are the generation parameters beyond the eleven every job carries.
+//
+// WHY THESE AND NOT THE OTHERS. They are the ones that change a plain
+// text-to-image generation and name no file and no directory. The fields left
+// out divide into two groups with two different reasons:
+//
+// `strength`, `guidance.img_cfg`, `control_strength`, `ip_adapter_strength`,
+// `increase_ref_index`, `ref_image_args` and `image_preprocess` do nothing
+// without an image input, and ember has no inbound image path at all -- the
+// image fields take base64 in the request body, which a YAML config cannot
+// hold and the web UI has no upload route for. A control that cannot affect
+// the generation is the same defect as a caption that is true of one preview
+// mode and wrong for the others: it reads as working.
+//
+// `cache_mode`, `cache_option`, `scm_mask`, `scm_policy_dynamic`,
+// `qwen_image_layers`, `custom_sigmas` (both of them) and
+// `vae_tiling_params.extra_tiling_args` are left to Extra because nothing
+// here knows their value sets. api.md names them without enumerating what
+// they accept, and a free-text field ember cannot check is a field ember
+// should not pretend to validate -- the `allowedCudaVersions` mistake is
+// reading a schema in place of a response, and typing a value set nobody has
+// observed is the same error with better manners.
+//
+// A pointer means the server's own default is not zero, so zero cannot stand
+// for unset. Everything else uses zero, which is what Body already omits.
+type Params struct {
+	// ClipSkip is a pointer because the server's default is -1 and 0 is a
+	// real value. A sentinel of 0 here would make `clip_skip: 0`
+	// unrepresentable while looking exactly like every other field.
+	ClipSkip *int `json:"clip_skip,omitempty"`
+
+	// Eta and FlowShift default to null on the server, and 0 is legal for
+	// both -- eta 0 is the deterministic sampler. Same reason as ClipSkip,
+	// reached from a different default.
+	Eta       *float64 `json:"eta,omitempty"`
+	FlowShift *float64 `json:"flow_shift,omitempty"`
+
+	// ShiftedTimestep's own default is 0, so zero-is-unset is the server's
+	// own meaning here rather than ember's convention imposed on it.
+	ShiftedTimestep int `json:"shifted_timestep,omitempty"`
+
+	SLG       SLG       `json:"slg,omitzero"`
+	Hires     Hires     `json:"hires,omitzero"`
+	VAETiling VAETiling `json:"vae_tiling,omitzero"`
+
+	// OutputFormat is checked against the server's own list. Compression
+	// applies to jpeg and webp; png ignores it.
+	OutputFormat      string `json:"output_format,omitempty"`
+	OutputCompression int    `json:"output_compression,omitempty"`
+}
+
+// SLG is skip-layer guidance.
+//
+// Scale is the switch: the server's default is 0.0, which is off, so layers
+// and bounds with no scale configure something that does not run. Body sends
+// the block only when Scale is non-zero, which makes "I set the layers and
+// nothing changed" unrepresentable rather than a thing to explain.
+type SLG struct {
+	Layers     []int   `json:"layers,omitempty"`
+	LayerStart float64 `json:"layer_start,omitempty"`
+	LayerEnd   float64 `json:"layer_end,omitempty"`
+	Scale      float64 `json:"scale,omitempty"`
+}
+
+// IsZero says nothing was set.
+//
+// A method and not an `==` at each call site, because SLG holds a slice and is
+// therefore not comparable -- a caller reaching for `== SLG{}` gets a compile
+// error and a caller reaching for it on Hires does not, which would leave the
+// three blocks checked three different ways. encoding/json's `omitzero` uses
+// this too, so what the wire omits and what a renderer treats as unset are
+// one answer rather than two.
+func (s SLG) IsZero() bool {
+	return len(s.Layers) == 0 && s.LayerStart == 0 && s.LayerEnd == 0 && s.Scale == 0
+}
+
+// Hires is the second, higher-resolution pass.
+//
+// Enabled is the switch and the rest is only sent with it, because the server
+// reads the block as a unit: upstream's own default is enabled false with
+// scale 2 and denoising 0.7 already filled in, so `enabled: true` alone is a
+// legitimate request for upstream's defaults rather than an incomplete one.
+//
+// Upscaler is a name from Capabilities.Upscalers and never free text. api.md
+// resolves a model-backed name as `--hires-upscalers-dir / (name + ext)`, so
+// an unchecked name is a path component chosen by whoever sent the request.
+type Hires struct {
+	Enabled           bool    `json:"enabled,omitempty"`
+	Upscaler          string  `json:"upscaler,omitempty"`
+	Scale             float64 `json:"scale,omitempty"`
+	TargetWidth       int     `json:"target_width,omitempty"`
+	TargetHeight      int     `json:"target_height,omitempty"`
+	Steps             int     `json:"steps,omitempty"`
+	DenoisingStrength float64 `json:"denoising_strength,omitempty"`
+	UpscaleTileSize   int     `json:"upscale_tile_size,omitempty"`
+}
+
+// IsZero says nothing was set. See SLG.IsZero for why it is a method.
+func (h Hires) IsZero() bool { return h == Hires{} }
+
+// VAETiling decodes the latent in tiles, which is how a large image fits in
+// VRAM that could not hold it whole.
+//
+// Enabled gates the block for Hires' reason. TemporalTiling is left out: it
+// is a video concern, and the served path generates images.
+type VAETiling struct {
+	Enabled       bool    `json:"enabled,omitempty"`
+	TileSizeW     int     `json:"tile_size_w,omitempty"`
+	TileSizeH     int     `json:"tile_size_h,omitempty"`
+	TargetOverlap float64 `json:"target_overlap,omitempty"`
+	RelSizeW      float64 `json:"rel_size_w,omitempty"`
+	RelSizeH      float64 `json:"rel_size_h,omitempty"`
+}
+
+// IsZero says nothing was set. See SLG.IsZero for why it is a method.
+func (t VAETiling) IsZero() bool { return t == VAETiling{} }
 
 // Describe is the one line an operator reads to know which image this is.
 //
@@ -490,6 +643,94 @@ func (j Job) Body(preview string, interval int) (map[string]any, error) {
 	}
 	if j.Guidance != 0 {
 		set(guidance, "sample_params.guidance.distilled_guidance", "distilled_guidance", j.Guidance)
+	}
+
+	p := j.Params
+	// A pointer that is set is sent even when it holds zero, which is the
+	// whole reason it is a pointer: clip_skip 0 and eta 0 are both values a
+	// model is told, and the server's defaults for them are -1 and null.
+	if p.ClipSkip != nil {
+		set(body, "clip_skip", "clip_skip", *p.ClipSkip)
+	}
+	if p.Eta != nil {
+		set(sample, "sample_params.eta", "eta", *p.Eta)
+	}
+	if p.FlowShift != nil {
+		set(sample, "sample_params.flow_shift", "flow_shift", *p.FlowShift)
+	}
+	if p.ShiftedTimestep != 0 {
+		set(sample, "sample_params.shifted_timestep", "shifted_timestep", p.ShiftedTimestep)
+	}
+	// Scale is the switch, so a zero scale sends no block at all rather than
+	// a block the server reads as off. Layers without a scale would otherwise
+	// look configured and do nothing.
+	if p.SLG.Scale != 0 {
+		slg := map[string]any{}
+		set(slg, "sample_params.guidance.slg.scale", "scale", p.SLG.Scale)
+		if len(p.SLG.Layers) > 0 {
+			set(slg, "sample_params.guidance.slg.layers", "layers", p.SLG.Layers)
+		}
+		if p.SLG.LayerStart != 0 {
+			set(slg, "sample_params.guidance.slg.layer_start", "layer_start", p.SLG.LayerStart)
+		}
+		if p.SLG.LayerEnd != 0 {
+			set(slg, "sample_params.guidance.slg.layer_end", "layer_end", p.SLG.LayerEnd)
+		}
+		guidance["slg"] = slg
+	}
+	// Enabled gates the whole block, for the reason on Hires: the server
+	// fills its own defaults in, so `enabled` alone is a complete request.
+	if p.Hires.Enabled {
+		h := map[string]any{}
+		set(h, "hires.enabled", "enabled", true)
+		if p.Hires.Upscaler != "" {
+			set(h, "hires.upscaler", "upscaler", p.Hires.Upscaler)
+		}
+		if p.Hires.Scale != 0 {
+			set(h, "hires.scale", "scale", p.Hires.Scale)
+		}
+		if p.Hires.TargetWidth != 0 {
+			set(h, "hires.target_width", "target_width", p.Hires.TargetWidth)
+		}
+		if p.Hires.TargetHeight != 0 {
+			set(h, "hires.target_height", "target_height", p.Hires.TargetHeight)
+		}
+		if p.Hires.Steps != 0 {
+			set(h, "hires.steps", "steps", p.Hires.Steps)
+		}
+		if p.Hires.DenoisingStrength != 0 {
+			set(h, "hires.denoising_strength", "denoising_strength", p.Hires.DenoisingStrength)
+		}
+		if p.Hires.UpscaleTileSize != 0 {
+			set(h, "hires.upscale_tile_size", "upscale_tile_size", p.Hires.UpscaleTileSize)
+		}
+		body["hires"] = h
+	}
+	if p.VAETiling.Enabled {
+		t := map[string]any{}
+		set(t, "vae_tiling_params.enabled", "enabled", true)
+		if p.VAETiling.TileSizeW != 0 {
+			set(t, "vae_tiling_params.tile_size_w", "tile_size_w", p.VAETiling.TileSizeW)
+		}
+		if p.VAETiling.TileSizeH != 0 {
+			set(t, "vae_tiling_params.tile_size_h", "tile_size_h", p.VAETiling.TileSizeH)
+		}
+		if p.VAETiling.TargetOverlap != 0 {
+			set(t, "vae_tiling_params.target_overlap", "target_overlap", p.VAETiling.TargetOverlap)
+		}
+		if p.VAETiling.RelSizeW != 0 {
+			set(t, "vae_tiling_params.rel_size_w", "rel_size_w", p.VAETiling.RelSizeW)
+		}
+		if p.VAETiling.RelSizeH != 0 {
+			set(t, "vae_tiling_params.rel_size_h", "rel_size_h", p.VAETiling.RelSizeH)
+		}
+		body["vae_tiling_params"] = t
+	}
+	if p.OutputFormat != "" {
+		set(body, "output_format", "output_format", p.OutputFormat)
+	}
+	if p.OutputCompression != 0 {
+		set(body, "output_compression", "output_compression", p.OutputCompression)
 	}
 
 	// Always ember's, so always a collision if Extra names them.

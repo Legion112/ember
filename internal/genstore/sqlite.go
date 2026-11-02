@@ -32,7 +32,54 @@ const FileName = "generations.db"
 // internal/statestore's reason: reading a newer layout as an older one drops
 // columns, and the column it would drop is the one that says a request is
 // still running.
-const schemaVersion = 1
+const schemaVersion = 2
+
+// migrations takes an existing file forward, one version per entry:
+// migrations[0] moves a version-1 file to version 2.
+//
+// IT EXISTS BECAUSE THE VERSION CHECK ONLY GUARDED ONE DIRECTION. migrate
+// refused a file from the future and did nothing at all about a file from the
+// past: the schema is `CREATE TABLE IF NOT EXISTS`, which is a no-op against a
+// table that already exists, so the first column ever added would have been
+// absent from every database written before it. Nothing would have reported
+// that -- the open succeeds, the version check passes, and the failure
+// arrives as `table jobs has no column named params` the next time an
+// operator queues a request, with their existing history in a file ember can
+// no longer write to. A version number that is only ever compared is a
+// version number that records the problem instead of fixing it.
+//
+// Applied inside migrate's transaction, so a file is either entirely at the
+// new version or entirely at the old one. SQLite's ALTER TABLE ADD COLUMN is
+// not transactional on every engine, but it is here, and a half-migrated file
+// is the one outcome that would need a human.
+var migrations = [][]string{
+	// 1 -> 2: the optional generation parameters.
+	{
+		// One column and not twenty-three, because nothing queries them: no
+		// WHERE, no ORDER BY, no join. They are payload carried to the
+		// generation call, which is what `events.body` already is, and a
+		// column per field would mean a migration every time upstream adds a
+		// knob -- for a table whose only reader selects every row of a
+		// request by id.
+		`ALTER TABLE jobs ADD COLUMN params TEXT NOT NULL DEFAULT '{}'`,
+
+		// AND THE CACHED CAPABILITIES GO, because they are now incomplete in
+		// a way that answers a question wrongly rather than not at all. The
+		// cache is the JSON of sdserver.Capabilities, and a row written
+		// before this version has no output_formats and no upscalers -- so
+		// they decode as empty, and Validate reads an empty list as "this
+		// build did not report that capability" and refuses a correct
+		// output_format with a message blaming the server for a field ember
+		// never asked it about. That is the capabilities.model mistake in
+		// cache form: a shape believed rather than observed.
+		//
+		// Dropping it costs one rental's worth of a sampler typo going
+		// uncaught, once, on an upgraded file -- which is what a fresh file
+		// already does, and which the next rental repairs because PutCaps
+		// runs on every one of them.
+		`DELETE FROM meta WHERE key = 'caps'`,
+	},
+}
 
 // defaultLimit bounds a listing that did not ask for one.
 //
@@ -143,6 +190,9 @@ CREATE TABLE IF NOT EXISTS jobs (
 	cfg         REAL    NOT NULL DEFAULT 0,
 	guidance    REAL    NOT NULL DEFAULT 0,
 	output      TEXT    NOT NULL DEFAULT '',
+	-- The optional parameters, as the JSON of sdserver.Params. See
+	-- migrations for why this is one column rather than one per field.
+	params      TEXT    NOT NULL DEFAULT '{}',
 	PRIMARY KEY (req, idx)
 );
 
@@ -166,7 +216,8 @@ CREATE TABLE IF NOT EXISTS images (
 );
 `
 
-// migrate creates the schema and refuses a file from the future.
+// migrate creates the schema, brings an older file forward and refuses a file
+// from the future.
 func (s *SQLite) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create the schema in %s: %w", s.path, err)
@@ -176,6 +227,8 @@ func (s *SQLite) migrate(ctx context.Context) error {
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&have)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
+		// A fresh file: the schema above already created the current shape,
+		// so there is nothing to migrate and the version is simply recorded.
 		_, err := s.db.ExecContext(ctx,
 			`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, fmt.Sprint(schemaVersion))
 		if err != nil {
@@ -195,6 +248,36 @@ func (s *SQLite) migrate(ctx context.Context) error {
 			"it is refused rather than read, because reading a newer layout as an older one drops "+
 			"columns and the one it would drop is the one that says a request is still running",
 			s.path, v, schemaVersion)
+	}
+	if v < 1 {
+		return fmt.Errorf("%s reports schema version %d, which no ember wrote", s.path, v)
+	}
+	if v == schemaVersion {
+		return nil
+	}
+
+	// All of it or none of it. A file stopped halfway between two versions
+	// reports the old one and has some of the new one, which is the state
+	// nothing here could diagnose later.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin the migration of %s: %w", s.path, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for i := v; i < schemaVersion; i++ {
+		for _, stmt := range migrations[i-1] {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("migrate %s from schema %d to %d: %w", s.path, i, i+1, err)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE meta SET value = ? WHERE key = 'schema_version'`, fmt.Sprint(schemaVersion)); err != nil {
+		return fmt.Errorf("record schema version %d in %s: %w", schemaVersion, s.path, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit the migration of %s: %w", s.path, err)
 	}
 	return nil
 }
@@ -247,13 +330,22 @@ func (s *SQLite) Enqueue(ctx context.Context, r Request) (ReqID, error) {
 	}
 
 	for i, j := range r.Jobs {
-		_, err := tx.ExecContext(ctx, `
+		// Marshalled here rather than in a helper on Job, because the error
+		// belongs to this write: a job whose parameters cannot be encoded
+		// must not be half-recorded, and the caller needs to be told which
+		// job it was.
+		params, err := json.Marshal(j.Params)
+		if err != nil {
+			return "", fmt.Errorf("encode the parameters of job %d of request %s: %w", i+1, r.ID, err)
+		}
+		_, err = tx.ExecContext(ctx, `
 			INSERT INTO jobs
 				(req, idx, prompt, negative, width, height, steps, batch_count, seed,
-				 sampler, scheduler, cfg, guidance, output)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				 sampler, scheduler, cfg, guidance, output, params)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			string(r.ID), i+1, j.Prompt, j.NegativePrompt, j.Width, j.Height, j.Steps,
-			j.BatchCount, j.Seed, j.Sampler, j.Scheduler, j.CFG, j.Guidance, j.Output)
+			j.BatchCount, j.Seed, j.Sampler, j.Scheduler, j.CFG, j.Guidance, j.Output,
+			params)
 		if err != nil {
 			return "", fmt.Errorf("record job %d of request %s: %w", i+1, r.ID, err)
 		}
@@ -325,7 +417,7 @@ func scanRequest(sc scanner) (Request, error) {
 func (s *SQLite) jobsOf(ctx context.Context, q scannerQuerier, id ReqID) ([]Job, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT prompt, negative, width, height, steps, batch_count, seed,
-		       sampler, scheduler, cfg, guidance, output
+		       sampler, scheduler, cfg, guidance, output, params
 		FROM jobs WHERE req = ? ORDER BY idx`, string(id))
 	if err != nil {
 		return nil, fmt.Errorf("read the jobs of %s: %w", id, err)
@@ -335,9 +427,19 @@ func (s *SQLite) jobsOf(ctx context.Context, q scannerQuerier, id ReqID) ([]Job,
 	var out []Job
 	for rows.Next() {
 		var j Job
+		var params string
 		if err := rows.Scan(&j.Prompt, &j.NegativePrompt, &j.Width, &j.Height, &j.Steps,
-			&j.BatchCount, &j.Seed, &j.Sampler, &j.Scheduler, &j.CFG, &j.Guidance, &j.Output); err != nil {
+			&j.BatchCount, &j.Seed, &j.Sampler, &j.Scheduler, &j.CFG, &j.Guidance, &j.Output,
+			&params); err != nil {
 			return nil, fmt.Errorf("read a job of %s: %w", id, err)
+		}
+		// Reported rather than swallowed. The column is written by this
+		// package and holds `{}` for a job with nothing set, so unreadable
+		// JSON here means the file was edited or corrupted -- and a request
+		// silently losing the parameters it was queued with would generate
+		// at the wrong settings and look like it worked.
+		if err := json.Unmarshal([]byte(params), &j.Params); err != nil {
+			return nil, fmt.Errorf("read the parameters of a job of %s: %w", id, err)
 		}
 		out = append(out, j)
 	}

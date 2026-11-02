@@ -776,3 +776,137 @@ func TestLoad_RefusesADuplicateKey(t *testing.T) {
 		t.Errorf("err = %v, want it to name the duplicate", err)
 	}
 }
+
+// The optional parameters parse from a config and reach the client's type.
+//
+// Both the flat keys and the three nested blocks, because the nesting is where
+// a yaml tag typo hides: a misspelled key on a nested struct is not an error,
+// it is a block that silently stays at its zero value -- and the generation
+// then runs at the server's defaults while the config says otherwise.
+func TestParseSD_ReadsTheOptionalParameters(t *testing.T) {
+	cfg, err := Load(write(t, `
+provider: local
+image: ember-sd:1
+ttl: 10m
+sd:
+  serve: [sd-server, --model, /models/sd15.gguf]
+  jobs:
+    - prompt: a cat
+      output: cat
+      clip_skip: 2
+      eta: 0
+      flow_shift: 3.5
+      shifted_timestep: 4
+      output_format: webp
+      output_compression: 90
+      slg:
+        layers: [7, 8, 9]
+        layer_start: 0.01
+        layer_end: 0.2
+        scale: 2.5
+      hires:
+        enabled: true
+        upscaler: Latent
+        scale: 2
+        steps: 10
+        denoising_strength: 0.7
+        target_width: 1024
+        target_height: 768
+        upscale_tile_size: 128
+      vae_tiling:
+        enabled: true
+        tile_size_w: 512
+        tile_size_h: 256
+        target_overlap: 0.5
+        rel_size_w: 0.25
+        rel_size_h: 0.125
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := cfg.ParseSD()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := run.Jobs[0].Params
+	if p.ClipSkip == nil || *p.ClipSkip != 2 {
+		t.Errorf("clip_skip = %v, want 2", p.ClipSkip)
+	}
+	// `eta: 0` is a value and not an absent key, which is the whole reason
+	// these three are pointers.
+	if p.Eta == nil || *p.Eta != 0 {
+		t.Errorf("eta = %v, want a pointer to 0", p.Eta)
+	}
+	if p.FlowShift == nil || *p.FlowShift != 3.5 {
+		t.Errorf("flow_shift = %v, want 3.5", p.FlowShift)
+	}
+	if p.ShiftedTimestep != 4 || p.OutputFormat != "webp" || p.OutputCompression != 90 {
+		t.Errorf("scalars = %+v", p)
+	}
+	if p.SLG.Scale != 2.5 || p.SLG.LayerStart != 0.01 || p.SLG.LayerEnd != 0.2 ||
+		len(p.SLG.Layers) != 3 || p.SLG.Layers[0] != 7 {
+		t.Errorf("slg = %+v", p.SLG)
+	}
+	if !p.Hires.Enabled || p.Hires.Upscaler != "Latent" || p.Hires.Scale != 2 ||
+		p.Hires.Steps != 10 || p.Hires.DenoisingStrength != 0.7 ||
+		p.Hires.TargetWidth != 1024 || p.Hires.TargetHeight != 768 ||
+		p.Hires.UpscaleTileSize != 128 {
+		t.Errorf("hires = %+v", p.Hires)
+	}
+	if !p.VAETiling.Enabled || p.VAETiling.TileSizeW != 512 || p.VAETiling.TileSizeH != 256 ||
+		p.VAETiling.TargetOverlap != 0.5 || p.VAETiling.RelSizeW != 0.25 ||
+		p.VAETiling.RelSizeH != 0.125 {
+		t.Errorf("vae tiling = %+v", p.VAETiling)
+	}
+
+	// An absent key is absent, not zero: a config that says nothing about
+	// clip_skip must not tell the model to use 0.
+	plain, err := Load(write(t, `
+provider: local
+image: ember-sd:1
+ttl: 10m
+sd:
+  serve: [sd-server, --model, /models/sd15.gguf]
+  jobs:
+    - prompt: a cat
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err = plain.ParseSD()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Jobs[0].Params.ClipSkip != nil || run.Jobs[0].Params.Eta != nil {
+		t.Errorf("params = %+v, want the pointers nil", run.Jobs[0].Params)
+	}
+}
+
+// A parameter outside its range is refused when the config is read, which is
+// before anything is rented.
+func TestParseSD_RefusesAParameterOutsideItsRange(t *testing.T) {
+	_, err := func() (any, error) {
+		cfg, err := Load(write(t, `
+provider: local
+image: ember-sd:1
+ttl: 10m
+sd:
+  serve: [sd-server, --model, /models/sd15.gguf]
+  jobs:
+    - prompt: a cat
+      hires:
+        enabled: true
+        denoising_strength: 2.0
+`))
+		if err != nil {
+			return nil, err
+		}
+		return cfg.ParseSD()
+	}()
+	if err == nil {
+		t.Fatal("a denoising strength of 2 was accepted")
+	}
+	if !strings.Contains(err.Error(), "denoising_strength") || !strings.Contains(err.Error(), "sd.jobs[0]") {
+		t.Errorf("err = %v, want it to name the field and the job", err)
+	}
+}

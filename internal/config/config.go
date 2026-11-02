@@ -329,12 +329,109 @@ type SDJob struct {
 	// Output is the local filename stem. It never reaches the server.
 	Output string `yaml:"output"`
 
+	// ClipSkip, Eta and FlowShift are pointers so that an absent key and a
+	// zero are different. The server's own defaults for them are -1, null
+	// and null, so zero cannot stand for unset the way it does above --
+	// `clip_skip: 0` and `eta: 0` are both things a model is told.
+	ClipSkip  *int     `yaml:"clip_skip"`
+	Eta       *float64 `yaml:"eta"`
+	FlowShift *float64 `yaml:"flow_shift"`
+
+	ShiftedTimestep int `yaml:"shifted_timestep"`
+
+	// OutputFormat is checked against the list the server publishes, so a
+	// typo here is refused before anything is rented. Compression applies to
+	// jpeg and webp; png ignores it.
+	OutputFormat      string `yaml:"output_format"`
+	OutputCompression int    `yaml:"output_compression"`
+
+	// Nested where the API nests, because these are read as units: hires
+	// with `enabled` and nothing else is a request for upstream's own
+	// defaults, and slg with layers and no scale is off.
+	SLG       SDSLG       `yaml:"slg"`
+	Hires     SDHires     `yaml:"hires"`
+	VAETiling SDVAETiling `yaml:"vae_tiling"`
+
 	// Extra reaches every field the typed ones above do not set, so nothing
 	// in the API is unreachable from a config. A key that collides with one
 	// ember set is refused rather than resolved: a seed or a step count
 	// resolved the wrong way makes two runs that claim to be the same
 	// measurement produce different images.
 	Extra map[string]any `yaml:"extra"`
+}
+
+// SDSLG is skip-layer guidance, as a config writes it.
+//
+// Scale is the switch: upstream's default is 0, which is off, so layers with
+// no scale configure something that never runs.
+type SDSLG struct {
+	Layers     []int   `yaml:"layers"`
+	LayerStart float64 `yaml:"layer_start"`
+	LayerEnd   float64 `yaml:"layer_end"`
+	Scale      float64 `yaml:"scale"`
+}
+
+// SDHires is the second, higher-resolution pass, as a config writes it.
+type SDHires struct {
+	Enabled           bool    `yaml:"enabled"`
+	Upscaler          string  `yaml:"upscaler"`
+	Scale             float64 `yaml:"scale"`
+	TargetWidth       int     `yaml:"target_width"`
+	TargetHeight      int     `yaml:"target_height"`
+	Steps             int     `yaml:"steps"`
+	DenoisingStrength float64 `yaml:"denoising_strength"`
+	UpscaleTileSize   int     `yaml:"upscale_tile_size"`
+}
+
+// SDVAETiling decodes the latent in tiles, as a config writes it.
+type SDVAETiling struct {
+	Enabled       bool    `yaml:"enabled"`
+	TileSizeW     int     `yaml:"tile_size_w"`
+	TileSizeH     int     `yaml:"tile_size_h"`
+	TargetOverlap float64 `yaml:"target_overlap"`
+	RelSizeW      float64 `yaml:"rel_size_w"`
+	RelSizeH      float64 `yaml:"rel_size_h"`
+}
+
+// params is the config's spelling of these turned into the client's.
+//
+// A method and not an inline literal at the call site, because the queue maps
+// the same parameters from its own wire type: two literals in two packages
+// are two places to forget a field, and a forgotten field here is a
+// generation that silently ignored what the operator asked for.
+func (j SDJob) params() sdserver.Params {
+	return sdserver.Params{
+		ClipSkip:          j.ClipSkip,
+		Eta:               j.Eta,
+		FlowShift:         j.FlowShift,
+		ShiftedTimestep:   j.ShiftedTimestep,
+		OutputFormat:      j.OutputFormat,
+		OutputCompression: j.OutputCompression,
+		SLG: sdserver.SLG{
+			Layers:     j.SLG.Layers,
+			LayerStart: j.SLG.LayerStart,
+			LayerEnd:   j.SLG.LayerEnd,
+			Scale:      j.SLG.Scale,
+		},
+		Hires: sdserver.Hires{
+			Enabled:           j.Hires.Enabled,
+			Upscaler:          j.Hires.Upscaler,
+			Scale:             j.Hires.Scale,
+			TargetWidth:       j.Hires.TargetWidth,
+			TargetHeight:      j.Hires.TargetHeight,
+			Steps:             j.Hires.Steps,
+			DenoisingStrength: j.Hires.DenoisingStrength,
+			UpscaleTileSize:   j.Hires.UpscaleTileSize,
+		},
+		VAETiling: sdserver.VAETiling{
+			Enabled:       j.VAETiling.Enabled,
+			TileSizeW:     j.VAETiling.TileSizeW,
+			TileSizeH:     j.VAETiling.TileSizeH,
+			TargetOverlap: j.VAETiling.TargetOverlap,
+			RelSizeW:      j.VAETiling.RelSizeW,
+			RelSizeH:      j.VAETiling.RelSizeH,
+		},
+	}
 }
 
 // DefaultMount is where a store is attached when the config does not say.
@@ -504,6 +601,7 @@ func (c Config) ParseSD() (sdserver.Run, error) {
 			CFG:            j.CFG,
 			Guidance:       j.Guidance,
 			Output:         j.Output,
+			Params:         j.params(),
 			Extra:          j.Extra,
 		}
 		// Everything checkable without a server, which is where a key in
