@@ -129,10 +129,15 @@ func (r Rate) Cost(d time.Duration) MicroUSD {
 // integer microdollars, so a budget ceiling is an exact comparison and
 // 0.1+0.2 > 0.3 cannot bypass it.
 //
-// Rounded, not truncated. int64(0.44 * 1e6) is 439999 on this hardware,
-// because 0.44 has no exact binary representation -- so truncation would
-// quietly under-report every price ending in a hundredth of a cent, and a
-// budget check would pass on a node a hair over the ceiling.
+// Rounded, not truncated. int64(2.01 * 1e6) is 2009999, because 2.01 has no
+// exact binary representation -- so truncation would quietly under-report the
+// price and a budget check would pass on a node a hair over the ceiling.
+//
+// The example used to be 0.44, which does NOT truncate: it comes out exactly
+// 440000, as 0.29 comes out exactly 290000. That is the stronger argument
+// rather than a weaker one -- the error cancels for some values and not for
+// others, so there is no telling by looking which prices survive the trip,
+// and rounding is the only rule that does not have to know.
 //
 // A negative or non-finite price becomes zero rather than nonsense. A
 // provider quoting NaN is a provider ember should not rent from, and the
@@ -149,9 +154,14 @@ func RateFromUSD(usd float64) Rate {
 // without going through a float.
 //
 // strconv.ParseFloat then multiplying by 1e6 is the obvious implementation and
-// it is wrong for exactly the values that matter: "0.29" becomes
-// 0.28999999999999998 and then 289999 microdollars, so a price that reads
+// it is wrong for exactly the values that matter: "2.01" becomes
+// 2.0099999999999998 and then 2009999 microdollars, so a price that reads
 // identical to the provider's web page compares as cheaper than it is.
+//
+// "0.29" was the example here and it does not truncate -- it is
+// 0.28999999999999998 exactly as stated, and times a million it is exactly
+// 290000, because the error cancels. Which is why this function exists at all
+// rather than a documented list of bad values: you cannot tell by looking.
 func ParseUSD(s string) (MicroUSD, error) {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "$")

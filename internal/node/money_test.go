@@ -100,13 +100,18 @@ func TestMoney_Strings(t *testing.T) {
 }
 
 // TestRateFromUSD_RoundsRatherThanTruncates. This is the only place a float is
-// allowed to become money, and int64(0.44 * 1e6) is 439999 on this hardware
-// because 0.44 has no exact binary representation. Truncating would
-// under-report every price ending in a hundredth of a cent, and a budget check
-// would then pass on a node a hair over the ceiling.
+// allowed to become money, and int64(2.01 * 1e6) is 2009999 because 2.01 has
+// no exact binary representation. Truncating would under-report the price, and
+// a budget check would then pass on a node a hair over the ceiling.
+//
+// 2.01 rather than 0.44, which was the example until it was checked: 0.44
+// comes out exactly 440000 and so proves nothing here. The table keeps both,
+// because a case that passes either way is still a case the next person does
+// not have to wonder about.
 func TestRateFromUSD_RoundsRatherThanTruncates(t *testing.T) {
 	for in, want := range map[float64]Rate{
-		0.44:      440_000,
+		2.01:      2_010_000, // int64(2.01*1e6) is 2009999; rounding is what fixes it
+		0.44:      440_000,   // comes out exact, and is kept to show that some do
 		0.69:      690_000,
 		2.69:      2_690_000,
 		0.001:     1_000,
