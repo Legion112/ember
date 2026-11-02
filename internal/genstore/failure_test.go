@@ -56,6 +56,13 @@ func TestSQLite_EveryMethodReportsAClosedDatabase(t *testing.T) {
 		{"PutCaps", func() error { return s.PutCaps(ctx, sdserver.Capabilities{Model: "m"}) }},
 		{"Caps", func() error { _, _, err := s.Caps(ctx); return err }},
 		{"Interrupt", func() error { _, err := s.Interrupt(ctx); return err }},
+		{"PruneEvents", func() error { _, err := s.PruneEvents(ctx, time.Now(), false); return err }},
+		{"PruneEvents dry", func() error { _, err := s.PruneEvents(ctx, time.Now(), true); return err }},
+		{"DropImages", func() error { _, err := s.DropImages(ctx, id); return err }},
+		{"Usage", func() error { _, err := s.Usage(ctx); return err }},
+		// With a non-zero count, because zero is the branch that deliberately
+		// does not touch the database -- see TestVacuum_OnlyRunsWhenAPrune...
+		{"Vacuum", func() error { _, err := s.Vacuum(ctx, 1); return err }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			err := c.call()
@@ -172,6 +179,9 @@ func TestRecording_FailsEveryCallItWasToldTo(t *testing.T) {
 		{"PutCaps", func() error { return s.PutCaps(ctx, sdserver.Capabilities{}) }},
 		{"Caps", func() error { _, _, err := s.Caps(ctx); return err }},
 		{"Interrupt", func() error { _, err := s.Interrupt(ctx); return err }},
+		{"PruneEvents", func() error { _, err := s.PruneEvents(ctx, time.Now(), false); return err }},
+		{"DropImages", func() error { _, err := s.DropImages(ctx, id); return err }},
+		{"Usage", func() error { _, err := s.Usage(ctx); return err }},
 	} {
 		t.Run(c.on, func(t *testing.T) {
 			s.FailOn = c.on

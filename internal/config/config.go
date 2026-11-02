@@ -171,6 +171,9 @@ type Config struct {
 	// Store names the persistent store this configuration uses, if any.
 	Store StoreConfig `yaml:"store"`
 
+	// History bounds how long the generation history keeps its event rows.
+	History HistoryConfig `yaml:"history"`
+
 	// Assets are the files that must be on the store, verified, before the
 	// workload runs.
 	Assets []AssetConfig `yaml:"assets"`
@@ -298,6 +301,46 @@ type StoreConfig struct {
 	// Mount is where the store is attached inside the node. Empty means
 	// DefaultMount.
 	Mount string `yaml:"mount"`
+}
+
+// HistoryConfig is the `history:` block.
+type HistoryConfig struct {
+	// KeepEvents is how long after a request finishes its per-step event rows
+	// are worth keeping. Empty, or zero, keeps them forever.
+	//
+	// OFF BY DEFAULT, AND IT IS THE HORIZON RATHER THAN THE SCHEDULE. Nothing
+	// in ember deletes an operator's data as a side effect of running a
+	// generation -- the inverse of the rule that stops a rental creating a
+	// standing monthly charge -- so this sets the default for
+	// `ember history prune --older-than` and runs nothing itself. The verb is
+	// what deletes; this is what makes typing the verb not also mean choosing
+	// a number every time.
+	//
+	// A duration and not a row count, because what a count means depends on
+	// the shape of the runs behind it: one FLUX.2 batch at 28 steps with
+	// previews every 5 emits rows per step per job per pass, and passes
+	// restart for each batch item and each highres pass. "Thirty days" is a
+	// retention policy; "ten thousand rows" is a number nobody can reason
+	// about.
+	KeepEvents time.Duration `yaml:"keep_events"`
+}
+
+// KeepEvents is the configured retention horizon for event rows.
+//
+// The shape of ParseAssets and ParseImages: a value receiver, no arguments,
+// empty is not an error. A NEGATIVE VALUE IS REFUSED RATHER THAN CLAMPED, for
+// the reason `ember store abort` refuses a negative --older-than: it reads as
+// "no bound", and a horizon of "ended before now plus a month" matches every
+// request that has ever finished. Clamping it to zero would be the other
+// defensible guess and would silently mean "keep everything" to somebody who
+// wrote -720h meaning "drop everything".
+func (c Config) KeepEvents() (time.Duration, error) {
+	if c.History.KeepEvents < 0 {
+		return 0, fmt.Errorf("history.keep_events is %s; it is how long to KEEP events after a "+
+			"request finishes, so a negative horizon would select every request that has ever "+
+			"ended -- leave it out to keep them forever", c.History.KeepEvents)
+	}
+	return c.History.KeepEvents, nil
 }
 
 // SDConfig is the `sd:` block.

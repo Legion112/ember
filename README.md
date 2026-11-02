@@ -113,7 +113,7 @@ Every verb `ember` dispatches, with the one-line summary it prints for itself:
 | `serve` | run the web UI and a queue that drains onto one rental |
 | `reap` | destroy every node past its deadline |
 | `spend` | report what the recorded generations cost |
-| `history` | list the generations ember has run, newest first |
+| `history` | list the generations ember has run, and measure or prune what they left |
 | `offers` | list rentable offers matching a filter |
 | `store` | create or destroy persistent storage that outlives a node |
 | `catalogue` | record what a provider has available, and read the series back |
@@ -1873,6 +1873,156 @@ request's jobs come from. The per-request figures and `ember spend`'s sums
 come out of one roll-up, so the two cannot come to disagree about what a run
 produced — a conformance test sums the ledger and compares it against the
 aggregate, in both stores.
+
+### What the history is occupying, and what may be removed
+
+Nothing in ember deleted a generation. The schema carried three
+`ON DELETE CASCADE` clauses and no statement anywhere that removes a row, and
+`transfer.RunDir`'s one-directory-per-run is how it stayed, forever. What that
+costs is not dollars but disk, which is why it is easy to leave for a year:
+
+```
+$ ember history du
+database  128.0 KiB   ~/.local/share/ember/state/generations.db
+          3 request(s), 8 job(s), 224 event(s), 8 image row(s) naming 30.8 MiB
+outputs   34.7 MiB    ~/.local/share/ember/outputs
+          9 file(s)
+
+3.9 MiB under outputs is named by no image row. `ember up` writes into this
+tree and records nothing, so `ember history rm` can never reach it.
+
+140 event rows are older than history.keep_events (720h0m0s);
+see `ember history prune`.
+```
+
+**The third figure is the one that would otherwise mislead.** `ember serve`
+writes a request's images under its own request id, which is what the `images`
+rows name; `ember up` writes a timestamped run directory into the same tree
+and records nothing at all. Without that line an operator reads one total,
+removes every request's images, frees a fraction of it and concludes ember is
+broken. The database figure includes SQLite's write-ahead log, which is disk
+in use and can be larger than the file beside it.
+
+**What may be removed is a retention decision, and it is not the one the
+cascades describe.** A cascade makes "delete a request" and "delete its
+images" one operation, and those two pull in opposite directions — the rows
+are small and are the only record that money was spent, the pictures are large
+and are the reason to prune at all. So:
+
+| | may it go | by age | what removes it |
+|---|---|---|---|
+| events | yes | yes | `ember history prune` |
+| images, and the rows naming them | yes | only with an explicit `--older-than` | `ember history rm` |
+| requests, jobs, every cost column | **no** | no | nothing |
+
+**Events are the easy case.** They are the bulk — a batch at 28 steps emits
+rows per step per job per pass, and passes restart for each batch item and
+each highres pass — and the execution columns above are a *derived index* of
+exactly these rows, so a prune changes no figure `ember spend` or
+`ember history` prints. What it costs is the replay: the event stream is the
+record ember treats as the truth, so anything not already in a column is gone
+with the rows, and nothing backfills them.
+
+**Requests and jobs are not prunable at all, and that is the narrowing.**
+`requests.cost` is the only record anywhere that a rental happened and
+`ember spend` is a `SUM` over it. Every other way of being short of history
+here announces itself — `Bucket.Unrecorded` counts the requests whose per-job
+figures are missing and `ember spend` prints how many it had to leave out —
+and a deleted row cannot be counted, because there is nothing left to count.
+It would make a period total quietly smaller than the invoice, with no
+footnote possible, which is the one direction a money figure must never be
+wrong in. What it would buy is a few hundred bytes a request. The cascades
+therefore stay unreachable, deliberately: dropping a foreign key in SQLite
+means rebuilding the table, and if a request row ever *were* deleted,
+cascading is the only behaviour that would not leave orphans.
+
+So `ember history rm` removes the pictures and keeps the money:
+
+```
+$ ember history rm --older-than 720h
+  e7d790ed48488f6e   4 image(s)    22.5 MiB
+  4b9de52ed51a105d   1 image(s)     1.7 MiB
+2 request(s), 5 image(s), 24.2 MiB
+ember: add --yes to remove them; a generated image is not recoverable, and the costs and counts stay either way
+$ echo $?
+3
+
+$ ember history rm --older-than 720h --yes
+  e7d790ed48488f6e   4 image(s)    22.5 MiB
+  4b9de52ed51a105d   1 image(s)     1.7 MiB
+2 request(s), 5 image(s), 24.2 MiB
+removed 5 image(s), 24.2 MiB, and 5 row(s).
+compacted ~/.local/share/ember/state/generations.db.
+```
+
+`ember history` prints the same three rows after that as before — the same
+eight images, the same `$3.18` of rental — because a ledger row's image and
+byte counts come from the job rows and never from the `images` table. The
+images table is the *pointer to the files*, not the measurement of them. What
+says the files are gone is `du`:
+
+```
+2 finished requests produced images and have none on disk, which is what
+`ember history rm` leaves: the costs and the counts stayed and the pictures
+are gone.
+```
+
+**Both verbs print what would go and then refuse until `--yes`, and the
+refusal exits 3.** Not 0, so a script that forgot the flag cannot read the
+exit status as a removal. `--dry-run` is the spelling for asking on purpose,
+and it wins over `--yes` rather than losing to it, so `--yes --dry-run`
+removes nothing — a flag that is sometimes a dry run is worse than none. A
+prompt would have been the wrong shape here: ember's exit codes are a
+contract with cron and CI, and a command that blocks on stdin hangs there
+instead of answering.
+
+**`VACUUM` runs only after a prune that removed something**, and the guard is
+inside the function rather than at the call site, so there is no unguarded
+entry point to forget. SQLite does not return freed pages without one, so a
+prune that skipped it would free disk nobody can see; a `VACUUM` rewrites the
+whole file, so running it after a prune that removed nothing makes the no-op
+case the expensive one on exactly the database large enough to be worth
+pruning.
+
+**`history.keep_events` is the default horizon and nothing applies it on its
+own.** Absent, or zero, keeps every event forever; set, it is what
+`ember history prune` uses when `--older-than` is not given, and what `du`
+counts against. A negative value is refused rather than clamped, as a negative
+`--older-than` is: it reads as "no bound", and "finished before now *plus* a
+month" selects every request that has ever ended.
+
+```yaml
+history:
+  keep_events: 720h   # 30 days; absent means keep them forever
+```
+
+The only process that *could* run a prune automatically is `ember serve`,
+which is the process that writes the events — a prune on its startup would
+delete the replay of the run the operator came back to look at, with no
+confirmation and no output they would ever see. That is the inverse of the rule
+that stops a rental creating a standing monthly charge: nothing that runs a
+generation may delete an older one as a side effect, and events cost disk
+rather than dollars, so no deadline forces the issue the way a billing node
+forces `reap`.
+
+**The horizon is measured from when a request finished**, which is where the
+period spellings in this repository legitimately part. `--since` and `--until`
+bound when a request was *created*, because an operator asks what last week
+cost; a retention horizon asks how long after it ended, and for a request
+created in March and finished yesterday the two answers are forty weeks apart.
+A request that has not finished is unreachable from either verb by
+construction rather than by a filter — it has no end to compare — so a browser
+streaming a run in flight cannot have its rows pulled out from under it, and a
+job three images into eight cannot have the first three removed.
+
+**A request id is the key to a path, so nothing here builds one.** Every byte
+removed goes through `blob.Store` under the key the database holds: the name
+is checked component by component and the removal goes through an `os.Root` —
+containment twice by two mechanisms, the rule `internal/transfer` follows for
+a tar member. A hand-edited row naming `../../../etc/passwd` is refused and
+named rather than cleaned. `Delete` also takes the directory its removal
+emptied, because one inode per pruned request left behind forever would be
+disk `du` reports and no command in ember can free.
 
 ## Video
 

@@ -93,7 +93,7 @@ func commands() []command {
 		{"serve", "run the web UI and a queue that drains onto one rental", cmdServe},
 		{"reap", "destroy every node past its deadline", cmdReap},
 		{"spend", "report what the recorded generations cost", cmdSpend},
-		{"history", "list the generations ember has run, newest first", cmdHistory},
+		{"history", "list the generations ember has run, and measure or prune what they left", cmdHistory},
 		{"offers", "list rentable offers matching a filter", cmdOffers},
 		{"store", "create or destroy persistent storage that outlives a node", cmdStore},
 		{"catalogue", "record what a provider has available, and read the series back", cmdCatalogue},

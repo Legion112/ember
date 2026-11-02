@@ -259,5 +259,74 @@ func TestDir_NameIsForAnErrorMessage(t *testing.T) {
 	}
 }
 
+// TestDir_DeleteTakesTheDirectoryItEmptied.
+//
+// A local key is "<request>/<stem>-00.png", so `ember history rm` removing
+// every image of a request empties that request's directory. Left behind, it
+// is one inode per pruned request for good -- in the very tree
+// `ember history du` is measuring, which would then report disk no command in
+// ember can free. The removal is folded into Delete rather than being a second
+// method, because the alternative is a call site that has to remember it.
+func TestDir_DeleteTakesTheDirectoryItEmptied(t *testing.T) {
+	d := openDir(t)
+	base := d.Name()
+
+	if err := d.Put(t.Context(), "req1/a-00.png", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Put(t.Context(), "req1/a-01.png", []byte("y")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first removal leaves the directory, because it is not empty -- a
+	// version that removed it would have had to take the second image too.
+	if err := d.Delete(t.Context(), "req1/a-00.png"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "req1")); err != nil {
+		t.Fatalf("the directory went while an image was still in it: %v", err)
+	}
+	if _, err := d.Open(t.Context(), "req1/a-01.png"); err != nil {
+		t.Fatalf("the other image went with its sibling: %v", err)
+	}
+
+	if err := d.Delete(t.Context(), "req1/a-01.png"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "req1")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the emptied directory is still there: %v", err)
+	}
+	// And the store's own directory is not a parent it may climb into. The
+	// walk stops at ".", so an output tree that happens to be empty is not
+	// removed out from under the next run.
+	if _, err := os.Stat(base); err != nil {
+		t.Errorf("Delete removed the store's own directory: %v", err)
+	}
+}
+
+// TestDir_DeleteWalksUpOnlyAsFarAsItIsEmpty: a key several directories deep,
+// with a sibling part-way up. The walk takes the levels it emptied and stops
+// at the first one it did not.
+func TestDir_DeleteWalksUpOnlyAsFarAsItIsEmpty(t *testing.T) {
+	d := openDir(t)
+	base := d.Name()
+
+	if err := d.Put(t.Context(), "a/b/c/deep.png", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Put(t.Context(), "a/kept.png", []byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Delete(t.Context(), "a/b/c/deep.png"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "a", "b")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a/b survived its last file: %v", err)
+	}
+	if _, err := d.Open(t.Context(), "a/kept.png"); err != nil {
+		t.Errorf("the walk climbed past a directory that was not empty: %v", err)
+	}
+}
+
 // Dir must satisfy Store, or the seam is not a seam.
 var _ Store = (*Dir)(nil)

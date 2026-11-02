@@ -36,6 +36,21 @@ import (
 type Store interface {
 	Put(ctx context.Context, key string, b []byte) error
 	Open(ctx context.Context, key string) (io.ReadSeekCloser, error)
+
+	// Delete removes key, and with it any directory the removal left empty.
+	//
+	// THE SECOND HALF IS IN THE CONTRACT RATHER THAN IN A SEPARATE METHOD,
+	// because the alternative leaves something nothing cleans up. A local key
+	// is "<request>/<stem>-00.png", so `ember history rm` removing every
+	// image of a request empties that request's directory and leaves it
+	// there -- one inode per pruned request, for good, in the tree
+	// `ember history du` is measuring. A backend with no directories, which
+	// is what internal/s3 will be, implements this as the removal alone and
+	// the sentence still reads true of it.
+	//
+	// It is not a prefix delete and must not become one: a recursive remove
+	// driven by a request id is the hazard the containment rules above exist
+	// for, and it would take files the operator put there themselves.
 	Delete(ctx context.Context, key string) error
 }
 
@@ -150,9 +165,11 @@ func (d *Dir) Open(_ context.Context, key string) (io.ReadSeekCloser, error) {
 	return f, nil
 }
 
-// Delete removes key. A key that is already gone is a success, for the reason
-// provider.Destroy treats a missing node as one: the goal is that it is not
-// there, and it is not.
+// Delete removes key and any directory of it the removal left empty.
+//
+// A key that is already gone is a success, for the reason provider.Destroy
+// treats a missing node as one: the goal is that it is not there, and it is
+// not.
 func (d *Dir) Delete(_ context.Context, key string) error {
 	if err := ValidateKey(key); err != nil {
 		return err
@@ -160,5 +177,30 @@ func (d *Dir) Delete(_ context.Context, key string) error {
 	if err := d.root.Remove(key); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove %s in %s: %w", key, d.name, err)
 	}
+	d.pruneDirs(path.Dir(key))
 	return nil
+}
+
+// pruneDirs removes dir and its parents for as long as they are empty.
+//
+// ERRORS ARE DISCARDED ON PURPOSE, AND THIS IS THE ONLY PLACE HERE THAT DOES.
+// The caller asked for a file to be gone and it is; a directory that would not
+// go is either not empty -- which is the ordinary case, because two requests'
+// keys can share no parent but the root and a run directory holds more than
+// one image until the last one goes -- or is a permissions problem on
+// something the operator owns. Reporting either as a failed Delete would make
+// `ember history rm` print an error over bytes it successfully freed, and the
+// first of them is not even unusual.
+//
+// Rooted, so the walk cannot climb out: "." is the store's own directory and
+// stops the loop, and os.Root refuses a name that would leave it anyway. The
+// bound on the loop is the key's own depth, which ValidateKey has already
+// refused "." and ".." from.
+func (d *Dir) pruneDirs(dir string) {
+	for dir != "." && dir != "/" && dir != "" {
+		if err := d.root.Remove(dir); err != nil {
+			return
+		}
+		dir = path.Dir(dir)
+	}
 }
