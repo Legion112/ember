@@ -189,6 +189,28 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 		opts.Budget = *req.Budget
 	}
 
+	// Said before anything is rented, because that is the only moment it is
+	// useful, and said rather than refused.
+	//
+	// workload.NonLoopbackBinds has the whole argument. The short version:
+	// nothing is published for a workload port -- exposure.PortRequest's
+	// `public` field is unexported and only SSHPort() sets it -- so an
+	// operator who writes `--host 0.0.0.0` has concluded something false
+	// about what ember exposed, and on the local provider that belief is
+	// partly true, since a Docker bridge makes the bind reachable from this
+	// machine. A refusal would be ember claiming to know a flag grammar it
+	// deliberately does not learn.
+	//
+	// sd.serve is not read here: sdserver.ServeCommand owns that argv's
+	// listen address and refuses a command that names it, which is a seal
+	// rather than advice.
+	for _, b := range cmdBinds(cfg) {
+		opts.Log.Warn("this workload asks to listen somewhere other than the node's own loopback",
+			"flag", b.Flag, "address", b.Addr, "argv", b.Index,
+			"published", "nothing: a workload port is never published, and the post-create check destroys a node whose provider published one",
+			"reachable", "the forward only, except on the local provider, where a Docker bridge makes the bind reachable from this machine")
+	}
+
 	// The offer is chosen here, for the same reasons the store is resolved
 	// above: only the provider knows what it has, and the image depends on the
 	// answer. An `images:` map is keyed by the architecture of the card, so
@@ -258,6 +280,21 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 		ImageFrom: from,
 		Hold:      req.Hold,
 	}, nil
+}
+
+// cmdBinds collects the non-loopback binds across every step of a run.
+//
+// Every entry of `cmds` and not only the first, for the reason BuildSpec
+// validates every entry's argv: a batch whose seventh step publishes is a
+// batch where the finding arrives after six steps have been paid for -- and
+// here it would never arrive at all, because the warning is printed once
+// before the rental rather than per step.
+func cmdBinds(cfg config.Config) []workload.NonLoopbackBind {
+	out := workload.NonLoopbackBinds(cfg.Cmd)
+	for _, c := range cfg.Cmds {
+		out = append(out, workload.NonLoopbackBinds(c)...)
+	}
+	return out
 }
 
 // Filter is the offer filter this config and store describe.
