@@ -171,7 +171,54 @@ type Capabilities struct {
 	// which on a batch is most of the money -- leaves the one in flight to
 	// finish, and says plainly that it could not be stopped. See runJobs.
 	CancelGenerating bool
+
+	// Supported is the server's two feature maps, trimmed to the flags that
+	// cover a parameter ember can send. See Supported.
+	Supported Supported
 }
+
+// Supported is what the server says the loaded model takes.
+//
+// IT IS A THIRD KIND OF ALLOW-LIST and the weakest of the three, which is why
+// it is separate from the lists above. `Samplers` and `Upscalers` are names
+// checked against names; `Limits` are numbers checked against numbers; these
+// are booleans the server derives from the model it loaded, and they say only
+// "asking for this at all is pointless or refused". They exist because without
+// them the compose panel offers a control for something the server has already
+// said it cannot do, and the operator learns it as a refusal after a card is
+// rented -- or, worse, as a parameter accepted and ignored, which reads as
+// "the model does not respond to clip skip".
+//
+// EVERY FIELD IS A POINTER: nil is "this build published no such flag" and
+// false is "the server says no". That distinction is load-bearing in both
+// directions. A nil that refused would make every parameter here unusable
+// against any build that does not publish the maps, including every cached
+// caps row written before ember read them -- the exact shape of the bug where
+// an old `caps` row decoded to empty lists and Validate refused a correct
+// output_format while blaming the server for a field ember never asked about.
+// A false that was ignored would put the control back where it started.
+//
+// They are spelled out one field per parameter rather than carried as a
+// map[string]bool, because a map would make the gate a string the UI has to
+// spell the same way the server does, in a language that cannot be compiled
+// against it. The closed set is upstream's k_recipe_features; ember reads five
+// of its twenty-seven and the one `hires` flag that only `features` carries.
+type Supported struct {
+	ClipSkip        *bool
+	FlowShift       *bool
+	ShiftedTimestep *bool
+	SLG             *bool
+	VAETiling       *bool
+	Hires           *bool
+}
+
+// denied reports that the server published this flag and said no.
+//
+// A function rather than `flag != nil && !*flag` at each call site, because
+// the nil case is the one that would be written wrong: `!*flag` on a nil
+// pointer panics, and `flag == nil || !*flag` -- the plausible typo -- refuses
+// everything against a server that published nothing.
+func denied(flag *bool) bool { return flag != nil && !*flag }
 
 // APIError is the server's structured refusal.
 type APIError struct {
@@ -313,11 +360,22 @@ func mapCapabilities(w wireCapabilities) Capabilities {
 	return Capabilities{
 		Model:            w.Model.Name,
 		CancelGenerating: w.Features.CancelGenerating,
-		Samplers:         append([]string(nil), w.Samplers...),
-		Schedulers:       append([]string(nil), w.Schedulers...),
-		PreviewModes:     append([]string(nil), w.PreviewModes...),
-		OutputFormats:    append([]string(nil), w.OutputFormats...),
-		Upscalers:        ups,
+		// Copied pointer by pointer rather than as a struct, so adding a flag
+		// to the wire type without reading it here is a compile-time nothing
+		// and not a silent passthrough of a field no refusal consults.
+		Supported: Supported{
+			ClipSkip:        w.GenerationFeatures.ClipSkip,
+			FlowShift:       w.GenerationFeatures.FlowShift,
+			ShiftedTimestep: w.GenerationFeatures.ShiftedTimestep,
+			SLG:             w.GenerationFeatures.SLG,
+			VAETiling:       w.GenerationFeatures.VAETiling,
+			Hires:           w.Features.Hires,
+		},
+		Samplers:      append([]string(nil), w.Samplers...),
+		Schedulers:    append([]string(nil), w.Schedulers...),
+		PreviewModes:  append([]string(nil), w.PreviewModes...),
+		OutputFormats: append([]string(nil), w.OutputFormats...),
+		Upscalers:     ups,
 		Limits: Limits{
 			MinWidth:      w.Limits.MinWidth,
 			MaxWidth:      w.Limits.MaxWidth,

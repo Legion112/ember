@@ -591,6 +591,112 @@ func TestPreview_AModelThatCannotLoadIsAnErrorStateAndNotASilence(t *testing.T) 
 		captureBody(t, filepath.Join(capture, "error_model_not_loaded.json"), body)
 	}
 
+	// 4b. AND THE ONE OBSERVED `false` IN EITHER FEATURE MAP, which is what
+	//     makes the capability gate a gate rather than a shape.
+	//
+	//     THE PROBLEM IT SOLVES. `generation_features` is the map ember reads
+	//     to grey a control the model does not take, and against every server
+	//     ember can currently start it is entirely TRUE: ember hands the
+	//     weights over as argv, upstream calls that the `@command-line`
+	//     recipe, and model_generation_features returns that recipe's
+	//     declared set unmodified -- "Command-line model (all features)".
+	//     k_recipe_features defaults clip_skip, flow_shift,
+	//     shifted_timestep, slg and img_cfg to false and a catalog recipe
+	//     turns on what it has, but a catalog recipe is only reachable through
+	//     POST /models/load, which ember does not call. So the whole
+	//     refuse-and-grey path risked being a feature built end to end and
+	//     connected to nothing -- agreeing with itself through four layers
+	//     and never once seeing the answer it exists to honour.
+	//
+	//     A server with no weights is the one state that does say no, and it
+	//     says no to everything: model_generation_features' first branch
+	//     returns k_recipe_features with every value set false. So this is the
+	//     deny path driven by a real response rather than by a hand-made one,
+	//     through the production mapper and the production refusal.
+	noModel, err := srv.client.Capabilities(t.Context())
+	if err != nil {
+		t.Fatalf("capabilities on a server with no weights: %v", err)
+	}
+	for _, f := range []struct {
+		name string
+		flag *bool
+	}{
+		{"clip_skip", noModel.Supported.ClipSkip},
+		{"flow_shift", noModel.Supported.FlowShift},
+		{"shifted_timestep", noModel.Supported.ShiftedTimestep},
+		{"slg", noModel.Supported.SLG},
+		{"vae_tiling", noModel.Supported.VAETiling},
+	} {
+		if f.flag == nil {
+			t.Errorf("generation_features.%s was not published at all, so ember cannot tell "+
+				"a server that says no from one that says nothing", f.name)
+			continue
+		}
+		if *f.flag {
+			t.Errorf("generation_features.%s is true on a server with no model loaded; "+
+				"the gate then has no observed false anywhere and is a shape rather than "+
+				"a check", f.name)
+		}
+	}
+	// AND THE OTHER STATE, WHICH IS WHY EVERY FLAG IS A POINTER. `hires` is
+	// the opposite answer here and it is not false -- it is ABSENT. With no
+	// model loaded `supported_modes` is empty, so the per-mode `features` map
+	// is never built and the response carries only the two cancel flags; this
+	// one captured response therefore holds a published false and a genuine
+	// silence side by side. A bool would have collapsed them, and the silence
+	// would have greyed the hires control on every build that does not publish
+	// the map -- the failure capsView.Caps is a pointer to avoid one layer up.
+	//
+	// So a nil must gate nothing, asserted rather than reasoned about: a job
+	// with the hires pass on is accepted here, by the same Validate that just
+	// refused clip_skip against the same capabilities.
+	if noModel.Supported.Hires != nil {
+		t.Errorf("features.hires on a server with no model = %v, want absent: "+
+			"the only observed silence in either feature map has stopped being one, "+
+			"and the pointer's nil case is now covered by nothing",
+			*noModel.Supported.Hires)
+	}
+	withHires := sdserver.Job{
+		Prompt: "a paper boat",
+		Width:  labWidth, Height: labHeight,
+		Steps:  labSteps,
+		Params: sdserver.Params{Hires: sdserver.Hires{Enabled: true}},
+	}
+	if err := sdserver.Validate(withHires, noModel); err != nil {
+		t.Errorf("a flag the server did not publish refused a job: %v. An unpublished "+
+			"flag is not a no, or ember refuses a parameter against every build that "+
+			"does not carry these maps", err)
+	}
+	// And the refusal, through Validate, which is the cheap moment: this is
+	// what a request naming clip_skip would hit before a card is rented.
+	gated := sdserver.Job{
+		Prompt: "a paper boat",
+		Width:  labWidth, Height: labHeight,
+		Steps:  labSteps,
+		Params: sdserver.Params{ClipSkip: ptr(2)},
+	}
+	if err := sdserver.Validate(gated, noModel); err == nil {
+		t.Error("a job naming clip_skip was accepted against a server that published " +
+			"generation_features.clip_skip false")
+	} else {
+		t.Logf("the capability gate refuses: %v", err)
+	}
+	// Nothing is refused when the parameter is not set, which is the half a
+	// gate gets wrong in the expensive direction: an all-false server must
+	// still accept an ordinary job.
+	plain := gated
+	plain.Params = sdserver.Params{}
+	if err := sdserver.Validate(plain, noModel); err != nil {
+		t.Errorf("an ordinary job was refused by the capability gate: %v", err)
+	}
+	if capture != "" {
+		_, body, cerr := labRequest(t, srv, http.MethodGet, "/sdcpp/v1/capabilities", nil)
+		if cerr != nil {
+			t.Fatalf("capturing the no-model capabilities: %v", cerr)
+		}
+		captureBody(t, filepath.Join(capture, "capabilities_no_model.json"), body)
+	}
+
 	// 5. A load that fails, with the server still up to be asked about it.
 	load := fmt.Sprintf(`{"recipe":"sd1-checkpoint","models":{"model":%q}}`, labBadModel)
 	code, body, err := labRequest(t, srv, http.MethodPost, "/sdcpp/v1/models/load", []byte(load))
@@ -799,6 +905,236 @@ func TestPreview_TheServerListensOnLoopbackOnly(t *testing.T) {
 	if !found {
 		t.Fatalf("nothing is listening on %d, although the model loaded:\n%s", sdserver.Port, out)
 	}
+}
+
+// The three paths the LoRA lab needs: a directory sd-server is told to scan,
+// one LoRA-shaped file inside it, and a second identical file one level above
+// so that "the path escapes" can be told apart from "the file is not there".
+//
+// `.safetensors` because that is one of the four extensions upstream's
+// is_supported_model_ext accepts (gguf, pt, pth, safetensors); the contents are
+// not a model and never have to be, because every assertion here is about path
+// *resolution*, which happens before anything is read.
+const (
+	labLoraDir     = "/tmp/ember-lab-loras"
+	labLoraOutside = "/tmp/ember-lab-outside"
+	labLoraName    = "real.safetensors"
+	labLoraEscape  = "escape.safetensors"
+)
+
+// TestPreview_ALoraPathIsAnIdFromAPublishedListAndNotAPath answers the one
+// question AGENTS.md held open rather than guessed at.
+//
+// WHAT WAS OPEN. `hires.upscaler` and `lora[].path` both looked like a request
+// body naming a file on a rented machine, and the honest position was "ember
+// does not know which of these are safe" -- the upscaler turned into an
+// allow-list because `capabilities.upscalers` publishes one, and the LoRA left
+// unreachable from a request until somebody read the C++ or sent a hostile
+// body. api.md says the ids are "relative paths resolved under loras/" and says
+// nothing about `..`, which is exactly the shape of claim this repository has
+// been wrong about before: a schema read in place of a response.
+//
+// WHAT THE C++ SAYS, at the revision both workload images pin (77b72a2).
+// `examples/server/runtime.cpp:480`'s get_lora_full_path does not join the
+// request's string to anything. It is an equality match against a cache the
+// server built by scanning its own LoRA directories --
+// `std::find_if(... entry.path == path)` -- and a miss returns `""`, which
+// `examples/common/common.cpp:2093`'s parse_lora_json_field turns into a
+// refusal of the whole request. So the string never reaches a path operation.
+// Containment is then enforced a second time by a different mechanism, which
+// is the rule ember's own tar extractor follows: the scan canonicalises every
+// entry and drops anything `model_path_inside` says is not under the directory
+// (runtime.cpp:444), and the resolver canonicalises and re-checks the entry it
+// matched before handing it back (runtime.cpp:486).
+//
+// WHY A LAB ANYWAY. Reading the source says what the program should do; this
+// says what the binary in the image does, and it is the half that costs a
+// rental to be wrong about. Every body below is sent raw through labRequest
+// rather than through sdserver.Job, because ember has no LoRA field -- and
+// deliberately still does not: the deliverable here is the evidence and the
+// written answer, not a control.
+func TestPreview_ALoraPathIsAnIdFromAPublishedListAndNotAPath(t *testing.T) {
+	l := harness.New(t)
+	n, client := labNodeAndDialer(t, l, "lora")
+
+	// Seeded through Docker before the server starts, for the reason the
+	// load-failure lab seeds its bad model root that way: widening a
+	// production interface so a test can write a file is a production
+	// interface shaped by a test's convenience.
+	//
+	// THE SYMLINK IS THE SECOND MECHANISM'S TEST. A file outside the
+	// directory is one thing; a name *inside* it that points outside is the
+	// one an identity match cannot catch on its own, and it is what the
+	// canonicalise-and-check in the scan is for.
+	l.Exec(t.Context(), n.ID, "mkdir", "-p", labLoraDir, labLoraOutside)
+	l.Exec(t.Context(), n.ID, "sh", "-c",
+		"printf 'not a lora\\n' > "+path.Join(labLoraDir, labLoraName)+
+			" && printf 'not a lora either\\n' > "+path.Join(labLoraOutside, labLoraName)+
+			" && ln -sf "+path.Join(labLoraOutside, labLoraName)+" "+path.Join(labLoraDir, labLoraEscape))
+
+	srv := startServerOn(t, n, client,
+		[]string{"sd-server", "--model", labModel, "--lora-model-dir", labLoraDir}, true)
+	capture := captureDir(t)
+
+	// 1. THE SERVER PUBLISHES THE ALLOW-LIST, which is what makes a future
+	//    ember LoRA field possible at all: `capabilities.loras[]` carries the
+	//    very `path` strings get_lora_full_path matches on, so a name checked
+	//    against it is a name the server already resolved -- the same shape
+	//    `Capabilities.Upscalers` has.
+	status, body, err := labRequest(t, srv, http.MethodGet, "/sdcpp/v1/capabilities", nil)
+	if err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("capabilities answered %d: %s", status, body)
+	}
+	var caps struct {
+		Loras []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"loras"`
+	}
+	if err := json.Unmarshal(body, &caps); err != nil {
+		t.Fatalf("decoding capabilities: %v", err)
+	}
+	var ids []string
+	for _, lr := range caps.Loras {
+		ids = append(ids, lr.Path)
+	}
+	if len(ids) != 1 || ids[0] != labLoraName {
+		t.Fatalf("the published LoRA ids are %v, want exactly [%s]. The symlink pointing out "+
+			"of the directory is the entry that must not be there: if it is, the scan's "+
+			"own containment check has stopped holding and an id from this list is no "+
+			"longer evidence of anything", ids, labLoraName)
+	}
+	if capture != "" {
+		captureBody(t, filepath.Join(capture, "capabilities_loras.json"), body)
+	}
+
+	// 2. THE PUBLISHED ID RESOLVES, which is the half that makes the refusals
+	//    below mean something. Without it every assertion after this one would
+	//    pass against a server that refuses every LoRA path there is -- the
+	//    AssertNoStray failure, reached by asserting only the direction that
+	//    cannot go wrong.
+	//
+	//    202 is the whole claim: the body parsed, so the resolver found the
+	//    file. What the generation then does with a file that is not a LoRA is
+	//    not this lab's question, and the job is cancelled rather than waited
+	//    for.
+	status, body, err = labRequest(t, srv, http.MethodPost, "/sdcpp/v1/img_gen",
+		loraBody(t, labLoraName))
+	if err != nil {
+		t.Fatalf("submitting the published id: %v", err)
+	}
+	if status != http.StatusAccepted {
+		t.Fatalf("the server refused its own published LoRA id %q with %d: %s\n"+
+			"Every refusal below would then be a refusal of everything rather than "+
+			"of an escaping path", labLoraName, status, body)
+	}
+	var accepted struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &accepted); err != nil {
+		t.Fatalf("decoding the acceptance: %v", err)
+	}
+	if err := srv.client.Cancel(t.Context(), accepted.ID); err != nil {
+		t.Logf("cancelling the accepted job: %v", err)
+	}
+
+	// 3. AND NOW THE HOSTILE ONES. Each is refused, and the first two are the
+	//    ones that carry the finding: `..` reaching a real file of a supported
+	//    extension that the server could read, and a symlink inside the
+	//    directory pointing at the same file. Neither is cleaned into
+	//    something valid and neither escapes -- they are simply not ids the
+	//    server published.
+	for _, tc := range []struct{ name, why string }{
+		{"../" + path.Base(labLoraOutside) + "/" + labLoraName,
+			"a traversal onto a real, readable, supported-extension file outside the LoRA directory"},
+		{labLoraEscape,
+			"a name inside the directory whose target is outside it"},
+		{"../../etc/passwd", "a traversal out of the directory tree entirely"},
+		{"/etc/passwd", "an absolute path"},
+		{"./" + labLoraName, "the published id with a redundant prefix"},
+		{"loras/" + labLoraName, "the published id under the subdirectory api.md names"},
+		{labLoraName + "/../" + labLoraName, "a path that normalises to the published id"},
+	} {
+		status, body, err := labRequest(t, srv, http.MethodPost, "/sdcpp/v1/img_gen",
+			loraBody(t, tc.name))
+		if err != nil {
+			t.Fatalf("submitting %q: %v", tc.name, err)
+		}
+		if status == http.StatusAccepted {
+			t.Errorf("the server ACCEPTED %q (%s). The seal on lora[].path is load-bearing "+
+				"and the answer recorded in AGENTS.md is now wrong: %s",
+				tc.name, tc.why, body)
+			continue
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("%q answered %d, want 400: %s", tc.name, status, body)
+			continue
+		}
+		// The sentence matters as much as the code. A 400 for some other
+		// reason -- a body ember built wrong, say -- would read as a refusal
+		// of the path and prove nothing about it.
+		var refusal struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		if err := json.Unmarshal(body, &refusal); err != nil {
+			t.Errorf("%q: decoding the refusal: %v (%s)", tc.name, err, body)
+			continue
+		}
+		if !strings.Contains(refusal.Error, "generation parameters") {
+			t.Errorf("%q was refused for something other than its path: %q", tc.name, refusal.Error)
+		}
+		t.Logf("%-46q refused %d %s (%s)", tc.name, status, refusal.Error, tc.why)
+		if capture != "" && tc.name == "../../etc/passwd" {
+			captureBody(t, filepath.Join(capture, "error_lora_not_found.json"), body)
+		}
+	}
+
+	// 4. THE LAST THING THE SYMLINK HAS TO SAY. Its *target* is readable and
+	//    one of the four supported extensions, so the only reason it is not an
+	//    id is the containment check in the scan. Asserting the file is really
+	//    there keeps that from being a lab that passes because the seeding
+	//    silently failed.
+	if out := l.ExecOut(t.Context(), n.ID, "readlink", "-f", path.Join(labLoraDir, labLoraEscape)); !strings.Contains(out, labLoraOutside) {
+		t.Errorf("the escaping symlink does not point out of the LoRA directory (%q), "+
+			"so the second containment mechanism was never exercised", strings.TrimSpace(out))
+	}
+}
+
+// ptr is for the Params fields that are pointers because zero is a value.
+//
+// clip_skip's server default is -1 and eta's is null, so 0 cannot stand for
+// unset -- which is why there is a pointer to take the address of here at all.
+func ptr[T any](v T) *T { return &v }
+
+// loraBody builds the smallest img_gen body that names one LoRA.
+//
+// Hand-built JSON rather than sdserver.Job.Body, because sdserver.Job HAS no
+// LoRA field and must not grow one for a test: an escape hatch for a test is
+// an escape hatch, which this package decided once already for the RunPod
+// mapper's sealed branch. The geometry and step count are the lab's smallest,
+// so an accepted job costs as little CPU as possible before it is cancelled.
+func loraBody(t *testing.T, loraPath string) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"prompt": "a paper boat",
+		"width":  labWidth,
+		"height": labHeight,
+		"sample_params": map[string]any{
+			"sample_steps":  labSteps,
+			"sample_method": "euler",
+		},
+		"seed":    1234,
+		"preview": sdserver.PreviewNone,
+		"lora":    []any{map[string]any{"path": loraPath, "multiplier": 1.0}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 // labServer is a started sd-server and the ways to reach it.

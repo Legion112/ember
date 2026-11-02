@@ -18,12 +18,46 @@ read from a **schema** rather than from a **response**.
 `sd-server` built from `workload-sd-cuda.Dockerfile` at `CUDA_ARCH=75`,
 serving sd15 Q8_0 on an RTX 2080 Ti. They are evidence.
 
-`capabilities.json` is also where `features.cancel_generating` is read from,
-which is the only feature flag ember acts on. The CPU build answers `true`
-for it too, which the cancel lab asserts against a live `/capabilities`
-rather than against this file — the flag decides whether ember asks a card
-that is already billing to stop, and reading a committed fixture to answer
-that would be the `allowedCudaVersions` mistake again.
+`capabilities.json` is also where `features.cancel_generating` is read from.
+The CPU build answers `true` for it too, which the cancel lab asserts against
+a live `/capabilities` rather than against this file — the flag decides
+whether ember asks a card that is already billing to stop, and reading a
+committed fixture to answer that would be the `allowedCudaVersions` mistake
+again.
+
+**`capabilities_no_model.json` is the only response here that says no, and it
+says two different kinds of no.** It is a server with no weights at all,
+captured by the same load-failure lab. Every one of the twenty-seven
+`generation_features` is `false`, because `model_generation_features` returns
+its whole default table inverted when nothing is loaded — and `features` is
+*not* a map with false values in it, it is a map with only
+`cancel_generating` and `cancel_queued` in it, because `supported_modes` is
+empty and the per-mode map is therefore never built. So one captured response
+carries a published denial and a genuine silence side by side, which is the
+evidence the pointers in `sdserver.Supported` are for: a bool would have
+turned the silence into a denial and greyed a control against every build that
+does not publish these maps. It is the fixture the whole capability gate is
+tested against, and the only one that can drive its deny path — see the note
+below on why no server ember starts reaches it.
+
+**`capabilities_loras.json` is a capture with nothing reading it yet, on
+purpose.** It is a CPU server started with `--lora-model-dir`, so `loras[]` is
+non-empty: `{"name":"real","path":"real.safetensors","display_path":
+"real.safetensors"}`. ember has no LoRA field and this change deliberately did
+not add one — the deliverable was the answer about `..`, which is in
+`AGENTS.md`. What the file is for is the next person: the `path` here is
+exactly the string `get_lora_full_path` matches on, so it shows what a
+`Capabilities.Loras` allow-list would be checking against, captured before the
+client code exists. That is the habit
+`internal/provider/runpod/testdata/README.md` set and the reason the volume
+API's two disagreeing field names were known before anything called them.
+
+**`error_lora_not_found.json` is a third spelling of `error`.** A `lora[].path`
+the server has not published is refused with
+`{"error":"invalid generation parameters"}` — a string, like the
+model-management form, but with **no `code` beside it**. `APIError.Error` has
+a branch for a message with no code, and until this capture that branch was
+written for a shape nobody had observed.
 
 `job_generating.json` and `job_completed.json` were captured by the preview
 lab (`make test-preview-lab`, `test/integration/preview_test.go`) from the CPU
@@ -153,7 +187,10 @@ two upscale bounds ember does not read.
 
 | file | endpoint | captured? | what it exercises |
 |---|---|---|---|
-| `capabilities.json` | `GET /sdcpp/v1/capabilities` | **captured** — CUDA build, sd15 Q8_0, RTX 2080 Ti | every allow-list `Validate` reads, and `features.cancel_generating` |
+| `capabilities.json` | `GET /sdcpp/v1/capabilities` | **captured** — CUDA build, sd15 Q8_0, RTX 2080 Ti | every allow-list `Validate` reads, `features.cancel_generating`, and both feature maps answering **true** |
+| `capabilities_no_model.json` | same | **captured** — `make test-preview-lab`, a CPU server with no weights | every `generation_features` flag **false**, beside a `features` map with no `hires` key at all |
+| `capabilities_loras.json` | same | **captured** — same lab, a CPU server started with `--lora-model-dir` | the shape of the published LoRA allow-list; read by no test yet, and the note above says why |
+| `error_lora_not_found.json` | `POST /sdcpp/v1/img_gen` | **captured** — the LoRA lab, a `lora[].path` the server has not published (400) | the string form of `error` with **no `code`** beside it |
 | `model_status_ready.json` | `GET /sdcpp/v1/models/status` | **captured** — same run | the state `WaitModel` stops on |
 | `model_status_empty.json` | same | **captured** — `make test-preview-lab`, a CPU server started with `--model-dir` and no model | a server up with no weights, and `load_elapsed_seconds: null` |
 | `model_status_error.json` | same | **captured** — same lab, after `models/load` on a file that is not a model | the state `WaitModel` refuses on, and that `error` is a JSON **string** |

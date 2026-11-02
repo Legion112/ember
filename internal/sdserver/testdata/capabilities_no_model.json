@@ -1,0 +1,162 @@
+{
+  "current_mode": "",
+  "defaults": {},
+  "defaults_by_mode": {},
+  "features": {
+    "cancel_generating": true,
+    "cancel_queued": true
+  },
+  "features_by_mode": {},
+  "generation_features": {
+    "cache": false,
+    "cache_dit": false,
+    "cache_unet": false,
+    "clip_skip": false,
+    "control_frames": false,
+    "control_image": false,
+    "controlnet": false,
+    "distilled_guidance": false,
+    "end_image": false,
+    "flow_shift": false,
+    "high_noise": false,
+    "img2img": false,
+    "img_cfg": false,
+    "init_image": false,
+    "ip_adapter": false,
+    "lora": false,
+    "mask_image": false,
+    "preview": false,
+    "preview_tae": false,
+    "ref_audios": false,
+    "ref_images": false,
+    "ref_video_audios": false,
+    "ref_videos": false,
+    "shifted_timestep": false,
+    "slg": false,
+    "vace": false,
+    "vae_tiling": false
+  },
+  "limits": {
+    "max_batch_count": 8,
+    "max_height": 4096,
+    "max_queue_size": 64,
+    "max_upscale_height": 8192,
+    "max_upscale_width": 8192,
+    "max_width": 4096,
+    "min_height": 64,
+    "min_width": 64
+  },
+  "loras": [],
+  "model": {
+    "name": "",
+    "path": "",
+    "stem": ""
+  },
+  "output_formats": [],
+  "output_formats_by_mode": {},
+  "preview_modes": [
+    "none",
+    "proj",
+    "tae",
+    "vae"
+  ],
+  "runtime": {
+    "error": null,
+    "load_elapsed_seconds": null,
+    "models": {},
+    "recipe": null,
+    "state": "empty"
+  },
+  "samplers": [
+    "euler",
+    "euler_a",
+    "heun",
+    "dpm2",
+    "dpm++2s_a",
+    "dpm++2m",
+    "dpm++2mv2",
+    "ipndm",
+    "ipndm_v",
+    "lcm",
+    "ddim_trailing",
+    "tcd",
+    "res_multistep",
+    "res_2s",
+    "er_sde",
+    "euler_cfg_pp",
+    "euler_a_cfg_pp",
+    "euler_ge",
+    "dpm++2m_sde",
+    "dpm++2m_sde_bt",
+    "lms"
+  ],
+  "schedulers": [
+    "discrete",
+    "normal",
+    "karras",
+    "exponential",
+    "ays",
+    "gits",
+    "sgm_uniform",
+    "simple",
+    "smoothstep",
+    "kl_optimal",
+    "lcm",
+    "bong_tangent",
+    "ltx2",
+    "logit_normal",
+    "flux2",
+    "flux",
+    "beta",
+    "llada_image"
+  ],
+  "supported_modes": [],
+  "upscale": false,
+  "upscalers": [
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "None"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Lanczos"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Nearest"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (nearest)"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (nearest-exact)"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (antialiased)"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (bicubic)"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (bicubic antialiased)"
+    }
+  ]
+}
