@@ -13,8 +13,11 @@ func TestRun_VersionPrintsIt(t *testing.T) {
 	if err := run([]string{"version"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(out.String()); got != Version {
-		t.Errorf("version printed %q, want %q", got, Version)
+	// Against version() and not against Version: the var is the -ldflags
+	// stamp and is empty in a test binary, so comparing with it would have
+	// asserted that `ember version` prints an empty line.
+	if got, want := strings.TrimSpace(out.String()), version(); got != want {
+		t.Errorf("version printed %q, want %q", got, want)
 	}
 }
 
