@@ -1857,11 +1857,10 @@ overwrites.
 ```
 
 The model column is last for one reason: it is the only cell whose width is
-not ember's to choose. A model is a filename, and
-`flux2-dev-Q8_0.gguf` is nineteen characters against `rtx4090`'s seven — so
-anywhere else a long name pushes every figure after it out of its column, and
-truncating it to fit would make two quantisations of one model read as the
-same model.
+not ember's to choose. A model is a filename, and `flux2-dev-Q8_0.gguf` is
+nineteen characters against `rtx4090`'s seven — so anywhere else a long name
+pushes every figure after it out of its column, and truncating it to fit
+would make two quantisations of one model read as the same model.
 
 `--since` and `--until` are UTC dates and half-open, the same rule `ember
 spend` uses, so the two tile alike. `--provider`, `--gpu` and `--status` match
@@ -1869,14 +1868,14 @@ exactly; `--limit` bounds the page, which defaults to the newest 200. `--json`
 prints the rows with money as integer microdollars and the full text of any
 error, where the table shows one line of it.
 
-**The two money dashes are the point of the table.** A rental serves every queued
-request it can, and its cost is charged to the request that *opened* it — so
-every request that joined a rental already up has a rental cost of zero by
-design. A money column of zeros that means "charged on another row" is the
-misreading this marker exists to prevent, and it is decided by asking whether
-another request on the same rental carries the cost, not by the zero itself:
-the local provider's rentals are free, so cost alone cannot tell the two
-apart. The second dash is a request that finished with no per-job figures,
+**The two money dashes are the point of the table.** A rental serves every
+queued request it can, and its cost is charged to the request that *opened*
+it — so every request that joined a rental already up has a rental cost of
+zero by design. A money column of zeros that means "charged on another row"
+is the misreading this marker exists to prevent, and it is decided by asking
+whether another request on the same rental carries the cost, not by the zero
+itself: the local provider's rentals are free, so cost alone cannot tell the
+two apart. The second dash is a request that finished with no per-job figures,
 which is every request from before the execution columns existed and also one
 that broke before a job completed. Both divide a rental cost into no images,
 which is why they are counted together and why `ember spend` calls per image
