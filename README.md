@@ -796,15 +796,43 @@ with `guidance: 4`, so setting the wrong one generates at the wrong strength
 and nothing reports it.
 
 **What is not typed, and why.** An image input — img2img, inpainting,
-ControlNet, IP-Adapter — and LoRA are not reachable from `sd.jobs` or from the
-web UI: the API takes images as base64 in the request body, which a YAML file
-cannot hold and the UI has no upload route for, and `lora[].path` and
-`hires.upscaler` are names the server resolves against a directory of its own.
-`strength`, `img_cfg`, `control_strength`, `ip_adapter_strength` and
-`increase_ref_index` do nothing without one of those images, so they are not
-typed either. `cache_mode`, `cache_option`, `scm_mask`, `scm_policy_dynamic`,
-`qwen_image_layers` and the two `custom_sigmas` are untyped because nothing
-here knows what values they accept.
+ControlNet, IP-Adapter — is not reachable from `sd.jobs` or from the web UI:
+the API takes images as base64 in the request body, which a YAML file cannot
+hold and the UI has no upload route for. `strength`, `img_cfg`,
+`control_strength`, `ip_adapter_strength` and `increase_ref_index` do nothing
+without one of those images, so they are not typed either. `cache_mode`,
+`cache_option`, `scm_mask`, `scm_policy_dynamic`, `qwen_image_layers` and the
+two `custom_sigmas` are untyped because nothing here knows what values they
+accept.
+
+`lora` is not typed either, and that one is no longer a question about safety.
+`lora[].path` never reaches a path join: the server matches it for equality
+against the ids it published in `capabilities.loras[]`, and anything else —
+`../..`, an absolute path, even the published id with a `./` in front of it —
+is refused with a 400 before the generation starts. `AGENTS.md` has the
+upstream lines and the lab that measured it. So a `lora` field is a
+`slices.Contains` against that published list, the same three lines
+`hires.upscaler` already has; it is not built yet because this change's
+deliverable was the answer rather than the control.
+
+**What is greyed out, and why.** The six advanced controls that have a feature
+flag in one of the server's two maps — clip skip, flow shift, shifted
+timestep, skip-layer guidance, vae tiling and the hires pass — are visibly
+unavailable in the web UI when the loaded model does not take them, and
+refused at enqueue rather than after a card is rented. A flag the server did
+not publish gates nothing: ember tells "the server says no" apart from "the
+server said nothing", because collapsing the two would grey every one of these
+against any build that does not carry the maps.
+
+`eta` is the one with no flag in either map, so ember has no advance answer
+about it and does not invent one. The UI says which controls this model denied,
+in words, rather than leaving it to be inferred from which boxes are grey.
+
+In practice nothing is greyed on a server `ember up` or `ember serve` starts:
+ember hands the weights over as argv, which upstream treats as a model
+declaring every feature. The flags matter when a server is loaded some other
+way, and the point of reading them is that ember reports the server's answer
+instead of assuming it.
 
 All of those remain reachable from a config: `extra` reaches every field of
 the API ember does not type, including nested ones, so nothing is out of

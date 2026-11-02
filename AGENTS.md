@@ -930,10 +930,118 @@ that sentence made unrepresentable rather than merely tested.
   under the model root's `loras/` -- so neither is a free filesystem path, and
   the published documentation does not say what either does with `..`.
   `Capabilities.Upscalers` turns the first into an allow-list, and the second
-  stays unreachable from a request until somebody has read that code or sent
-  a deliberately hostile one. "ember does not know which of these are safe" is
-  the honest statement of the seal; "they read arbitrary files" would be a
-  guess in the other direction.
+  stayed unreachable from a request until somebody had read that code or sent
+  a deliberately hostile one. "ember does not know which of these are safe"
+  was the honest statement of the seal; "they read arbitrary files" would have
+  been a guess in the other direction. Somebody has now read it, and the next
+  entry is the answer.
+- **`lora[].path` is confined, and it is confined because it is not a path.**
+  It never reaches a path join at all. At the pinned revision, 77b72a2,
+  `examples/server/runtime.cpp:480`'s `get_lora_full_path` is an equality
+  match against a cache the server built by scanning its own LoRA directories
+  -- `std::find_if(... entry.path == path)` -- and a miss returns `""`, which
+  `examples/common/common.cpp:2093`'s `parse_lora_json_field` turns into a
+  refusal of the whole request. Containment is then enforced a second time by
+  a different mechanism, which is the rule the tar extractor follows: the scan
+  canonicalises every entry and drops anything `model_path_inside` says is not
+  under the directory (`runtime.cpp:444`), and the resolver canonicalises and
+  re-checks the entry it matched before handing it back (`runtime.cpp:486`).
+  So `..` is not cleaned, absorbed or normalised -- it is simply not an id the
+  server published.
+
+  **Measured, not reasoned.** `TestPreview_ALoraPathIsAnIdFromAPublishedListAndNotAPath`
+  seeds one LoRA-shaped file in a `--lora-model-dir`, an identical one a
+  directory above it, and a symlink inside pointing at the second. The
+  published id is accepted (202); `../ember-lab-outside/real.safetensors` --
+  a real, readable, supported-extension file -- is refused 400, as are
+  `../../etc/passwd`, `/etc/passwd`, `./real.safetensors`,
+  `loras/real.safetensors` and `real.safetensors/../real.safetensors`. The
+  symlink never appears in `capabilities.loras[]` at all; the server logs
+  `skipping inaccessible LoRA or path outside LoRA directory`. The acceptance
+  is asserted beside the refusals on purpose: without it every refusal would
+  be consistent with a server that refuses every LoRA there is.
+
+  **So a `lora` field is possible, and its shape is the upscaler's.**
+  `capabilities.loras[]` publishes `{name, path, display_path}` and the `path`
+  is the id `get_lora_full_path` matches, so `Capabilities.Loras []string`
+  plus a `slices.Contains` in `validateParams` is the whole seal -- the same
+  three lines `Upscalers` already has, refusing before a card is rented.
+  `testdata/capabilities_loras.json` is a capture with a non-empty list,
+  taken before any client code exists, which is the calibration habit
+  `internal/provider/runpod/testdata/README.md` set. It is not built here:
+  this change's deliverable was the answer.
+
+  **One thing the measurement turned up that nothing asked for.** A published
+  id whose file is not loadable is a *warning*, not a refusal: the server says
+  `cannot register LoRA source` and generates the image without the LoRA. So a
+  future `lora` field buys a refusal for a name the server does not have and
+  nothing at all for a name it has and cannot use -- which is a thing to write
+  down rather than discover from an image that looks untouched.
+- **A control for a feature the server denies is unavailable, and the flag it
+  is read from is the model's and not the mode's.** sd-server publishes two
+  feature maps and they answer different questions. `features` is built per
+  mode from a literal where every img_gen value starts true, and only eleven
+  keys are ever overwritten; `generation_features` is derived from the loaded
+  model, starting from a table where `clip_skip`, `flow_shift`,
+  `shifted_timestep`, `slg` and `img_cfg` all default to **false**. So the
+  second is the one that can say no, and it is the one five of the six gated
+  controls read. `hires` is read from `features` only because
+  `generation_features` has no such key.
+
+  **Every flag is a pointer, and the capture is why.** A server with no model
+  loaded reports `supported_modes: []`, so the per-mode map is never built and
+  `features` collapses to the two cancel flags: `capabilities_no_model.json`
+  holds a published false for every generation feature *and* a genuine silence
+  for `hires`, in one response. A bool would have read the silence as a no and
+  greyed the control against every build that does not publish the maps --
+  which is the failure `capsView.Caps` is a pointer to avoid one layer up, and
+  the shape of the bug where a `caps` row cached before these columns existed
+  decoded to empty lists and refused a correct `output_format`. A nil gates
+  nothing; a published false refuses.
+
+  **It does not fire on any server ember can currently start, and that is
+  written down rather than implied.** ember hands the weights to sd-server as
+  argv, upstream calls that the `@command-line` recipe, and that recipe
+  declares all twenty-seven features -- so `generation_features` is entirely
+  true on every rental. A catalog recipe, which is where a real denial comes
+  from, is reachable only through `POST /models/load`, which ember does not
+  call. The one response that says no is a server with no weights, and ember
+  never caches that because `WaitModel` fails first. What the gate is for is
+  that ember now honours the published answer instead of assuming it, and that
+  the UI can distinguish "ember has no control for this" from "the server will
+  not take it" -- the distinction this whole surface exists to stop being made
+  by omission. The deny path is driven by a real response in the preview lab
+  and by a hand-seeded `caps` row in the browser lab, because nothing else can
+  reach it.
+
+  **`eta` is ungated and says so.** Neither map names it. A flag invented for
+  it would be the `allowedCudaVersions` mistake, and a section where five
+  controls are gated and the sixth is silently not would read as all-or-nothing
+  -- so the page names what is denied in words rather than leaving it to be
+  inferred from which boxes are grey, and `eta`'s own tooltip says ember has no
+  answer about it.
+- **Greying a control is not the same as not sending one.** `/api/config` is
+  fetched after the page mounts, so there is a real window in which the
+  advanced section is open, typeable and ungated -- and a job added to the
+  batch in that window keeps what was typed. The control greys when the answer
+  arrives and the value stays in the draft, so the request would carry a
+  parameter whose control is visibly unavailable: the same disagreement between
+  what is on screen and what is on the wire that each block's switch exists to
+  prevent. `Job::drop_denied` clears the draft *and* the batch, and what it
+  clears is exactly what `Body` would have sent -- a zero `shifted_timestep`
+  and an slg block with no scale are already absent from the request, and for
+  skip-layer guidance the scale is the switch.
+
+  **The ten lines that call it are covered by nothing, and that is recorded
+  rather than implied.** `drop_denied`'s decision has a unit test;
+  the effect in `Compose` that applies it to the draft and the batch does not,
+  because the state it exists for -- a value typed in the window before
+  `/api/config` answers -- is not one chromedp can be driven into. Removing
+  the effect outright was reinstated and **no test went red**: the only one of
+  seventeen that did not. So this is the same closed loop as the preview frame
+  nothing inserted, caught while it is ten lines rather than a feature, and
+  the thing to notice if a value a greyed control cannot hold ever reaches a
+  request.
 - **Zero is a value wherever the server's default is not zero.** Every typed
   field used zero for "leave it to the server", which is right when the
   server's own default is zero -- and wrong for `clip_skip`, whose default is

@@ -1030,13 +1030,201 @@ func TestValidate_UnreportedLimitsBoundNothing(t *testing.T) {
 	}
 }
 
-func testCaps(t *testing.T) Capabilities {
+// The two feature maps, out of the two captured responses that disagree.
+//
+// `capabilities.json` is a server with a command-line model, where every
+// generation feature is true; `capabilities_no_model.json` is a server with no
+// weights, where every one of them is false AND the per-mode `features` map is
+// absent entirely -- so `hires` there is nil rather than false. One assertion
+// over both files, because what has to hold is that ember tells three states
+// apart, and a test against either file alone would pass against code that
+// collapsed them.
+func TestCapabilities_ReadsBothFeatureMaps(t *testing.T) {
+	loaded := testCaps(t)
+	for _, f := range []struct {
+		name string
+		flag *bool
+	}{
+		{"clip_skip", loaded.Supported.ClipSkip},
+		{"flow_shift", loaded.Supported.FlowShift},
+		{"shifted_timestep", loaded.Supported.ShiftedTimestep},
+		{"slg", loaded.Supported.SLG},
+		{"vae_tiling", loaded.Supported.VAETiling},
+		{"hires", loaded.Supported.Hires},
+	} {
+		if f.flag == nil || !*f.flag {
+			t.Errorf("%s = %v on a server with a model loaded, and the captured response "+
+				"says true", f.name, f.flag)
+		}
+	}
+
+	empty := capsFrom(t, "capabilities_no_model.json")
+	for _, f := range []struct {
+		name string
+		flag *bool
+	}{
+		{"clip_skip", empty.Supported.ClipSkip},
+		{"flow_shift", empty.Supported.FlowShift},
+		{"shifted_timestep", empty.Supported.ShiftedTimestep},
+		{"slg", empty.Supported.SLG},
+		{"vae_tiling", empty.Supported.VAETiling},
+	} {
+		if f.flag == nil {
+			t.Errorf("%s is absent on a server with no model, and the captured response "+
+				"publishes it as false", f.name)
+			continue
+		}
+		if *f.flag {
+			t.Errorf("%s = true on a server with no model loaded", f.name)
+		}
+	}
+	// And the silence beside the denials, in the same response: with no model
+	// there are no supported modes, so the per-mode map is never built and
+	// `features` carries only the two cancel flags.
+	if empty.Supported.Hires != nil {
+		t.Errorf("hires = %v on a server with no model, want absent", *empty.Supported.Hires)
+	}
+}
+
+// A parameter the server said no to is refused before a card is rented.
+//
+// WHAT HAPPENS WITHOUT IT is not a 400 -- it is a generation that runs and
+// quietly drops the parameter, which reads as a model that ignores clip skip.
+// That is the same defect as a skip-layer block sent with its scale at zero,
+// one layer out, and it costs a rental to see.
+func TestValidate_RefusesAParameterTheServerDenies(t *testing.T) {
+	caps := capsFrom(t, "capabilities_no_model.json")
+	// Hires is not in this table: the no-model response does not publish the
+	// flag at all, and the test below is the one about that.
+	for _, tc := range []struct {
+		name  string
+		param Params
+		flag  string
+	}{
+		{"clip_skip", Params{ClipSkip: intPtr(2)}, "generation_features.clip_skip"},
+		{"flow_shift", Params{FlowShift: floatPtr(3)}, "generation_features.flow_shift"},
+		{"shifted_timestep", Params{ShiftedTimestep: 250}, "generation_features.shifted_timestep"},
+		{"slg", Params{SLG: SLG{Scale: 2.5}}, "generation_features.slg"},
+		{"vae_tiling", Params{VAETiling: VAETiling{Enabled: true}}, "generation_features.vae_tiling"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Validate(Job{Prompt: "a", Params: tc.param}, caps)
+			if err == nil {
+				t.Fatalf("%s was accepted against a server that published it false", tc.name)
+			}
+			// The flag's own key is in the message, because the remediation is
+			// to change the model and not the request -- and because the two
+			// maps disagree, so an operator checking for themselves has to be
+			// told which one said no.
+			if !strings.Contains(err.Error(), tc.flag) {
+				t.Errorf("err = %v, want it to name %s", err, tc.flag)
+			}
+		})
+	}
+}
+
+// The gate only refuses what Body would have sent.
+//
+// A zero shifted_timestep, an slg block with no scale and a hires block that
+// is off are all omitted from the request already, so refusing them would
+// refuse a job that asks for nothing -- and for skip-layer guidance the scale
+// IS the switch, because two ways to say "off" can disagree. This is the pair
+// to the table above: the same all-denying capabilities, and nothing set.
+func TestValidate_ADeniedFeatureRefusesNothingThatIsNotSent(t *testing.T) {
+	caps := capsFrom(t, "capabilities_no_model.json")
+	for _, tc := range []struct {
+		name  string
+		param Params
+	}{
+		{"nothing set", Params{}},
+		{"a zero shifted_timestep", Params{ShiftedTimestep: 0}},
+		{"slg layers with no scale", Params{SLG: SLG{Layers: []int{7, 8, 9}, LayerStart: 0.01}}},
+		{"a hires block that is off", Params{Hires: Hires{Scale: 2}}},
+		{"vae tiling tiles with the switch off", Params{VAETiling: VAETiling{TileSizeW: 512}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := Validate(Job{Prompt: "a", Params: tc.param}, caps); err != nil {
+				t.Errorf("err = %v, want a parameter that is never sent to be refused by nothing", err)
+			}
+		})
+	}
+}
+
+// A flag the server did not publish is not a refusal.
+//
+// The opposite of how the lists above read an absent one, deliberately: an
+// empty sampler list refuses because a name has to match something, while a
+// missing boolean means some build -- or some `caps` row cached before ember
+// read these maps -- simply has nothing to say. Collapsing them would make
+// every one of these parameters unusable against such a server, which is the
+// shape of the bug where an old cached row decoded to empty lists and refused
+// a correct output_format.
+func TestValidate_AnUnpublishedFeatureFlagGatesNothing(t *testing.T) {
+	silent := Capabilities{}
+	j := Job{Prompt: "a", Params: Params{
+		ClipSkip:        intPtr(2),
+		FlowShift:       floatPtr(3),
+		ShiftedTimestep: 250,
+		SLG:             SLG{Scale: 2.5},
+		VAETiling:       VAETiling{Enabled: true},
+		Hires:           Hires{Enabled: true},
+	}}
+	if err := Validate(j, silent); err != nil {
+		t.Fatalf("err = %v, want a server that published no feature map to gate nothing", err)
+	}
+	// And the same job against the captured no-model response, where the hires
+	// flag is the only absent one: the five published denials fire and hires
+	// is not the reason.
+	err := Validate(j, capsFrom(t, "capabilities_no_model.json"))
+	if err == nil {
+		t.Fatal("the published denials refused nothing")
+	}
+	if strings.Contains(err.Error(), "features.hires") {
+		t.Errorf("err = %v, want the refusal to come from a flag the server published", err)
+	}
+}
+
+// A refusal ember has now seen a third spelling of.
+//
+// `error_lora_not_found.json` is what a real server answers to a `lora[].path`
+// that is not one of its published ids: an `error` string with **no `code`
+// beside it**. decodeAPIError and refusal both read the string form, and
+// APIError.Error has a branch for a message with no code -- which until this
+// capture was a branch written for a shape nobody had observed.
+func TestAPIError_AMessageWithNoCodeIsStillTheReason(t *testing.T) {
+	var env wireErrorEnvelope
+	if err := json.Unmarshal(fixture(t, "error_lora_not_found.json"), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error == "" {
+		t.Fatal("the captured refusal carries no error string")
+	}
+	if env.Code != "" {
+		t.Errorf("code = %q; the capture had none, so the no-code branch is covered by "+
+			"nothing again", env.Code)
+	}
+	got := (&APIError{Code: env.Code, Message: env.Error}).Error()
+	if got != env.Error {
+		t.Errorf("Error() = %q, want the server's own sentence %q", got, env.Error)
+	}
+}
+
+func intPtr(v int) *int           { return &v }
+func floatPtr(v float64) *float64 { return &v }
+
+// capsFrom maps one captured capabilities response the way the client does.
+func capsFrom(t *testing.T, name string) Capabilities {
 	t.Helper()
 	var w wireCapabilities
-	if err := json.Unmarshal(fixture(t, "capabilities.json"), &w); err != nil {
+	if err := json.Unmarshal(fixture(t, name), &w); err != nil {
 		t.Fatal(err)
 	}
 	return mapCapabilities(w)
+}
+
+func testCaps(t *testing.T) Capabilities {
+	t.Helper()
+	return capsFrom(t, "capabilities.json")
 }
 
 func TestWriteImages_WritesEveryImageNumbered(t *testing.T) {

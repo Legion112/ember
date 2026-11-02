@@ -12,6 +12,7 @@ import (
 	_ "image/png"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +21,8 @@ import (
 
 	"github.com/chromedp/chromedp"
 
+	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/test/integration/harness"
 )
 
@@ -467,6 +470,180 @@ func TestServe_UI(t *testing.T) {
 	if !strings.Contains(done, "file(s)") {
 		t.Errorf("the progress row never reported the files: %q", done)
 	}
+
+	if errs := console.errors(); errs != "" {
+		t.Errorf("the page logged errors:\n%s", errs)
+	}
+}
+
+// TestServe_UIGreysWhatTheServerSaysItCannotDo is the capability gate's only
+// honest check.
+//
+// WHY A BROWSER. The gate is four layers deep -- sd-server's two feature maps,
+// `sdserver.Supported`, `capsView.Features`, and a `disabled` attribute
+// computed in wasm -- and every layer but the last can be checked in Go or in
+// `cargo test`. The last one is what the operator sees, and it is exactly the
+// kind of thing this repository has shipped broken while every test passed: a
+// nil slice that marshalled as `null` and dropped whole updates, a keyed list
+// that never re-rendered, a feature built end to end and connected to nothing.
+// A greyed control asserted only in a Rust unit test is a greyed control
+// nobody has seen.
+//
+// WHY IT SEEDS THE CACHE INSTEAD OF RENTING. `generation_features` is all-true
+// on every server ember can currently start -- ember hands the weights over as
+// argv, and upstream calls that the `@command-line` recipe, which declares
+// every feature. The one real response that says no is a server with no model
+// at all, and ember never caches that one because `WaitModel` fails first. So
+// a rental here would prove the enabled direction and nothing else. The denied
+// capabilities are written into the store the way a rental would write them,
+// through `genstore.PutCaps`, before the process under test starts: state
+// seeded out of band, which is the rule the SIGKILL labs follow.
+//
+// It asserts BOTH DIRECTIONS from one page load -- three flags denied, three
+// allowed, and the one control with no flag at all -- because a lab that only
+// checked the denials would pass against a page that greyed everything, which
+// is the AssertNoStray failure reached from the opposite side.
+func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
+	requireChrome(t)
+	l := harness.New(t)
+	l.WriteConfig(nil)
+	l.AppendConfig(serveConfig)
+
+	// Denied: clip skip, skip-layer guidance, the hires pass. Allowed: flow
+	// shift, shifted timestep, vae tiling. `eta` is in neither list because
+	// the server publishes no flag for it, and the page must leave it alone.
+	no, yes := false, true
+	store, err := genstore.Open(filepath.Join(l.Dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutCaps(t.Context(), sdserver.Capabilities{
+		Model:      "sd15.gguf",
+		Samplers:   []string{"euler", "heun"},
+		Schedulers: []string{"discrete"},
+		Limits:     sdserver.Limits{MinWidth: 64, MaxWidth: 2048, MinHeight: 64, MaxHeight: 2048},
+		Supported: sdserver.Supported{
+			ClipSkip: &no, SLG: &no, Hires: &no,
+			FlowShift: &yes, ShiftedTimestep: &yes, VAETiling: &yes,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Closed before ember opens it. SQLite in WAL mode would tolerate two
+	// writers, but the lab has nothing more to write and a handle left open
+	// across the process under test is a handle nothing accounts for.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, srv, wait := startServe(t, l)
+	defer func() {
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return
+		}
+		_ = wait()
+	}()
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Headless, chromedp.NoSandbox, chromedp.DisableGPU)
+	alloc, cancelAlloc := chromedp.NewExecAllocator(t.Context(), opts...)
+	defer cancelAlloc()
+	ctx, cancel := chromedp.NewContext(alloc)
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancelTimeout()
+
+	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
+	if err := chromedp.Do(ctx,
+		chromedp.Navigate(fmt.Sprintf("%s?t=%s", pageURL, srv.Token))); err != nil {
+		t.Fatalf("navigating to the one-time URL: %v", err)
+	}
+	console := watchConsole(t, ctx)
+
+	// The advanced section is collapsed, which is correct -- five rows are the
+	// whole job on almost every run -- so it has to be opened before anything
+	// in it is visible. Clicking the summary is what a person does.
+	if err := chromedp.Do(ctx,
+		chromedp.WaitVisible(`h1`),
+		chromedp.Click(`//summary[contains(text(), "advanced")]`),
+		chromedp.WaitVisible(`details[open] input`),
+	); err != nil {
+		t.Fatalf("opening the advanced section: %v\n%s", err, console.text())
+	}
+
+	// Read off the page's own structure: the label's `denied` class and the
+	// control's own `disabled`, keyed by the help span that names it. Both,
+	// because they are two different failures -- a disabled input that still
+	// looks live reads as a box that has not loaded yet, and a dimmed label
+	// around a control that still accepts a value is worse than no gate at
+	// all.
+	const probe = `Array.from(document.querySelectorAll('details label')).map(function (l) {
+		var h = l.querySelector('.help');
+		var i = l.querySelector('input, select');
+		return [h ? h.textContent.trim() : '',
+		        l.classList.contains('denied') ? 'grey' : 'lit',
+		        (i && i.disabled) ? 'disabled' : 'enabled'].join('|');
+	})`
+	lines, err := chromedp.Run(ctx, chromedp.Evaluate[[]string](probe))
+	if err != nil {
+		t.Fatalf("reading the advanced controls: %v\n%s", err, console.text())
+	}
+	state := map[string]string{}
+	for _, line := range lines {
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) == 3 && parts[0] != "" {
+			state[parts[0]] = parts[1] + "|" + parts[2]
+		}
+	}
+	t.Logf("advanced controls: %v", state)
+
+	for _, tc := range []struct{ label, want, why string }{
+		{"clip skip", "grey|disabled",
+			"generation_features.clip_skip is false in the cached capabilities"},
+		{"slg scale", "grey|disabled",
+			"generation_features.slg is false, and the scale is the block's switch"},
+		{"hires pass", "grey|disabled",
+			"features.hires is false, so the whole second pass is unavailable"},
+		{"flow shift", "lit|enabled",
+			"generation_features.flow_shift is true"},
+		{"shifted timestep", "lit|enabled",
+			"generation_features.shifted_timestep is true"},
+		{"vae tiling", "lit|enabled",
+			"generation_features.vae_tiling is true"},
+		{"eta", "lit|enabled",
+			"neither of the server's feature maps names eta, so ember has no answer about it " +
+				"and must not invent one"},
+	} {
+		got, ok := state[tc.label]
+		if !ok {
+			t.Errorf("no advanced control labelled %q is on the page; the gate is keyed on "+
+				"these labels and a rename makes it silently gate nothing", tc.label)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%q is %s, want %s: %s", tc.label, got, tc.want, tc.why)
+		}
+	}
+
+	// AND IT SAYS WHY, in words. A grey box is easy to read as "ember has not
+	// implemented this yet", which sends somebody to the issue tracker for a
+	// limit that belongs to the model they chose.
+	hint, err := chromedp.Run(ctx, chromedp.Text(`details p.hint.denied`))
+	if err != nil {
+		t.Fatalf("reading the denial hint: %v\n%s", err, console.text())
+	}
+	for _, name := range []string{"clip skip", "skip-layer guidance", "the hires pass"} {
+		if !strings.Contains(hint, name) {
+			t.Errorf("the hint does not name %q: %q", name, hint)
+		}
+	}
+	for _, name := range []string{"flow shift", "vae tiling"} {
+		if strings.Contains(hint, name) {
+			t.Errorf("the hint names %q, which this server does take: %q", name, hint)
+		}
+	}
+	t.Logf("the page says: %s", hint)
 
 	if errs := console.errors(); errs != "" {
 		t.Errorf("the page logged errors:\n%s", errs)

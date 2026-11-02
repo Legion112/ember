@@ -110,6 +110,33 @@ type capsView struct {
 	// whose plausible values are mostly refusals.
 	OutputFormats []string `json:"output_formats"`
 	Upscalers     []string `json:"upscalers"`
+
+	// Features is what the server said the loaded model takes, so the page can
+	// make a control it cannot use visibly unavailable instead of accepting a
+	// value that is refused at enqueue -- or, worse, accepted by a server that
+	// drops it, which reads as "the model ignores this".
+	//
+	// Always an object, never omitted: a `null` here would arrive at serde as
+	// a type error on a field that is present, which is the bug that dropped
+	// whole websocket envelopes. The flags inside are omitted individually,
+	// and absence is the answer that gates nothing.
+	Features featuresView `json:"features"`
+}
+
+// featuresView is sdserver.Supported on the wire.
+//
+// Pointers all the way through, for the reason sdserver.Supported gives: nil
+// is "the server published no such flag" and false is "the server says no",
+// and a page that treated the first as the second would grey out a control
+// against any build that does not publish the maps. `omitempty` on a *bool
+// omits only nil, so a published false reaches the page as false.
+type featuresView struct {
+	ClipSkip        *bool `json:"clip_skip,omitempty"`
+	FlowShift       *bool `json:"flow_shift,omitempty"`
+	ShiftedTimestep *bool `json:"shifted_timestep,omitempty"`
+	SLG             *bool `json:"slg,omitempty"`
+	VAETiling       *bool `json:"vae_tiling,omitempty"`
+	Hires           *bool `json:"hires,omitempty"`
 }
 
 type limitView struct {
@@ -155,6 +182,14 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 			// as an empty Vec rather than failing the whole envelope.
 			OutputFormats: caps.OutputFormats,
 			Upscalers:     caps.Upscalers,
+			Features: featuresView{
+				ClipSkip:        caps.Supported.ClipSkip,
+				FlowShift:       caps.Supported.FlowShift,
+				ShiftedTimestep: caps.Supported.ShiftedTimestep,
+				SLG:             caps.Supported.SLG,
+				VAETiling:       caps.Supported.VAETiling,
+				Hires:           caps.Supported.Hires,
+			},
 			Limits: limitView{
 				MinWidth: caps.Limits.MinWidth, MaxWidth: caps.Limits.MaxWidth,
 				MinHeight: caps.Limits.MinHeight, MaxHeight: caps.Limits.MaxHeight,

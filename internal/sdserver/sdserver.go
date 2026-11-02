@@ -417,7 +417,58 @@ func validateParams(p Params, caps Capabilities) error {
 	if err := within("hires target_height", p.Hires.TargetHeight, caps.Limits.MinHeight, caps.Limits.MaxHeight); err != nil {
 		return err
 	}
+	return unsupported(p, caps.Supported)
+}
+
+// unsupported refuses a parameter the server has said the loaded model does
+// not take.
+//
+// THE TEST IS WHETHER Body WOULD SEND IT, not whether the field holds
+// something. A zero ShiftedTimestep, a SLG block with no scale and a Hires
+// block with Enabled false are all omitted from the request, so refusing them
+// would refuse a job that asks for nothing -- and for skip-layer guidance the
+// switch *is* the scale, because two ways to say "off" can disagree. So each
+// condition below is the same condition Body uses, which is what keeps "ember
+// refused it" and "ember would have sent it" the same set.
+//
+// WHY A REFUSAL AND NOT A WARNING. The failure without it is not a 400: the
+// generation runs, the parameter is dropped by a server that never claimed to
+// take it, and the operator reads an image that looks like the parameter did
+// nothing -- which presents as "this model ignores clip skip" rather than as a
+// value that was never applied. That is the slg-block defect one layer up, and
+// it costs a rental to see.
+//
+// A nil flag is not a refusal, which is the opposite of how the lists above
+// read an empty one; Supported's doc comment says why.
+func unsupported(p Params, s Supported) error {
+	switch {
+	case p.ClipSkip != nil && denied(s.ClipSkip):
+		return featureRefusal("clip_skip", "generation_features.clip_skip")
+	case p.FlowShift != nil && denied(s.FlowShift):
+		return featureRefusal("flow_shift", "generation_features.flow_shift")
+	case p.ShiftedTimestep != 0 && denied(s.ShiftedTimestep):
+		return featureRefusal("shifted_timestep", "generation_features.shifted_timestep")
+	case p.SLG.Scale != 0 && denied(s.SLG):
+		return featureRefusal("skip-layer guidance", "generation_features.slg")
+	case p.VAETiling.Enabled && denied(s.VAETiling):
+		return featureRefusal("vae tiling", "generation_features.vae_tiling")
+	case p.Hires.Enabled && denied(s.Hires):
+		return featureRefusal("the hires pass", "features.hires")
+	}
 	return nil
+}
+
+// featureRefusal names the field, the flag it was checked against and the one
+// thing that can be done about it.
+//
+// The map's own key is in the message on purpose: the remediation is to change
+// the model or the recipe, not the request, and an operator who wants to see
+// for themselves needs to know which of the server's two feature maps said so
+// -- they disagree, and one of them is a per-mode literal that never says no.
+func featureRefusal(field, flag string) error {
+	return fmt.Errorf("%s cannot be sent to this server: it reports %s false, "+
+		"so the loaded model does not take it. Leave the field unset, or serve a model that does",
+		field, flag)
 }
 
 // ValidateStatic is every refusal that needs no server.

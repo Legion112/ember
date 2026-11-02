@@ -142,6 +142,53 @@ fn Compose(config: RwSignal<Config>, watching: RwSignal<String>) -> impl IntoVie
         }
     });
 
+    // AND THE SAME ANSWER APPLIED TO WHAT HAS ALREADY BEEN TYPED.
+    //
+    // The config arrives after the panel is on screen, so an operator can type
+    // a clip skip -- or add a whole job to the batch -- before ember knows
+    // whether the server takes one. The controls below grey out when the
+    // answer lands, and without this the value stays in the draft and in the
+    // batch: a request carrying a parameter whose control is visibly
+    // unavailable, which is the defect `drop_denied` names. The batch is
+    // cleaned too and not only the draft, because a batch row is a job nothing
+    // re-renders from a control.
+    //
+    // Guarded on a change rather than written unconditionally, so a config
+    // that denies nothing -- which is every server here -- does not notify the
+    // batch's subscribers on load.
+    //
+    // NOTHING COVERS THESE TEN LINES, and it is written down rather than
+    // assumed away. `drop_denied` has a unit test; this effect does not,
+    // because the window it exists for -- a value typed before /api/config
+    // answers -- is not a state the browser lab can be driven into. Removing
+    // it was reinstated and no test went red, the only one of seventeen that
+    // did not. The decision is in `model` on purpose, so what is untested here
+    // is the wiring and not the rule.
+    Effect::new(move |_| {
+        let f = match config.get().caps {
+            Some(c) => c.features,
+            None => return,
+        };
+        // Untracked, so this effect depends on the config alone. Reading the
+        // draft reactively here would re-run it on every keystroke -- and
+        // worse, the effect writes the draft, so it would be subscribing to
+        // its own output.
+        let mut d = draft.get_untracked();
+        let before = d.clone();
+        d.drop_denied(&f);
+        if d != before {
+            draft.set(d);
+        }
+        let mut b = batch.get_untracked();
+        let kept = b.clone();
+        for j in b.iter_mut() {
+            j.drop_denied(&f);
+        }
+        if b != kept {
+            batch.set(b);
+        }
+    });
+
     let load_offers = move || {
         let p = provider.get();
         let g = gpu.get();
@@ -543,35 +590,69 @@ fn JobForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
 /// `cache_mode`, `scm_mask`, `qwen_image_layers` and the two `custom_sigmas`
 /// are absent because nothing here knows their value sets; they stay
 /// reachable from `ember.yaml`'s `extra`.
+///
+/// WHAT IS GREYED, AND WHY IT IS GREYED RATHER THAN REFUSED LATER. Six of
+/// these controls have a flag in one of the server's two feature maps, and a
+/// control the server has already said no to is `disabled` and marked
+/// `.denied` here. Without it the operator types a value, queues, rents a
+/// card and reads the refusal -- or, where the server drops the parameter
+/// instead of refusing it, reads an image that looks as though the model
+/// ignored them. `eta` has no flag in either map and is never greyed; the
+/// `.denied` hint below says so out loud, because a section where some
+/// controls are gated and others are not is one an operator will otherwise
+/// read as all-or-nothing.
 #[component]
 fn AdvancedForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
     view! {
         <div class="row">
-            <label><Help text="clip skip" title="How many of the text encoder's last layers to skip. Many SD1.5 finetunes are trained for 2. Empty leaves the model's own default, which is not 0 -- so an empty box and a 0 are different requests and ember sends them differently."/>
+            <label class:denied=move || !config.get().offers(|f| f.clip_skip)>
+                <Help text="clip skip" title="How many of the text encoder's last layers to skip. Many SD1.5 finetunes are trained for 2. Empty leaves the model's own default, which is not 0 -- so an empty box and a 0 are different requests and ember sends them differently."/>
                 <input type="number" placeholder="model"
+                    disabled=move || !config.get().offers(|f| f.clip_skip)
                     prop:value=move || shown(draft.get().clip_skip)
                     on:input=move |ev| draft.update(|j| j.clip_skip = numo(&ev))
                 />
             </label>
-            <label><Help text="eta" title="Noise added back at each step by the ancestral samplers. 0 is the deterministic path and a real value, so empty means 'leave it to the server' and 0 does not."/>
+            // NOT GATED, and the only one in this row that is not: `eta`
+            // appears in neither `features` nor `generation_features`, so
+            // ember has no published answer about it. Inventing one would be
+            // reading a schema in place of a response.
+            <label><Help text="eta" title="Noise added back at each step by the ancestral samplers. 0 is the deterministic path and a real value, so empty means 'leave it to the server' and 0 does not. The server publishes no feature flag for eta, so ember cannot tell you in advance whether this model takes it."/>
                 <input type="number" step="0.01" placeholder="server"
                     prop:value=move || shown(draft.get().eta)
                     on:input=move |ev| draft.update(|j| j.eta = numfo(&ev))
                 />
             </label>
-            <label><Help text="flow shift" title="Shifts the flow-matching timestep schedule, which the rectified-flow models (FLUX, SD3) use. Empty leaves the server's own, which is not 0."/>
+            <label class:denied=move || !config.get().offers(|f| f.flow_shift)>
+                <Help text="flow shift" title="Shifts the flow-matching timestep schedule, which the rectified-flow models (FLUX, SD3) use. Empty leaves the server's own, which is not 0."/>
                 <input type="number" step="0.1" placeholder="server"
+                    disabled=move || !config.get().offers(|f| f.flow_shift)
                     prop:value=move || shown(draft.get().flow_shift)
                     on:input=move |ev| draft.update(|j| j.flow_shift = numfo(&ev))
                 />
             </label>
-            <label><Help text="shifted timestep" title="Offsets the timestep the sampler starts from. The server's own default is 0, so here 0 and empty mean the same thing."/>
+            <label class:denied=move || !config.get().offers(|f| f.shifted_timestep)>
+                <Help text="shifted timestep" title="Offsets the timestep the sampler starts from. The server's own default is 0, so here 0 and empty mean the same thing."/>
                 <input type="number"
+                    disabled=move || !config.get().offers(|f| f.shifted_timestep)
                     prop:value=move || draft.get().shifted_timestep
                     on:input=move |ev| draft.update(|j| j.shifted_timestep = num(&ev))
                 />
             </label>
         </div>
+
+        // One line naming what this server will not take, listed rather than
+        // left to be inferred from which boxes are grey -- a disabled input is
+        // easy to read as "not implemented in ember yet", which is the wrong
+        // conclusion and the one that sends somebody to the issue tracker.
+        <Show when=move || !denials(config.get()).is_empty()>
+            <p class="hint denied">
+                "This model does not take " {move || denials(config.get()).join(", ")}
+                ", so those controls are unavailable and ember sends nothing for them.
+                 It is the server's own answer, from its feature map, not a limit of
+                 ember's: serve a model or recipe that supports them and they come back."
+            </p>
+        </Show>
 
         <div class="row">
             <label>
@@ -606,8 +687,10 @@ fn AdvancedForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView
         // rather than sending it with enabled false, so what is on screen and
         // what is on the wire cannot disagree.
         <div class="row">
-            <label><Help text="hires pass" title="Generates at a smaller size and then re-samples at a larger one, which is how a detailed large image is made without sampling the whole thing at full size. Turning it on with nothing else set uses the server's own scale and denoising."/>
+            <label class:denied=move || !config.get().offers(|f| f.hires)>
+                <Help text="hires pass" title="Generates at a smaller size and then re-samples at a larger one, which is how a detailed large image is made without sampling the whole thing at full size. Turning it on with nothing else set uses the server's own scale and denoising."/>
                 <input type="checkbox"
+                    disabled=move || !config.get().offers(|f| f.hires)
                     prop:checked=move || draft.get().hires.is_some()
                     on:change=move |ev| {
                         let on = event_target_checked(&ev);
@@ -692,8 +775,10 @@ fn AdvancedForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView
         </Show>
 
         <div class="row">
-            <label><Help text="vae tiling" title="Decodes the latent in overlapping tiles instead of all at once, which is how a large image fits in VRAM that could not hold the whole decode. Costs a little time and can leave faint seams."/>
+            <label class:denied=move || !config.get().offers(|f| f.vae_tiling)>
+                <Help text="vae tiling" title="Decodes the latent in overlapping tiles instead of all at once, which is how a large image fits in VRAM that could not hold the whole decode. Costs a little time and can leave faint seams."/>
                 <input type="checkbox"
+                    disabled=move || !config.get().offers(|f| f.vae_tiling)
                     prop:checked=move || draft.get().vae_tiling.is_some()
                     on:change=move |ev| {
                         let on = event_target_checked(&ev);
@@ -750,8 +835,10 @@ fn AdvancedForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView
         // own "off" IS a zero scale: a checkbox would be a second way to say
         // the same thing and the two could disagree.
         <div class="row">
-            <label><Help text="slg scale" title="Skip-layer guidance: re-runs some of the model's own layers with their output suppressed and pushes away from it. Scale is the switch -- 0 is off, and ember sends no skip-layer block at all, so the layers below do nothing until this is set."/>
+            <label class:denied=move || !config.get().offers(|f| f.slg)>
+                <Help text="slg scale" title="Skip-layer guidance: re-runs some of the model's own layers with their output suppressed and pushes away from it. Scale is the switch -- 0 is off, and ember sends no skip-layer block at all, so the layers below do nothing until this is set."/>
                 <input type="number" step="0.1"
+                    disabled=move || !config.get().offers(|f| f.slg)
                     prop:value=move || draft.get().slg.map(|s| s.scale).unwrap_or_default()
                     on:input=move |ev| {
                         let v = numf(&ev);
@@ -1179,6 +1266,34 @@ fn layers(ev: &leptos::ev::Event) -> Vec<i32> {
 /// edit to any other field.
 fn shown<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|v| v.to_string()).unwrap_or_default()
+}
+
+/// denials names the advanced controls this server has said no to.
+///
+/// Built from the same `offers` calls the controls are gated on, so the
+/// sentence and the grey boxes cannot disagree: a control added to the gate
+/// without a name here, or a name here without a gate, is what would make the
+/// hint a caption that is true of some of them.
+///
+/// The names are the control labels and not the API's field names, because the
+/// operator is looking at the labels. The flag each one came from is in the
+/// refusal `sdserver.featureRefusal` builds, which is where somebody who wants
+/// to check the server for themselves ends up.
+fn denials(c: Config) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (name, offered) in [
+        ("clip skip", c.offers(|f| f.clip_skip)),
+        ("flow shift", c.offers(|f| f.flow_shift)),
+        ("shifted timestep", c.offers(|f| f.shifted_timestep)),
+        ("skip-layer guidance", c.offers(|f| f.slg)),
+        ("vae tiling", c.offers(|f| f.vae_tiling)),
+        ("the hires pass", c.offers(|f| f.hires)),
+    ] {
+        if !offered {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// urlish escapes the few characters a GPU name or a provider could carry.

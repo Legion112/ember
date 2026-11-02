@@ -326,6 +326,47 @@ func TestConfig_ReportsTheCapabilitiesOnceSomethingHasLearnedThem(t *testing.T) 
 	}
 }
 
+// The feature flags reach the page, and a silence stays a silence.
+//
+// WHY IT MATTERS ON THIS SIDE. The page greys a control the server said no to,
+// and the only thing that tells it is this object. A flag flattened to false
+// on the way out would grey the control for every server that published
+// nothing -- including every `caps` row cached before ember read these maps --
+// and the operator would find the advanced section half unusable with no
+// explanation anywhere. `omitempty` on a *bool omits nil and keeps a published
+// false, which is the whole mechanism.
+func TestConfig_ReportsTheFeatureFlagsAndLeavesTheSilencesOut(t *testing.T) {
+	h := newHarness(t)
+	no, yes := false, true
+	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+		Model:     "sd15.gguf",
+		Supported: sdserver.Supported{ClipSkip: &no, SLG: &yes},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := h.do(t, "GET", "/api/config", "")
+	got := decode[configView](t, w)
+	if got.Caps == nil {
+		t.Fatal("caps are absent after they were cached")
+	}
+	if got.Caps.Features.ClipSkip == nil || *got.Caps.Features.ClipSkip {
+		t.Errorf("clip_skip = %v, want a published false", got.Caps.Features.ClipSkip)
+	}
+	if got.Caps.Features.SLG == nil || !*got.Caps.Features.SLG {
+		t.Errorf("slg = %v, want a published true", got.Caps.Features.SLG)
+	}
+	if got.Caps.Features.Hires != nil {
+		t.Errorf("hires = %v, want it absent: the server said nothing about it",
+			*got.Caps.Features.Hires)
+	}
+	// Against the bytes, because the decoded struct cannot tell an absent
+	// field from a false one after the fact -- and absent is what the page
+	// reads as "not gated".
+	if body := w.Body.String(); strings.Contains(body, `"hires"`) {
+		t.Errorf("an unpublished flag is on the wire: %s", body)
+	}
+}
+
 // --- posting a request ---
 
 func TestPostRequest_QueuesABatchAndKicksTheLoop(t *testing.T) {

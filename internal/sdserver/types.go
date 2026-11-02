@@ -143,21 +143,45 @@ type wireCapabilities struct {
 	OutputFormats []string       `json:"output_formats"`
 	Upscalers     []wireUpscaler `json:"upscalers"`
 
-	// Features is the server's own account of what it can be asked to do, as
-	// opposed to what a job may contain. ember reads one flag out of it; see
-	// wireFeatures.
-	Features wireFeatures `json:"features"`
+	// Features and GenerationFeatures are the server's own two accounts of
+	// what it can be asked for, and they are not the same account; see
+	// wireFeatures and wireGenerationFeatures for which answers which
+	// question and why one parameter is read from each.
+	Features           wireFeatures           `json:"features"`
+	GenerationFeatures wireGenerationFeatures `json:"generation_features"`
 }
 
-// wireFeatures is the one feature flag ember acts on.
+// wireFeatures is the per-mode map: what a request *body* for this mode may
+// carry.
 //
-// There are eleven in a captured response -- cache, control_image, hires,
+// There are twelve in a captured response -- cache, control_image, hires,
 // init_image, ip_adapter_image, lora, mask_image, preview, ref_images,
-// vae_tiling and the two cancels -- and all but one of them describe what a
-// *request body* may carry, which Validate already checks against the lists
-// beside them. `cancel_generating` is different in kind: it is the only one
-// that says what ember may ask of a generation that is already running and
-// already billing, so it is the only one that changes a decision here.
+// vae_tiling and the two cancels -- and most of them describe image inputs
+// ember has no route for. Two are read.
+//
+// `cancel_generating` says what ember may ask of a generation that is already
+// running and already billing, which is the only one of these that changes a
+// decision about a request in flight rather than about a request body.
+//
+// `hires` is read because it is the ONLY published flag covering the hires
+// block: `generation_features` has no `hires` key at all.
+//
+// IT IS A POINTER BECAUSE ABSENT IS AN ANSWER, and this is the field that
+// proves it rather than the field that argues for it. At 77b72a2
+// make_img_gen_features_json hardcodes it true and recipe_features never
+// overwrites it -- the overwrite list is mask_image, ref_images, end_image,
+// control_frames, ref_videos, ref_audios, ref_video_audios, lora, vae_tiling,
+// cache and preview -- so no model makes it false. But a server with no
+// weights reports `supported_modes: []`, the per-mode map is then never built,
+// and the whole `features` object collapses to the two cancel flags: `hires`
+// is **missing**, not false. testdata/capabilities_no_model.json is that
+// response, and it carries a published false (every generation feature) beside
+// a genuine silence (this one). A bool here would have read the silence as a
+// no and greyed the control on every build that does not publish the map.
+//
+// ember therefore honours what the server says and asserts nothing about what
+// it will say. The greyed hires control is reachable only from a config built
+// by hand, which is what the browser lab serves.
 //
 // `cancel_queued` is deliberately absent. sd-server's own queue is one job
 // deep by construction -- runJobs submits one at a time precisely so a
@@ -165,7 +189,52 @@ type wireCapabilities struct {
 // is never a queued job on the server for ember to cancel. Reading the flag
 // would be reading a capability for a state ember cannot produce.
 type wireFeatures struct {
-	CancelGenerating bool `json:"cancel_generating"`
+	CancelGenerating bool  `json:"cancel_generating"`
+	Hires            *bool `json:"hires"`
+}
+
+// wireGenerationFeatures is the map derived from the *model*, which is the one
+// worth gating a control on.
+//
+// WHY A SECOND MAP AT ALL. `features` above is built per mode from a literal:
+// for img_gen every value starts true and only the keys in recipe_features'
+// overwrite list are replaced. `generation_features` is
+// model_catalog.cpp's model_generation_features, which starts from
+// k_recipe_features -- where clip_skip, flow_shift, shifted_timestep, slg and
+// img_cfg all default to **false** -- and turns on what the loaded model's
+// recipe declares. So this is the map that can say no, and the five fields
+// here are the ones covering a parameter ember can actually send.
+//
+// EVERY FIELD IS A POINTER, and that is the WithExposed distinction again:
+// nil is "this build published no such flag" and false is "the server says
+// no". Collapsing them would mean a server that does not publish the map
+// greying every control in the compose panel, which is the failure
+// capsView.Caps is a pointer to avoid one layer up. A nil gates nothing; a
+// false refuses before a card is rented.
+//
+// WHAT IS NOT HERE AND WHY. `eta` appears in neither map, so it is sent
+// ungated and README says so -- inventing a flag for it would be the
+// allowedCudaVersions mistake, a schema read in place of a response.
+// `output_format` and `output_compression` are already checked against
+// `output_formats`, which is a stronger answer than a boolean. `lora`,
+// `img_cfg`, `init_image`, `mask_image`, `control_image`, `ip_adapter` and
+// `ref_images` are published and not read, because ember has no field for any
+// of them: a flag gating a parameter nothing can send is a feature built end
+// to end and connected to nothing, which this repository has shipped twice.
+//
+// `cache`, `preview` and `preview_tae` are left alone on purpose. The first
+// covers `cache_mode` and `cache_option`, which stay in `extra` because
+// nobody here has observed their value sets; the other two would gate the
+// preview mode, which `preview_modes` already publishes as a list -- and
+// `preview_tae` describes the `tae` mode specifically while `vae` has no flag,
+// so gating the menu on it would be a caption true of one mode applied to all
+// of them.
+type wireGenerationFeatures struct {
+	ClipSkip        *bool `json:"clip_skip"`
+	FlowShift       *bool `json:"flow_shift"`
+	ShiftedTimestep *bool `json:"shifted_timestep"`
+	SLG             *bool `json:"slg"`
+	VAETiling       *bool `json:"vae_tiling"`
 }
 
 // wireUpscaler is one entry of the hires upscaler list.

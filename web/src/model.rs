@@ -116,6 +116,48 @@ pub struct Caps {
     pub output_formats: Vec<String>,
     #[serde(default, deserialize_with = "nullable")]
     pub upscalers: Vec<String>,
+
+    /// What the server said the loaded model takes. See [`Features`].
+    #[serde(default)]
+    pub features: Features,
+}
+
+/// The server's own feature flags, for the controls that have one.
+///
+/// `Option` per flag, and the three states are all distinct: absent is "this
+/// build published no such flag", `Some(true)` is yes and `Some(false)` is no.
+/// A page that read absent as no would grey every one of these controls
+/// against a server that does not publish the maps -- the same failure
+/// `Config::caps` is an `Option` to avoid, one level down. Only `Some(false)`
+/// takes a control away.
+///
+/// `eta` has no flag in either of the server's maps, so it is never gated
+/// here; the format menu is built from `output_formats`, which is a list and a
+/// better answer than a boolean.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Features {
+    #[serde(default)]
+    pub clip_skip: Option<bool>,
+    #[serde(default)]
+    pub flow_shift: Option<bool>,
+    #[serde(default)]
+    pub shifted_timestep: Option<bool>,
+    #[serde(default)]
+    pub slg: Option<bool>,
+    #[serde(default)]
+    pub vae_tiling: Option<bool>,
+    #[serde(default)]
+    pub hires: Option<bool>,
+}
+
+/// Whether the server has said no to this flag.
+///
+/// A free function rather than a method on `Option<bool>`, which is not ours
+/// to extend, and spelled once so the nil case cannot be written two ways:
+/// `!flag.unwrap_or(true)` and `flag == Some(false)` agree, and
+/// `!flag.unwrap_or(false)` -- the plausible slip -- greys everything.
+pub fn denied(flag: Option<bool>) -> bool {
+    flag == Some(false)
 }
 
 /// What the server will let this UI offer.
@@ -158,6 +200,24 @@ impl Config {
         self.providers
             .iter()
             .any(|p| p.name == name && (p.free || self.allow_paid))
+    }
+
+    /// Whether a control gated on one of the server's feature flags may be
+    /// offered.
+    ///
+    /// True before anything has asked a server, which is the same answer the
+    /// sampler menu gives: no capabilities means nothing to check against, and
+    /// greying out the advanced section before the operator's first rental
+    /// would make the first request the one that can say least.
+    ///
+    /// Takes the field as a function pointer rather than a string key, so a
+    /// control naming a flag the wire type does not carry is a compile error
+    /// rather than a gate that is silently always open.
+    pub fn offers(&self, pick: fn(&Features) -> Option<bool>) -> bool {
+        match &self.caps {
+            None => true,
+            Some(c) => !denied(pick(&c.features)),
+        }
     }
 }
 
@@ -343,6 +403,42 @@ fn is_zero_f64(v: &f64) -> bool {
 }
 
 impl Job {
+    /// Removes every parameter the server has said no to.
+    ///
+    /// IT EXISTS BECAUSE GREYING A CONTROL IS NOT THE SAME AS NOT SENDING ONE.
+    /// `/api/config` is fetched after the page mounts, so the compose panel is
+    /// on screen and typeable before ember knows what the server takes -- and
+    /// a job added to the batch in that window keeps whatever was typed. The
+    /// control greys out when the answer arrives and the value stays in the
+    /// draft, so the request would carry a parameter whose control is visibly
+    /// unavailable: exactly the disagreement between what is on screen and
+    /// what is on the wire that each block's switch exists to prevent.
+    ///
+    /// WHAT IS CLEARED IS WHAT WOULD BE SENT, which is the same set
+    /// `sdserver.unsupported` refuses: a zero `shifted_timestep` and a `None`
+    /// block are already absent from the body, and for skip-layer guidance the
+    /// scale is the switch. Clearing more than that would be clearing nothing.
+    pub fn drop_denied(&mut self, f: &Features) {
+        if denied(f.clip_skip) {
+            self.clip_skip = None;
+        }
+        if denied(f.flow_shift) {
+            self.flow_shift = None;
+        }
+        if denied(f.shifted_timestep) {
+            self.shifted_timestep = 0;
+        }
+        if denied(f.slg) {
+            self.slg = None;
+        }
+        if denied(f.vae_tiling) {
+            self.vae_tiling = None;
+        }
+        if denied(f.hires) {
+            self.hires = None;
+        }
+    }
+
     /// One line identifying this job, the way ember's own output does.
     ///
     /// Deliberately the same shape as `sdserver.Job.Describe` in Go: a prompt
@@ -1351,6 +1447,124 @@ mod tests {
         assert_eq!(r.id, "abc");
         assert_eq!(r.cost.text(), "$5e-06");
         assert_eq!(r.jobs.len(), 1);
+    }
+
+    /// The three states of a feature flag are three answers, not two.
+    ///
+    /// `caps` absent is before the first rental, when there is nothing to
+    /// check against and every control has to stay usable -- otherwise the
+    /// operator's first request is the one that can say least. A flag the
+    /// server did not publish is the same answer arrived at differently: some
+    /// build, or some cached `caps` row written before ember read these maps,
+    /// simply has nothing to say about it. Only a published `false` takes a
+    /// control away.
+    ///
+    /// Written as one test over all three because the bug is picking the
+    /// wrong default for the absent cases, and a test that only covered
+    /// `Some(false)` would pass against a page that greyed everything.
+    #[test]
+    fn only_a_published_no_takes_a_control_away() {
+        let before_any_rental = Config::default();
+        assert!(before_any_rental.caps.is_none());
+        assert!(
+            before_any_rental.offers(|f| f.clip_skip),
+            "a control was greyed out before anything had asked a server what it can do"
+        );
+
+        let silent: Config = serde_json::from_str(r#"{"caps":{"model":"sd15.gguf"}}"#).unwrap();
+        assert!(
+            silent.offers(|f| f.clip_skip),
+            "a server that published no feature map greyed a control anyway"
+        );
+
+        let yes: Config =
+            serde_json::from_str(r#"{"caps":{"features":{"clip_skip":true}}}"#).unwrap();
+        assert!(yes.offers(|f| f.clip_skip));
+
+        let no: Config =
+            serde_json::from_str(r#"{"caps":{"features":{"clip_skip":false}}}"#).unwrap();
+        assert!(
+            !no.offers(|f| f.clip_skip),
+            "the server said clip_skip is unsupported and the control stayed available"
+        );
+        // And the answer is per flag: one denial must not take the rest with
+        // it, which is what reading the map as "all or nothing" would do.
+        assert!(
+            no.offers(|f| f.slg),
+            "one denial greyed an unrelated control"
+        );
+    }
+
+    /// A greyed control must not post what was typed before it greyed.
+    ///
+    /// `/api/config` is fetched after the page mounts, so there is a real
+    /// window in which the advanced section is open, typeable and ungated.
+    /// Values from that window live in the draft and in any job already added
+    /// to the batch, and greying the control afterwards does not remove them
+    /// -- the request would then carry a parameter whose control is visibly
+    /// unavailable. ember's own enqueue refuses it, which means the page would
+    /// be posting a request it knows will be refused.
+    ///
+    /// The set cleared is the set `Body` would send, which is why an
+    /// slg block with scale 0 and a `shifted_timestep` of 0 are not here:
+    /// they are already absent from the wire.
+    #[test]
+    fn a_denied_parameter_is_dropped_from_what_was_already_typed() {
+        let f: Features = serde_json::from_str(
+            r#"{"clip_skip":false,"flow_shift":false,"shifted_timestep":false,
+                "slg":false,"vae_tiling":false,"hires":false}"#,
+        )
+        .unwrap();
+
+        let mut j = Job {
+            prompt: "a paper boat".into(),
+            clip_skip: Some(2),
+            eta: Some(0.0),
+            flow_shift: Some(3.0),
+            shifted_timestep: 250,
+            slg: Some(Slg {
+                scale: 2.5,
+                ..Default::default()
+            }),
+            vae_tiling: Some(VaeTiling {
+                enabled: true,
+                ..Default::default()
+            }),
+            hires: Some(Hires {
+                enabled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        j.drop_denied(&f);
+
+        let body = serde_json::to_string(&j).unwrap();
+        for gone in [
+            "clip_skip",
+            "flow_shift",
+            "shifted_timestep",
+            "slg",
+            "vae_tiling",
+            "hires",
+        ] {
+            assert!(!body.contains(gone), "{gone} survived in {body}");
+        }
+        // The prompt and the ungated parameter are untouched. A clear that
+        // emptied the job would pass the assertions above and lose the
+        // request.
+        assert_eq!(j.prompt, "a paper boat");
+        assert_eq!(j.eta, Some(0.0), "eta has no flag and must not be cleared");
+
+        // And nothing is dropped when the server said yes, or said nothing.
+        let mut kept = j.clone();
+        kept.clip_skip = Some(2);
+        kept.hires = Some(Hires {
+            enabled: true,
+            ..Default::default()
+        });
+        let before = kept.clone();
+        kept.drop_denied(&Features::default());
+        assert_eq!(kept, before, "a silent server had a parameter dropped");
     }
 
     #[test]
