@@ -74,6 +74,15 @@ const (
 	StatusInterrupted Status = "interrupted"
 )
 
+// Statuses is every status this package writes, so a command's flag help and
+// Valid cannot disagree about the set. The mirror of GroupBys.
+func Statuses() []Status {
+	return []Status{
+		StatusQueued, StatusRunning, StatusDone,
+		StatusFailed, StatusCancelled, StatusInterrupted,
+	}
+}
+
 // Terminal reports whether nothing more will happen to a request in this
 // status.
 func (s Status) Terminal() bool {
@@ -433,13 +442,24 @@ type Bucket struct {
 	Sampling time.Duration `json:"sampling_ns"`
 	Billable time.Duration `json:"billable_ns"`
 
-	// Unrecorded is how many matched requests ran before these columns
-	// existed, and so contribute nothing to the figures above.
+	// Unrecorded is how many matched requests FINISHED with jobs that never
+	// reported, and so contribute nothing to the figures above.
 	//
 	// Counted and reported rather than quietly excluded. A total that is
 	// missing a month of history and does not say so is the clean-bill-of-
 	// health failure `ember ls --all` exits non-zero to avoid, in a column of
 	// money.
+	//
+	// Finished is load-bearing and was missing from the first version: a
+	// queued request contributes no cost and no images for the same
+	// arithmetic reason, so it was counted here and `ember spend` told the
+	// operator a request that had not run was missing figures. Nothing is
+	// missing from a request that has not happened yet.
+	//
+	// Two different things are counted together on purpose -- a request from
+	// before schema version 3, and one that failed before a job completed --
+	// because the warning is about the arithmetic and both divide a rental
+	// cost into no images. See unrecorded, which both stores go through.
 	Unrecorded int `json:"unrecorded,omitempty"`
 }
 
@@ -491,14 +511,120 @@ func (b Bucket) SamplingShare() float64 {
 }
 
 // Filter narrows a listing.
+//
+// One Filter for both readers, so `ember history --status` and the API's queue
+// listing cannot come to mean different things. The queue API passes Status
+// and Limit and nothing else; the ledger passes all of it.
 type Filter struct {
 	// Status, empty for every status.
 	Status Status
+
+	// Since and Until bound when a request was created, half-open: Since
+	// includes and Until excludes, so consecutive periods tile without a
+	// request landing in both. The same rule and the same spelling as
+	// SpendQuery, because an operator who reads `ember spend --since` and then
+	// `ember history --since` must not have to wonder which end is open.
+	Since time.Time
+	Until time.Time
+
+	// Provider and GPU match exactly, empty for any. Exactly and not by
+	// prefix: node.NormalizeGPU has already decided what a card is called by
+	// the time a request is stored, and a filter that guessed at prefixes
+	// here would be a second spelling of the matching rule that
+	// node.Filter.Matches already owns.
+	Provider string
+	GPU      string
 
 	// Limit caps how many come back, newest first. Zero means a default the
 	// implementation chooses: an unbounded listing of every request ever made
 	// is not an answer to "what is in the queue".
 	Limit int
+}
+
+// Entry is one row of the ledger: a request, joined to what it produced.
+//
+// FLAT, AND NOT A Request WITH COUNTS BESIDE IT, which was the first shape and
+// was wrong twice over. Request carries Jobs []Job -- the prompts and the
+// geometry -- and reading those for a listing is a query per row, which is the
+// N+1 this type exists to replace; so the embedded Request would have arrived
+// with Jobs nil, and `"jobs": null` beside `"jobs": 6` is a wire shape where
+// the honest answer ("not asked for") is spelled the same way as a request
+// with no jobs at all. Validate refuses those, so the listing would have been
+// shipping an unrepresentable request. `Get` is where a request's jobs come
+// from.
+//
+// The duplication is bounded by what a ledger row prints. A field added to
+// Request that nothing in this table shows does not belong here.
+type Entry struct {
+	ID      ReqID     `json:"id"`
+	Created time.Time `json:"created"`
+	Status  Status    `json:"status"`
+
+	Provider string `json:"provider"`
+	GPU      string `json:"gpu,omitempty"`
+
+	// RunID and Node name the rental that served it, which is what joins a
+	// row here to what `ember ls` reported at the time.
+	RunID string `json:"run_id,omitempty"`
+	Node  string `json:"node,omitempty"`
+
+	Started time.Time `json:"started,omitempty"`
+	Ended   time.Time `json:"ended,omitempty"`
+
+	// Cost is the rental and JobCost the card time inside it, the same two
+	// figures Bucket carries and for the same reason: the gap between them is
+	// the per-rental overhead a batch pays once.
+	Cost     node.MicroUSD `json:"cost_micro_usd,omitempty"`
+	Rate     node.Rate     `json:"rate_micro_usd_per_hour,omitempty"`
+	Elapsed  time.Duration `json:"elapsed_ns,omitempty"`
+	Billable time.Duration `json:"billable_ns,omitempty"`
+
+	Jobs   int   `json:"jobs"`
+	Images int   `json:"images"`
+	Bytes  int64 `json:"bytes,omitempty"`
+
+	JobCost  node.MicroUSD `json:"job_cost_micro_usd,omitempty"`
+	Steps    int64         `json:"steps,omitempty"`
+	Sampling time.Duration `json:"sampling_ns,omitempty"`
+
+	// Rode means this request generated on a rental another request opened,
+	// so its zero rental cost is by design and not a figure that went
+	// missing.
+	//
+	// IT IS HERE BECAUSE A COLUMN OF ZEROS IN A MONEY LEDGER READS AS FREE.
+	// The queue writes the rental's cost to the request that opened it and to
+	// no other -- "which request gets the rental's cost is a real question
+	// with no tidy answer", and that is the answer -- so every request that
+	// joined a rental already up has Cost 0 with real card time beside it. A
+	// reader who does not know that sums the column and gets a bill several
+	// times too small, which is the direction a money figure must never be
+	// wrong in.
+	Rode bool `json:"rode_along,omitempty"`
+
+	// Unrecorded means no job of this request ever reported finishing, so the
+	// per-job columns are zero because nothing wrote them.
+	//
+	// True for every request that ran before schema version 3, and nothing
+	// backfills: a backfill would have to re-derive step counts from progress
+	// frames whose poll interval is unknown for those runs. Said out loud for
+	// the reason Bucket.Unrecorded is, one row at a time.
+	Unrecorded bool `json:"unrecorded,omitempty"`
+
+	Err string `json:"error,omitempty"`
+}
+
+// Wall is how long the request itself took.
+//
+// Its own span and not the rental's Elapsed, which only the opener carries: a
+// request that rode along on somebody else's rental has a wall time of its own
+// and no Elapsed at all. Zero when either end is missing, as JobRun.Sampling
+// is, rather than a duration measured against the zero time -- which would be
+// two thousand years and would poison every average it reached.
+func (e Entry) Wall() time.Duration {
+	if e.Started.IsZero() || e.Ended.IsZero() || e.Ended.Before(e.Started) {
+		return 0
+	}
+	return e.Ended.Sub(e.Started)
 }
 
 // Store is the record of what was asked for and what came back.
@@ -562,6 +688,20 @@ type Store interface {
 	// division, and a stored quotient is a number that can disagree with the
 	// terms it came from.
 	Spend(ctx context.Context, q SpendQuery) ([]Bucket, error)
+
+	// History returns the ledger: one row per request, newest first, each
+	// joined to what its jobs did.
+	//
+	// SEPARATE FROM List BECAUSE THE QUESTIONS ARE. List answers "what is in
+	// the queue" and hands back the prompts, which means a second query per
+	// row for the jobs; this answers "what has ember run and what did it
+	// cost" in one statement, over a period, and never reads a prompt. A
+	// single method doing both would do the expensive half always.
+	//
+	// It is a read and nothing else. There is no write anywhere on the path
+	// from `ember history` to here, which is what makes "the ledger cannot
+	// advance the queue" a property of the shape rather than a promise.
+	History(ctx context.Context, f Filter) ([]Entry, error)
 
 	// Update applies fn to a request and writes it back.
 	//

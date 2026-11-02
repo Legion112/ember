@@ -58,6 +58,8 @@ func rentalRow(t *testing.T, st genstore.Store, gpu string, created time.Time,
 	if err := st.Update(t.Context(), id, func(g *genstore.Request) {
 		g.Status = genstore.StatusDone
 		g.Cost, g.Billable = cost, billable
+		// A finished rental has a start and an end, as the queue writes it.
+		g.Started, g.Ended = created, created.Add(billable)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +216,7 @@ func TestSpend_NamesPerImageAsAnUpperBoundWhenHistoryIsMissing(t *testing.T) {
 		if err := st.Update(t.Context(), id, func(g *genstore.Request) {
 			g.Status = genstore.StatusDone
 			g.Cost = 500_000
+			g.Started, g.Ended = spendDay(1), spendDay(1).Add(time.Hour)
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -224,7 +227,7 @@ func TestSpend_NamesPerImageAsAnUpperBoundWhenHistoryIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "1 request(s) ran before ember recorded per-job figures") {
+	if !strings.Contains(got, "1 request(s) contribute their rental cost and no per-job figures") {
 		t.Errorf("the gap in the history is not reported:\n%s", got)
 	}
 	if !strings.Contains(got, "upper bound") {

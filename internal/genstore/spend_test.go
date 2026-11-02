@@ -59,6 +59,11 @@ func rental(gpu string, created time.Time, cost node.MicroUSD, billable time.Dur
 	r.Created = created
 	r.Cost, r.Billable = cost, billable
 	r.Rate = node.Rate(2_490_000)
+	// A finished rental has a start and an end. Left off, these rows read as
+	// never having finished -- which is what "contributes no per-job figures"
+	// is now conditioned on, and the fixture has to be the shape the queue
+	// actually writes.
+	r.Started, r.Ended = created, created.Add(billable)
 	return r
 }
 

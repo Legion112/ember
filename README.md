@@ -1219,14 +1219,15 @@ ember's own overhead regressing.
 ```
 $ ember spend --by gpu
 card          reqs  jobs images      rental   card time    overhead  per image steps/s
-a100-80g         1     4      4       $1.79       $1.52       $0.27    $0.4475    0.04
-rtx4090          2     9      8       $1.39       $0.76       $0.63   $0.17375    0.07
+a100-80g         1     4      4       $1.79       $1.52       $0.27    $0.4475    0.05
+rtx4090          3     9      8       $1.39       $0.76       $0.63   $0.17375    0.15
 
-total: 3 request(s), 12 image(s), $3.18 of rental, $2.28 of card time
-90% of billable rental time was spent generating.
-1 request(s) ran before ember recorded per-job figures, so they contribute
-their rental cost and none of their images: per image is an upper bound here,
-and steps/s is computed only over what was recorded. Nothing backfills them.
+total: 4 request(s), 12 image(s), $3.18 of rental, $2.28 of card time
+41% of billable rental time was spent generating.
+1 request(s) contribute their rental cost and no per-job figures -- they ran
+before ember recorded them, or finished without a job completing. So per image
+is an upper bound here, and steps/s is computed only over what was recorded.
+Nothing backfills them.
 ```
 
 `--by` takes `provider`, `gpu` or `day`; `--since` and `--until` are UTC dates
@@ -1274,6 +1275,66 @@ counted from the frames ember saw: ember deduplicates progress on the step, so
 at a poll slower than the card samples it observes fewer frames than there
 were steps, and a count of frames would measure the poll interval instead of
 the work.
+
+### Which run was it
+
+`ember spend` answers what a period cost. The next question is always which
+run it was, and before these two commands there was nowhere to ask it: the
+generation history was **write-only** from the command line. The queue filled
+it, the web page read one request's rows, and `grep -rln genstore internal/cli/`
+named one file — `cmd_serve.go`, which only starts the queue. Looking at a
+finished run meant starting a server that can rent a card and clicking through
+a browser, or opening SQLite by hand.
+
+```
+$ ember history
+when (utc)       request          status      provider   card          jobs images      wall      rental   card time
+2026-10-31 18:19 080f21c0cc2f5be8 done        runpod     rtx4090          3      3     6m45s           -      $0.285
+2026-10-31 18:02 5f324627337df6f5 done        runpod     rtx4090          5      5    14m30s       $0.89      $0.475
+2026-10-29 09:14 15d87a1aae672727 done        runpod     a100-80g         4      4    41m12s       $1.79       $1.52
+2026-10-24 11:40 1393e5b386595420 done        runpod     rtx4090          1      -     33m0s        $0.5           -
+
+total: 4 request(s), 12 image(s), $3.18 of rental, $2.28 of card time
+1 request(s) rode along on a rental another request opened, so their rental
+cost is a dash rather than zero: the node was charged once, to whichever
+request paid for it to exist.
+1 request(s) finished with no per-job figures -- from before ember recorded
+them, or without a job completing -- so their images and card time are a dash
+rather than zero. Nothing backfills them.
+```
+
+`--since` and `--until` are UTC dates and half-open, the same rule `ember
+spend` uses, so the two tile alike. `--provider`, `--gpu` and `--status` match
+exactly; `--limit` bounds the page, which defaults to the newest 200. `--json`
+prints the rows with money as integer microdollars and the full text of any
+error, where the table shows one line of it.
+
+**The two dashes are the point of the table.** A rental serves every queued
+request it can, and its cost is charged to the request that *opened* it — so
+every request that joined a rental already up has a rental cost of zero by
+design. A money column of zeros that means "charged on another row" is the
+misreading this marker exists to prevent, and it is decided by asking whether
+another request on the same rental carries the cost, not by the zero itself:
+the local provider's rentals are free, so cost alone cannot tell the two
+apart. The second dash is a request that finished with no per-job figures,
+which is every request from before the execution columns existed and also one
+that broke before a job completed. Both divide a rental cost into no images,
+which is why they are counted together and why `ember spend` calls per image
+an upper bound when there are any.
+
+**It cannot spend.** No provider is constructed anywhere on the path, and the
+only statement it runs is a `SELECT` — so "a listing command must not be able
+to rent, enqueue or claim" is a property of what the command has rather than a
+rule somebody has to keep. A test lists three times and then asserts the
+queued request is still claimable.
+
+**It does not read the prompts.** A ledger row carries the counts and the
+money and no job text, because reading the prompts is a query per row for
+something the table never prints; `ember serve`'s own API is where one
+request's jobs come from. The per-request figures and `ember spend`'s sums
+come out of one roll-up, so the two cannot come to disagree about what a run
+produced — a conformance test sums the ledger and compares it against the
+aggregate, in both stores.
 
 ## Video
 

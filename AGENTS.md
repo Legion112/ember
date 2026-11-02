@@ -652,6 +652,77 @@ that sentence made unrepresentable rather than merely tested.
   and no error, as `Images` and `Events` do. A fake *stricter* than the thing
   it stands in for is the usual danger inverted and grows callers a branch
   for an error nothing returns.
+- **The generation history was write-only from the command line, and a
+  database nothing reads is a measurement nobody takes.**
+  `grep -rln genstore internal/cli/ cmd/` named one file -- `cmd_serve.go`,
+  which only *starts* the queue. So every figure in the store was reachable
+  only by running a server that can rent a card and clicking through a
+  browser, or by opening SQLite by hand, which is how the sequence-number bug
+  was found and is a poor way to answer a recurring question. `ember spend`
+  made the money queryable in aggregate; `ember history` is the row-by-row
+  ledger, which is what an operator reads the moment the aggregate surprises
+  them. Both go through one roll-up, so neither can come to disagree with the
+  other about what a run produced, and a conformance test sums the ledger and
+  compares it against the aggregate in both stores.
+- **A ledger row is not a `Request` with counts beside it, and the reason is
+  the wire.** `Request` carries `Jobs []Job` -- the prompts and the geometry
+  -- and reading those for a listing is a query per row, which is the N+1 the
+  ledger exists to replace. So the embedded version arrived with `Jobs` nil,
+  and `"jobs": null` beside `"jobs": 6` is a shape where the honest answer
+  ("not asked for") is spelled exactly like a request with no jobs at all --
+  which `Validate` refuses, so the listing would have been shipping a request
+  that cannot exist. `genstore.Entry` is flat instead, and the duplication is
+  bounded by what the table prints: a field added to `Request` that nothing
+  shows does not belong there. The nil-slice-is-not-an-empty-list rule, met a
+  third time, upstream of the wire rather than on it.
+- **A rider's rental cost is zero by design, and a money column of zeros
+  reads as free.** The rental is charged to the request that opened it and to
+  no other, which is already written down above as the only answer that
+  neither understates nor multiplies -- and it means every request that joined
+  a rental already up sits in the ledger with real card time and no rental
+  cost. A reader who does not know that sums the column and gets a bill
+  several times too small. `Entry.Rode` says so per row, and it is decided by
+  asking whether *another* request on the same rental carries the cost rather
+  than by the zero itself: the local provider's rentals are free, so cost
+  alone cannot tell "somebody else paid" from "nobody did". Billable is tested
+  beside cost for exactly that case.
+- **"It has no figures" is the fact; "it ran before ember recorded them" was a
+  guess at the cause.** Two different things contribute a rental cost and no
+  per-job figures -- a request from before schema version 3, and one that
+  failed or was cancelled before a job completed -- and the arithmetic warning
+  is warranted for both, because both divide a rental into no images. Naming
+  only the first blamed the schema for a run that simply broke. Found by
+  printing `ember history` over a failed request, which is the third time in
+  this repository that reading real output found a defect no test had an
+  opinion about.
+- **"Finished" is the precondition, and leaving it out made the warning fire
+  on requests that had not run.** A queued request contributes no cost and no
+  images for the same arithmetic reason as a pre-v3 one, so `Bucket.Unrecorded`
+  counted it and `ember spend` told the operator a request that had not
+  happened was missing its history. Nothing is missing from a request that has
+  not happened yet. The test is `ended_unix` rather than a status list,
+  because a status list in SQL would be a second spelling of
+  `Status.Terminal()` -- and every path that ends a request writes the end:
+  the queue on done and failed, the API on cancel, `Interrupt` on a restart.
+  The fixtures had to be corrected too, because they wrote "done" rows with no
+  end, which is not a shape the queue can produce.
+- **The ledger cannot spend, and that is structural rather than promised.**
+  No provider is constructed anywhere on the path from `ember history` to the
+  store, and the only statement it runs is a `SELECT` -- so there is nothing
+  for a refusal to refuse. The assertion is that three listings leave the
+  queued request still claimable, because a reader that had claimed it would
+  leave the queue drained and a request "running" against a rental nothing
+  holds.
+- **Two parts of #27 were refused, and here is why.** It asked for
+  `ember spend` to default to the current calendar month: a default that
+  silently excludes everything older is the "a total missing part of its
+  history says so" rule inverted, and "what has ember ever cost" would have
+  had no way to be asked, so the period stays unbounded and one flag away. It
+  also asked for store standing charges as a line on the spend report, which
+  contradicts its own done-when -- pricing a store means asking a provider
+  what stores exist, and "no provider contacted" is the property that makes
+  these two commands safe to run from a timer. The standing charge stays in
+  `ember ls`, where the scan already happens.
 - **A caption that is true of one mode is wrong for the others.** The preview
   figure said "the latent, not the output" unconditionally. That is right for
   `proj`, which projects the latent and previews a 512x512 generation as a

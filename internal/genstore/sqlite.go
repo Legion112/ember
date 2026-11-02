@@ -582,13 +582,14 @@ func (s *SQLite) List(ctx context.Context, f Filter) ([]Request, error) {
 		limit = defaultLimit
 	}
 
-	q := `SELECT ` + requestColumns + ` FROM requests`
-	args := []any{}
-	if f.Status != "" {
-		q += ` WHERE status = ?`
-		args = append(args, string(f.Status))
-	}
-	q += ` ORDER BY created_unix DESC, id DESC LIMIT ?`
+	// Through filterWhere, the same clause builder History uses, so a listing
+	// and the ledger cannot come to disagree about what --status or a period
+	// bound selects.
+	//
+	where, args := filterWhere(f)
+	//nolint:gosec // G202: where is fixed clause text from filterWhere; every value is a ? parameter
+	q := `SELECT ` + requestColumns + ` FROM requests r ` + where +
+		` ORDER BY created_unix DESC, id DESC LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
