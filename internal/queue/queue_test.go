@@ -27,21 +27,39 @@ type fakeServed struct {
 	failNth  map[int]error
 	progress func(sink report.Sink, n int)
 	caps     sdserver.Capabilities
+
+	// onStop, when set, is called with the stop channel of each batch
+	// instead of returning at once.
+	//
+	// IT TAKES THE CHANNEL RATHER THAN A BOOL, because what has to be
+	// asserted is that the channel the queue handed over is the one closing
+	// a cancel of THAT request closes -- a fake that reported "I was
+	// cancelled" out of its own state would agree with itself whether or not
+	// the signal ever arrived. The same reason the preview fake repeats a
+	// frame: a fake tidier than the thing it stands in for tests a program
+	// that does not exist.
+	onStop func(stop <-chan struct{}, n int) error
 }
 
 func (f *fakeServed) Caps() sdserver.Capabilities { return f.caps }
 
-func (f *fakeServed) Generate(_ context.Context, sink report.Sink, jobs sdserver.Run, dir string) error {
+func (f *fakeServed) Generate(_ context.Context, sink report.Sink, jobs sdserver.Run, dir string, stop <-chan struct{}) error {
 	f.mu.Lock()
 	n := len(f.batches)
 	f.batches = append(f.batches, jobs)
 	f.dirs = append(f.dirs, dir)
 	fail := f.failNth[n]
 	prog := f.progress
+	onStop := f.onStop
 	f.mu.Unlock()
 
 	if prog != nil {
 		prog(sink, n)
+	}
+	if onStop != nil {
+		if err := onStop(stop, n); err != nil {
+			return err
+		}
 	}
 	return fail
 }
@@ -1175,5 +1193,232 @@ func TestOnce_RecordsWhatTheNodeSaidAboutItsMemory(t *testing.T) {
 	if second.MemLimit != 0 {
 		t.Errorf("the rider carries the node's memory limit too (%d); it belongs to the rental",
 			second.MemLimit)
+	}
+}
+
+// --- cancel ---
+
+// TestCancel_StopsOneRequestAndTheRentalServesTheNext is the money assertion
+// of the whole change.
+//
+// `ember serve` used to refuse a cancel on a generating request, and the
+// reason it gave was that stopping it "would mean destroying that node, which
+// would take every other request on the same rental with it". That is what
+// this test exists to deny: the cancelled request ends as cancelled, the node
+// is rented ONCE, and the request behind it is generated on the same warm
+// card rather than waiting for a second rental to pay for provisioning, the
+// image pull and a 56 GiB model load all over again.
+func TestCancel_StopsOneRequestAndTheRentalServesTheNext(t *testing.T) {
+	served := &fakeServed{caps: sdserver.Capabilities{Model: "sd15", CancelGenerating: true}}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+
+	a := enqueue(t, st, "rtx2080ti", "stop this one")
+	b := enqueue(t, st, "rtx2080ti", "and keep this one")
+
+	served.onStop = func(stop <-chan struct{}, n int) error {
+		if n != 0 {
+			return nil
+		}
+		// From another goroutine, as the HTTP handler is: Cancel must not
+		// block on the loop it is signalling.
+		reached := make(chan bool, 1)
+		go func() { reached <- q.Cancel(a) }()
+		if !<-reached {
+			return errors.New("Cancel did not reach the request that is generating")
+		}
+		// THE CHANNEL THE QUEUE HANDED OVER is the one that closes. A fake
+		// reporting "I was cancelled" out of its own state would pass
+		// whether or not the signal ever arrived -- see fakeServed.onStop.
+		select {
+		case <-stop:
+			return app.ErrCancelled
+		case <-time.After(5 * time.Second):
+			return errors.New("the cancel never reached the batch")
+		}
+	}
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatalf("a cancelled request ended the rental with an error: %v", err)
+	}
+
+	if rentals, destroyed := pl.counts(); rentals != 1 || destroyed != 1 {
+		t.Errorf("rented %d node(s) and destroyed %d, want 1 and 1: a cancelled request "+
+			"stops a batch and not a rental", rentals, destroyed)
+	}
+	if n := served.count(); n != 2 {
+		t.Errorf("generated %d batch(es), want 2: the request behind the cancelled one "+
+			"should have been served by the same warm card", n)
+	}
+
+	got, err := st.Get(t.Context(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != genstore.StatusCancelled {
+		t.Errorf("the cancelled request ended as %q, want cancelled", got.Status)
+	}
+	if got.Err == "" {
+		t.Error("the cancelled request recorded no reason")
+	}
+
+	next, err := st.Get(t.Context(), b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Status != genstore.StatusDone {
+		t.Errorf("the request behind it ended as %q, want done", next.Status)
+	}
+}
+
+// A cancel names one request, and reaches only that one.
+//
+// The signal is per-request and not per-rental, which is the difference
+// between "stop my batch" and "stop the node". Cancelling b while a generates
+// must leave a alone -- otherwise one operator's cancel silently stops
+// somebody else's work on the shared rental, which is the failure the old 409
+// was right to be afraid of.
+func TestCancel_ReachesOnlyTheRequestItNames(t *testing.T) {
+	served := &fakeServed{caps: sdserver.Capabilities{Model: "sd15"}}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+
+	a := enqueue(t, st, "rtx2080ti", "generating")
+	b := enqueue(t, st, "rtx2080ti", "still queued")
+
+	var wrong error
+	served.onStop = func(stop <-chan struct{}, n int) error {
+		if n != 0 {
+			return nil
+		}
+		if q.Cancel(b) {
+			wrong = errors.New("Cancel claimed to have stopped a request that is not generating")
+		}
+		// Not merely "Cancel said no": the channel a is listening to must
+		// still be open, because a signal delivered to the wrong batch is
+		// exactly what this is about.
+		select {
+		case <-stop:
+			wrong = errors.New("cancelling b closed a's stop channel")
+		default:
+		}
+		return nil
+	}
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if wrong != nil {
+		t.Error(wrong)
+	}
+	for _, id := range []genstore.ReqID{a, b} {
+		got, err := st.Get(t.Context(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != genstore.StatusDone {
+			t.Errorf("request %s ended as %q, want done: neither was cancelled", id, got.Status)
+		}
+	}
+}
+
+// Cancelling twice is not a panic, and the second one says it did nothing.
+//
+// A double-clicked button is the ordinary case here, not the exotic one, and
+// closing a channel twice panics -- in the drain loop's own goroutine, which
+// would take the process down with a node running.
+func TestCancel_IsSafeToAskTwice(t *testing.T) {
+	served := &fakeServed{caps: sdserver.Capabilities{Model: "sd15"}}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+
+	a := enqueue(t, st, "rtx2080ti", "stop this one")
+
+	var second bool
+	served.onStop = func(stop <-chan struct{}, _ int) error {
+		if !q.Cancel(a) {
+			return errors.New("the first cancel did not reach it")
+		}
+		second = q.Cancel(a)
+		<-stop
+		return app.ErrCancelled
+	}
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if second {
+		t.Error("the second cancel reported it stopped something, and there was nothing left to stop")
+	}
+}
+
+// Nothing generating is nothing to cancel, and that is reported as false.
+//
+// The API turns false into a 409 rather than recording a cancellation, for
+// the reason `ember ls --all` exits non-zero on a provider it could not ask:
+// "I could not stop it" must not render as "it is stopped" over a card that
+// may still be billing.
+func TestCancel_ReportsFalseWhenNothingIsGenerating(t *testing.T) {
+	q, st := newQueue(t, &fakePlanner{served: &fakeServed{}})
+	id := enqueue(t, st, "rtx2080ti", "queued")
+
+	if q.Cancel(id) {
+		t.Error("Cancel claimed to have stopped a request before any rental existed")
+	}
+	if q.Cancel("") {
+		t.Error("Cancel accepted an empty id, which matches nothing and would match current when it is empty")
+	}
+}
+
+// A cancel arriving a moment too late does not reach the next request.
+//
+// The drain loop claims the next request onto the same rental, so the window
+// between one batch returning and the next starting is real, and a stale
+// signal landing there would stop a batch the operator said nothing about.
+//
+// THE ID CHECK IN Cancel IS WHAT PREVENTS IT, which the reinstatement pass
+// settled rather than the reading: clearing q.stop in generate's defer looks
+// like the guard and reinstating that alone leaves this test green, because
+// the next batch overwrites the channel anyway. Removing the id check is what
+// turns it red.
+func TestCancel_DoesNotReachTheNextRequestOnTheSameRental(t *testing.T) {
+	served := &fakeServed{caps: sdserver.Capabilities{Model: "sd15"}}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+
+	a := enqueue(t, st, "rtx2080ti", "first")
+	b := enqueue(t, st, "rtx2080ti", "second")
+
+	var leaked error
+	served.onStop = func(stop <-chan struct{}, n int) error {
+		if n == 0 {
+			return nil
+		}
+		// The second batch is generating now. A cancel naming the FIRST
+		// request -- an operator who clicked while it was still on screen --
+		// must not touch this one.
+		if q.Cancel(a) {
+			leaked = errors.New("a cancel naming the finished request reached the one after it")
+		}
+		select {
+		case <-stop:
+			leaked = errors.New("the second batch's stop channel was closed by the first's cancel")
+		default:
+		}
+		return nil
+	}
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if leaked != nil {
+		t.Error(leaked)
+	}
+	got, err := st.Get(t.Context(), b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != genstore.StatusDone {
+		t.Errorf("the second request ended as %q, want done", got.Status)
 	}
 }

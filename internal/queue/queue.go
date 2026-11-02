@@ -103,6 +103,20 @@ type Queue struct {
 	mu      sync.Mutex
 	current genstore.ReqID
 
+	// stop is closed to cancel `current`, and nil once it has been.
+	//
+	// ONE CHANNEL AND NOT A MAP, for the reason there is one drain
+	// goroutine: a rental lives inside one iteration of the loop and one
+	// request generates at a time, so "the cancel signal for the request
+	// that is generating" is a single value. A map keyed by request id would
+	// be a set of signals only one of which can ever be listened to, and the
+	// other entries would be a leak with a plausible-looking lookup over it.
+	//
+	// Set to nil by Cancel rather than closed twice: a double close panics,
+	// and a double-clicked cancel button is the ordinary case rather than
+	// the exotic one.
+	stop chan struct{}
+
 	// sinks is one event stream per request, memoised.
 	//
 	// ONE PER REQUEST AND NOT ONE PER CALL, because the sequence number is
@@ -173,6 +187,38 @@ func (q *Queue) Running() (genstore.ReqID, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.current, q.current != ""
+}
+
+// Cancel stops the generation of one request and reports whether it reached
+// it.
+//
+// THE RENTAL SURVIVES IT, which is the whole difference between this and what
+// `ember serve` used to offer. Nothing here touches a context: cancelling the
+// drain loop's would unwind through provision.WithNode's deferred destroy and
+// take the node away, and with it every other request queued onto the same
+// rental -- which is what the API's old 409 was protecting, correctly, against
+// a mechanism that did not exist yet. Closing a channel ends one batch; the
+// node, the server process and the resident weights are untouched, and the
+// next claim is served by a card that is already warm.
+//
+// Kick's shape and for Kick's reason: the API has to reach the drain loop, and
+// a handler must never block on it. False means this request is not the one
+// generating -- it was already cancelled, or it has finished, or a different
+// one is running -- and the caller must not read that as "stopped".
+func (q *Queue) Cancel(id genstore.ReqID) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if id == "" || q.current != id || q.stop == nil {
+		return false
+	}
+	close(q.stop)
+	// FORGOTTEN RATHER THAN CLOSED AGAIN, and this line is the one that
+	// matters: a double close panics, in the drain goroutine, with a node
+	// running -- and a double-clicked cancel button is the ordinary case
+	// here, not the exotic one. Reinstating the bug makes
+	// TestCancel_IsSafeToAskTwice report `close of closed channel`.
+	q.stop = nil
+	return true
 }
 
 // Run drains until ctx ends.
@@ -268,7 +314,19 @@ func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat ge
 		*served = append(*served, req.ID)
 		err := q.generate(ctx, s, req)
 		q.finish(ctx, req.ID, err)
-		if err != nil {
+		switch {
+		case errors.Is(err, app.ErrCancelled):
+			// A CANCELLED REQUEST DOES NOT STOP THE RENTAL, and that is the
+			// entire point of being able to cancel one. The operator asked
+			// for this batch to stop, not for the node to go away -- and the
+			// requests behind it on this rental are other people's work, or
+			// their own, which they said nothing about. Treating this like a
+			// failure would reinstate exactly the behaviour webapi's old 409
+			// refused the cancel in order to avoid, this time without the
+			// warning.
+			q.log().Info("a request was cancelled while generating; the rental carries on",
+				"request", req.ID)
+		case err != nil:
 			// A failed batch stops the rental. A rental that carried on after
 			// one request failed would bill for work whose premise an
 			// operator is now going to re-examine, and the remaining
@@ -297,12 +355,24 @@ func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat ge
 
 // generate runs one request's jobs and records what came back.
 func (q *Queue) generate(ctx context.Context, s app.Served, req genstore.Request) error {
+	stop := make(chan struct{})
 	q.mu.Lock()
-	q.current = req.ID
+	q.current, q.stop = req.ID, stop
 	q.mu.Unlock()
 	defer func() {
 		q.mu.Lock()
-		q.current = ""
+		// Not closed here: Cancel may already have, and the only reader is
+		// the Generate call this defer runs after.
+		//
+		// Clearing `stop` is hygiene and NOT the guard, which is worth
+		// saying because it reads like one. What stops a cancel arriving a
+		// moment too late from reaching the next request on the same rental
+		// is the id check in Cancel -- reinstating that is what makes
+		// TestCancel_DoesNotReachTheNextRequestOnTheSameRental fail, and
+		// reinstating this does not. It stays so that `q.stop != nil` means
+		// "a batch is in flight" and Cancel's own guard reads as the
+		// invariant it is.
+		q.current, q.stop = "", nil
 		q.mu.Unlock()
 	}()
 
@@ -313,7 +383,7 @@ func (q *Queue) generate(ctx context.Context, s app.Served, req genstore.Request
 
 	dir := q.dirOf(req.ID)
 	snk := q.sinkFor(req.ID)
-	err := s.Generate(ctx, snk, run, dir)
+	err := s.Generate(ctx, snk, run, dir, stop)
 	snk.flush(ctx)
 	return err
 }
@@ -333,6 +403,12 @@ func (q *Queue) fail(ctx context.Context, id genstore.ReqID, cause error) {
 func (q *Queue) finish(ctx context.Context, id genstore.ReqID, cause error) {
 	status, msg := genstore.StatusDone, ""
 	switch {
+	case errors.Is(cause, app.ErrCancelled):
+		// The operator asked for this one. Recorded with its reason, which
+		// names how far it got and whether the job in flight could be
+		// stopped -- the event stream has the detail, and the row is what
+		// `ember ls` and the queue table read.
+		status, msg = genstore.StatusCancelled, cause.Error()
 	case errors.Is(cause, context.Canceled), errors.Is(cause, context.DeadlineExceeded):
 		// Not a failure. The operator pressed Ctrl-C, or the node reached its
 		// deadline; calling that a failed generation would send them looking

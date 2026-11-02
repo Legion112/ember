@@ -876,10 +876,19 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                     </For>
                 </tbody>
             </table>
+            // THE OLD CAPTION HERE SAID THE OPPOSITE, and it was wrong about
+            // its own premise: "a request that is already generating cannot
+            // be cancelled: it would mean destroying the node, which takes
+            // every other request on the same rental with it". That is true
+            // of cancelling a rental and was never true of cancelling a job.
+            // Replaced rather than deleted, because what an operator needs
+            // to know is still the distinction -- what cancel does to the
+            // rental, and therefore what it does to the money.
             <p class="hint">
-                "A request that is already generating cannot be cancelled: it would mean
-                 destroying the node, which takes every other request on the same rental
-                 with it. Stop " <code>"ember serve"</code> " to end a rental."
+                "Cancelling a generating request stops its current image and drops the jobs
+                 behind it. The rental keeps going, so anything else queued onto it still
+                 runs on the same warm card. Stop " <code>"ember serve"</code>
+                 " to end the rental itself."
             </p>
         </section>
     }
@@ -993,7 +1002,23 @@ fn Watch(watching: RwSignal<String>) -> impl IntoView {
                             </span>
                             <code>{j.desc.clone()}</code>
                             {
-                                if j.done {
+                                if j.cancelled && !j.done {
+                                    // GUARDED ON `!done`, because a job can
+                                    // be both: the server finished the last
+                                    // step before it read the cancel, so
+                                    // the images arrived anyway. "cancelled"
+                                    // printed over a row whose picture is in
+                                    // the gallery below is the caption that
+                                    // is true of one case and wrong for the
+                                    // other, so files win.
+                                    let why = if j.cancel_error.is_empty() {
+                                        " cancelled".to_string()
+                                    } else {
+                                        format!(" cancelled, but it will finish and be paid for: {}",
+                                                j.cancel_error)
+                                    };
+                                    view! { <span class="step">{why}</span> }.into_any()
+                                } else if j.done {
                                     view! {
                                         <span class="done">
                                             {format!(" {} file(s)", j.files)}
@@ -1018,6 +1043,21 @@ fn Watch(watching: RwSignal<String>) -> impl IntoView {
                         </li>
                     }).collect::<Vec<_>>()}
                 </ol>
+
+                // The jobs that never started have no rows above -- nothing
+                // ever named them -- so this is the only place that can say
+                // they are not coming.
+                // `!= 0` and not `> 0`: the view macro ends an attribute at
+                // the first `>`, so the comparison would parse as the end of
+                // the tag and a stray `0`, and clippy refuses the
+                // parentheses that would fix it. `dropped` is clamped at
+                // zero where it is set.
+                <Show when=move || progress.get().dropped != 0>
+                    <p class="hint">
+                        {move || format!("cancelled: {} job(s) were dropped and will not run",
+                                         progress.get().dropped)}
+                    </p>
+                </Show>
 
                 <Gallery request=request progress=progress />
 
@@ -1064,8 +1104,11 @@ fn Gallery(request: RwSignal<Option<Request>>, progress: RwSignal<Progress>) -> 
                 // caption for both would be wrong half the time, and wrong in
                 // the direction that makes a working preview look broken.
                 let latent = r.preview == "proj";
-                progress.get().jobs.into_iter()
-                    .filter(|j| !j.done && j.step > 0)
+                // The predicate is Progress::sampling and not a closure
+                // here, so a test can reach it: a component this deep inside
+                // a view macro needs a DOM, and "which jobs still have a
+                // frame coming" is a decision rather than a layout.
+                progress.get().sampling().into_iter()
                     .filter_map(|j| {
                         let im = r.images.iter().find(|i| i.preview && i.job == j.index)?;
                         Some((j.index, format!("{}&step={}", im.path, j.step)))

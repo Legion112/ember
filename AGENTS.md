@@ -1563,6 +1563,104 @@ A leaked node bills by the hour in silence. These are not style preferences.
   repeat check makes it fail against live data, proving the branch is reached;
   corrupting the captured frame's base64 makes the unit test report `image:
   unknown format` rather than passing on bytes that are not an image.
+- **A cancel ends a job, not a rental, and the difference is a channel rather
+  than a context.** `ember serve` refused a cancel on a generating request,
+  and the 409 said why: cancelling it "would mean destroying that node, which
+  would take every other request on the same rental with it". That is a true
+  sentence about cancelling a *rental* and a false one about cancelling a
+  *job* -- `POST /sdcpp/v1/jobs/{id}/cancel` ends one generation and leaves
+  the process, the node and the resident weights alone, which is the entire
+  shape of the served path. The refusal was guarding a mechanism nobody had
+  connected: `sdserver.Client.Cancel` was written, covered to 99% by its own
+  package's tests, and called by nothing outside them. So the fix was the join
+  and not a deletion -- the `queue.Cost` precedent does not apply, because
+  there is no second cancel mechanism and deleting this one deletes the only
+  one. `queue.Cancel` closes a per-request channel; nothing anywhere cancels a
+  context, because a cancelled context would unwind through
+  `provision.WithNode`'s deferred destroy and reinstate exactly the behaviour
+  the 409 existed to prevent -- and would also kill the SSH connection the
+  cancel has to travel down.
+- **A cancel takes the request's remaining jobs with it, and that is where the
+  money is.** Stopping only the job in flight would leave the next one
+  starting a second later on the same card: the button would look like it
+  worked and the bill would not change, which is the "reads as working" defect
+  this file keeps recording. On FLUX.2 at 2048x2048 one job is ~141s, so
+  cancelling job 3 of 8 is worth 1/8 of the batch if it stops one image and
+  6/8 if it stops the rest. An operator clicking cancel on a request means the
+  request, because a request is the batch they asked for as one thing.
+- **A server that does not report `cancel_generating` is not a refusal, and
+  "fail loudly rather than skip quietly" points the wrong way here.** The
+  operator has just asked ember to stop spending. Refusing leaves them one
+  lever -- stopping `ember serve` -- which destroys the rental and takes every
+  other request on it, so the safety check would cost more than the thing it
+  refused. ember instead does the half it owns (drops the remaining jobs),
+  does not ask a server that says it cannot (the 404 would surface as a
+  transport problem rather than as the capability it is), and is loud about
+  the part that keeps billing: *"job 3/8: cannot be stopped, so it will finish
+  and be paid for (…); 5 job(s) after it were dropped"*. The loudness belongs
+  in what it says, not in a 409. `Capabilities.CancelGenerating` therefore
+  defaults to the *expensive* answer, which is the opposite of every other
+  field beside it: an absent sampler list refuses a job, because a refusal
+  before a card is rented costs nothing, and this one is read while a rented
+  card is sampling.
+- **A cancelled job carries an error object, and testing it before the status
+  destroyed the rental.** A real `GET /jobs/{id}` for a cancelled job answers
+  `{"code":"cancelled","message":"job cancelled by client"}` beside
+  `"status": "cancelled"`, with `result` null. `runJobs` checked `State.Err`
+  first, so every live cancel came back as `sd-server refused it: cancelled:
+  job cancelled by client` -- a plain failure, which is what the drain loop
+  destroys a rental for. Pressing the new cancel button would have taken down
+  the node and every other request draining onto it: the exact outcome the
+  feature exists to avoid, reached by using the feature. The fake answered a
+  cancelled status with no error at all, so the whole unit suite agreed with
+  itself and `make test-preview-lab` found it on the first live cancel.
+  `testdata/job_cancelled.json` is the capture, and the fake carries the error
+  object now. The same server also writes `[E] Diffusion model sampling
+  failed` to its own stderr for a job it reports as `cancelled`, which is a
+  second reason the status is read and the log is not.
+- **ember reports whether it asked, because "cancelled" has two authors.** A
+  job that came back cancelled because ember asked is the operator's stop; one
+  that came back cancelled with nobody asking is something ember cannot
+  account for, and filing the second under the first would record a request
+  nobody stopped as `cancelled`. `awaitJob` returns the flag rather than
+  letting its caller infer it, since the signal can be closed between two
+  polls.
+- **The ask is made once per job and the poll carries on after it.** A closed
+  channel is permanently ready, so a loop that re-read it would ask every
+  poll -- a request a second against the program ember is waiting for. And the
+  server's own answer decides the outcome: it may come back `cancelled` with
+  nothing, or `completed` because the last step finished while the ask was in
+  flight, so the images are still written and the card time is still reported.
+  A return that skipped the cost would make a cancelled batch look cheaper
+  than it was, which is the one direction a money figure must never be wrong
+  in.
+- **`cancel_queued` is read by nothing, on purpose.** sd-server's queue is one
+  job deep by construction -- `runJobs` submits one at a time so a finished
+  result cannot be purged by `async_jobs`' 600-second TTL -- so there is never
+  a queued job on the server for ember to cancel. Reading the flag would be
+  reading a capability for a state ember cannot produce.
+- **The cancel signal is forgotten as each batch ends, not only when it is
+  closed.** The drain loop claims the next request onto the same rental, so
+  the gap between one batch returning and the next starting is real, and a
+  stale signal landing there would stop a batch the operator said nothing
+  about. `Cancel` checks the id and `generate`'s defer clears the channel, so
+  neither path has to know whether the other ran -- and a second cancel
+  reports false rather than closing a closed channel, because a
+  double-clicked button is the ordinary case and the panic would be in the
+  drain goroutine, with a node running.
+- **`webapi.Drain` is an interface so a handler test does not rent anything.**
+  Three methods -- `Kick`, `Running`, `Cancel` -- all of which this package
+  calls and none of which it implements, the same reason `scan` is injected.
+  `RecordingDrain` answers "I did not reach it" by default, which is
+  `Caps.PublicSSH`'s decision: a fake that claimed to have stopped something
+  without being told would make every cancel test pass against a handler that
+  never called `Cancel`.
+- **The queue records how a cancelled generation ended; the handler does
+  not.** A queued request has no rental and nothing to tell, so the handler
+  makes it terminal. A running one is still generating when the handler
+  returns -- ember is polling sd-server for the job's own answer -- so the
+  status it ends up with belongs to the queue. Two writers for one row means
+  the loser overwrites the one that knew.
 
 ## Style
 

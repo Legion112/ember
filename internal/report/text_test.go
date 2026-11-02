@@ -64,6 +64,13 @@ var renderings = map[Kind]struct {
 		want:  "job 1/2: could not write the preview frame: disk full\n",
 	},
 
+	// The ask that worked. Total-Index is the half the operator pressed the
+	// button for: how many jobs stopped being paid for.
+	KindJobCancelled: {
+		event: Event{Kind: KindJobCancelled, Unit: UnitJob, Index: 3, Total: 8},
+		want:  "job 3/8: asked the server to stop it; 5 job(s) after it were dropped\n",
+	},
+
 	// Both views of memory, in bytes, with no verdict: what to do about a
 	// node that cannot hold the weights is a decision to take once there are
 	// measurements, and a line saying "this will be slow" would be that
@@ -86,6 +93,42 @@ var renderings = map[Kind]struct {
 	KindDestroyFailed: {event: Event{Kind: KindDestroyFailed, Err: "boom"}, want: ""},
 	KindRunFinished:   {event: Event{Kind: KindRunFinished}, want: ""},
 	KindRunFailed:     {event: Event{Kind: KindRunFailed, Err: "boom"}, want: ""},
+}
+
+// A cancel the server would not take says what it will still cost.
+//
+// Its own test rather than a second row in the table above, which is keyed by
+// Kind -- and the second spelling is the one that matters more: the in-flight
+// job is still sampling on a card that is still billing, and a line that read
+// as "cancelled" would tell the operator the spending stopped when it did
+// not. THE REASON IS QUOTED VERBATIM, because the cause is upstream's and the
+// operator is the one who has to recognise it.
+func TestText_ACancelThatCouldNotBeHonouredSaysWhatItCosts(t *testing.T) {
+	var buf bytes.Buffer
+	Text(&buf).Emit(Event{
+		Kind: KindJobCancelled, Unit: UnitJob, Index: 2, Total: 4,
+		Err: "this sd-server build does not report features.cancel_generating",
+	})
+	want := "job 2/4: cannot be stopped, so it will finish and be paid for " +
+		"(this sd-server build does not report features.cancel_generating); " +
+		"2 job(s) after it were dropped\n"
+	if got := buf.String(); got != want {
+		t.Errorf("rendered %q, want %q", got, want)
+	}
+}
+
+// A cancel that landed between two jobs names no job.
+//
+// Index is the count that FINISHED when Unit is empty, so Label would print
+// "job 2/5" over a job that had already completed and been paid for -- the
+// one row on screen that was not cancelled.
+func TestText_ACancelBetweenJobsNamesNoJob(t *testing.T) {
+	var buf bytes.Buffer
+	Text(&buf).Emit(Event{Kind: KindJobCancelled, Index: 2, Total: 5})
+	want := "cancelled: 3 of 5 job(s) were dropped before they started\n"
+	if got := buf.String(); got != want {
+		t.Errorf("rendered %q, want %q", got, want)
+	}
 }
 
 // A node with no cgroup limit says "none" rather than "0 B".
@@ -197,8 +240,9 @@ func kindByName(t *testing.T, name string) Kind {
 		"KindLog": KindLog, "KindServerStarting": KindServerStarting,
 		"KindModelResident": KindModelResident, "KindUnitStarted": KindUnitStarted,
 		"KindJobProgress": KindJobProgress, "KindJobImages": KindJobImages,
-		"KindUnitCost": KindUnitCost, "KindPreviewFailed": KindPreviewFailed,
-		"KindNodeReady": KindNodeReady, "KindNodeMemory": KindNodeMemory,
+		"KindUnitCost": KindUnitCost, "KindJobCancelled": KindJobCancelled,
+		"KindPreviewFailed": KindPreviewFailed,
+		"KindNodeReady":     KindNodeReady, "KindNodeMemory": KindNodeMemory,
 		"KindRunCost":       KindRunCost,
 		"KindDestroyFailed": KindDestroyFailed,
 		"KindRunFinished":   KindRunFinished, "KindRunFailed": KindRunFailed,

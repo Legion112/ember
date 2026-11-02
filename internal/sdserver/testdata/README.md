@@ -18,13 +18,43 @@ read from a **schema** rather than from a **response**.
 `sd-server` built from `workload-sd-cuda.Dockerfile` at `CUDA_ARCH=75`,
 serving sd15 Q8_0 on an RTX 2080 Ti. They are evidence.
 
+`capabilities.json` is also where `features.cancel_generating` is read from,
+which is the only feature flag ember acts on. The CPU build answers `true`
+for it too, which the cancel lab asserts against a live `/capabilities`
+rather than against this file — the flag decides whether ember asks a card
+that is already billing to stop, and reading a committed fixture to answer
+that would be the `allowedCudaVersions` mistake again.
+
 `job_generating.json` and `job_completed.json` were captured by the preview
 lab (`make test-preview-lab`, `test/integration/preview_test.go`) from the CPU
 image serving sd15 Q4_0, generating a 64x64 image in six steps with
 `preview_interval` at 1. They are evidence, and they can be re-captured by
 setting `EMBER_CAPTURE_DIR` on that lab.
 
-What they corrected is smaller than what `capabilities.json` corrected, and
+`job_cancelled.json` was captured by the same lab
+(`TestPreview_ARealServerStopsAGenerationWhenAsked`) from a sixty-step
+generation stopped at step 2. It is evidence, and it is the most expensive
+thing any fixture here has corrected.
+
+**A cancelled job carries an error object.** `{"code":"cancelled","message":
+"job cancelled by client"}` sits beside `"status": "cancelled"`, with `result`
+null — and `app.runJobs` tested `State.Err` *before* the status, so every
+successful cancel read as `sd-server refused it: cancelled: job cancelled by
+client`. One layer up, a plain failure is what the drain loop destroys a
+rental for: pressing the cancel button would have taken down the node and
+every other request draining onto it, which is the exact outcome the feature
+exists to avoid. The fake in `internal/app` answered a cancelled status with
+no error at all, so the entire unit suite agreed with itself. Nothing but a
+real server could have said otherwise.
+
+One more thing only the capture shows, and it is why the status is read rather
+than the log: the server writes `[E] Diffusion model sampling failed` and
+`[E] sampling for image 1/1 failed after 0.51s` to its own stderr for a job it
+reports as `cancelled`. Those lines reach the operator's terminal through
+`KindLog`. A client that inferred the outcome from the output would call a
+cancel a crash.
+
+What the preview fixtures corrected is smaller than what `capabilities.json` corrected, and
 that is worth saying plainly: **every field ember reads was already right.**
 `pass`, `step`, `total_steps` and `b64_json` are shaped as api.md implies, and
 so is `result.images[].b64_json`. What the guesses had wrong was everything

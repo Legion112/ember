@@ -39,6 +39,34 @@ type harness struct {
 	reg   *provider.Registry
 }
 
+// RecordingDrain is the drain loop as a handler test can see it.
+//
+// The house fake shape -- Calls, plus the one answer that has to be scripted.
+// Reaching the real *queue.Queue would mean a handler test with a rental in
+// it, which is the thing this package owns none of.
+//
+// `reached` is false by default ON PURPOSE, which is the same decision
+// Caps.PublicSSH makes: the uninformative answer is the safe one. A fake that
+// said "yes, I stopped it" without being told would make every cancel test
+// pass against a handler that never called Cancel at all.
+type RecordingDrain struct {
+	Calls   []string
+	running genstore.ReqID
+	reached bool
+}
+
+func (d *RecordingDrain) Kick() { d.Calls = append(d.Calls, "Kick") }
+
+func (d *RecordingDrain) Running() (genstore.ReqID, bool) {
+	d.Calls = append(d.Calls, "Running")
+	return d.running, d.running != ""
+}
+
+func (d *RecordingDrain) Cancel(id genstore.ReqID) bool {
+	d.Calls = append(d.Calls, "Cancel "+string(id))
+	return d.reached && id == d.running
+}
+
 func newHarness(t *testing.T, mut ...func(*Options)) *harness {
 	t.Helper()
 
@@ -528,13 +556,10 @@ func TestRequests_ListRefusesABadLimit(t *testing.T) {
 	}
 }
 
-// TestCancel_StopsAQueuedRequestAndRefusesARunningOne.
-//
-// Cancelling a running one would mean destroying its node, which takes every
-// other request on the same rental with it -- so the refusal says that rather
-// than pretending the button does nothing.
-func TestCancel_StopsAQueuedRequestAndRefusesARunningOne(t *testing.T) {
-	h := newHarness(t)
+// TestCancel_StopsAQueuedRequest is the half that always worked.
+func TestCancel_StopsAQueuedRequest(t *testing.T) {
+	drain := &RecordingDrain{}
+	h := newHarness(t, func(o *Options) { o.Queue = drain })
 	queued := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
 
 	w := h.do(t, "POST", "/api/requests/"+queued+"/cancel", "")
@@ -549,23 +574,121 @@ func TestCancel_StopsAQueuedRequestAndRefusesARunningOne(t *testing.T) {
 		t.Errorf("status = %q, want cancelled", got.Status)
 	}
 
+	// AND THE LOOP WAS SIGNALLED ANYWAY, although the row said queued.
+	// ClaimNext is one statement and it can run between the Get and the
+	// Update here, so a request read as queued may already be generating --
+	// in which case the row this handler wrote is about to be overwritten by
+	// the queue's own finish and the batch would carry on.
+	if !containsCall(drain.Calls, "Cancel "+queued) {
+		t.Errorf("calls = %v, want the loop signalled too: a request read as queued "+
+			"may have been claimed between the read and the write", drain.Calls)
+	}
+
 	// Already ended.
 	if w := h.do(t, "POST", "/api/requests/"+queued+"/cancel", ""); w.Code != http.StatusConflict {
 		t.Errorf("cancelling an ended request = %d, want 409", w.Code)
 	}
+}
 
-	// Running.
-	running := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
+// TestCancel_StopsARunningRequestWithoutEndingTheRental is the correction.
+//
+// IT USED TO BE A 409, whose stated reason was that cancelling a generating
+// request "would mean destroying that node, which would take every other
+// request on the same rental with it". True of cancelling a rental, false of
+// cancelling a job: sd-server's own /jobs/{id}/cancel ends one generation and
+// leaves the process, the node and the resident weights alone. The refusal
+// was protecting against a mechanism nobody had connected.
+func TestCancel_StopsARunningRequestWithoutEndingTheRental(t *testing.T) {
+	drain := &RecordingDrain{reached: true}
+	h := newHarness(t, func(o *Options) { o.Queue = drain })
+
+	id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
 	if _, ok, err := h.store.ClaimNext(t.Context(), "lease", genstore.Compat{}); err != nil || !ok {
 		t.Fatalf("setup: ok=%v err=%v", ok, err)
 	}
-	w = h.do(t, "POST", "/api/requests/"+running+"/cancel", "")
-	if w.Code != http.StatusConflict {
-		t.Fatalf("cancelling a running request = %d, want 409", w.Code)
+	drain.running = genstore.ReqID(id)
+
+	w := h.do(t, "POST", "/api/requests/"+id+"/cancel", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("cancelling a running request = %d, want 200: %s", w.Code, w.Body.String())
 	}
-	if got := decode[map[string]string](t, w)["error"]; !strings.Contains(got, "every other request") {
-		t.Errorf("error = %q, want it to say what cancelling would cost", got)
+	if !containsCall(drain.Calls, "Cancel "+id) {
+		t.Errorf("calls = %v, want the drain loop asked to stop it", drain.Calls)
 	}
+
+	// THE ROW IS NOT WRITTEN HERE. The request is still generating when this
+	// returns: the queue is polling sd-server for the job's own answer, and
+	// what it ended as -- how far it got, whether the job in flight could be
+	// stopped at all -- is the queue's to record. A second writer racing the
+	// one that knows would sometimes overwrite the truth with a guess.
+	got, err := h.store.Get(t.Context(), genstore.ReqID(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != genstore.StatusRunning {
+		t.Errorf("status = %q, want it left as running: the queue records how a cancelled "+
+			"generation ended, and two writers for one row means the loser overwrites it",
+			got.Status)
+	}
+
+	// The reply says a stop is on its way rather than claiming it happened.
+	body := decode[map[string]any](t, w)
+	if body["cancelling"] != true {
+		t.Errorf("body = %v, want cancelling true", body)
+	}
+	if body["status"] != string(genstore.StatusRunning) {
+		t.Errorf("status = %v, want the status the row actually holds", body["status"])
+	}
+}
+
+// "I could not stop it" and "it is stopped" are different answers.
+//
+// A row that says running with no rental generating it is what a restart
+// leaves behind before queue.Run's Interrupt sweep reaches it. Marking it
+// cancelled would report a card as stopped that may still be billing -- the
+// same refusal as `ember ls --all` exiting non-zero on a provider it could
+// not ask.
+func TestCancel_WillNotClaimToHaveStoppedWhatItCouldNotReach(t *testing.T) {
+	cases := map[string]Drain{
+		// Running in the row, not running in this process.
+		"a stale row": &RecordingDrain{reached: false},
+		// `ember serve` before the loop exists, and every other handler test.
+		"no loop at all": nil,
+	}
+	for name, q := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, func(o *Options) { o.Queue = q })
+			id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
+			if _, ok, err := h.store.ClaimNext(t.Context(), "lease", genstore.Compat{}); err != nil || !ok {
+				t.Fatalf("setup: ok=%v err=%v", ok, err)
+			}
+
+			w := h.do(t, "POST", "/api/requests/"+id+"/cancel", "")
+			if w.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409", w.Code)
+			}
+			if got := decode[map[string]string](t, w)["error"]; !strings.Contains(got, "no rental in this process") {
+				t.Errorf("error = %q, want it to say it could not reach the generation", got)
+			}
+			got, err := h.store.Get(t.Context(), genstore.ReqID(id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != genstore.StatusRunning {
+				t.Errorf("status = %q; a cancel that could not be delivered must not record one",
+					got.Status)
+			}
+		})
+	}
+}
+
+func containsCall(calls []string, want string) bool {
+	for _, c := range calls {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCancel_MissingIsNotFound(t *testing.T) {

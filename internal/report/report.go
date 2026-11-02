@@ -72,6 +72,26 @@ const (
 	// total.
 	KindUnitCost Kind = "unit_cost"
 
+	// KindJobCancelled is the operator's stop reaching one job.
+	//
+	// EMITTED WHETHER OR NOT THE IN-FLIGHT JOB COULD BE STOPPED, and Err is
+	// what tells them apart: empty means the server was asked, set means it
+	// was not asked or would not answer. Two kinds would have let a reader
+	// handle one and silently drop the other, and the one that would get
+	// dropped is the one that says a card is still sampling something the
+	// operator has already paid to stop wanting.
+	//
+	// Total is the batch size and Index is the job the cancel reached, so
+	// Total-Index is how many were dropped -- a reader can say the thing the
+	// operator pressed the button to find out without a fourth number.
+	//
+	// Unit is UnitJob when a job was in flight and EMPTY when none was: a
+	// cancel can land in the gap between one job finishing and the next
+	// starting, and there "job 2/5" would name a job that had already
+	// completed. Index is then the count that finished, which keeps the
+	// arithmetic above true in both cases.
+	KindJobCancelled Kind = "job_cancelled"
+
 	// KindPreviewFailed is a preview frame that could not be written. Best
 	// effort: a preview is not a reason to abandon a generation that is
 	// already paid for.
@@ -118,7 +138,7 @@ func Kinds() []Kind {
 	return []Kind{
 		KindLog, KindServerStarting, KindModelResident,
 		KindUnitStarted, KindJobProgress, KindJobImages, KindUnitCost,
-		KindPreviewFailed,
+		KindJobCancelled, KindPreviewFailed,
 		KindNodeReady, KindNodeMemory, KindRunCost, KindDestroyFailed,
 		KindRunFinished, KindRunFailed,
 	}

@@ -93,6 +93,31 @@ func TestCapabilities_ReadsTheTrimmedSubset(t *testing.T) {
 	if caps.Limits.MaxBatchCount != 8 {
 		t.Errorf("max_batch_count = %d, want 8", caps.Limits.MaxBatchCount)
 	}
+	// features.cancel_generating, out of the same captured response. It is
+	// the only feature flag ember acts on, and it is the only one that says
+	// what may be asked of a generation that is already billing rather than
+	// what a request body may carry.
+	if !caps.CancelGenerating {
+		t.Error("cancel_generating = false, and the captured response says true")
+	}
+}
+
+// A build that does not report the flag reads as false, which is the
+// expensive answer and therefore the one to be sure of.
+//
+// Every other list here refuses a job when it is absent, because a refusal
+// before a card is rented costs nothing. This one is read while a rented card
+// is sampling, so false must mean "do not ask the server" and not "do not
+// cancel" -- see Capabilities.CancelGenerating and app.runJobs.
+func TestCapabilities_AnUnreportedCancelFlagIsFalse(t *testing.T) {
+	c := newTestClient(t, serveJSON(200, `{"model":{"name":"m.gguf"},"samplers":["euler"]}`))
+	caps, err := c.Capabilities(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caps.CancelGenerating {
+		t.Error("a response with no features object reported cancel_generating")
+	}
 }
 
 func TestCapabilities_ReportsATransportFailure(t *testing.T) {
@@ -233,6 +258,7 @@ func TestPoll_EveryStatus(t *testing.T) {
 		{"job_generating.json", StatusGenerating},
 		{"job_completed.json", StatusCompleted},
 		{"job_failed.json", StatusFailed},
+		{"job_cancelled.json", StatusCancelled},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			c := newTestClient(t, serveFile(t, tc.file))
@@ -1438,5 +1464,42 @@ func TestCapabilities_ReadsTheFormatAndUpscalerLists(t *testing.T) {
 	}
 	if !slices.Contains(caps.Upscalers, "Latent") {
 		t.Errorf("upscalers = %v, want Latent among them", caps.Upscalers)
+	}
+}
+
+// A CANCELLED JOB CARRIES AN ERROR OBJECT, which is the one thing the capture
+// of this response corrected and it was worth a rental.
+//
+// `{"code":"cancelled","message":"job cancelled by client"}` sits beside
+// status "cancelled", so a caller that tested State.Err before the status --
+// which app.runJobs did -- read every successful cancel as a refusal. One
+// layer up that made the operator's own cancel look like a failed batch, and
+// the queue destroys the rental for a failed batch: every other request on
+// that node would have gone with it, by pressing the button the feature
+// added. The fake in internal/app answered a cancelled status with no error
+// at all, so the whole unit suite agreed with itself.
+//
+// `result` is null and there are no images: a cancelled generation is
+// sampling that stopped, not an image withheld.
+func TestPoll_ACancelledJobCarriesTheServersOwnExplanation(t *testing.T) {
+	c := newTestClient(t, serveFile(t, "job_cancelled.json"))
+	st, err := c.Poll(t.Context(), "job_1a19daf5ace_00000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != StatusCancelled {
+		t.Fatalf("status = %v, want cancelled", st.Status)
+	}
+	if !st.Status.Done() {
+		t.Error("a cancelled job is not terminal, so a poller would spin on a card it has stopped")
+	}
+	if st.Err == nil {
+		t.Fatal("no error object: this fixture is here because a real cancelled job carries one")
+	}
+	if st.Err.Code != "cancelled" {
+		t.Errorf("error code = %q, want cancelled", st.Err.Code)
+	}
+	if len(st.Images) != 0 {
+		t.Errorf("a cancelled job came back with %d image(s)", len(st.Images))
 	}
 }
