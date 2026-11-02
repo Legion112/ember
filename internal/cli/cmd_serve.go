@@ -150,6 +150,18 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	}
 	defer func() { _ = blobs.Close() }()
 
+	// SEPARATE FROM THE BLOB STORE ABOVE, AND UNDER THE STATE DIRECTORY
+	// RATHER THAN THE OUTPUTS. An uploaded image is not something a run
+	// produced: it exists before the request that uses it, so it cannot be
+	// keyed by one -- and writing it under the outputs would make `ember
+	// history prune` treat an operator's own photograph as a generated image
+	// it is free to remove. internal/blob's own header says the rest.
+	inputs, err := blob.OpenInputs(ps.Inputs)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = inputs.Close() }()
+
 	// The node's own output -- an sd-server's complaint, a model load that is
 	// about to fail -- goes to this terminal. ember's structured progress
 	// does not: it goes to the database, which is what the browser reads.
@@ -174,7 +186,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	token, minted := serveToken(creds)
 
 	srv, err := webapi.New(webapi.Options{
-		Config: cfg, Registry: reg, Store: store, Blobs: blobs, Queue: q,
+		Config: cfg, Registry: reg, Store: store, Blobs: blobs, Inputs: inputs, Queue: q,
 		AllowPaid: o.AllowPaid, Port: o.Port, Dist: o.Dist, Log: logger,
 		Token: token,
 	})

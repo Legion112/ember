@@ -217,10 +217,14 @@ type wireFeatures struct {
 // allowedCudaVersions mistake, a schema read in place of a response.
 // `output_format` and `output_compression` are already checked against
 // `output_formats`, which is a stronger answer than a boolean. `lora`,
-// `img_cfg`, `init_image`, `mask_image`, `control_image`, `ip_adapter` and
-// `ref_images` are published and not read, because ember has no field for any
-// of them: a flag gating a parameter nothing can send is a feature built end
-// to end and connected to nothing, which this repository has shipped twice.
+// `mask_image`, `control_image`, `ip_adapter` and `ref_images` are published
+// and not read, because ember has no field for any of them: a flag gating a
+// parameter nothing can send is a feature built end to end and connected to
+// nothing, which this repository has shipped twice. `img_cfg` is the one
+// published flag ember deliberately does not read although it could -- a live
+// server answers true for it and accepts the parameter at -1 and at 99
+// without echoing any of them, so the flag describes a field whose effect
+// nothing here can observe; see Params.Strength for the probe.
 //
 // `cache`, `preview` and `preview_tae` are left alone on purpose. The first
 // covers `cache_mode` and `cache_option`, which stay in `extra` because
@@ -235,6 +239,22 @@ type wireGenerationFeatures struct {
 	ShiftedTimestep *bool `json:"shifted_timestep"`
 	SLG             *bool `json:"slg"`
 	VAETiling       *bool `json:"vae_tiling"`
+
+	// InitImage gates the one image input ember can supply.
+	//
+	// READ FROM THIS MAP AND NOT FROM `features`, although both publish an
+	// `init_image` key and `features` is the one describing what a request
+	// BODY may carry. `features` is built per mode from a literal where every
+	// value starts true, so it cannot say no; this one is derived from the
+	// loaded model's recipe, which is the whole reason there are two maps and
+	// the reason `hires` is read from the other one -- that key exists only
+	// there.
+	//
+	// `img2img` is NOT read beside it, and that is the Offer.VCPU rule: it
+	// describes the same capability from the mode's side, so two flags for
+	// one fact is two things that can disagree, and the one ember would be
+	// wrong to believe is whichever it checked second.
+	InitImage *bool `json:"init_image"`
 }
 
 // wireUpscaler is one entry of the hires upscaler list.

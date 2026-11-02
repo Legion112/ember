@@ -30,6 +30,12 @@ var everyRoute = []struct{ method, path string }{
 	{"GET", "/api/config"},
 	{"GET", "/api/offers"},
 	{"GET", "/api/nodes"},
+	// The one route that takes bytes inbound. An ungated upload is a
+	// loopback port on which any other uid on this machine -- or anything
+	// reached through an `ssh -L` -- can write files into the operator's
+	// state directory, so it is in this table for the same reason the rest
+	// are and not as an afterthought.
+	{"POST", "/api/inputs"},
 	{"POST", "/api/requests"},
 	{"GET", "/api/requests"},
 	{"GET", "/api/requests/abc"},

@@ -1,6 +1,7 @@
 package webapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -54,9 +55,10 @@ func authorize(r *http.Request) *http.Request {
 // else.
 type harness struct {
 	*Server
-	store *genstore.RecordingStore
-	blobs *blob.Dir
-	reg   *provider.Registry
+	store  *genstore.RecordingStore
+	blobs  *blob.Dir
+	inputs *blob.Inputs
+	reg    *provider.Registry
 }
 
 // RecordingDrain is the drain loop as a handler test can see it.
@@ -101,6 +103,16 @@ func newHarness(t *testing.T, mut ...func(*Options)) *harness {
 	}
 	t.Cleanup(func() { _ = blobs.Close() })
 
+	// A REAL STAGING STORE AND NOT A FAKE, pointed at a temporary directory.
+	// blob.Inputs is a directory and a digest check; there is no external
+	// system behind it to stand in for, and an interface introduced to make
+	// a test easier is an interface the production code did not need.
+	inputs, err := blob.OpenInputs(filepath.Join(t.TempDir(), "inputs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inputs.Close() })
+
 	store := genstore.NewRecordingStore()
 	o := Options{
 		Config: config.Config{
@@ -114,7 +126,8 @@ func newHarness(t *testing.T, mut ...func(*Options)) *harness {
 			},
 			MaxHourlyUSD: "1.00",
 		},
-		Registry: reg, Store: store, Blobs: blobs, Port: testPort, Token: testToken,
+		Registry: reg, Store: store, Blobs: blobs, Inputs: inputs,
+		Port: testPort, Token: testToken,
 	}
 	for _, m := range mut {
 		m(&o)
@@ -123,7 +136,25 @@ func newHarness(t *testing.T, mut ...func(*Options)) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{Server: s, store: store, blobs: blobs, reg: reg}
+	return &harness{Server: s, store: store, blobs: blobs, inputs: o.Inputs, reg: reg}
+}
+
+// upload posts raw bytes to the one route that takes them.
+//
+// NO Content-Type THAT MEANS ANYTHING, deliberately: the server does not
+// consult it, because a client's declared type is a claim about the bytes and
+// image.DecodeConfig is a check of them.
+func (h *harness) upload(t *testing.T, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest("POST", "/api/inputs", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/octet-stream")
+	r.Host = fmt.Sprintf("127.0.0.1:%d", testPort)
+	r.Header.Set("Origin", fmt.Sprintf("http://127.0.0.1:%d", testPort))
+	authorize(r)
+
+	w := httptest.NewRecorder()
+	h.Handler().ServeHTTP(w, r)
+	return w
 }
 
 // do sends a request that looks like the UI's own: this server's Host, and

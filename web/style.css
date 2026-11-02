@@ -195,3 +195,21 @@ summary { cursor: pointer; color: var(--dim) }
   align-items: center;
   gap: .4rem;
 }
+
+/* THE FILE PICKER IS THE WIDEST CONTROL ON THE PAGE AND THE LEAST
+   CONFIGURABLE. A browser renders `input[type=file]` as a button plus the
+   chosen filename, sized to whatever that name happens to be -- so it is the
+   one control here that would push the row it is in around as soon as
+   somebody picked a file with a long name. Bounded, and the name allowed to
+   truncate: the name is not what identifies the staged image anyway, because
+   ember keys it by the sha256 of the bytes and never sees the filename. The
+   line under it is what says what was staged. */
+.image-input input[type=file] {
+  max-width: 18rem;
+  padding: .25rem;
+}
+
+/* The staged line sits with the picker rather than with the hints below it,
+   because it is an answer to the control immediately above and not general
+   advice. */
+.hint.staged { color: var(--fg); margin-top: .2rem }

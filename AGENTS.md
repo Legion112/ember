@@ -1006,14 +1006,183 @@ that sentence made unrepresentable rather than merely tested.
   server reports with nothing anywhere saying which forty it could not. The
   line moved to "path-free and affects a text-to-image run"; what is still
   out is out for one of two stated reasons, not by omission.
-- **The parameters that need an image input are absent on purpose, and that is
-  a UI decision rather than a plumbing one.** `strength`, `img_cfg`,
-  `control_strength`, `ip_adapter_strength` and `increase_ref_index` are
-  path-free numbers that would have been three lines each. They do nothing
-  without an image, the API takes images as base64 in the request body, and
-  ember has no inbound image path at all -- so a control for them would sit on
-  screen, accept a value, send it, and change no pixel. Same defect as the
-  preview caption that was true of one mode: it reads as working.
+- **The parameters that need an image input were absent on purpose, and one of
+  the five now ships.** `strength`, `img_cfg`, `control_strength`,
+  `ip_adapter_strength` and `increase_ref_index` are path-free numbers that
+  would have been three lines each, and were held back because they do nothing
+  without an image and ember had no inbound path -- so a control for them
+  would sit on screen, accept a value, send it, and change no pixel. Same
+  defect as the preview caption that was true of one mode: it reads as
+  working. There is a path now, and `strength` goes with it.
+- **Four of the five stayed out, and what changed is that the reason is a
+  measurement.** Each was sent to a live sd-server before any client code was
+  written, which is the calibration habit the RunPod volume API set. All four
+  were accepted; none changed anything observable. `control_strength` and
+  `ip_adapter_strength` were echoed nowhere and want `control_image` /
+  `ip_adapter_image` **plus** a ControlNet or an IP-Adapter in the serve argv,
+  which nothing here has run. `increase_ref_index` came back as
+  `ref_image_args: "ref_index_mode=increase"` and wants `ref_images`, an edit
+  model's input. `img_cfg` is the sharpest of them: accepted at `0`, at `-1`
+  and at `99`, echoed at **none** of them, on a build whose
+  `generation_features.img_cfg` says true -- so there is no value ember could
+  send and no flag it could read that would tell an operator whether it did
+  anything. Typing a parameter on that evidence is `allowedCudaVersions` with
+  better manners. `strength` is the one with the opposite evidence: the server
+  echoes `generation_info.strength` including an explicit `0`, and two arms of
+  one measurement with and without an init image produce different images.
+- **A strength with no image is accepted, dropped and reported nowhere, so
+  ember refuses the combination.** Measured: 202, a completed generation, and
+  no `strength` anywhere in `generation_info`. That is the whole "reads as
+  working" defect in one field, reachable from the UI the moment the number
+  exists without the picker -- so `staticParams` refuses it rather than
+  leaving the operator to notice that the slider does nothing. The server's
+  own bound is the other half: `1.5` and `-1` are both 400s and `0` and `1`
+  are both accepted, so ember's range is the server's and not a guess.
+- **`strength` is a pointer, and that is the fourth default this rule has been
+  reached from.** The server's own is **0.75** and `strength: 0` is a real
+  value it echoes back as `0.0` -- so zero-is-unset would make "keep the whole
+  init image" unrepresentable while looking exactly like a field that works.
+  Same as `clip_skip`'s -1 and `eta`'s and `flow_shift`'s null, and the UI
+  needs the same spelling: an empty box is None and a box holding 0 is
+  Some(0).
+- **An uploaded image is keyed by its own content, and three questions are
+  answered by that one decision.** The uploaded filename never reaches a path
+  because it is **discarded** rather than sanitised -- `internal/transfer`
+  shipped the other version, where `path.Clean` absorbed a traversal and the
+  check could never fire. "Can one request name another request's input" is
+  not an access question, because there is no such thing as whose input it is:
+  the name IS the content, so naming an object requires holding its sha256,
+  which requires holding the bytes. And the rule that every asset is verified
+  by digest before any GPU time is spent on it applies unchanged to bytes
+  arriving by a different door -- `Load` re-hashes what it read and refuses a
+  mismatch, so the reference is a claim about content that is checked rather
+  than trusted. Reported and never repaired: ember does not know what wrote
+  them, and overwriting destroys the evidence.
+- **Staged inputs are their own store, under the state directory and not the
+  outputs.** `blob.Dir` is rooted at the output directory and keys everything
+  `<request>/<stem>-NN.png`, which is what lets `ember history rm` remove a
+  request's bytes and `ember history du` measure them. An upload has no
+  request: it exists *before* one, so it cannot be keyed by a request that
+  does not exist yet -- and writing it under one that does would make an
+  operator's own photograph as prunable as a generated image. An input nobody
+  generated with is bytes ember is storing for nobody; a result is bytes
+  somebody was billed for.
+- **The upload bound refuses and never truncates.** `blob.ReadInput` reads one
+  byte past 8 MiB so that "too large" and "exactly the bound" are different
+  answers, which is `internal/s3`'s `do` after it was taught the same thing --
+  a truncated listing page parsed as XML right up to where it did not. Here it
+  would be worse than confusing: a truncated image whose header survived still
+  decodes, so ember would stage a file that is not the file somebody picked
+  and the operator would find out as a generation that used the wrong pixels.
+- **The axis bound is not a size bound, and it is load-bearing precisely
+  because ember never decodes the pixels.** A two-kilobyte PNG can declare
+  100000x100000 and pass every byte count there is; the thing that would then
+  allocate four bytes per pixel is sd-server, on a rented machine, after a
+  card has been paid for. `image.DecodeConfig` reads the header and nothing
+  else, so the declared geometry is free and the bound costs one comparison.
+  8192 is twice the largest generation dimension the captured `limits`
+  publish.
+- **The format allow-list is two imports, not a list of strings.** A format
+  whose decoder this file does not register cannot be accepted by accident --
+  `image.DecodeConfig` answers `ErrFormat` for anything else, and there is no
+  way to widen the set without adding a line. A string check against the
+  returned `format` would be a second spelling of one rule and the two could
+  disagree. webp is deliberately out although a browser's picker offers it:
+  the standard library has no decoder, so taking one would mean a new
+  dependency or relaying bytes ember never looked at.
+- **ember validates although it is only a relay, and the reason is where the
+  refusal lands.** sd-server does refuse a payload that is not an image --
+  measured, a 400 with `{"error":"invalid generation parameters"}`, the third
+  spelling of `error` -- but that refusal arrives after a card is rented and
+  names the request rather than the file. Here it costs one header read while
+  the operator is still looking at the picker.
+- **The reference is checked at three moments and the bytes are loaded at
+  one.** At enqueue, where a reference nothing staged is refused before the
+  request is even queued; again in `NewPlan`, before the create call; and
+  again in `served.Generate`, which is the only layer that sees the jobs that
+  will actually be submitted -- because the drain loop builds its `Run` from
+  the **stored** request for every batch it claims, including the first, so
+  the resolution `NewPlan` did cannot travel with it. A plan that carried the
+  pixels would hold megabytes for the life of a rental by nothing that reads
+  them.
+- **The bytes are on `sdserver.Job` and the reference is on `Params`, and the
+  asymmetry is structural.** `Params` is stored as JSON in genstore's `params`
+  column and handed back to the browser by `viewRequest`; `Job` is serialised
+  nowhere. Putting the bytes on `Params` with a `json:"-"` would work today
+  and silently empty itself on a round trip through the store, which is a
+  footgun aimed at whoever next reads a request back out of the database. And
+  `Body` **refuses** a reference with no bytes rather than omitting the field:
+  omitting would send a plain text-to-image generation for a request that
+  asked for an image and bill for it, which is the quiet half of the defect.
+- **`ember up` has no staging directory, and that is the seal rather than an
+  omission.** `config.SDJob` has no image field, so a config cannot name one
+  -- and `runServed` passes an empty directory, so the resolution path is
+  unreachable from that shape by construction. A job that somehow names an
+  image there is refused rather than having the field dropped.
+- **The staging area is swept by the thing that fills it.** Not by `ember
+  history prune`, which removes a request's rows and the images it was billed
+  for -- a staged input is neither, and putting it in that scheme would mean
+  deciding an operator's uploaded photograph is as removable as a generated
+  image. So every upload removes staged files that no **unfinished** request
+  names and that are older than a day. Both bounds are needed: without the
+  keep-set a queued batch loses the image it was queued with, and without the
+  age bound the sweep deletes the file an operator picked a second ago,
+  because they are still composing. That second one is `ember store abort
+  --older-than`'s rule -- an upload in progress and an abandoned one are the
+  same thing to the thing storing them.
+- **A keep-set built from a truncated listing sweeps the wrong files, so it
+  sweeps none.** `genstore.List` is bounded by construction, and a page ember
+  cannot be sure is the whole answer is not an answer -- the rule the
+  paginated S3 listings follow. Hitting the bound is said out loud rather than
+  shortening the set, because the rows it would be missing are exactly the
+  unfinished requests whose images must not go.
+- **Only a browser can check a file picker, and this one is the clearest case
+  of that rule in the repository.** There is no `File`, no `FileList` and no
+  `Blob.array_buffer` outside a browser, so `cargo test` can check that a
+  struct serialises and nothing else. Everything between the click and the
+  digest -- whether the change handler reads the picked file, whether the
+  bytes survive a Uint8Array, whether the 201 decodes, whether the reference
+  reaches the draft the Add button clones -- is invisible to every other kind
+  of test here. The lab picks a real file in a real Chrome and asserts that
+  the queued request names the sha256 **the lab computed itself**, which is
+  the join rather than either half agreeing with itself.
+- **`chromedp.SetValue` dispatches no event, so a fine-grained signal never
+  hears about it.** It is `SetJavascriptAttribute(sel, "value", ...)` in the
+  pinned version: the DOM property changes, the page's `on:input` does not
+  run, and the draft keeps its default -- silently, with the page still
+  looking right. `TestServe_UI` sets a width of 192 that way and asserts
+  nothing about it. The image lab sends real key events instead and asserts
+  the geometry reached the request, so a timeout there names its cause rather
+  than being guessed at.
+- **A decimal point does not reach an `<input type=number>` through a
+  synthesized key event, and the stepper does.** Typing `0`, `.`, `2` into the
+  strength box leaves it holding `0` after the second keystroke -- the `.`
+  appears in neither `value` nor `validity.badInput` -- and the `2` then lands
+  in front of it, so ember was posted `20` and refused it with a message
+  naming a number nobody typed. Measured twice, through chromedp and through
+  desktop automation, on `eta` as well, which shipped long before any of this.
+  It is the automation and not the page: four presses of ArrowUp walk the same
+  box to `0.2`, and digits typed in sequence arrive in order. So the lab uses
+  the stepper, and what is written down is the limit -- **nothing in this
+  repository can assert a fractional value TYPED into a number box.** A fix
+  for the typing path was written first and reverted: `validity.badInput` is
+  false in every observation here, so the branch was unreachable and the fix
+  was a guess about a defect nothing had reproduced, which is the shape this
+  repository refuses.
+- **A browser lab that waits only for the outcome it wants reports a timeout
+  for a refusal that is on screen.** The first run of the picker lab spent
+  fourteen minutes waiting for a job row that was never going to appear,
+  because the POST had been refused and the panel was already showing the
+  server's sentence. It waits for either now, and the same bug was named in
+  1.35 seconds the next run. The rule is `orExited`'s one layer out: race the
+  thing you are waiting for against the thing that means it will never
+  happen.
+- **The image lab's assertion is a pixel comparison and not a plumbing
+  check.** Same prompt, same seed, same geometry, same step count, two arms on
+  one rental differing only in the init image -- and the two result files have
+  to **differ**. A server that accepted `init_image` and dropped it would
+  produce two identical images, which is exactly what it does with `strength`
+  when no image is attached.
 - **A value set nobody has observed is not typed.** `cache_mode`,
   `cache_option`, `scm_mask`, `scm_policy_dynamic`, `qwen_image_layers` and
   both `custom_sigmas` stay in `extra`. api.md names them and does not

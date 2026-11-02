@@ -40,6 +40,19 @@ features = [
   "Request", "RequestInit", "RequestMode", "Response", "Headers",
   "WebSocket", "MessageEvent", "CloseEvent", "BinaryType", "Event",
   "AbortController", "AbortSignal",
+
+  # The file picker. FEATURES AND NOT A CRATE, which is the whole reason
+  # web-sys is here rather than a wrapper: an <input type=file> needs the
+  # element type, the FileList it holds and Blob::array_buffer to read one.
+  #
+  # NO FileReader. Blob::array_buffer returns a Promise, which
+  # wasm-bindgen-futures already turns into something awaitable -- a
+  # FileReader needs an onload closure kept alive for exactly as long as the
+  # read, which is the shape api::Socket has to do by hand for the websocket
+  # and the bug class it carries (a dropped closure is a callback the browser
+  # never calls again).
+  "HtmlInputElement", "FileList", "File", "Blob",
+
 ]
 
 [profile.release]

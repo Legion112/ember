@@ -195,7 +195,7 @@ func TestJobsFromRequest_RefusesEveryJobBeforeAnythingIsRented(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := jobsFromRequest(c.req)
+			_, err := jobsFromRequest(c.req, t.TempDir())
 			if err == nil {
 				t.Fatal("accepted a batch nothing could run")
 			}

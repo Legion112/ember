@@ -131,6 +131,10 @@ type capsView struct {
 // against any build that does not publish the maps. `omitempty` on a *bool
 // omits only nil, so a published false reaches the page as false.
 type featuresView struct {
+	// InitImage gates the file picker and, through it, the strength control.
+	// generation_features.init_image, which is the map derived from the
+	// loaded model -- see sdserver.Supported.
+	InitImage       *bool `json:"init_image,omitempty"`
 	ClipSkip        *bool `json:"clip_skip,omitempty"`
 	FlowShift       *bool `json:"flow_shift,omitempty"`
 	ShiftedTimestep *bool `json:"shifted_timestep,omitempty"`
@@ -183,6 +187,7 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 			OutputFormats: caps.OutputFormats,
 			Upscalers:     caps.Upscalers,
 			Features: featuresView{
+				InitImage:       caps.Supported.InitImage,
 				ClipSkip:        caps.Supported.ClipSkip,
 				FlowShift:       caps.Supported.FlowShift,
 				ShiftedTimestep: caps.Supported.ShiftedTimestep,
@@ -259,14 +264,45 @@ func viewOffers(ls []app.OfferListing) offersView {
 	return out
 }
 
+// inputView is what POST /api/inputs answers with.
+//
+// THE GEOMETRY AND THE FORMAT ARE HERE BECAUSE THIS IS THE ONLY MOMENT THEY
+// ARE FREE. image.DecodeConfig has just read the header, and a file picker
+// that cannot say "that is a 1024x768 jpeg" gives the operator no way to tell
+// a picked file from a refused one. Nothing downstream reads them: the
+// generation call needs only the bytes, because sd-server sniffs the format
+// itself.
+//
+// `id` and not `ref` or `key`, because it is the string a job carries and the
+// page should not have to translate between two names for one thing. It is
+// the digest, which is also the answer to "which object is this".
+type inputView struct {
+	ID     string `json:"id"`
+	Format string `json:"format"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	Bytes  int    `json:"bytes"`
+}
+
 // newRequest is what a browser POSTs.
 //
 // EVERY FIELD HERE IS SOMETHING A REQUEST MAY CHOOSE, and the absences are
-// the design. There is no image, no images map, no store, no mount, no ports,
-// no serve argv, no gpu probe, no assets, no verify policy -- those stay in
+// the design. There is no images map, no store, no mount, no ports, no serve
+// argv, no gpu probe, no assets, no verify policy -- those stay in
 // ember.yaml, which is what keeps every existing seal upstream of anything a
 // request can influence: node.MountAt's refusal of /root, ValidateImage's
 // refusal of :latest, sdserver.ServeCommand's refusal of a listen flag.
+//
+// A JOB MAY NOW NAME AN IMAGE, which is the one thing that list has lost, and
+// what it may name is a DIGEST of bytes already uploaded through
+// POST /api/inputs. Not a path, not a URL, not a filename: sixty-four
+// lowercase hex characters or blob.ParseRef refuses it. So the new capability
+// is "generate from bytes this server already holds and has already checked",
+// and the seals above are untouched -- there is still no field here that
+// reaches node.MountAt, exposure.SSHPort or sdserver.ServeCommand, and the
+// reference cannot become a path component on the node because it never
+// leaves this process: what travels is base64 in the generation request
+// body.
 //
 // There is also no `extra`. It reaches every field of the generation API ember
 // does not type, including the ones naming file paths on the node, so a
@@ -327,6 +363,16 @@ type newJob struct {
 	Eta       *float64 `json:"eta,omitempty"`
 	FlowShift *float64 `json:"flow_shift,omitempty"`
 
+	// InitImage is a reference from POST /api/inputs and Strength is how
+	// much of it survives.
+	//
+	// Strength is a POINTER for ClipSkip's reason reached from a fourth
+	// default: the server's own is 0.75 and `strength: 0` is a real value it
+	// echoes back, so zero-is-unset would make "keep the whole image"
+	// unrepresentable.
+	InitImage string   `json:"init_image,omitempty"`
+	Strength  *float64 `json:"strength,omitempty"`
+
 	ShiftedTimestep int `json:"shifted_timestep,omitempty"`
 
 	OutputFormat      string `json:"output_format,omitempty"`
@@ -373,6 +419,8 @@ type tileJob struct {
 // params is this job's optional parameters as the client takes them.
 func (j newJob) params() sdserver.Params {
 	p := sdserver.Params{
+		InitImage:         j.InitImage,
+		Strength:          j.Strength,
 		ClipSkip:          j.ClipSkip,
 		Eta:               j.Eta,
 		FlowShift:         j.FlowShift,
@@ -523,6 +571,7 @@ func viewRequest(r genstore.Request, ims []genstore.Image) requestView {
 			BatchCount: j.BatchCount, Seed: j.Seed,
 			Sampler: j.Sampler, Scheduler: j.Scheduler,
 			CFG: j.CFG, Guidance: j.Guidance, Output: j.Output,
+			InitImage: j.Params.InitImage, Strength: j.Params.Strength,
 			ClipSkip: j.Params.ClipSkip, Eta: j.Params.Eta,
 			FlowShift: j.Params.FlowShift, ShiftedTimestep: j.Params.ShiftedTimestep,
 			OutputFormat: j.Params.OutputFormat, OutputCompression: j.Params.OutputCompression,

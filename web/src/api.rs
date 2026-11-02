@@ -1,7 +1,8 @@
 //! fetch and WebSocket, straight from web-sys.
 //!
-//! No helper crate: about eighty lines here against another dependency tree,
-//! and what is needed is narrow -- four GETs, two POSTs and one socket.
+//! No helper crate: about a hundred lines here against another dependency
+//! tree, and what is needed is narrow -- four GETs, three POSTs (one of them
+//! a file) and one socket.
 //!
 //! EVERYTHING IS SAME-ORIGIN AND RELATIVE. The server refuses any request
 //! whose `Origin` is not its own and any whose `Host` is not a loopback name
@@ -64,6 +65,62 @@ pub async fn post<B: serde::Serialize, T: DeserializeOwned>(
         return Err(reason(status, &text));
     }
     serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+/// post_bytes uploads a file's contents and decodes the answer.
+///
+/// RAW BYTES AND NOT BASE64, which is a decision about the one route in this
+/// program that carries a file. The generation API does take base64, but that
+/// is the hop from `ember serve` to the node; this hop is a browser to
+/// loopback, and encoding here would make the body a third larger and put a
+/// base64 encoder in the page for no gain. The server derives the key from
+/// the content, so there is nothing else to send: no filename, no declared
+/// type, no form envelope.
+///
+/// NOT multipart/form-data FOR THE SAME REASON. A multipart body carries a
+/// filename, and a filename is the thing this path is designed not to have --
+/// it would arrive at a server that must then be trusted never to join it
+/// onto a path. One file per request, as the bytes, is the shape with nothing
+/// in it to refuse.
+///
+/// `Content-Type: application/octet-stream` is set because something has to
+/// be, and the server does not consult it: the bytes decide what they are,
+/// and a declared type is a claim rather than a check.
+pub async fn post_bytes<T: DeserializeOwned>(path: &str, bytes: &[u8]) -> Result<T, Error> {
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    // A copy into a JS-side array, which is what a fetch body has to be.
+    // `from` copies; the alternative -- a view onto the wasm heap -- is a
+    // pointer into memory the allocator may move while the request is in
+    // flight.
+    let buf = js_sys::Uint8Array::from(bytes);
+    opts.set_body(&buf);
+
+    let req = Request::new_with_str_and_init(path, &opts).map_err(describe)?;
+    req.headers()
+        .set("Content-Type", "application/octet-stream")
+        .map_err(describe)?;
+
+    let (status, text) = send(req).await?;
+    // 201: the upload created something that now has a name.
+    if status != 201 {
+        return Err(reason(status, &text));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+/// read_file is a picked file's bytes.
+///
+/// `Blob::array_buffer` AND NOT A FileReader. The buffer form is a Promise,
+/// which wasm-bindgen-futures awaits directly; a FileReader needs an onload
+/// closure kept alive for exactly as long as the read, which is the one thing
+/// in this file that has to be done by hand for the websocket -- and a
+/// dropped closure there is a callback the browser never calls again.
+pub async fn read_file(file: &web_sys::File) -> Result<Vec<u8>, Error> {
+    let buf = JsFuture::from(file.array_buffer())
+        .await
+        .map_err(describe)?;
+    Ok(js_sys::Uint8Array::new(&buf).to_vec())
 }
 
 /// reason pulls the server's own message out of a failure.

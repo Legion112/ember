@@ -15,7 +15,8 @@ use leptos::task::spawn_local;
 
 use crate::api;
 use crate::model::{
-    Config, Envelope, Hires, Job, NewRequest, Offers, Progress, Request, RequestList, VaeTiling,
+    Config, Envelope, Hires, Input, Job, NewRequest, Offers, Progress, Request, RequestList,
+    VaeTiling,
 };
 
 /// App is the whole page.
@@ -576,17 +577,133 @@ fn JobForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
     }
 }
 
+/// ImageInput is the file picker and the one parameter it unblocks.
+///
+/// WHY THE STRENGTH IS INSIDE THIS COMPONENT and not beside the other
+/// numbers. It cannot be sent without an image: a live sd-server accepts
+/// `strength` with no `init_image`, generates, and reports the strength
+/// nowhere in what it echoes back -- so ember refuses the combination, and a
+/// control sitting there accepting a value before a file is picked would be
+/// a control whose only outcome is a 400. It appears when there is something
+/// for it to apply to.
+///
+/// WHAT THE PICKER SENDS is the file's bytes and nothing else: no filename,
+/// no form envelope, no declared type. The server answers with the sha256 of
+/// what it stored, and that digest is what the job carries -- so the name of
+/// the file on the operator's disk never reaches ember at all, which is the
+/// strongest available answer to "could an uploaded filename reach a path
+/// join".
+///
+/// WHAT IT SHOWS BACK is the server's own reading of the header: the format
+/// and the geometry. That is not decoration -- it is the only way to tell a
+/// staged file from one the browser has in hand but ember refused, and the
+/// refusal is a sentence from the server rather than a guess made here.
+#[component]
+fn ImageInput(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
+    // What the server said about the file that is currently staged, and what
+    // it said about one it would not take. Separate signals because they are
+    // different states: a refused upload leaves the previous image staged,
+    // and a picker that cleared it would lose a file the operator had
+    // already uploaded over one that failed.
+    let staged = RwSignal::new(Option::<Input>::None);
+    let error = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+
+    let offered = move || config.get().offers(|f| f.init_image);
+
+    let pick = move |ev: leptos::ev::Event| {
+        let input: web_sys::HtmlInputElement = event_target(&ev);
+        let file = input.files().and_then(|fs| fs.get(0));
+        error.set(String::new());
+        let Some(file) = file else {
+            // The picker was cleared. The reference AND the strength go, for
+            // the reason the strength lives here: one without the other is a
+            // request ember refuses.
+            staged.set(None);
+            draft.update(|j| {
+                j.init_image = String::new();
+                j.strength = None;
+            });
+            return;
+        };
+        busy.set(true);
+        spawn_local(async move {
+            let bytes = match api::read_file(&file).await {
+                Ok(b) => b,
+                Err(e) => {
+                    busy.set(false);
+                    error.set(e);
+                    return;
+                }
+            };
+            match api::post_bytes::<Input>("/api/inputs", &bytes).await {
+                Ok(input) => {
+                    draft.update(|j| j.init_image = input.id.clone());
+                    staged.set(Some(input));
+                }
+                // THE PREVIOUS IMAGE IS LEFT STAGED, deliberately. A refusal
+                // here is "this file is too large" or "this file is not a png
+                // or a jpeg" -- the operator picked the wrong one, and taking
+                // away the right one they picked a minute ago would make the
+                // mistake cost more than it should.
+                Err(e) => error.set(e),
+            }
+            busy.set(false);
+        });
+    };
+
+    view! {
+        <div class="row image-input">
+            <label class:denied=move || !offered()>
+                <Help text="image" title="A png or a jpeg to generate from instead of from noise. It is uploaded to ember, which checks the header and keys it by the sha256 of the bytes -- the name of the file on your disk is never sent. At most 8 MiB and 8192 pixels on each axis; the server resizes it to the width and height above."/>
+                <input type="file" accept="image/png,image/jpeg"
+                    disabled=move || !offered() || busy.get()
+                    on:change=pick
+                />
+            </label>
+            <Show when=move || !draft.get().init_image.is_empty()>
+                <label>
+                    <Help text="strength" title="How much of the image is replaced, 0 to 1. 0 keeps it and 1 generates as though it were not there. Empty leaves the server's own default of 0.75, and an explicit 0 is a different request from an empty box -- so ember sends them differently."/>
+                    <input type="number" step="0.05" min="0" max="1" placeholder="0.75"
+                        prop:value=move || shown(draft.get().strength)
+                        on:input=move |ev| draft.update(|j| j.strength = numfo(&ev))
+                    />
+                </label>
+            </Show>
+        </div>
+        <Show when=move || staged.get().is_some()>
+            <p class="hint staged">
+                "staged: " {move || staged.get().map(|i| i.describe()).unwrap_or_default()}
+            </p>
+        </Show>
+        <Show when=move || !error.get().is_empty()>
+            <p class="hint error">{move || error.get()}</p>
+        </Show>
+    }
+}
+
 /// AdvancedForm is the optional parameters.
 ///
 /// Its own component rather than more markup in JobForm, because JobForm was
 /// already the longest view here and these controls share nothing with the
 /// ones above except the draft they write to.
 ///
-/// WHAT IS NOT HERE. `strength`, `img_cfg`, `control_strength`,
-/// `ip_adapter_strength` and `increase_ref_index` all need an image input,
-/// which this UI has no way to supply -- the API takes images as base64 in
-/// the request body and there is no upload route. A control that cannot
-/// affect the generation reads as working, which is worse than its absence.
+/// WHAT IS NOT HERE, AND IT IS NO LONGER THE WHOLE GROUP OF FIVE. `strength`
+/// is here now, because there is an upload route for the image it applies to.
+/// `img_cfg`, `control_strength`, `ip_adapter_strength` and
+/// `increase_ref_index` are still absent, and the reason is sharper than "no
+/// image input": each was sent to a live sd-server and none of them changed
+/// anything observable. `control_strength` and `ip_adapter_strength` were
+/// accepted and echoed nowhere -- they want `control_image` and
+/// `ip_adapter_image` plus a ControlNet or an IP-Adapter in the serve argv.
+/// `increase_ref_index` came back as `ref_image_args=ref_index_mode=increase`
+/// and wants `ref_images`, which is an edit model's input. `img_cfg` was
+/// accepted at 0, at -1 and at 99 and echoed at none of them, on a build that
+/// publishes `generation_features.img_cfg` as true -- so there is no value
+/// ember could send and no flag it could read that would tell an operator
+/// whether it did anything. A control that cannot affect the generation reads
+/// as working, which is worse than its absence.
+///
 /// `cache_mode`, `scm_mask`, `qwen_image_layers` and the two `custom_sigmas`
 /// are absent because nothing here knows their value sets; they stay
 /// reachable from `ember.yaml`'s `extra`.
@@ -604,6 +721,11 @@ fn JobForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
 #[component]
 fn AdvancedForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView {
     view! {
+        // FIRST IN THE SECTION, because it is the only control here that
+        // changes what the generation starts from rather than how it
+        // proceeds.
+        <ImageInput config=config draft=draft/>
+
         <div class="row">
             <label class:denied=move || !config.get().offers(|f| f.clip_skip)>
                 <Help text="clip skip" title="How many of the text encoder's last layers to skip. Many SD1.5 finetunes are trained for 2. Empty leaves the model's own default, which is not 0 -- so an empty box and a 0 are different requests and ember sends them differently."/>
@@ -879,10 +1001,12 @@ fn AdvancedForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView
         </Show>
 
         <p class="hint">
-            "An image input -- img2img, inpainting, ControlNet, IP-Adapter -- and LoRA
-             are not here: the API takes images as base64 in the request body and ember
-             has no upload route yet. They are reachable from "<code>"ember.yaml"</code>
-            "'s "<code>"extra"</code>", which a request may not set."
+            "Inpainting, ControlNet, IP-Adapter and LoRA are not here. Each needs an
+             image slot or a model root of its own, and each was tried against a real
+             server first: sent without the slot they are accepted, dropped and
+             reported nowhere, which is worse than being absent. They are reachable
+             from "<code>"ember.yaml"</code>"'s "<code>"extra"</code>", which a request
+             may not set."
         </p>
     }
 }
@@ -1282,6 +1406,10 @@ fn shown<T: std::fmt::Display>(v: Option<T>) -> String {
 fn denials(c: Config) -> Vec<&'static str> {
     let mut out = Vec::new();
     for (name, offered) in [
+        // The same words ember's own refusal uses -- sdserver's
+        // featureRefusal says "an image input" -- so an operator who reads
+        // the hint and then reads a 400 sees one name for one thing.
+        ("an image input", c.offers(|f| f.init_image)),
         ("clip skip", c.offers(|f| f.clip_skip)),
         ("flow shift", c.offers(|f| f.flow_shift)),
         ("shifted timestep", c.offers(|f| f.shifted_timestep)),
