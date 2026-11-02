@@ -2056,6 +2056,97 @@ named rather than cleaned. `Delete` also takes the directory its removal
 emptied, because one inode per pruned request left behind forever would be
 disk `du` reports and no command in ember can free.
 
+## Logging
+
+`ember up` and `ember serve` take `--log-level` and `--log-format`:
+
+```
+--log-level debug|info|warn|error    default info, or EMBER_LOG_LEVEL
+--log-format text|json               default text, or EMBER_LOG_FORMAT
+```
+
+The flag wins over the variable, and a value neither recognises is refused
+with exit 3 rather than ignored — a stale `EMBER_LOG_LEVEL=verbose` that
+silently fell back to `info` would mean turning the logs up, seeing no change
+and concluding there is nothing there to see.
+
+They are only on those two verbs because those are the only two that build a
+logger. `text` is `slog`'s own logfmt, which is what a terminal reads and what
+Loki and Vector ingest; `json` is the same records for anything else. Nothing
+is shipped anywhere — there is no exporter and no egress, and adding one is
+a separate decision.
+
+**`debug` was unreachable until now, and there were seventeen debug lines
+waiting for it.** The handler was constructed in two places with the same
+literal and both pinned the level to `info`, so not one of them could be
+displayed by any invocation of ember that shipped. The four worth knowing
+about:
+
+| line | answers |
+|---|---|
+| `node running but not yet reachable` | why a provision is still waiting |
+| `sd-server exited` | why a served run is about to time out at `ready_timeout` |
+| `asset ready` | how long each asset took to verify |
+| `could not read the record to estimate the cost` | why a teardown printed no cost |
+
+`internal/logx` is the one place that builds the handler, and
+`TestNoHandlerOutsideLogx` walks the tree and fails the build if a second
+place appears — the shape `TestNoListenOutsideLoopback` already uses for
+`net.Listen`.
+
+### Finding the lines that belong to one rental
+
+Every line written inside a rental carries `run=<id>`, attached once in
+`provision.WithNode` and inherited by everything handed that logger — the SSH
+session, the forwards, the GPU probe, the generation server and ember's own
+pipeline. `ember serve` adds `request=<id>` where a queued request is what the
+rental is serving.
+
+```
+$ ember up --log-level debug --log-format json | jq -c 'select(.run=="8f3c...")'
+```
+
+These are not the generation history. `ember history` and `ember spend` read
+`report.Event` rows — what ember *did*, numbered and durable. A log line is
+how ember *behaved*: a retry, a fallback, a timing that surprised it. They
+share the `run` and `request` labels so a line and a row can be put side by
+side, and nothing routes one into the other, because a history that is also a
+log sink is a history nothing can bound.
+
+### The node's own log comes home
+
+`embernode` — the program ember runs on the rented machine — installs the host
+key, installs the authorized key, starts `sshd` and arms the self-destruct
+timer. It used to write plain text to a stream nothing in ember ever read, on a
+machine ember then destroys. So the component whose failures are hardest and
+most expensive to diagnose was the one whose evidence was thrown away: the
+host-key incident, the trust-on-first-use fallback, the missing `/workspace`
+and the wrong-architecture abort were every one of them diagnosed by somebody
+watching a terminal while it happened.
+
+It now logs in the same format as the CLI, to its own stderr *and* to a file,
+and ember copies that file into the run's output directory as `embernode.log`
+before the node is destroyed — on a context that survives Ctrl-C, like every
+other fetch, because an interrupted run is the one whose log is worth most.
+
+```
+~/renders/20261102-2312-8f3c91.../
+├── embernode.log
+└── renders/
+```
+
+Two things it does not do. **It cannot fail a run**: an older node image, an
+`sshd` already gone or a read-only `/tmp` are all ordinary, and the failure is
+reported at `debug` and swallowed — logging is the one subsystem that must
+never be load-bearing. **A `SIGKILL`ed ember leaves it on the node**, because
+nothing is left to fetch it with; the TTL still destroys the machine.
+
+The keys are logged as fingerprints and never as material, which is what
+`node.Secret` exists for — and now matters more than it did, because the file
+is on the operator's disk rather than in a stream nobody reads.
+`internal/logx`'s `TestNoKeyMaterialInALogCall` walks the tree and fails the
+build if any log call unwraps a secret.
+
 ## Video
 
 [`ember.video.example.yaml`](ember.video.example.yaml) is the configuration

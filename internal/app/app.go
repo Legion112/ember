@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"path/filepath"
 	"time"
 
@@ -31,6 +30,7 @@ import (
 	"github.com/Legion112/ember/internal/dockerengine/dockerclient"
 	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/keys"
+	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provider/local"
 	"github.com/Legion112/ember/internal/provider/runpod"
@@ -230,7 +230,12 @@ func BuildRegistry(d Deps, creds config.Credentials, cfg config.Config) (*provid
 // so one run's teardown can drop a pin another run just wrote. That matters
 // nowhere for `ember up`, which provisions once per process, and matters a
 // great deal for a server that provisions on request.
-func BuildOptions(ps Paths, cfg config.Config, out io.Writer) (provision.Options, error) {
+//
+// lo is the level and the format, decided by whoever read the flags. Its zero
+// value is info-level text, which is what the literal that used to sit here
+// hard-coded -- so a caller that has no opinion gets exactly the previous
+// behaviour rather than a new default nobody chose.
+func BuildOptions(ps Paths, cfg config.Config, out io.Writer, lo logx.Options) (provision.Options, error) {
 	store, err := OpenStore(ps.State)
 	if err != nil {
 		return provision.Options{}, err
@@ -252,7 +257,7 @@ func BuildOptions(ps Paths, cfg config.Config, out io.Writer) (provision.Options
 		Pins:     pins,
 		Identity: id,
 		Budget:   provision.Budget{MaxRate: hourly, MaxRun: run},
-		Log:      slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Log:      logx.New(out, lo),
 	}, nil
 }
 

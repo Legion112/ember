@@ -9,6 +9,7 @@ import (
 
 	"github.com/Legion112/ember/internal/assets"
 	"github.com/Legion112/ember/internal/config"
+	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provision"
@@ -74,6 +75,17 @@ type Request struct {
 	// the smaller of the two already; nothing here re-checks, because nothing
 	// here knows which config the caller meant.
 	Budget *provision.Budget
+
+	// Log is the level and the format this run's logger is built with.
+	//
+	// IT TRAVELS ON THE REQUEST AND NOT ON THE CONFIG, for the reason the
+	// `serve` config path is read from a flag: these are two values the
+	// *operator* chose on the command line, and ember.yaml is the file a
+	// queued request must never be able to name. The zero value is
+	// info-level text, so the one caller that has nothing to say about it --
+	// internal/queue's planner, standing in for a browser -- gets what ember
+	// printed before the flags existed.
+	Log logx.Options
 }
 
 // Plan is everything decided before the create call.
@@ -169,7 +181,7 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	}
 
 	// Options before the offer, because PickOffer needs the budget.
-	opts, err := BuildOptions(ps, cfg, out)
+	opts, err := BuildOptions(ps, cfg, out, req.Log)
 	if err != nil {
 		return Plan{}, err
 	}

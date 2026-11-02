@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -12,6 +13,7 @@ import (
 	"github.com/Legion112/ember/internal/assets"
 	"github.com/Legion112/ember/internal/gpucheck"
 	"github.com/Legion112/ember/internal/keys"
+	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/nodemem"
 	"github.com/Legion112/ember/internal/provision"
@@ -202,6 +204,21 @@ func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s prov
 	// several times and every step of one run has to land in one directory.
 	runDir := transfer.RunDir(p.Paths.Outputs, s.RunID, time.Now())
 
+	// THE NODE'S OWN LOG, COLLECTED ONCE FOR EVERY SHAPE BELOW.
+	//
+	// A defer rather than a line in each of the three branches -- steps,
+	// served, interactive -- because three call sites for one decision are
+	// three that can disagree, and the branch that would be missed is
+	// whichever one is added next. It runs before `client.Close()` above:
+	// defers unwind last-registered-first, and that one was registered
+	// first.
+	//
+	// It covers every rental that brings something home. `store sync` does
+	// not, because nothing on that path has an output directory at all --
+	// the bytes it rents a machine for land on the store, which is the whole
+	// point of it.
+	defer collectNodeLog(ctx, sshexec.New(client.SSH()), runDir, so.Log)
+
 	// A node rented to run something stops when it has run it. Holding
 	// afterwards would bill for a machine with nothing left to do, which is
 	// the whole failure mode ember exists to prevent. So this returns rather
@@ -236,6 +253,53 @@ func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s prov
 	}
 	return serveErr
 }
+
+// collectNodeLog brings embernode's own log home, and cannot fail a run.
+//
+// WHY THE NODE'S LOG NEEDS BRINGING HOME AT ALL. embernode installs the host
+// key, installs the authorized key, starts sshd and arms the self-destruct
+// timer, and it wrote to a stream nothing in ember read -- so the component
+// whose failures are hardest and most expensive to diagnose was the one whose
+// evidence ember destroyed by design, on a context that survives Ctrl-C.
+//
+// ON A CONTEXT THAT SURVIVES Ctrl-C, for the reason every other fetch here
+// is: the node is about to be destroyed either way, and the run that failed
+// halfway is exactly the one whose log is worth having. The operator pressing
+// Ctrl-C is the most likely way to reach this function.
+//
+// EVERY FAILURE IS SWALLOWED, AT DEBUG. A log fetch that could fail a run
+// would make logging load-bearing, which is the one thing it must never be --
+// and the ways this fails are ordinary: an older node image whose embernode
+// predates the file, a node whose sshd is already gone, a /tmp that was
+// read-only. GNU tar over a missing path exits non-zero and writes a valid
+// empty archive, so "there is no log" arrives here as an error rather than as
+// an empty result, and treating it as fatal would turn a successful
+// generation into a failed command.
+//
+// NOTHING IS PRINTED ON SUCCESS. `ember up`'s default output is asserted by
+// test/integration/lifecycle_test.go, and a diagnostic that is always there
+// is not worth a line an operator has to read past on every run. README says
+// where the file lands; --log-level debug says that it did.
+func collectNodeLog(ctx context.Context, r sshx.Runner, dir string, log *slog.Logger) {
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nodeLogTimeout)
+	defer cancel()
+
+	res, err := transfer.Fetch(fetchCtx, r,
+		[]node.OutputPath{{Remote: logx.NodeLogPath}}, dir, "")
+	if err != nil {
+		log.Debug("could not bring the node's own log home", "path", logx.NodeLogPath, "err", err)
+		return
+	}
+	log.Debug("the node's log is home", "dir", dir, "bytes", res.Bytes)
+}
+
+// nodeLogTimeout bounds it, and is short because the file is small.
+//
+// outputTimeout is thirty minutes because an output can be minutes of video.
+// This is a few kilobytes of text, and it is fetched on the path where the
+// node is already being torn down -- so a stalled connection here would hold
+// up a destroy, and a destroy that is held up is a bill that keeps running.
+const nodeLogTimeout = time.Minute
 
 // fetchMarker is the file on the node whose mtime bounds the next fetch.
 //
@@ -474,7 +538,11 @@ func dialNode(ctx context.Context, s provision.Session, opts provision.Options, 
 		signers = append(signers, agentSigners...)
 	}
 
-	so := session.Options{Log: opts.Log, Hold: hold}
+	// s.Log and not opts.Log: the first carries this rental's run id, which
+	// provision.WithNode attached once. Reading it off Options here would
+	// hand every package below -- session, tunnel, gpucheck, sdserver -- a
+	// logger whose lines cannot be joined to the node they are about.
+	so := session.Options{Log: s.Log, Hold: hold}
 	client, err := session.Dial(ctx, sshdial.Target{
 		NodeID:   s.Node.Handle().ID,
 		Endpoint: s.Node.Endpoint(),

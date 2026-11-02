@@ -38,6 +38,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 		dryRun       = fs.Bool("dry-run", false, "say what would be rented and create nothing")
 		holdFor      = fs.Duration("hold", 0, "stop after this long instead of waiting for Ctrl-C")
 	)
+	logs := addLogFlags(fs)
 	var ports multiFlag
 	fs.Var(&ports, "port", "forward a port, as name:remote or name:remote:local (repeatable)")
 	var cmdArgs multiFlag
@@ -50,6 +51,15 @@ func runUp(args []string, out io.Writer, d deps) error {
 	}
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
+	}
+
+	// Before the config is read, because a mistyped level is a mistyped
+	// command line and should not cost a file open -- the order
+	// internal/s3's push already follows: check what is local and free
+	// before what is remote and slow.
+	logOpts, err := logs.resolve()
+	if err != nil {
+		return err
 	}
 
 	cfg, err := config.Load(*cfgPath)
@@ -65,7 +75,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	// the offer, the image for the card that offer names, the jobs, the spec.
 	// Nothing is rented until Do.
 	plan, err := app.NewPlan(context.Background(), app.Request{
-		Config: cfg, Deps: d, Hold: *holdFor,
+		Config: cfg, Deps: d, Hold: *holdFor, Log: logOpts,
 	}, out)
 	if err != nil {
 		return err

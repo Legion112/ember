@@ -17,6 +17,7 @@ import (
 	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/keys"
+	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/statestore"
@@ -154,6 +155,21 @@ type Session struct {
 	Node  node.ReadyNode
 	Trust hostkey.Trust
 	RunID node.RunID
+
+	// Log already carries this run's id, and that is the whole reason it is
+	// here rather than being read off Options by the closure.
+	//
+	// Of the log lines in this tree, seven could be joined to the rental they
+	// were about and the rest could not -- so "node running but not yet
+	// reachable" named no node, in a program whose subject is that a node
+	// bills by the hour. The key is attached ONCE, in WithNode below, and
+	// every package handed this logger inherits it: session, tunnel,
+	// gpucheck, sdserver and internal/app's own lines all carry `run=` with
+	// no call site mentioning it. A Session that did not carry the logger
+	// would mean the closure reading Options.Log instead -- the un-tagged
+	// one -- and the tagging would then have to be repeated at every layer,
+	// which is the form that gets forgotten.
+	Log *slog.Logger
 }
 
 // WithNode rents a node, runs fn against it, and destroys it.
@@ -188,6 +204,19 @@ func WithNode(
 	}
 
 	runID := node.NewRunID()
+
+	// EVERY LINE FROM HERE ON CARRIES THE RUN, including the ones written by
+	// the deferred destroy after fn has returned. o is a value, so this
+	// rebinds only this rental's copy -- which is what makes it safe for
+	// `ember serve`, where one Options is built at startup and shared by
+	// every rental the queue drains. Assigning into a shared Options would
+	// tag one run's logger with another run's id.
+	//
+	// It is attached after the id exists and not before: a line emitted
+	// while choosing an offer belongs to no rental, and `run=""` is worse
+	// than no key, because a filter for lines with no run would match it.
+	o.Log = logx.WithRun(o.log(), string(runID))
+
 	req, err := node.NewCreateRequest(spec, offer, runID, o.now(), o.Identity.AuthorizedKey, pair.Private, pair.NodeKey())
 	if err != nil {
 		return err
@@ -284,7 +313,7 @@ func WithNode(
 	runCtx, cancel := context.WithDeadline(ctx, req.Deadline)
 	defer cancel()
 
-	return fn(runCtx, Session{Node: ready, Trust: trust, RunID: runID})
+	return fn(runCtx, Session{Node: ready, Trust: trust, RunID: runID, Log: o.Log})
 }
 
 // assertExposure applies the assertion the provider's capabilities call for.

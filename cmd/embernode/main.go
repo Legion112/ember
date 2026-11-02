@@ -11,6 +11,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -31,6 +32,16 @@ const (
 )
 
 func main() {
+	// THE LOGGER IS FIRST, before the dispatch and before anything can fail.
+	//
+	// The fatal line is the one worth having: a node that could not install
+	// its host key is a node whose handshake failure ember reads as a
+	// possible attack, and the sentence explaining it was previously written
+	// to a stream nobody collects, on a machine ember then destroys. Both
+	// exits below therefore log rather than print -- see log.go on why a
+	// logger that cannot open its file still returns one.
+	log := logger()
+
 	// One subcommand, and everything else is the node entrypoint.
 	//
 	// Dispatching on os.Args rather than growing a flag package at the top:
@@ -39,27 +50,37 @@ func main() {
 	// empty case would be a node that does not come up.
 	if len(os.Args) > 1 && os.Args[1] == "fetch" {
 		if err := runFetch(os.Args[2:]); err != nil {
+			// Logged AND printed in the old spelling. `embernode fetch` runs
+			// over ember's SSH connection, so this stream is the operator's
+			// own terminal and a timestamped record is not what they are
+			// reading there; the log copy is for the node's file, which is
+			// the only one that survives the node.
+			log.Error("asset fetch failed; the workload will not start", "err", err)
 			fmt.Fprintf(os.Stderr, "embernode fetch: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	code, err := run()
+	code, err := run(log)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "embernode: %v\n", err)
+		log.Error("the node could not be brought up", "err", err)
 		os.Exit(1)
 	}
 	os.Exit(code)
 }
 
-func run() (int, error) {
+func run(log *slog.Logger) (int, error) {
 	if err := installHostKey(); err != nil {
 		return 0, err
 	}
 	if err := installAuthorizedKey(); err != nil {
 		return 0, err
 	}
+	// Fingerprints and never the material; see keys.go, which exists as a
+	// function so that keys_test.go can refuse the shorter spelling of that
+	// mistake with no node and no Docker.
+	logKeys(log)
 
 	// Clear the key material before anything else can read /proc/1/environ.
 	// A container's init process keeps its environment for its whole life,
@@ -91,7 +112,9 @@ func run() (int, error) {
 		return 0, fmt.Errorf("start sshd: %w", err)
 	}
 
-	stopDeadline := armDeadline(cmd)
+	log.Info("sshd started", "pid", cmd.Process.Pid)
+
+	stopDeadline := armDeadline(log, cmd)
 	defer stopDeadline()
 
 	sigs := make(chan os.Signal, 1)
@@ -103,6 +126,7 @@ func run() (int, error) {
 
 	select {
 	case sig := <-sigs:
+		log.Info("signal received, forwarding it to sshd and stopping", "signal", sig.String())
 		// Forward and wait, so `docker stop` is quick rather than taking the
 		// full ten-second grace period before a kill.
 		_ = cmd.Process.Signal(sig)
@@ -113,8 +137,15 @@ func run() (int, error) {
 		<-done //nolint:errcheck // deliberate: see above
 		return 0, nil
 	case err := <-done:
+		// sshd exiting on its own is the interesting case, and the one that
+		// had no record at all: "no hostkeys available -- exiting" is what a
+		// private key one byte short produces, it happens in the second
+		// before ember's first dial, and what ember then reports is a
+		// connection refused on a node that looks perfectly healthy.
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
+			log.Error("sshd exited on its own; nothing can connect to this node",
+				"exit", exitErr.ExitCode())
 			return exitErr.ExitCode(), nil
 		}
 		if err != nil {
@@ -172,19 +203,26 @@ func installAuthorizedKey() error {
 // A missing or unreadable TTL is not fatal: the node still runs and ember's
 // own watchdog still destroys it. Refusing to start would turn a bad number
 // into an outage.
-func armDeadline(cmd *exec.Cmd) func() {
+func armDeadline(log *slog.Logger, cmd *exec.Cmd) func() {
 	raw := os.Getenv(envTTL)
 	if raw == "" {
+		// Previously silent, and it is the state worth naming: a node with no
+		// injected deadline cannot stop its own bill, so the only thing left
+		// is ember's watchdog on a laptop that may be shut.
+		log.Warn("no deadline was injected; only ember's own watchdog will stop this node",
+			"env", envTTL)
 		return func() {}
 	}
 	secs, err := strconv.Atoi(raw)
 	if err != nil || secs <= 0 {
-		fmt.Fprintf(os.Stderr, "embernode: ignoring unusable %s=%q\n", envTTL, raw)
+		log.Warn("ignoring an unusable deadline; only ember's own watchdog will stop this node",
+			"env", envTTL, "value", raw)
 		return func() {}
 	}
+	log.Info("deadline armed", "seconds", secs)
 
 	timer := time.AfterFunc(time.Duration(secs)*time.Second, func() {
-		fmt.Fprintf(os.Stderr, "embernode: deadline reached after %ds, stopping\n", secs)
+		log.Warn("deadline reached, stopping", "seconds", secs)
 		if cmd.Process != nil {
 			_ = cmd.Process.Signal(syscall.SIGTERM)
 		}

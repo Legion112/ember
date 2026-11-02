@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -16,6 +15,7 @@ import (
 	"github.com/Legion112/ember/internal/blob"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/webapi"
@@ -39,6 +39,7 @@ func runServe(args []string, out io.Writer, d deps) error {
 		allowPaid = fs.Bool("allow-paid", false, "let the web UI rent from providers that cost money")
 		dist      = fs.String("dist", "", "serve the UI from this directory instead of the built-in copy")
 	)
+	logs := addLogFlags(fs)
 	fs.Usage = func() {
 		outf(out, "ember serve runs the web UI and a queue that drains onto one rental.\n\n")
 		outf(out, "It listens on loopback only. Nothing ember serves is reachable from\nanother machine.\n\n")
@@ -55,6 +56,10 @@ func runServe(args []string, out io.Writer, d deps) error {
 	}
 	if *port == 0 || *port > 65535 {
 		return usageError{fmt.Errorf("port %d is outside 1..65535", *port)}
+	}
+	logOpts, err := logs.resolve()
+	if err != nil {
+		return err
 	}
 
 	// READ ONCE, HERE. The config is the ceiling, and a request must never be
@@ -79,7 +84,7 @@ func runServe(args []string, out io.Writer, d deps) error {
 	defer stop()
 
 	return serveUntil(ctx, out, d, cfg, serveOptions{
-		Port: uint16(*port), AllowPaid: *allowPaid, Dist: *dist,
+		Port: uint16(*port), AllowPaid: *allowPaid, Dist: *dist, Log: logOpts,
 	})
 }
 
@@ -88,6 +93,14 @@ type serveOptions struct {
 	Port      uint16
 	AllowPaid bool
 	Dist      string
+
+	// Log is the level and the format. It reaches two places from here -- the
+	// logger this process writes with, and the Request every queued rental is
+	// planned from -- so a `--log-level debug` covers the server's own lines
+	// and the lines a rental emits inside internal/provision alike. Without
+	// the second, turning the level up on the one long-running command would
+	// have left the rental, which is the expensive half, silent.
+	Log logx.Options
 }
 
 // serveUntil builds both halves and runs them until ctx ends.
@@ -140,7 +153,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// The node's own output -- an sd-server's complaint, a model load that is
 	// about to fail -- goes to this terminal. ember's structured progress
 	// does not: it goes to the database, which is what the browser reads.
-	logger := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := logx.New(out, o.Log)
 
 	q := &queue.Queue{
 		Store: store,
@@ -149,6 +162,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		// is the one number that is already recorded, numbered and durable.
 		Planner: queue.AppPlanner{
 			Config: cfg, Deps: d, AllowPaid: o.AllowPaid, Out: out, Ledger: store,
+			Log: o.Log,
 		},
 		Outputs: ps.Outputs,
 		Out:     out,
