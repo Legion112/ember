@@ -164,10 +164,17 @@ func ask(t *testing.T, method string, s served, path, body string) answer {
 // and was added to that guard for this package.
 //
 // A unit test can assert the handler's behaviour; only a real listener can
-// answer "is there a socket on this machine's LAN address". The probe is
+// answer "is there a socket on this machine's LAN address". The dial below is
 // evidence rather than proof -- a firewall that DROPs looks like a closed
-// port from here -- which is the same caveat internal/exposure's probe
-// carries, and it is still the only thing that can see a published port.
+// port from here -- and it is still the only thing that can see a published
+// port.
+//
+// It is dialled inline rather than through a type in internal/exposure, and
+// that is now the only probe in the tree: exposure.Probe was deleted having
+// never had a caller, because a probe needs an address and the ports it was
+// written to find have none. See the note beside AssertNoPublishedPorts. This
+// one has an address -- the listener is on this machine and the port is the
+// one ember printed -- which is exactly the difference.
 func TestServe_IsReachableFromNowhereElse(t *testing.T) {
 	l := harness.New(t)
 	l.AppendConfig(serveConfig)
