@@ -16,6 +16,7 @@ import (
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provider/providertest"
+	"github.com/Legion112/ember/test/integration/runpodfake"
 )
 
 // newTestProvider points a real Provider at an httptest.Server.
@@ -798,4 +799,53 @@ func TestCreate_SendsNoCudaFieldAtAll(t *testing.T) {
 				"unevaluatedProperties: false and answers 422 to anything it does not know", k)
 		}
 	}
+}
+
+// conformanceNodes is the data plane a conformance run does not have.
+//
+// runpodfake starts a real container through this seam so that a lab above it
+// does a real SSH handshake; the conformance suite never dials anything, so
+// what it needs from the seam is only that RunPod's own sequencing can
+// complete -- ssh.direct appears once the public 22/tcp mapping is assigned,
+// and the fake will not assign one for a pod whose machine never started.
+// Reporting an address with nothing behind it is the honest stub for a
+// control-plane test: the control plane is what is under test, and a
+// conformance check that dialled would be asserting sshd rather than this
+// provider's mapping.
+type conformanceNodes struct{}
+
+func (conformanceNodes) Start(string, string, string) (string, string, uint16) {
+	return "conformance-machine", "203.0.113.7", 40022
+}
+func (conformanceNodes) Stop(string) {}
+
+// TestRunPod_Conformance holds this provider to the guarantees that are not in
+// the Provider interface.
+//
+// Against runpodfake rather than a one-off handler, and that is most of the
+// reason to point it here: a handler returning a canned blob cannot express
+// the thing that actually breaks, which is time. That fake reproduces each
+// RunPod behaviour that cost money to discover -- the unbidden public
+// 19123/http mapping, ssh.direct null for a while after the status reads
+// RUNNING, runtime null on every list entry, no host key ever reported -- and
+// the conformance checks run against all of it. Still no credentials and no
+// network: it is an httptest.Server, served this package's own captured
+// catalogue so the fake and the fixtures cannot drift.
+//
+// ReadyAfter and SSHAfter are left at zero so a pod is ready on the first
+// Inspect, which is what the suite requires and says out loud when it is not.
+// The staggering is not skipped anywhere: it is a transition rather than an
+// invariant, and a poll loop belongs in the tests of the layer that polls.
+func TestRunPod_Conformance(t *testing.T) {
+	catalogue, err := os.ReadFile(filepath.Join("testdata", "gpus.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := runpodfake.New(t, conformanceNodes{}, runpodfake.Options{Catalogue: catalogue})
+
+	p := &Provider{HTTP: httpx.Client{
+		BaseURL: f.URL,
+		Token:   node.NewSecret([]byte("rp-conformance-token")),
+	}}
+	providertest.RunConformance(t, p)
 }
