@@ -443,11 +443,46 @@ that sentence made unrepresentable rather than merely tested.
 - **The post-create exposure check destroys the node on failure.** A provider
   changing a default reintroduces public exposure that the request shape cannot
   see. A warning is useless here: the node is already wrong.
-- **The outside-in probe is evidence, not proof, and says so.** A firewall that
-  DROPs looks exactly like a closed port from here. Each port gets its own
-  timeout, not a share of one budget: a run of dropped ports would otherwise
-  eat the budget between them and the rest would report "closed" because the
-  clock ran out, which is a false pass on the only answer that matters.
+- **There is no outside-in probe: ember reads the mappings and never dials
+  from outside, and the posture is therefore one mechanism rather than two.**
+  This bullet used to describe `exposure.Probe` -- a DialFunc seam, a per-port
+  timeout, `Open`, `AssertClosed`, 144 lines of tests, this package gated at
+  100% -- and nothing outside that test file ever called either method, while
+  the bullet sat in a list whose other entries are live seals. Read here it
+  claimed a capability, which is why it is a deletion and not a shrug: the
+  file's own doc comment named the case it was for, "the provider's API says
+  one thing and its network does another", and that case was caught by
+  nothing. The live control, `AssertSSHOnly` on what the provider reports back
+  plus the destroy, does run and does go red when reinstated.
+  **Deleting it was NOT the `sdserver.Client.Cancel` call**, which was written,
+  covered, uncalled and wired up because deleting it would have deleted the
+  only cancel mechanism. The difference is that the join here is not available:
+  **a probe needs an address, and ember has one only for the ports it is
+  already deciding about.** An unreported public port has no address by
+  construction -- nothing names the host, nothing names the public port -- so a
+  probe aimed at the SSH endpoint's host and the node-side port number is
+  aimed at an address no provider here serves and answers "closed" always,
+  which is `AssertNoStray`-could-not-fail with a dialler in it. A reported one
+  is already decided and the node is already destroyed. The one real gap is a
+  tolerated `Caps.PlatformPorts` entry, where the concession rests on a
+  property of ember's node image rather than a promise from the provider --
+  and `node.Exposed` carries the node-side port plus a URL "kept for the error
+  message", which on RunPod is `{id}-{port}.proxy.runpod.net` for an http port
+  while `mapExposure` writes that field as `ip:publicPort`, and
+  `Probe.Open(ctx, host, []uint16)` cannot express either. So the address
+  would have to be built from field combinations nobody has captured, which is
+  how `allowedCudaVersions` and `capabilities.model` both went wrong.
+  **The two judgements are kept as a note where the code was**, the
+  `node.RateFromFloat` shape, because whoever writes the next one makes them
+  again: a port that answers is conclusive and a port that does not is only
+  evidence, since a firewall that DROPs looks exactly like a closed port from
+  here; and each port gets its own timeout rather than a share of one budget,
+  because a run of dropped ports would otherwise eat the budget between them
+  and every later port would report "closed" because the clock ran out --
+  a false pass on the only answer that matters. The one dial left in the tree
+  is `TestServe_IsReachableFromNowhereElse`, which probes this machine's own
+  LAN addresses for the `ember serve` listener; it has an address, and that is
+  the whole difference.
 - **"Published nothing" and "never reported" are different answers.**
   `node.Exposure()` returns `([]Exposed, bool)` and an unreported node fails
   every assertion. They are the same empty slice, and treating the second as

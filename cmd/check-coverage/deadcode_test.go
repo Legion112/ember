@@ -327,7 +327,6 @@ var deadExcluded = []struct{ sym, why string }{
 	// deletion.
 	{"internal/node.CUDAAtLeast", "the comparison min_cuda would be enforced with, and nothing enforces it: RunPod refuses the field outright and no other provider reads the floor, so deleting this would remove the evidence that the key is unenforced"},
 	{"internal/exposure.Tolerated", "written so a caller could log the platform ports it decided to live with, and no caller logs them -- 'an exposure that is waved through silently is one nobody re-examines' is its own doc comment"},
-	{"internal/exposure.(Probe).AssertClosed", "the outside-in probe's assertion; the labs probe and assert separately, so this convenience has no caller"},
 	{"internal/report.Writer", "the Sink-as-io.WriteCloser adapter; node byte streams reach the operator another way"},
 	{"internal/report.Multi", "fan-out over sinks, superseded by the queue wrapping its own sinks"},
 	{"internal/report.Kinds", "the enumeration of event kinds, for a reader that would list them"},

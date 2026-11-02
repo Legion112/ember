@@ -139,6 +139,70 @@ func Tolerated(n node.Node, platform []PlatformPort) []node.Exposed {
 	return out
 }
 
+// There is deliberately NO outside-in probe here, and this note is what is
+// left of one.
+//
+// `Probe` was a complete feature -- a DialFunc seam, a per-port timeout,
+// `Open` returning the ports that answered and `AssertClosed` turning that
+// into a refusal, 144 lines of tests, this package gated at 100% -- and
+// nothing outside its own test file ever called either method. Its own doc
+// comment said what it was for: "the probe catches the different case where
+// the provider's API says one thing and its network does another", read in a
+// Threat model list whose other entries are live seals. That case was caught
+// by nothing, which is the part worth deleting over.
+//
+// The reason it never acquired a caller is sharper than "nobody got round to
+// it", and it is the thing to know before writing another one. A PROBE NEEDS
+// AN ADDRESS, AND EMBER HAS ONE ONLY FOR THE PORTS IT IS ALREADY DECIDING
+// ABOUT:
+//
+//   - For the case the probe was written for -- a port the provider's API
+//     does not report -- there is no address at all, by construction. Nothing
+//     names the host, nothing names the public port. A probe aimed at the SSH
+//     endpoint's host and the node-side port number is aimed at an address no
+//     provider here serves, so it answers "closed" always, and a check that
+//     cannot fail is the `AssertNoStray` defect with a dialler in it.
+//   - For a port that IS reported, AssertSSHOnly has already decided, and the
+//     node is destroyed before anything could dial it.
+//   - The one gap in between is a tolerated PlatformPort, where the
+//     concession rests on a property of ember's node image rather than on a
+//     promise from the provider -- which is genuinely the probe's question,
+//     and still not answerable from here. node.Exposed keeps the NODE-side
+//     port and a URL "kept for the error message": on RunPod an http port is
+//     served at {id}-{port}.proxy.runpod.net while mapExposure writes that
+//     field as `ip:publicPort` from the pod's own runtime entry, and
+//     `Probe.Open(ctx, host, []uint16)` cannot express either of them. A tcp
+//     port is at a different external port on the direct host, and ember
+//     keeps that number nowhere but inside the display string.
+//
+// So the posture is one mechanism, not two: ember reads the mappings the
+// provider or the daemon reports back and destroys a node that carries
+// anything else. That is weaker than reading the mappings AND dialling from
+// outside, and it is written down as weaker rather than left to be inferred
+// from a type that existed.
+//
+// The two judgements the deleted code carried are the reason this is a note
+// rather than nothing, because whoever writes the next one has to make them
+// again:
+//
+//   - A PORT THAT ANSWERS IS CONCLUSIVE; A PORT THAT DOES NOT IS ONLY
+//     EVIDENCE. A provider firewall that DROPs is indistinguishable from a
+//     closed port from here, and so is a transient failure leaving the
+//     operator's own machine. So an accept is a finding and a refusal is
+//     never a pass to rely on, which is why a probe can never be the primary
+//     control.
+//   - EACH PORT GETS ITS OWN TIMEOUT, never a share of one budget. A run of
+//     DROPped ports would otherwise eat the whole budget between them and
+//     every later port would report "closed" because the clock ran out --
+//     a false pass on the only answer that matters.
+//
+// Tolerated above is the input such a probe would want and still has no
+// caller of its own. Anyone reviving this has to answer the address question
+// first, and the answer has to come from a response rather than from a
+// schema: the available field combinations for a non-SSH public port on
+// RunPod have never been captured, and building a dial target out of them is
+// how `allowedCudaVersions` and `capabilities.model` both went wrong.
+
 // AssertNoPublishedPorts requires that the provider published nothing at all.
 //
 // This is the stricter assertion, for providers reached without any public
