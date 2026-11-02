@@ -2127,8 +2127,8 @@ and concluding there is nothing there to see.
 They are only on those two verbs because those are the only two that build a
 logger. `text` is `slog`'s own logfmt, which is what a terminal reads and what
 Loki and Vector ingest; `json` is the same records for anything else. Nothing
-is shipped anywhere — there is no exporter and no egress, and adding one is
-a separate decision.
+is shipped anywhere — there is no exporter and no egress, which is now a
+decision rather than a gap; see below.
 
 **`debug` was unreachable until now, and there were seventeen debug lines
 waiting for it.** The handler was constructed in two places with the same
@@ -2200,6 +2200,50 @@ The keys are logged as fingerprints and never as material, which is what
 is on the operator's disk rather than in a stream nobody reads.
 `internal/logx`'s `TestNoKeyMaterialInALogCall` walks the tree and fails the
 build if any log call unwraps a secret.
+
+### Nothing is exported, and OpenTelemetry is in the dependency list anyway
+
+**ember sends no telemetry anywhere.** There is no exporter, no collector
+endpoint, no flag and no environment variable that turns one on. An audit of
+ember's dependencies will nevertheless find seven `go.opentelemetry.io`
+modules, so the honest answer to why:
+
+```
+$ go mod why go.opentelemetry.io/otel
+github.com/Legion112/ember/internal/dockerengine/dockerclient
+github.com/docker/docker/client
+go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp
+go.opentelemetry.io/otel
+```
+
+Docker's client wraps its own HTTP transport in tracing unconditionally, and
+ember uses Docker's client. So the otel **API** is linked into every ember
+binary — 530 symbols — and the **SDK is not**:
+
+```
+$ go tool nm bin/ember | grep -c opentelemetry
+530
+$ go tool nm bin/ember | grep -c 'otel/sdk'
+0
+```
+
+The API with no registered provider does nothing: spans are created,
+discarded and never leave the process. That is the state ember ships in, and
+it is held there by a test rather than by nobody having got round to it —
+`internal/logx`'s `TestNoTelemetrySDKRegistered` walks the tree and fails the
+build on an SDK or exporter import or on an `otel.Set…Provider` call, and
+`TestOTelStaysIndirect` fails if an otel module loses its `// indirect`
+marker in `go.mod`.
+
+Why it was decided that way, with the numbers, is in `AGENTS.md`'s dependency
+bullet. The short version: a span sink that needs no network costs +2.5% of
+the binary and has no viewer, the one with a viewer costs +47% and a gRPC
+stack, the free Docker spans cover tens of milliseconds of control plane out
+of the ~27 s a rental spends on overhead, and `--log-level debug` with the
+`run` key already answers the question that was being asked. If an exporter
+is ever added, its destination is an allow-list and the allow-list is
+loopback — what is new about an exporter is not the connection but the
+payload, because a span of a generation carries the prompt.
 
 ## Video
 

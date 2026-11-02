@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -75,6 +76,148 @@ func TestNoHandlerOutsideLogx(t *testing.T) {
 	})
 	if checked == 0 {
 		t.Fatal("inspected no files; the walk is broken, not the module")
+	}
+}
+
+// setProviders are the four calls that turn OpenTelemetry on.
+//
+// The otel API is linked into every ember binary whether anybody wants it or
+// not -- Docker's client wraps its own transport in otelhttp.NewTransport
+// unconditionally, so internal/dockerengine/dockerclient pulls in 530
+// `opentelemetry` symbols -- and it does nothing, because the API with no
+// registered provider is a no-op. These are the calls that end that, and
+// SetTextMapPropagator is here with the other three because a propagator is
+// what starts writing `traceparent` onto outbound requests.
+var setProviders = map[string]bool{
+	"SetTracerProvider":    true,
+	"SetMeterProvider":     true,
+	"SetLoggerProvider":    true,
+	"SetTextMapPropagator": true,
+}
+
+// TestNoTelemetrySDKRegistered is the decision of #33 as a build failure
+// rather than a paragraph.
+//
+// WHAT WAS DECIDED AND WHY IT NEEDS ENFORCING. ember does not register an
+// OpenTelemetry SDK, and the reasoning is in AGENTS.md's dependency bullet
+// with the numbers it was taken on. The part that cannot live in a document
+// is that today's state -- API linked, no provider, therefore no cost and no
+// egress -- is not a property anybody chose file by file. It is what happens
+// when nobody imports the SDK, so it survives exactly until somebody does,
+// and the import that would do it is one line in a package that already has
+// the API in scope. AGENTS.md's rule for this is "prefer making a bug
+// unrepresentable over testing for it", and the closest reachable thing is
+// the shape TestNoListenOutsideLoopback uses for net.Listen: walk the tree
+// and refuse.
+//
+// IT SEALS THE SDK AND THE EXPORTERS, NOT THE API. Banning the API would ban
+// Docker's client and therefore the local provider, and the API is the half
+// that is free: `go tool nm bin/ember | grep -c 'otel/sdk'` is 0 today and
+// that zero is the whole seal. go.opentelemetry.io/contrib is deliberately
+// permitted for the same reason -- otelhttp is instrumentation against the
+// API, already in the tree, and already producing non-recording spans.
+//
+// IT IS ALSO THE EGRESS SEAL, which is what #34 and #35 both wait on. An
+// exporter is the only thing in this tree that would originate a connection
+// carrying operator content: a span of a generation naturally holds the
+// prompt, the seed and the output path, and the rule for operator content is
+// an allow-list -- rejectSecrets deliberately not scanning `cmd`/`cmds`
+// because "a token of affection" is a legitimate prompt is the precedent for
+// why a deny-list is the wrong tool. So the terms of a future yes are in
+// AGENTS.md and this test is what makes somebody read them.
+//
+// Test files are exempt, as they are for the two walks above, and the limit
+// is worth naming because a seal believed past its reach is worse than none:
+// a _test.go file importing the SDK would not fail here. It would still have
+// to put a `require` in go.mod, which is what TestOTelStaysIndirect covers.
+func TestNoTelemetrySDKRegistered(t *testing.T) {
+	checked := 0
+	walkModule(t, func(rel string, fset *token.FileSet, f *ast.File) {
+		checked++
+		for _, imp := range f.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			if !strings.HasPrefix(path, "go.opentelemetry.io/") {
+				continue
+			}
+			if strings.Contains(path, "/sdk") || strings.Contains(path, "/exporters/") {
+				t.Errorf("%s:%d: imports %s; ember registers no OpenTelemetry SDK -- "+
+					"the decision and the measurements it was taken on are in AGENTS.md's "+
+					"dependency bullet, and changing it means changing that entry first",
+					rel, fset.Position(imp.Pos()).Line, path)
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			// Matched on the qualifier as well as the name, the correction
+			// TestNoHandlerOutsideLogx above already needed: `SetMeterProvider`
+			// on some other package's value is not this.
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || !setProviders[sel.Sel.Name] {
+				return true
+			}
+			if q, ok := sel.X.(*ast.Ident); ok && q.Name == "otel" {
+				t.Errorf("%s:%d: otel.%s registers a global OpenTelemetry provider; "+
+					"ember's otel API is deliberately a no-op and AGENTS.md says on what numbers",
+					rel, fset.Position(call.Pos()).Line, sel.Sel.Name)
+			}
+			return true
+		})
+	})
+	if checked == 0 {
+		t.Fatal("inspected no files; the walk is broken, not the module")
+	}
+}
+
+// TestOTelStaysIndirect is the same decision read off go.mod.
+//
+// WHY A SECOND CHECK FOR ONE RULE. The walk above sees imports in non-test
+// files, which is where an SDK would have to be used -- and go.mod is where
+// adopting one becomes visible to anybody auditing ember's dependencies,
+// including through a route the walk cannot see (a _test.go import, or a
+// `go mod tidy` that promotes a module because some new file referenced it).
+// Containment twice by two mechanisms, which is the rule the tar extractor is
+// written to and the leftover sweep repeats: a string check misses a
+// spelling, and the module file cannot be wrong about what was required.
+//
+// Every otel module in go.mod is there because Docker's client needs it, and
+// otlptracehttp is there for a reason sharper still: `go mod why` names
+// `github.com/docker/docker/client.test` -- it is pinned by somebody else's
+// test binary and contributes 0 symbols to ember. An entry losing its
+// `// indirect` marker means a file in this module imported it, which is the
+// decision, not a tidy.
+//
+// Line-scanned rather than parsed with golang.org/x/mod/modfile, because that
+// is a module this repository does not have and would be a new dependency
+// added to police a dependency decision.
+func TestOTelStaysIndirect(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	seen := 0
+	for i, line := range strings.Split(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "go.opentelemetry.io/") {
+			continue
+		}
+		seen++
+		if !strings.HasSuffix(trimmed, "// indirect") {
+			t.Errorf("go.mod:%d: %q is a direct requirement; ember adopts no OpenTelemetry "+
+				"module, and AGENTS.md's dependency bullet records what the measurements said",
+				i+1, trimmed)
+		}
+	}
+	// Zero would mean Docker stopped instrumenting its client, which is a
+	// thing to notice rather than a reason to pass: a check that holds
+	// because it found nothing is the failure mode AGENTS.md names for
+	// AssertNoStray, which could not fail for the life of the suite.
+	if seen == 0 {
+		t.Fatal("go.mod names no go.opentelemetry.io module; either the parse is broken " +
+			"or docker/docker no longer pulls the otel API in, and AGENTS.md's entry " +
+			"about a linked no-op API is then describing a state that no longer exists")
 	}
 }
 
