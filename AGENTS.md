@@ -11,6 +11,20 @@ This project is **Go-first**, like `go-tun`, `transcription` and `sms-gateway`.
   `modernc.org/sqlite`. **Adding one needs a reason written down**, which is
   what the rest of this bullet is.
 
+  **This list and `go.mod`'s direct requirements are checked against each
+  other, by `make tidy-check` and the CI step that calls it.** They had
+  drifted: `go build` and `go get` add a requirement without correcting its
+  `// indirect` marker, so `yaml.v3`, `coder/websocket`, `modernc.org/sqlite`
+  and `chromedp` were each recorded as something nobody asked for, while three
+  of the four are argued for at length below. What made that worth a gate
+  rather than a tidy is that `TestOTelStaysIndirect` reads the marker as
+  evidence -- a seal whose one signal was known to be stale four lines away in
+  the same file. `chromedp` is direct through `TestServe_UI` alone, behind
+  `integration && imagelab`: `go mod tidy` considers every build
+  configuration, so a tag-gated test import is a direct requirement, and
+  promoting it changed no package in either the plain or the tagged build
+  graph.
+
   `modernc.org/sqlite` is the queue and the generation history. ember had no
   state that outlives a process: `internal/statestore` is a journal of *live*
   nodes, deliberately empty after a clean run, which is the right shape for

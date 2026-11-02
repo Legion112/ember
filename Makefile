@@ -610,3 +610,55 @@ reap-labs:
 
 clean:
 	rm -rf $(BIN) $(COVERPROFILE)
+
+# go.mod says what ember chose to depend on, and nothing was checking that it
+# still did.
+#
+# WHAT WAS WRONG. `go build` and `go get` add a requirement without correcting
+# its `// indirect` marker, so the marker is only ever as true as the last
+# `go mod tidy` somebody remembered to run -- and nobody had for long enough
+# that four modules stood recorded as if nobody asked for them: chromedp,
+# coder/websocket, yaml.v3 and modernc.org/sqlite. Three of those four get a
+# paragraph of argument each in AGENTS.md's dependency bullet, which is the
+# document this file's direct requirements are supposed to agree with. They
+# disagreed, silently, because a stale comment is not a build failure.
+#
+# WHY IT IS A GATE AND NOT A ONE-OFF TIDY. #33's TestOTelStaysIndirect reads
+# that marker as evidence: an otel line losing `// indirect` means a file in
+# this module imported an OpenTelemetry SDK, which is the decision that test
+# exists to refuse. A seal resting on a field known to be stale four lines
+# away is the shape AGENTS.md names for AssertNoStray -- a check that passes
+# because what it reads has stopped meaning anything. Tidying once fixes today
+# and drifts again at the next `go get`.
+#
+# IT LEAVES THE TIDIED FILES IN PLACE, deliberately: the diff it just computed
+# IS the fix, so whoever runs this and reads the error has the correction
+# applied rather than a command to go and run. The message says so, because a
+# target that quietly rewrote two tracked files and did not mention it would
+# be worse than one that never ran.
+#
+# NOT A GO TEST, which is where this repository's other seals of this kind
+# live -- TestNoHandlerOutsideLogx, TestNoListenOutsideLoopback, and
+# cmd/check-coverage's build-tag guard. Every one of those parses files that
+# are already on disk. This one has to run `go mod tidy`, which resolves
+# modules, and `go test ./...` must need no GPU, no Docker, no network and no
+# credentials. A seal that bought the whole unit suite a network dependency
+# would cost more than the drift it prevents, so the rule wins and this is a
+# target that CI calls.
+#
+# THE MODULE CACHE IS WHY THE NETWORK IS NOT A WORRY. setup-go caches the
+# module download cache keyed on go.sum, and a tidy of an already-tidy tree
+# resolves everything out of it: `GOPROXY=off $(GO) mod tidy` succeeds here
+# and changes nothing. The proxy is reached only when the answer was going to
+# be a failure anyway -- a requirement that is missing or a package nothing
+# records -- which is the case where resolving it is the entire point.
+.PHONY: tidy-check
+tidy-check:
+	$(GO) mod tidy
+	@git diff --exit-code go.mod go.sum || { \
+		echo; \
+		echo "go.mod/go.sum are not tidy. The diff above IS the fix, and it is"; \
+		echo "already applied to your tree -- read it and commit it. AGENTS.md's"; \
+		echo "dependency bullet is the list these direct requirements answer to."; \
+		exit 1; \
+	}
