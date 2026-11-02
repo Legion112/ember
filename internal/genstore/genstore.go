@@ -131,6 +131,15 @@ type Job struct {
 
 	// Output is the local filename stem and never reaches the server.
 	Output string `json:"output,omitempty"`
+
+	// Params are the optional generation parameters.
+	//
+	// sdserver.Params itself rather than a mirror of it, because this package
+	// already imports sdserver for Job.SD and Caps, and a second copy of
+	// twenty-three fields is twenty-three chances for the two to disagree
+	// about which one is a pointer. It is stored as the JSON of this struct
+	// in one column; see sqlite.go's migrations for why one.
+	Params sdserver.Params `json:"params,omitzero"`
 }
 
 // SD converts to the type the generation client takes.
@@ -151,6 +160,7 @@ func (j Job) SD() sdserver.Job {
 		CFG:            j.CFG,
 		Guidance:       j.Guidance,
 		Output:         j.Output,
+		Params:         j.Params,
 	}
 }
 

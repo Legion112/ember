@@ -174,3 +174,13 @@ summary { cursor: pointer; color: var(--dim) }
    there is a tooltip nobody reads. The dotted rule is the oldest convention
    for it and costs no layout. */
 .help { border-bottom: 1px dotted var(--dim); cursor: help }
+
+/* A CHECKBOX GOES BESIDE ITS LABEL, not under it. Every other control here is
+   a box under its name, which is why `label` is a column -- but a checkbox is
+   a quarter the width of its own text, and stacked it reads as a stray mark
+   under a heading rather than as a switch that belongs to it. */
+.row label:has(input[type=checkbox]) {
+  flex-direction: row;
+  align-items: center;
+  gap: .4rem;
+}

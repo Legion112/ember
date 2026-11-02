@@ -129,6 +129,23 @@ type wireCapabilities struct {
 	Schedulers   []string   `json:"schedulers"`
 	PreviewModes []string   `json:"preview_modes"`
 	Limits       wireLimits `json:"limits"`
+
+	// OutputFormats and Upscalers are read for the same reason Samplers is:
+	// they are the server's own allow-lists, and a name checked against them
+	// is a name refused before a card is rented rather than after.
+	//
+	// Upscalers is an array of objects where the others are arrays of
+	// strings, and the name is the only field ember needs -- the entries also
+	// carry `model` and `image_upscale` booleans describing whether the
+	// upscaler is model-backed, which is the server's problem and not
+	// ember's.
+	OutputFormats []string       `json:"output_formats"`
+	Upscalers     []wireUpscaler `json:"upscalers"`
+}
+
+// wireUpscaler is one entry of the hires upscaler list.
+type wireUpscaler struct {
+	Name string `json:"name"`
 }
 
 // wireModel is what the server says is loaded.

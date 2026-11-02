@@ -1093,3 +1093,350 @@ func TestValidateOutput(t *testing.T) {
 		}
 	}
 }
+
+// A pointer field holding zero is SENT, and an unset one is not.
+//
+// This is the whole reason ClipSkip, Eta and FlowShift are pointers: the
+// server's defaults for them are -1, null and null, so the zero-is-unset
+// convention every other field uses would make `clip_skip: 0` and `eta: 0`
+// unrepresentable while looking exactly like a field that works.
+func TestBody_AZeroPointerIsSentAndAnUnsetOneIsNot(t *testing.T) {
+	zero, zerof := 0, 0.0
+	body, err := Job{
+		Prompt: "a cat",
+		Params: Params{ClipSkip: &zero, Eta: &zerof},
+	}.Body(PreviewNone, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := body["clip_skip"]; !ok || got != 0 {
+		t.Errorf("clip_skip = %v (present %v), want 0 present", got, ok)
+	}
+	sp, ok := body["sample_params"].(map[string]any)
+	if !ok {
+		t.Fatalf("no sample_params: %v", body)
+	}
+	if got, ok := sp["eta"]; !ok || got != 0.0 {
+		t.Errorf("eta = %v (present %v), want 0 present", got, ok)
+	}
+
+	body, err = Job{Prompt: "a cat"}.Body(PreviewNone, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["clip_skip"]; ok {
+		t.Errorf("clip_skip sent for a job that did not set it: %v", body)
+	}
+	if sp, ok := body["sample_params"].(map[string]any); ok {
+		if _, ok := sp["eta"]; ok {
+			t.Errorf("eta sent for a job that did not set it: %v", sp)
+		}
+	}
+}
+
+// Each optional parameter lands on the dotted path upstream names, and not on
+// ember's own spelling of it.
+//
+// Four of these are renamed on the way out -- steps to sample_steps, cfg to
+// txt_cfg, vae_tiling to vae_tiling_params, slg into guidance rather than
+// beside it -- so a field that compiled and went to the wrong key would be a
+// parameter the operator set and the server never saw. That failure is silent
+// in both directions: the generation succeeds, at the server's default.
+func TestBody_PutsEachParameterWhereUpstreamNamesIt(t *testing.T) {
+	skip := 2
+	shift := 3.5
+	body, err := Job{
+		Prompt: "a cat",
+		Params: Params{
+			ClipSkip:          &skip,
+			FlowShift:         &shift,
+			ShiftedTimestep:   4,
+			OutputFormat:      "webp",
+			OutputCompression: 90,
+			SLG:               SLG{Layers: []int{7, 8}, LayerStart: 0.01, LayerEnd: 0.2, Scale: 2.5},
+			Hires: Hires{
+				Enabled: true, Upscaler: "Latent", Scale: 2, TargetWidth: 1024,
+				TargetHeight: 768, Steps: 10, DenoisingStrength: 0.7, UpscaleTileSize: 128,
+			},
+			VAETiling: VAETiling{
+				Enabled: true, TileSizeW: 512, TileSizeH: 256,
+				TargetOverlap: 0.5, RelSizeW: 0.25, RelSizeH: 0.125,
+			},
+		},
+	}.Body(PreviewNone, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Walked by dotted path, so the test reads as the API's own field list
+	// rather than as a pile of type assertions.
+	at := func(path string) any {
+		cur := any(body)
+		for _, part := range strings.Split(path, ".") {
+			m, ok := cur.(map[string]any)
+			if !ok {
+				t.Fatalf("%s: %q is not an object", path, part)
+			}
+			cur, ok = m[part]
+			if !ok {
+				t.Fatalf("%s: nothing at %q", path, part)
+			}
+		}
+		return cur
+	}
+	for path, want := range map[string]any{
+		"clip_skip":                              2,
+		"output_format":                          "webp",
+		"output_compression":                     90,
+		"sample_params.flow_shift":               3.5,
+		"sample_params.shifted_timestep":         4,
+		"sample_params.guidance.slg.scale":       2.5,
+		"sample_params.guidance.slg.layer_start": 0.01,
+		"sample_params.guidance.slg.layer_end":   0.2,
+		"hires.enabled":                          true,
+		"hires.upscaler":                         "Latent",
+		"hires.scale":                            2.0,
+		"hires.target_width":                     1024,
+		"hires.target_height":                    768,
+		"hires.steps":                            10,
+		"hires.denoising_strength":               0.7,
+		"hires.upscale_tile_size":                128,
+		"vae_tiling_params.enabled":              true,
+		"vae_tiling_params.tile_size_w":          512,
+		"vae_tiling_params.tile_size_h":          256,
+		"vae_tiling_params.target_overlap":       0.5,
+		"vae_tiling_params.rel_size_w":           0.25,
+		"vae_tiling_params.rel_size_h":           0.125,
+	} {
+		if got := at(path); got != want {
+			t.Errorf("%s = %v (%T), want %v (%T)", path, got, got, want, want)
+		}
+	}
+	if got := at("sample_params.guidance.slg.layers"); !slices.Equal(got.([]int), []int{7, 8}) {
+		t.Errorf("slg.layers = %v", got)
+	}
+}
+
+// A switch that is off sends NO BLOCK, rather than a block the server reads as
+// off.
+//
+// Upstream's own defaults are `hires.enabled` false and `slg.scale` 0, so
+// sending the block with the switch off is sending settings nothing applies --
+// and in the slg case it is worse than useless: layers with no scale look
+// configured on screen and change nothing in the image, which is a bug that
+// presents as "the model ignores skip-layer guidance".
+func TestBody_AnUnsetSwitchSendsNoBlock(t *testing.T) {
+	body, err := Job{
+		Prompt: "a cat",
+		Params: Params{
+			// Everything set except the switch, in all three blocks.
+			SLG:       SLG{Layers: []int{7, 8, 9}, LayerStart: 0.01, LayerEnd: 0.2},
+			Hires:     Hires{Upscaler: "Latent", Scale: 2, Steps: 10},
+			VAETiling: VAETiling{TileSizeW: 512},
+		},
+	}.Body(PreviewNone, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["hires"]; ok {
+		t.Errorf("hires sent with enabled false: %v", body["hires"])
+	}
+	if _, ok := body["vae_tiling_params"]; ok {
+		t.Errorf("vae_tiling_params sent with enabled false: %v", body["vae_tiling_params"])
+	}
+	if sp, ok := body["sample_params"].(map[string]any); ok {
+		if g, ok := sp["guidance"].(map[string]any); ok {
+			if _, ok := g["slg"]; ok {
+				t.Errorf("slg sent with scale 0: %v", g["slg"])
+			}
+		}
+	}
+}
+
+// extra colliding with one of the NEW nested paths is refused by that path's
+// own name.
+//
+// The collision check works off a dotted path registered as each key is set,
+// so a block attached to the body without registering its paths would accept
+// an extra that silently overwrote it. "Something clashed" is not a useful
+// error here: the operator has to be told which of thirty fields to remove.
+func TestBody_RefusesExtraThatShadowsANestedParameter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		job  Job
+		want string
+	}{
+		{
+			"hires.scale",
+			Job{Prompt: "a", Params: Params{Hires: Hires{Enabled: true, Scale: 2}},
+				Extra: map[string]any{"hires": map[string]any{"scale": 4}}},
+			"extra sets hires.scale",
+		},
+		{
+			"slg.scale",
+			Job{Prompt: "a", Params: Params{SLG: SLG{Scale: 2}},
+				Extra: map[string]any{"sample_params": map[string]any{
+					"guidance": map[string]any{"slg": map[string]any{"scale": 9}}}}},
+			"extra sets sample_params.guidance.slg.scale",
+		},
+		{
+			"vae_tiling_params.tile_size_w",
+			Job{Prompt: "a", Params: Params{VAETiling: VAETiling{Enabled: true, TileSizeW: 512}},
+				Extra: map[string]any{"vae_tiling_params": map[string]any{"tile_size_w": 64}}},
+			"extra sets vae_tiling_params.tile_size_w",
+		},
+		{
+			"clip_skip",
+			func() Job {
+				two := 2
+				return Job{Prompt: "a", Params: Params{ClipSkip: &two},
+					Extra: map[string]any{"clip_skip": 1}}
+			}(),
+			"extra sets clip_skip",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.job.Body(PreviewProj, 5)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A name outside the server's own list is refused, and so is a name that
+// cannot be checked because the server published no list.
+//
+// The upscaler is the one that matters: api.md resolves a model-backed name as
+// `--hires-upscalers-dir / (name + ext)`, so the name reaches a path join on
+// the node. Nothing in this repository knows what sd-server does with a
+// hostile one, which is exactly why the check is an allow-list rather than a
+// pattern.
+func TestValidate_ChecksTheParameterNamesAgainstTheServersLists(t *testing.T) {
+	full := Capabilities{
+		Samplers:      []string{"euler"},
+		Schedulers:    []string{"karras"},
+		OutputFormats: []string{"png", "jpeg"},
+		Upscalers:     []string{"Latent", "Lanczos"},
+	}
+	for _, tc := range []struct {
+		name string
+		caps Capabilities
+		p    Params
+		want string
+	}{
+		{"an unknown format", full, Params{OutputFormat: "tiff"},
+			`output_format "tiff" is not one this server has`},
+		{"an unknown upscaler", full, Params{Hires: Hires{Enabled: true, Upscaler: "../etc/passwd"}},
+			`hires upscaler "../etc/passwd" is not one this server has`},
+		{"no format list", Capabilities{}, Params{OutputFormat: "png"},
+			"the server reported no format list"},
+		{"no upscaler list", Capabilities{}, Params{Hires: Hires{Enabled: true, Upscaler: "Latent"}},
+			"the server reported no upscaler list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Validate(Job{Prompt: "a cat", Params: tc.p}, tc.caps)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+
+	// And the names the server did publish are accepted.
+	ok := Job{Prompt: "a cat", Params: Params{
+		OutputFormat: "jpeg",
+		Hires:        Hires{Enabled: true, Upscaler: "Latent"},
+	}}
+	if err := Validate(ok, full); err != nil {
+		t.Fatalf("a published name was refused: %v", err)
+	}
+}
+
+// A hires target size is checked against the same limits the main size is.
+//
+// It is a generation size like any other -- the second pass samples at it --
+// and a target above the server's maximum is a job that fails after the first
+// pass has already been paid for.
+func TestValidate_ChecksTheHiresTargetAgainstTheSameLimits(t *testing.T) {
+	caps := Capabilities{
+		Upscalers: []string{"Latent"},
+		Limits:    Limits{MinWidth: 64, MaxWidth: 2048, MinHeight: 64, MaxHeight: 2048},
+	}
+	j := Job{Prompt: "a cat", Params: Params{Hires: Hires{Enabled: true, TargetWidth: 4096}}}
+	err := Validate(j, caps)
+	if err == nil || !strings.Contains(err.Error(), "hires target_width 4096 is above") {
+		t.Fatalf("err = %v, want the hires width refused by name", err)
+	}
+	j = Job{Prompt: "a cat", Params: Params{Hires: Hires{Enabled: true, TargetHeight: 16}}}
+	err = Validate(j, caps)
+	if err == nil || !strings.Contains(err.Error(), "hires target_height 16 is below") {
+		t.Fatalf("err = %v, want the hires height refused by name", err)
+	}
+}
+
+// Every parameter that is wrong on its face is refused with no server at all.
+//
+// None of these needs a capability list, so none of them should cost a
+// rental. The negative cases are the ones that earn this: upstream clamps a
+// non-positive preview_interval to 1, so a habit of writing -1 to mean "off"
+// buys the most expensive setting there is -- and the same keystroke in a
+// denoising strength or a scale would be applied rather than clamped.
+func TestValidateStatic_RefusesParametersThatNeedNoServer(t *testing.T) {
+	below := -2
+	for _, tc := range []struct {
+		name string
+		p    Params
+		want string
+	}{
+		{"clip_skip below -1", Params{ClipSkip: &below}, "clip_skip -2 is below -1"},
+		{"slg layer_start above 1", Params{SLG: SLG{LayerStart: 1.5}}, "slg layer_start 1.5 is outside 0 to 1"},
+		{"slg layer_end negative", Params{SLG: SLG{LayerEnd: -0.5}}, "slg layer_end -0.5 is outside 0 to 1"},
+		{"an empty slg range", Params{SLG: SLG{LayerStart: 0.5, LayerEnd: 0.2}}, "is after layer_end"},
+		{"a negative slg layer", Params{SLG: SLG{Layers: []int{-1}}}, "slg layer -1 is negative"},
+		{"a negative hires scale", Params{Hires: Hires{Scale: -2}}, "hires scale -2 is negative"},
+		{"negative hires steps", Params{Hires: Hires{Steps: -1}}, "hires steps -1 is negative"},
+		{"denoising above 1", Params{Hires: Hires{DenoisingStrength: 1.2}}, "hires denoising_strength 1.2 is outside 0 to 1"},
+		{"a negative tile", Params{Hires: Hires{UpscaleTileSize: -1}}, "hires upscale_tile_size -1 is negative"},
+		{"a negative tile size", Params{VAETiling: VAETiling{TileSizeW: -8}}, "vae tiling tile size -8x0 is negative"},
+		{"overlap above 1", Params{VAETiling: VAETiling{TargetOverlap: 2}}, "vae tiling target_overlap 2 is outside 0 to 1"},
+		{"rel_size_w above 1", Params{VAETiling: VAETiling{RelSizeW: 1.1}}, "vae tiling rel_size_w 1.1 is outside 0 to 1"},
+		{"rel_size_h negative", Params{VAETiling: VAETiling{RelSizeH: -1}}, "vae tiling rel_size_h -1 is outside 0 to 1"},
+		{"compression above 100", Params{OutputCompression: 101}, "output_compression 101 is outside 0 to 100"},
+		{"compression negative", Params{OutputCompression: -1}, "output_compression -1 is outside 0 to 100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateStatic(Job{Prompt: "a cat", Output: "x", Params: tc.p}, PreviewNone, 0)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+
+	// -1 is the one negative clip_skip with a meaning: the model's own.
+	minusOne := -1
+	err := ValidateStatic(Job{Prompt: "a cat", Output: "x",
+		Params: Params{ClipSkip: &minusOne}}, PreviewNone, 0)
+	if err != nil {
+		t.Fatalf("clip_skip -1 refused: %v", err)
+	}
+}
+
+// The capability lists are read off a real capture, not off api.md.
+//
+// output_formats is an array of strings and upscalers is an array of OBJECTS
+// in the same response, which is the kind of difference a doc-derived wire
+// type gets wrong and then passes its own test on -- capabilities.model was
+// exactly that, an object read as a string.
+func TestCapabilities_ReadsTheFormatAndUpscalerLists(t *testing.T) {
+	caps := testCaps(t)
+	if !slices.Contains(caps.OutputFormats, "png") || !slices.Contains(caps.OutputFormats, "webp") {
+		t.Errorf("output formats = %v, want the captured list", caps.OutputFormats)
+	}
+	// Flattened from objects to names, in order.
+	if len(caps.Upscalers) == 0 || caps.Upscalers[0] != "None" {
+		t.Errorf("upscalers = %v, want the captured names", caps.Upscalers)
+	}
+	if !slices.Contains(caps.Upscalers, "Latent") {
+		t.Errorf("upscalers = %v, want Latent among them", caps.Upscalers)
+	}
+}

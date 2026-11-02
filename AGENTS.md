@@ -438,6 +438,75 @@ that sentence made unrepresentable rather than merely tested.
   and the queue records it as an image row keyed `(request, job, index,
   preview)`, which is overwritten rather than accumulated because the file on
   disk is. Both halves were checked by reinstating the bug.
+- **A typed subset is the right answer until a browser is the caller.** The sd
+  job typed eleven fields and sent everything else through `extra`, which was
+  correct while the only caller was a YAML file an operator edits by hand -- a
+  map in a config costs nothing to write. `ember serve` changed the premise
+  without changing the code: `extra` is structurally refused over HTTP, so an
+  untyped field is not inconvenient from the web UI but **unreachable**, and
+  the UI shipped able to send **eleven of the fifty-one** parameters the
+  server reports with nothing anywhere saying which forty it could not. The
+  line moved to "path-free and affects a text-to-image run"; what is still
+  out is out for one of two stated reasons, not by omission.
+- **The parameters that need an image input are absent on purpose, and that is
+  a UI decision rather than a plumbing one.** `strength`, `img_cfg`,
+  `control_strength`, `ip_adapter_strength` and `increase_ref_index` are
+  path-free numbers that would have been three lines each. They do nothing
+  without an image, the API takes images as base64 in the request body, and
+  ember has no inbound image path at all -- so a control for them would sit on
+  screen, accept a value, send it, and change no pixel. Same defect as the
+  preview caption that was true of one mode: it reads as working.
+- **A value set nobody has observed is not typed.** `cache_mode`,
+  `cache_option`, `scm_mask`, `scm_policy_dynamic`, `qwen_image_layers` and
+  both `custom_sigmas` stay in `extra`. api.md names them and does not
+  enumerate what they accept, and a dropdown built from a guess is the
+  `allowedCudaVersions` mistake with better manners -- a schema read in place
+  of a response, which this repository has now made twice.
+- **A name that reaches a path join is checked against a list the server
+  published, not against a pattern.** `hires.upscaler` resolves as
+  `--hires-upscalers-dir / (name + ext)`, and `lora[].path` is a relative id
+  under the model root's `loras/` -- so neither is a free filesystem path, and
+  the published documentation does not say what either does with `..`.
+  `Capabilities.Upscalers` turns the first into an allow-list, and the second
+  stays unreachable from a request until somebody has read that code or sent
+  a deliberately hostile one. "ember does not know which of these are safe" is
+  the honest statement of the seal; "they read arbitrary files" would be a
+  guess in the other direction.
+- **Zero is a value wherever the server's default is not zero.** Every typed
+  field used zero for "leave it to the server", which is right when the
+  server's own default is zero -- and wrong for `clip_skip`, whose default is
+  **-1**, and for `eta` and `flow_shift`, whose defaults are **null**. A
+  sentinel of 0 there makes `clip_skip: 0` and `eta: 0` unrepresentable while
+  looking exactly like a field that works, so those three are pointers
+  through all four layers and `Option` in the page. The UI needs its own
+  spelling of the same rule: an empty box is None and a box holding 0 is
+  Some(0), or the first keystroke in any other field posts a zero nobody
+  typed.
+- **A block with a switch sends nothing when the switch is off.** Upstream's
+  defaults are `hires.enabled` false and `slg.scale` 0, so a block sent with
+  the switch off is settings nothing applies. For skip-layer guidance it is
+  worse than redundant: layers with no scale look configured and change
+  nothing, which presents as "the model ignores slg" rather than as a value
+  that was never sent. `slg.scale` is therefore the switch itself rather than
+  a checkbox beside it, because two ways to say "off" can disagree.
+- **A version check that only ever compares is a version number instead of a
+  migration.** `genstore.migrate` refused a file from the future and did
+  nothing about a file from the past, while the schema is
+  `CREATE TABLE IF NOT EXISTS` -- a no-op against a table that already
+  exists. So the first column ever added would have been missing from every
+  database written before it: `Open` succeeds, the version check passes, and
+  the failure arrives as `table jobs has no column named params` the next time
+  an operator queues a request, with their whole history in a file ember can
+  no longer write. Found by needing the column, not by reading the code.
+  There is a migration list now, applied in one transaction, and a lab-free
+  test that builds a version-1 file by hand and reads it with today's ember --
+  because what has to be proved is that today's binary reads yesterday's file,
+  which checking out the old code cannot show.
+- **One JSON column, not twenty-three.** Nothing queries the optional
+  parameters: no `WHERE`, no `ORDER BY`, no join. They are payload carried to
+  the generation call, which is what `events.body` already is -- and a column
+  per field would mean a migration every time upstream adds a knob, to a
+  table whose only reader selects a request's rows by id.
 - **A caption that is true of one mode is wrong for the others.** The preview
   figure said "the latent, not the output" unconditionally. That is right for
   `proj`, which projects the latent and previews a 512x512 generation as a

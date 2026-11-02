@@ -471,15 +471,105 @@ progress streaming: a program that will not read its own payload cannot report
 that job two is fourteen steps into its first pass, and a `curl` in a config
 file is not an integration — it is the same knowledge, maintained by hand.
 
-`sd.jobs` types what ember validates and reports on; `extra` reaches every
-other field of the API, including nested ones, so nothing is out of reach:
+### What a job can be told
+
+The eleven fields above are what every job has. These are the rest of what a
+text-to-image generation takes, all optional and all unset by default:
+
+```yaml
+    - prompt: "a cat"
+      clip_skip: 2              # many SD1.5 finetunes are trained for 2
+      eta: 0.0                  # noise added back by the ancestral samplers
+      flow_shift: 3.0           # the rectified-flow models (FLUX, SD3)
+      shifted_timestep: 0
+      output_format: webp       # from the server's own list; png, jpeg, webp
+      output_compression: 90    # jpeg and webp only
+      slg:                      # skip-layer guidance; scale 0 is off
+        layers: [7, 8, 9]
+        layer_start: 0.01
+        layer_end: 0.2
+        scale: 2.5
+      hires:                    # a second, higher-resolution pass
+        enabled: true
+        upscaler: Latent        # from the server's own list
+        scale: 2.0
+        steps: 10
+        denoising_strength: 0.7
+        target_width: 0         # an explicit size instead of a scale
+        target_height: 0
+        upscale_tile_size: 128
+      vae_tiling:               # decode in tiles, for VRAM a whole decode
+        enabled: true           # would not fit
+        tile_size_w: 512
+        tile_size_h: 256
+        target_overlap: 0.5
+        rel_size_w: 0.0         # a fraction of the image instead of a size
+        rel_size_h: 0.0
+```
+
+`hires.enabled` and `vae_tiling.enabled` are switches: with the switch off,
+ember sends no block at all, and with it on and nothing else set the server
+uses its own defaults. `slg.scale` is the switch for skip-layer guidance,
+because upstream's own "off" **is** a zero scale — so layers with no scale
+configure nothing.
+
+`clip_skip`, `eta` and `flow_shift` are **absent when the key is absent**, and
+`0` is a value rather than "unset": the server's own defaults for them are -1,
+null and null, unlike every field above where 0 means "leave it to the server".
+
+`output_format` and `hires.upscaler` are checked against the lists the server
+publishes, so a typo is refused before anything is rented. Everything else
+with a range — a denoising strength, a tiling overlap, a compression — is
+refused when the config is read.
+
+**ember's names are not always upstream's.** Four are renamed on the way out,
+so when reading sd-server's `api.md` beside an `ember.yaml`:
+
+| `ember.yaml` and the UI | the request body |
+|---|---|
+| `steps` | `sample_params.sample_steps` |
+| `sampler` | `sample_params.sample_method` |
+| `scheduler` | `sample_params.scheduler` |
+| `cfg` | `sample_params.guidance.txt_cfg` |
+| `guidance` | `sample_params.guidance.distilled_guidance` |
+| `eta`, `flow_shift`, `shifted_timestep` | `sample_params.<same>` |
+| `slg.*` | `sample_params.guidance.slg.*` |
+| `vae_tiling.*` | `vae_tiling_params.*` |
+| `clip_skip`, `output_format`, `output_compression`, `hires.*` | the same, top level |
+| `output` | nothing — it is the local filename stem |
+
+`cfg` and `guidance` are the two worth knowing: both get called "cfg" in
+conversation and they are different fields. The FLUX.2 recipe sets `cfg: 1`
+with `guidance: 4`, so setting the wrong one generates at the wrong strength
+and nothing reports it.
+
+**What is not typed, and why.** An image input — img2img, inpainting,
+ControlNet, IP-Adapter — and LoRA are not reachable from `sd.jobs` or from the
+web UI: the API takes images as base64 in the request body, which a YAML file
+cannot hold and the UI has no upload route for, and `lora[].path` and
+`hires.upscaler` are names the server resolves against a directory of its own.
+`strength`, `img_cfg`, `control_strength`, `ip_adapter_strength` and
+`increase_ref_index` do nothing without one of those images, so they are not
+typed either. `cache_mode`, `cache_option`, `scm_mask`, `scm_policy_dynamic`,
+`qwen_image_layers` and the two `custom_sigmas` are untyped because nothing
+here knows what values they accept.
+
+All of those remain reachable from a config: `extra` reaches every field of
+the API ember does not type, including nested ones, so nothing is out of
+reach:
 
 ```yaml
     - prompt: "a cat"
       extra:
-        output_format: png
-        sample_params: { eta: 0.3 }
+        strength: 0.6
+        lora: [{ path: "detail", multiplier: 0.8 }]
+        sample_params: { custom_sigmas: [14.6, 10.0, 0.0] }
 ```
+
+`extra` is a **config-only** field. A request over HTTP has no such key and is
+refused if it sends one, because `extra` reaches the fields naming file paths
+on the node — so the web UI is bounded by what `sd.jobs` types, which is what
+the list above is about.
 
 A key in `extra` that ember also set is **refused**, not resolved. A seed or a
 step count decided the wrong way makes two runs that claim to be the same
@@ -823,6 +913,13 @@ It is the `sd.jobs` shape driven from a browser: pick a provider and a card
 from live offers, type a prompt and its parameters, push a batch, and watch the
 sampling steps and preview frames arrive while the images land on disk.
 
+The five rows of the compose panel are the whole job on most runs; an
+**advanced** section below them holds the rest of what a generation can be
+told — clip skip, the sampler's eta and flow shift, the output format, a hires
+pass, VAE tiling and skip-layer guidance. Every label has an explanation on
+hover. What the UI cannot send, and why, is the list at the end of
+[what a job can be told](#what-a-job-can-be-told).
+
 ```bash
 make web                 # builds the Rust/WASM frontend
 ember serve              # http://127.0.0.1:7777/
@@ -927,7 +1024,9 @@ least. Every field in the form explains itself on hover.
 | `ttl`, up to the config's | `store:` and its mount |
 | `max_hourly_usd` and `max_run_usd`, up to the config's | `ports:` |
 | prompt, size, steps, batch count, seed, sampler, scheduler, cfg, guidance, output name | `sd.serve`, `gpu_probe`, `assets:`, `verify:` |
-| preview mode and interval | `extra` |
+| clip skip, eta, flow shift, shifted timestep, output format and compression | `extra` |
+| the `hires`, `vae_tiling` and `slg` blocks | an image input and `lora` |
+| preview mode and interval | |
 
 A request asking for a *higher* ceiling gets the config's, not a refusal: a UI
 offering a slider should not have to know every limit before it can offer

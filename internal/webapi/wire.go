@@ -103,6 +103,13 @@ type capsView struct {
 	Schedulers   []string  `json:"schedulers"`
 	PreviewModes []string  `json:"preview_modes"`
 	Limits       limitView `json:"limits"`
+
+	// OutputFormats and Upscalers are here so the page can offer a menu
+	// instead of a text box. That is not cosmetic: both are checked against
+	// these same lists at enqueue, so a free-text control would be a control
+	// whose plausible values are mostly refusals.
+	OutputFormats []string `json:"output_formats"`
+	Upscalers     []string `json:"upscalers"`
 }
 
 type limitView struct {
@@ -141,6 +148,13 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 		v.Caps = &capsView{
 			Model: caps.Model, Samplers: caps.Samplers, Schedulers: caps.Schedulers,
 			PreviewModes: caps.PreviewModes,
+			// Passed through as the three lists above are, nil and all: an
+			// unreported capability is a nil slice here and `null` on the
+			// wire, and the page reads every one of these through its own
+			// `nullable` so that an absent list and an empty one both arrive
+			// as an empty Vec rather than failing the whole envelope.
+			OutputFormats: caps.OutputFormats,
+			Upscalers:     caps.Upscalers,
 			Limits: limitView{
 				MinWidth: caps.Limits.MinWidth, MaxWidth: caps.Limits.MaxWidth,
 				MinHeight: caps.Limits.MinHeight, MaxHeight: caps.Limits.MaxHeight,
@@ -254,6 +268,98 @@ type newJob struct {
 	CFG            float64 `json:"cfg,omitempty"`
 	Guidance       float64 `json:"guidance,omitempty"`
 	Output         string  `json:"output,omitempty"`
+
+	// The optional parameters. Each one is a number, a boolean or a name from
+	// a list the server published, and none of them names a file or a
+	// directory -- which is the line this type draws, not a count. What is
+	// still absent is absent on purpose: `strength`, `img_cfg`,
+	// `control_strength`, `ip_adapter_strength`, `increase_ref_index`,
+	// `ref_image_args` and `image_preprocess` do nothing without an image
+	// input, which nothing here can supply yet, and `cache_mode`,
+	// `scm_mask`, `qwen_image_layers` and the two `custom_sigmas` have value
+	// sets nobody here has observed. An unobserved value set typed as if it
+	// were known is the allowedCudaVersions mistake.
+	//
+	// Pointers where the server's default is not zero, so that "unset" and
+	// "zero" survive the round trip from a browser that sends neither.
+	ClipSkip  *int     `json:"clip_skip,omitempty"`
+	Eta       *float64 `json:"eta,omitempty"`
+	FlowShift *float64 `json:"flow_shift,omitempty"`
+
+	ShiftedTimestep int `json:"shifted_timestep,omitempty"`
+
+	OutputFormat      string `json:"output_format,omitempty"`
+	OutputCompression int    `json:"output_compression,omitempty"`
+
+	SLG       *slgJob   `json:"slg,omitempty"`
+	Hires     *hiresJob `json:"hires,omitempty"`
+	VAETiling *tileJob  `json:"vae_tiling,omitempty"`
+}
+
+// slgJob, hiresJob and tileJob are the nested blocks.
+//
+// Pointers on newJob so that a body which omits them is distinguishable from
+// one that sends them empty -- not because the two are treated differently
+// today, but because the page sends what it has and a reader of this type
+// should not have to infer which of those the browser meant.
+type slgJob struct {
+	Layers     []int   `json:"layers,omitempty"`
+	LayerStart float64 `json:"layer_start,omitempty"`
+	LayerEnd   float64 `json:"layer_end,omitempty"`
+	Scale      float64 `json:"scale,omitempty"`
+}
+
+type hiresJob struct {
+	Enabled           bool    `json:"enabled,omitempty"`
+	Upscaler          string  `json:"upscaler,omitempty"`
+	Scale             float64 `json:"scale,omitempty"`
+	TargetWidth       int     `json:"target_width,omitempty"`
+	TargetHeight      int     `json:"target_height,omitempty"`
+	Steps             int     `json:"steps,omitempty"`
+	DenoisingStrength float64 `json:"denoising_strength,omitempty"`
+	UpscaleTileSize   int     `json:"upscale_tile_size,omitempty"`
+}
+
+type tileJob struct {
+	Enabled       bool    `json:"enabled,omitempty"`
+	TileSizeW     int     `json:"tile_size_w,omitempty"`
+	TileSizeH     int     `json:"tile_size_h,omitempty"`
+	TargetOverlap float64 `json:"target_overlap,omitempty"`
+	RelSizeW      float64 `json:"rel_size_w,omitempty"`
+	RelSizeH      float64 `json:"rel_size_h,omitempty"`
+}
+
+// params is this job's optional parameters as the client takes them.
+func (j newJob) params() sdserver.Params {
+	p := sdserver.Params{
+		ClipSkip:          j.ClipSkip,
+		Eta:               j.Eta,
+		FlowShift:         j.FlowShift,
+		ShiftedTimestep:   j.ShiftedTimestep,
+		OutputFormat:      j.OutputFormat,
+		OutputCompression: j.OutputCompression,
+	}
+	if s := j.SLG; s != nil {
+		p.SLG = sdserver.SLG{
+			Layers: s.Layers, LayerStart: s.LayerStart,
+			LayerEnd: s.LayerEnd, Scale: s.Scale,
+		}
+	}
+	if h := j.Hires; h != nil {
+		p.Hires = sdserver.Hires{
+			Enabled: h.Enabled, Upscaler: h.Upscaler, Scale: h.Scale,
+			TargetWidth: h.TargetWidth, TargetHeight: h.TargetHeight,
+			Steps: h.Steps, DenoisingStrength: h.DenoisingStrength,
+			UpscaleTileSize: h.UpscaleTileSize,
+		}
+	}
+	if t := j.VAETiling; t != nil {
+		p.VAETiling = sdserver.VAETiling{
+			Enabled: t.Enabled, TileSizeW: t.TileSizeW, TileSizeH: t.TileSizeH,
+			TargetOverlap: t.TargetOverlap, RelSizeW: t.RelSizeW, RelSizeH: t.RelSizeH,
+		}
+	}
+	return p
 }
 
 // toRequest turns a posted body into something the store can hold.
@@ -302,6 +408,7 @@ func (n newRequest) toRequest() (genstore.Request, error) {
 			BatchCount: j.BatchCount, Seed: j.Seed,
 			Sampler: j.Sampler, Scheduler: j.Scheduler,
 			CFG: j.CFG, Guidance: j.Guidance, Output: j.Output,
+			Params: j.params(),
 		})
 	}
 	return r, nil
@@ -364,13 +471,44 @@ func viewRequest(r genstore.Request, ims []genstore.Image) requestView {
 		v.Ended = r.Ended.UTC().Format(time.RFC3339)
 	}
 	for _, j := range r.Jobs {
-		v.Jobs = append(v.Jobs, newJob{
+		// The same type outbound as inbound, and the parameters travel both
+		// ways. Rendering a request's jobs without them would show an
+		// operator a job description that is not the job that ran -- the
+		// hires pass and the clip skip simply absent from the page that
+		// exists to say what was asked for.
+		out := newJob{
 			Prompt: j.Prompt, NegativePrompt: j.NegativePrompt,
 			Width: j.Width, Height: j.Height, Steps: j.Steps,
 			BatchCount: j.BatchCount, Seed: j.Seed,
 			Sampler: j.Sampler, Scheduler: j.Scheduler,
 			CFG: j.CFG, Guidance: j.Guidance, Output: j.Output,
-		})
+			ClipSkip: j.Params.ClipSkip, Eta: j.Params.Eta,
+			FlowShift: j.Params.FlowShift, ShiftedTimestep: j.Params.ShiftedTimestep,
+			OutputFormat: j.Params.OutputFormat, OutputCompression: j.Params.OutputCompression,
+		}
+		// Sent only when they hold something, so a job with none of this set
+		// renders as the job it was rather than as three empty objects.
+		if s := j.Params.SLG; !s.IsZero() {
+			out.SLG = &slgJob{
+				Layers: s.Layers, LayerStart: s.LayerStart,
+				LayerEnd: s.LayerEnd, Scale: s.Scale,
+			}
+		}
+		if h := j.Params.Hires; !h.IsZero() {
+			out.Hires = &hiresJob{
+				Enabled: h.Enabled, Upscaler: h.Upscaler, Scale: h.Scale,
+				TargetWidth: h.TargetWidth, TargetHeight: h.TargetHeight,
+				Steps: h.Steps, DenoisingStrength: h.DenoisingStrength,
+				UpscaleTileSize: h.UpscaleTileSize,
+			}
+		}
+		if t := j.Params.VAETiling; !t.IsZero() {
+			out.VAETiling = &tileJob{
+				Enabled: t.Enabled, TileSizeW: t.TileSizeW, TileSizeH: t.TileSizeH,
+				TargetOverlap: t.TargetOverlap, RelSizeW: t.RelSizeW, RelSizeH: t.RelSizeH,
+			}
+		}
+		v.Jobs = append(v.Jobs, out)
 	}
 	for _, im := range ims {
 		v.Images = append(v.Images, imageRef{
