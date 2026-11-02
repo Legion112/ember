@@ -2,11 +2,27 @@ version: "2"
 
 run:
   timeout: 5m
-  # The integration tag is set here rather than passed on a command line, so
-  # the single lint step in CI covers the labs too. Without it the tagged tree
-  # is linted nowhere, and lab code drifts until somebody runs it by hand.
+  # EVERY BUILD TAG IN THE TREE GOES HERE. The tags are set in the config
+  # rather than passed on a command line, because CI lints through
+  # golangci-lint-action and the action reads this file -- so a tag missing
+  # here is a tree linted nowhere, and it drifts until somebody types the tag
+  # by hand.
+  #
+  # The rule is the list, not the entries. This comment used to argue for
+  # `integration` alone, which is the right argument and cannot catch the tag
+  # somebody forgets: `imagelab` was added to `go vet` in three places and not
+  # to this one, so the image labs -- which are what stops a bad workload
+  # image reaching a registry -- went unlinted for their whole life, with an
+  # unchecked error and a dead helper sitting in them. Same shape as the
+  # journal subdirectory that was spelled in two places until a lab read the
+  # wrong one.
+  #
+  # cmd/check-coverage's TestEveryBuildTagReachesTheGates now walks the tree,
+  # parses the constraints and fails when a tag is missing from here or from
+  # the Makefile's LAB_TAGS, so the next tag cannot be a silent gap in either.
   build-tags:
     - integration
+    - imagelab
 
 linters:
   default: none
