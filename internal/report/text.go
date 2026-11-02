@@ -78,6 +78,32 @@ func render(e Event) string {
 		return fmt.Sprintf("%s took %v of card time, %v so far\n",
 			Label(e.Unit, e.Index, e.Total), e.Cost, e.Spent)
 
+	case KindJobCancelled:
+		// Two sentences in one line, and the second half is the one that
+		// matters: how many jobs stopped being paid for. "cancelled" alone
+		// over a batch would leave an operator wondering whether the other
+		// nine are still coming, which is the question they pressed the
+		// button to answer.
+		dropped := e.Total - e.Index
+		if e.Unit == "" {
+			// Nothing was in flight, so there is no job to name -- see the
+			// Kind. Label would print "job 2/5" over a job that had already
+			// finished and been paid for.
+			return fmt.Sprintf("cancelled: %d of %d job(s) were dropped before they started\n",
+				dropped, e.Total)
+		}
+		if e.Err == "" {
+			return fmt.Sprintf("%s: asked the server to stop it; %d job(s) after it were dropped\n",
+				Label(e.Unit, e.Index, e.Total), dropped)
+		}
+		// The in-flight job keeps going and keeps billing. Said as what it
+		// costs rather than as a capability the server lacks, because the
+		// operator pressed cancel to stop spending and the honest answer is
+		// how much of the spending did not stop.
+		return fmt.Sprintf("%s: cannot be stopped, so it will finish and be paid for (%s); "+
+			"%d job(s) after it were dropped\n",
+			Label(e.Unit, e.Index, e.Total), e.Err, dropped)
+
 	case KindPreviewFailed:
 		return fmt.Sprintf("%s: could not write the preview frame: %s\n",
 			Label(e.Unit, e.Index, e.Total), e.Err)

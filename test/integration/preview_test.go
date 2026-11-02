@@ -244,6 +244,177 @@ func TestPreview_TheSameFrameComesBackBetweenIntervals(t *testing.T) {
 	t.Logf("%d of %d consecutive frame pairs were repeats", repeats, len(obs.previews)-1)
 }
 
+// labCancelSteps is long enough that there is a generation to interrupt.
+//
+// The six-step job above is over in a couple of seconds of CPU sampling,
+// which is not a window a cancel can be aimed at. Sixty steps at 64x64 is
+// still seconds rather than minutes and leaves plenty of middle: the
+// assertion below is that the job stopped BEFORE the last step, so the margin
+// is what makes the test mean something rather than pass by luck.
+const labCancelSteps = 60
+
+// TestPreview_ARealServerStopsAGenerationWhenAsked is the one honest check on
+// the whole cancel path.
+//
+// sdserver.Client.Cancel existed, was covered to 99% by its own package's
+// tests, and was called by NOTHING outside them -- so every assertion about
+// it was ember agreeing with a fake it had written. That is the closed loop
+// capabilities.model sat in until a real server answered with an object, and
+// the one the preview frames sat in until this file existed. A cancel checked
+// only against a fake would be the same mistake a third time.
+//
+// Two things are proved here that no unit test can:
+//
+//  1. The server DECLARES the capability. features.cancel_generating is read
+//     out of a live /capabilities, not out of a fixture -- and false is the
+//     answer that makes ember leave an in-flight job running, so it is worth
+//     knowing which one a real build gives.
+//  2. The server HONOURS the ask. POST /jobs/{id}/cancel, mid-sampling,
+//     ends the job as `cancelled` with no images -- and does it before the
+//     declared step total, which is what distinguishes a cancel from a
+//     generation that simply finished.
+func TestPreview_ARealServerStopsAGenerationWhenAsked(t *testing.T) {
+	l := harness.New(t)
+	srv := startLabServer(t, l)
+
+	caps, err := srv.client.Capabilities(t.Context())
+	if err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
+	// Read from a response and not from a schema, which is the rule this
+	// repository has now paid for twice -- allowedCudaVersions and
+	// capabilities.model. If a real build says false, ember's refusal to ask
+	// it is right and this lab is what says so.
+	if !caps.CancelGenerating {
+		t.Fatalf("features.cancel_generating = false on a live server; ember will leave an "+
+			"in-flight job running and only drop the ones behind it. caps = %+v", caps)
+	}
+
+	job := sdserver.Job{
+		Prompt: "a paper boat",
+		Width:  labWidth, Height: labHeight,
+		Steps:   labCancelSteps,
+		Sampler: "euler",
+		Seed:    1234,
+		Output:  "boat",
+	}
+	if err := sdserver.Validate(job, caps); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	// interval 1 so the step count moves on every step: the cancel is aimed
+	// at a step in the middle, and a sparse preview would mean aiming at a
+	// number ember had not been told yet.
+	id, err := srv.client.Submit(t.Context(), job, "proj", 1)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
+	defer cancel()
+
+	// Sample until it is demonstrably mid-generation, then ask.
+	//
+	// A step and not a sleep: "the server is two steps in" is the condition
+	// the cancel has to land inside, and a fixed wait would be a guess about
+	// how fast this machine samples -- wrong in the direction that cancels
+	// a job that has already finished and proves nothing.
+	var (
+		asked    bool
+		atStep   int
+		polls    int
+		lastStep int
+		final    sdserver.State
+	)
+	for {
+		st, perr := srv.client.Poll(ctx, id)
+		if perr != nil {
+			t.Fatalf("poll after %d polls: %v", polls, perr)
+		}
+		polls++
+		if p := st.Preview; p != nil && p.Step > lastStep {
+			lastStep = p.Step
+		}
+		if !asked && lastStep >= 2 {
+			if cerr := srv.client.Cancel(ctx, id); cerr != nil {
+				t.Fatalf("cancel at step %d: %v", lastStep, cerr)
+			}
+			asked, atStep = true, lastStep
+			t.Logf("asked the server to cancel at step %d/%d", atStep, labCancelSteps)
+		}
+		if st.Status.Done() {
+			// Captured under its own name, opt-in, as pollToCompletion does:
+			// a cancelled job is a response shape no fixture here has ever
+			// held, and promoting a guess to evidence is a deliberate act
+			// with a README row attached.
+			if dir := captureDir(t); dir != "" {
+				captureRaw(t, srv, id, filepath.Join(dir, "job_cancelled.json"))
+			}
+			final = st
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("job %s neither finished nor stopped: last status %v after %d polls",
+				id, st.Status, polls)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	if !asked {
+		t.Fatalf("the job reached a terminal state (%v) before step 2, so nothing was "+
+			"cancelled mid-generation; raise labCancelSteps", final.Status)
+	}
+
+	// 1. The server ended it as cancelled. sdserver.StatusCancelled and
+	//    Status.Done() were written for this and had never seen one.
+	if final.Status != sdserver.StatusCancelled {
+		t.Errorf("final status = %v after a cancel at step %d/%d (err: %v); the ask was "+
+			"accepted with a 200 and the job ran to %v",
+			final.Status, atStep, labCancelSteps, final.Err, final.Status)
+	}
+
+	// 2. It stopped EARLY. A server that ignored the ask and sampled all
+	//    sixty steps would produce an image and report completed, which the
+	//    assertion above catches -- but one that reported `cancelled` after
+	//    finishing anyway would not, and that is the version that would have
+	//    ember charging for an image it told the operator it had stopped.
+	if lastStep >= labCancelSteps {
+		t.Errorf("the last step observed was %d of %d, so the generation ran to the end "+
+			"despite the cancel", lastStep, labCancelSteps)
+	}
+
+	// 3. Nothing was produced, which is the point: a cancelled generation is
+	//    sampling that stopped, not an image withheld.
+	if len(final.Images) != 0 {
+		t.Errorf("a cancelled job came back with %d image(s)", len(final.Images))
+	}
+
+	t.Logf("cancelled at step %d/%d, ended as %v after %d polls, %d image(s)",
+		atStep, labCancelSteps, final.Status, polls, len(final.Images))
+}
+
+// A cancel for a job the server has never heard of is an error and not a
+// silent success.
+//
+// ember asks once per job and only while that job is in flight, so this
+// should be unreachable in production -- which is exactly why it is worth
+// knowing what the server does with it. If a bad id answered 200, a cancel
+// sent against a stale id would report success and the real generation would
+// carry on billing.
+func TestPreview_ACancelForAJobThatDoesNotExistIsRefused(t *testing.T) {
+	l := harness.New(t)
+	srv := startLabServer(t, l)
+
+	err := srv.client.Cancel(t.Context(), "no-such-job")
+	if err == nil {
+		t.Error("cancelling an unknown job id succeeded; a stale id would then report a " +
+			"stop that did not happen")
+		return
+	}
+	t.Logf("an unknown job id answers: %v", err)
+}
+
 // TestPreview_TheServerListensOnLoopbackOnly closes a deferral that was
 // recorded rather than quietly skipped.
 //

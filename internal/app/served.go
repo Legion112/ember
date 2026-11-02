@@ -68,7 +68,16 @@ type Served interface {
 	// Every job is checked against the server's own capabilities before the
 	// first one runs. Checking job n just before submitting it would mean
 	// n-1 images already paid for when the typo in the last one surfaces.
-	Generate(ctx context.Context, sink report.Sink, jobs sdserver.Run, dir string) error
+	//
+	// stop is the operator asking for THIS BATCH to end, and it is a channel
+	// rather than a context for the one reason that matters: a cancelled
+	// context would unwind through provision.WithNode and destroy the node,
+	// taking every other request on the same rental with it -- which is
+	// exactly the thing `ember serve` used to refuse a cancel to protect. It
+	// would also kill the connection the cancel has to travel down. Closing
+	// stop ends this batch and leaves the rental alone; a nil channel is
+	// never closed, which is what a caller with nothing to cancel passes.
+	Generate(ctx context.Context, sink report.Sink, jobs sdserver.Run, dir string, stop <-chan struct{}) error
 
 	// Caps is what this server build reported it can do.
 	Caps() sdserver.Capabilities
@@ -83,13 +92,18 @@ type served struct {
 
 func (s served) Caps() sdserver.Capabilities { return s.caps }
 
-func (s served) Generate(ctx context.Context, sink report.Sink, jobs sdserver.Run, dir string) error {
+func (s served) Generate(ctx context.Context, sink report.Sink, jobs sdserver.Run, dir string, stop <-chan struct{}) error {
 	for i, j := range jobs.Jobs {
 		if err := sdserver.Validate(j, s.caps); err != nil {
 			return Usage(fmt.Errorf("sd.jobs[%d]: %w", i, err))
 		}
 	}
-	return runJobs(ctx, sink, s.client, jobs, dir, s.rate)
+	// The capability is joined to the signal HERE and not by the caller: a
+	// drain loop knows which request the operator stopped and has no business
+	// knowing what the server build can do, and this is the one place that
+	// holds both.
+	return runJobs(ctx, sink, s.client, jobs, dir, s.rate,
+		cancelSignal{on: stop, server: s.caps.CancelGenerating})
 }
 
 // WithServed rents this plan's node, makes the weights resident, and calls fn.
@@ -143,7 +157,10 @@ func runServed(
 ) error {
 	return withServer(ctx, out, sink, client, r, spec, so, rate, len(run.Jobs),
 		func(ctx context.Context, s Served) error {
-			return s.Generate(ctx, sink, run, runDir)
+			// nil: `ember up` has one batch and no second caller, so the only
+			// way to stop it is Ctrl-C, which cancels the whole run. There is
+			// nothing for a per-request cancel to mean here.
+			return s.Generate(ctx, sink, run, runDir, nil)
 		})
 }
 
@@ -361,7 +378,48 @@ func orExited(ctx context.Context, p *serverProc, what string, fn func() error) 
 // one at a time costs nothing in throughput -- the generation context lock
 // serializes work on the device anyway -- and makes the TTL unreachable, the
 // 64-job pending cap irrelevant and queue_position moot.
-func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdserver.Run, runDir string, rate node.Rate) error {
+// ErrCancelled is a batch the operator stopped, as opposed to one that failed.
+//
+// A SENTINEL BECAUSE THE DIFFERENCE DECIDES WHETHER A RENTAL DIES. A failed
+// request stops the rental -- a batch whose premise an operator is about to
+// re-examine should not keep billing, and the requests behind it get a fresh
+// node. A cancelled one must not: the whole point of cancelling a job rather
+// than a rental is that the node, the server process and the resident weights
+// survive it, so the next queued request is served by the card that is
+// already warm. context.Canceled cannot carry that distinction, because it is
+// also what Ctrl-C and an expired deadline look like, and both of those DO
+// end the rental.
+var ErrCancelled = errors.New("cancelled while it was generating")
+
+// cancelSignal is the operator's stop, plus what the server will do about it.
+//
+// One value rather than two parameters so a caller cannot pass a channel and
+// forget the capability, which would silently mean "never ask the server" --
+// the quietest possible way for this whole path to do nothing. The zero value
+// is "no cancel is possible", which is what every caller that has nothing to
+// cancel gets by writing cancelSignal{}.
+type cancelSignal struct {
+	// on is closed when the operator asked for this batch to stop. nil is
+	// never closed, and a receive on a nil channel blocks forever, so a
+	// zero value needs no branch anywhere below.
+	on <-chan struct{}
+
+	// server is sdserver.Capabilities.CancelGenerating. See that field for
+	// why false does not refuse the cancel.
+	server bool
+}
+
+// asked reports whether the operator has asked, without blocking.
+func (s cancelSignal) asked() bool {
+	select {
+	case <-s.on:
+		return true
+	default:
+		return false
+	}
+}
+
+func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdserver.Run, runDir string, rate node.Rate, stop cancelSignal) error {
 	// Created here, because nothing else on this path does. The fetching
 	// paths get it from transfer.Fetch's own MkdirAll; a served run never
 	// calls Fetch, since the images arrive in the HTTP response rather than
@@ -379,6 +437,24 @@ func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdser
 	var spent node.MicroUSD
 	for i, j := range run.Jobs {
 		label := report.Label(report.UnitJob, i+1, len(run.Jobs))
+
+		// CHECKED BEFORE THE SUBMIT, which is where the money in a batch
+		// actually is. Stopping only the job in flight would leave the next
+		// one starting a second later on the same card -- the button would
+		// appear to work and the bill would not change, which is the "reads
+		// as working" defect this repository keeps finding. A cancelled
+		// request means every job of it that has not started, never starts.
+		if stop.asked() {
+			// No Unit, because no job is in flight to name: the cancel landed
+			// in the gap between one job finishing and the next starting.
+			// Index is how many finished, so Total-Index is what was dropped
+			// -- the same arithmetic as the in-flight event below, which is
+			// why there is one kind and not two.
+			sink.Emit(report.Event{
+				Kind: report.KindJobCancelled, Index: i, Total: len(run.Jobs),
+			})
+			return ErrCancelled
+		}
 		stem := j.Output
 		if stem == "" {
 			// Numbered from the position in the list, so a config that names
@@ -397,14 +473,35 @@ func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdser
 			return fmt.Errorf("%s: %w", label, err)
 		}
 
-		st, err := awaitJob(ctx, sink, c, id, i+1, len(run.Jobs), stem, root)
+		st, asked, err := awaitJob(ctx, sink, c, id, i+1, len(run.Jobs), stem, root, stop)
 		if err != nil {
 			return fmt.Errorf("%s: %w", label, err)
 		}
-		if st.Err != nil {
+		switch {
+		case asked && st.Status == sdserver.StatusCancelled:
+			// The expected end of a job ember asked to stop, AND IT HAS TO
+			// BE TESTED BEFORE st.Err, which the lab found and no fake had.
+			//
+			// A real cancelled job carries the server's own explanation in
+			// `error`: {"code":"cancelled","message":"job cancelled by
+			// client"}. With the refusal check first, every live cancel came
+			// back as `sd-server refused it: cancelled: job cancelled by
+			// client` -- a plain failure, not ErrCancelled -- so the queue
+			// would have read the operator's own cancel as a failed batch
+			// and DESTROYED THE RENTAL, taking every other request on it.
+			// The exact outcome the whole feature exists to avoid, reached
+			// by pressing the button it added. The fake answered a cancelled
+			// status with no error object, so the unit tests agreed with
+			// themselves; see testdata/job_cancelled.json.
+			//
+			// `asked` keeps the other meaning available: a server that
+			// cancelled a job nobody asked about has done something ember
+			// cannot account for, and filing that under "the operator
+			// pressed cancel" would record a request nobody stopped as
+			// cancelled.
+		case st.Err != nil:
 			return fmt.Errorf("%s: sd-server refused it: %w", label, st.Err)
-		}
-		if st.Status != sdserver.StatusCompleted {
+		case st.Status != sdserver.StatusCompleted:
 			return fmt.Errorf("%s: ended as %s", label, st.Status)
 		}
 
@@ -412,15 +509,24 @@ func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdser
 		if err != nil {
 			return fmt.Errorf("%s: %w", label, err)
 		}
-		wrote := make([]report.File, 0, len(w.Each))
-		for _, f := range w.Each {
-			wrote = append(wrote, report.File{Name: f.Name, Bytes: f.Bytes})
+		// WRITTEN AND REPORTED EVEN WHEN THE CANCEL LANDED, because a card
+		// that produced an image was paid for it whatever happened next. A
+		// job the server stopped mid-pass carries none, which is why the
+		// event is guarded on there being files rather than emitted flat:
+		// "0 file(s), 0 B" against a cancelled job reads as a job that
+		// finished and produced nothing. The job's step tally still reaches
+		// its row through the cost event below, which is unconditional.
+		if w.Files > 0 {
+			wrote := make([]report.File, 0, len(w.Each))
+			for _, f := range w.Each {
+				wrote = append(wrote, report.File{Name: f.Name, Bytes: f.Bytes})
+			}
+			sink.Emit(report.Event{
+				Kind: report.KindJobImages, Unit: report.UnitJob,
+				Index: i + 1, Total: len(run.Jobs),
+				Files: w.Files, Bytes: w.Bytes, Wrote: wrote,
+			})
 		}
-		sink.Emit(report.Event{
-			Kind: report.KindJobImages, Unit: report.UnitJob,
-			Index: i + 1, Total: len(run.Jobs),
-			Files: w.Files, Bytes: w.Bytes, Wrote: wrote,
-		})
 
 		// The accumulating price, the same reporting runSteps does and for the
 		// same reason: an operator watching a ten-job batch can stop paying
@@ -432,6 +538,15 @@ func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdser
 			Kind: report.KindUnitCost, Unit: report.UnitJob,
 			Index: i + 1, Total: len(run.Jobs), Cost: step, Spent: spent,
 		})
+
+		// AFTER the cost, not before: the card time this job spent is money
+		// the operator is billed for whether or not they stopped it, and a
+		// return that skipped it would make a cancelled batch look cheaper
+		// than it was -- the one direction a money figure must never be
+		// wrong in.
+		if asked {
+			return ErrCancelled
+		}
 	}
 	return nil
 }
@@ -447,13 +562,27 @@ func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdser
 // Each distinct frame is written over the last one rather than accumulating,
 // because the useful thing is a file an operator can leave open in a viewer
 // and not three hundred PNGs of a half-finished cat.
-func awaitJob(ctx context.Context, sink report.Sink, c sdserver.Client, id string, index, total int, stem string, root *os.Root) (sdserver.State, error) {
+// It reports whether ember asked for this job to stop, which is the one fact
+// its caller cannot work out for itself: the signal can be closed between two
+// polls, and a job that came back `cancelled` because ember asked is a
+// different outcome from one that came back `cancelled` on its own.
+func awaitJob(ctx context.Context, sink report.Sink, c sdserver.Client, id string, index, total int, stem string, root *os.Root, stop cancelSignal) (sdserver.State, bool, error) {
 	lastStep := -1
 	wait := jobPollMin
+	asked := false
+
+	// Set to nil once the ask has been made, so the select below stops waking
+	// on a channel that is closed and stays closed. A closed channel is
+	// permanently ready, so leaving it in would turn the poll loop into a
+	// spin at the exact moment ember is waiting for a card to finish -- and a
+	// nil channel is the standard way to say "never again" without a second
+	// flag that could disagree with the first.
+	pending := stop.on
+
 	for {
 		st, err := c.Poll(ctx, id)
 		if err != nil {
-			return sdserver.State{}, err
+			return sdserver.State{}, asked, err
 		}
 		if p := st.Preview; p != nil && p.Step != lastStep {
 			lastStep = p.Step
@@ -494,11 +623,66 @@ func awaitJob(ctx context.Context, sink report.Sink, c sdserver.Client, id strin
 			}
 		}
 		if st.Status.Done() {
-			return st, nil
+			return st, asked, nil
 		}
+
+		// THE ONE CALL THIS WHOLE PATH EXISTS FOR, made once per job and not
+		// once per poll: POST /jobs/{id}/cancel is idempotent as far as
+		// anyone knows, but asking repeatedly while the server works through
+		// a 141-second FLUX.2 step would be a request a second against the
+		// program ember is waiting for.
+		//
+		// Polling CONTINUES after the ask. The server's own answer is what
+		// decides the outcome -- it may come back `cancelled` with nothing,
+		// or `completed` because the last step finished while the request was
+		// in flight -- and ember records whichever happened rather than
+		// assuming. Status.Done() already treats cancelled as terminal,
+		// which is the half of this feature that was finished first.
+		if pending != nil && stop.asked() {
+			asked, pending = true, nil
+			switch {
+			case !stop.server:
+				// NOT A REFUSAL, and the reasoning is on
+				// Capabilities.CancelGenerating. ember does not ask a server
+				// that says it cannot, because the 404 or 400 that came back
+				// would be reported as a transport problem rather than as
+				// the capability it is -- but the jobs after this one are
+				// ember's to drop, and in a batch they are most of the bill.
+				// What is left is to be explicit about the part that keeps
+				// billing.
+				sink.Emit(report.Event{
+					Kind: report.KindJobCancelled, Unit: report.UnitJob,
+					Index: index, Total: total,
+					Err: "this sd-server build does not report features.cancel_generating",
+				})
+			default:
+				cerr := c.Cancel(ctx, id)
+				e := report.Event{
+					Kind: report.KindJobCancelled, Unit: report.UnitJob,
+					Index: index, Total: total,
+				}
+				if cerr != nil {
+					// Reported and not returned. The generation is still
+					// running on a card that is still billing, so abandoning
+					// the poll here would lose the image it is about to
+					// produce AND the record of what it cost -- turning a
+					// failed cancel into a worse outcome than no cancel at
+					// all.
+					e.Err = cerr.Error()
+				}
+				sink.Emit(e)
+			}
+		}
+
 		select {
 		case <-ctx.Done():
-			return sdserver.State{}, ctx.Err()
+			return sdserver.State{}, asked, ctx.Err()
+		case <-pending:
+			// Woken to ask at once rather than at the next poll. The backoff
+			// settles at two seconds, and a cancel that takes effect two
+			// seconds late is a cancel the operator presses again -- which
+			// is how a button that works comes to look like one that does
+			// not.
 		case <-time.After(wait):
 		}
 		wait = nextPoll(wait)

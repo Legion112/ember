@@ -53,7 +53,6 @@ import (
 	"github.com/Legion112/ember/internal/loopback"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
-	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 )
@@ -68,6 +67,24 @@ const DefaultPort uint16 = 7777
 // readHeaderTimeout bounds a client that opens a connection and says nothing.
 // gosec G112 asks for it; cmd/emberwl is the precedent.
 const readHeaderTimeout = 10 * time.Second
+
+// Drain is the drain loop as this package uses it.
+//
+// Three methods, all of which this package calls and none of which it
+// implements: there is one Queue in the program and this is the narrow view a
+// request handler needs of it. *queue.Queue satisfies it.
+type Drain interface {
+	// Kick says there may be work. Never blocks.
+	Kick()
+
+	// Running is which request is generating right now, if any.
+	Running() (genstore.ReqID, bool)
+
+	// Cancel stops one request's generation and reports whether it reached
+	// it. False means that request is not the one generating, which a caller
+	// must not report as "stopped" -- see cancelRequest.
+	Cancel(genstore.ReqID) bool
+}
 
 // Options are what a server needs.
 type Options struct {
@@ -84,8 +101,15 @@ type Options struct {
 	Blobs blob.Store
 
 	// Queue is kicked after an enqueue, so a pushed request starts without
-	// waiting for a poll.
-	Queue *queue.Queue
+	// waiting for a poll, and asked to stop one that is generating.
+	//
+	// AN INTERFACE RATHER THAN *queue.Queue, and the reason is the same one
+	// that put `scan` on the Server: the behaviour worth testing here is a
+	// decision about a request, and reaching the real drain loop would mean
+	// a handler test that rents something. A nil value is `ember serve`
+	// before the loop exists and every handler test; cmd_serve always
+	// supplies a real one, so there is no typed-nil hazard in production.
+	Queue Drain
 
 	// AllowPaid gates every provider that is not free. Checked here and again
 	// in the planner, because this is not the last statement before a create
@@ -473,14 +497,29 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {
 	s.ok(w, viewRequest(req, ims))
 }
 
-// cancelRequest stops a request that has not started.
+// cancelRequest stops a request, queued or generating.
 //
-// WHAT IT CANNOT DO, said plainly rather than implied: it does not stop a
-// generation that is already running. Doing that means cancelling the drain
-// loop's context, which destroys the node -- and a node destroyed mid-batch
-// takes every later request on that rental with it. A queued request is
-// cancelled here; a running one is stopped by stopping ember serve, which is
-// what Ctrl-C has always done.
+// IT USED TO REFUSE A RUNNING ONE, with a 409 whose stated reason was that
+// cancelling it "would mean destroying that node, which would take every
+// other request on the same rental with it". That was a true sentence about
+// cancelling a RENTAL and a false one about cancelling a JOB, and the
+// difference is the whole shape of the served path: sd-server's own
+// /jobs/{id}/cancel ends one generation and leaves the process, the node and
+// the resident weights exactly as they were. The mechanism existed the whole
+// time -- sdserver.Client.Cancel, written, covered, and called by nothing but
+// its own test -- so the refusal was protecting against a thing nobody had
+// built. queue.Cancel is what the old message was missing: a signal that ends
+// one batch without going near the drain loop's context.
+//
+// THE TWO CASES WRITE THE ROW IN DIFFERENT PLACES, deliberately.
+//
+// A queued request has no rental and nothing to tell, so it is terminal the
+// moment this handler says so. A running one is still generating when this
+// returns: the queue is polling sd-server for the job's own answer, and the
+// status it ends up with -- how far it got, whether the job in flight could be
+// stopped -- is the queue's to record when the batch returns. Writing
+// "cancelled" here as well would be a second writer for one row, racing the
+// one that actually knows, and the loser would overwrite the truth.
 func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 	id := genstore.ReqID(r.PathValue("id"))
 
@@ -489,14 +528,32 @@ func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 		s.failStore(w, err)
 		return
 	}
-	switch {
-	case req.Status.Terminal():
+	if req.Status.Terminal() {
 		s.fail(w, http.StatusConflict, fmt.Errorf("request %s already ended as %s", id, req.Status))
 		return
-	case req.Status == genstore.StatusRunning:
-		s.fail(w, http.StatusConflict, fmt.Errorf("request %s is generating on a rented node. "+
-			"Cancelling it would mean destroying that node, which would take every other request "+
-			"on the same rental with it; stop ember serve to end the rental", id))
+	}
+
+	if req.Status == genstore.StatusRunning {
+		if !s.cancelRunning(id) {
+			// Running in the row and not running in this process. That is
+			// what a restart leaves behind -- queue.Run's Interrupt sweep
+			// has not reached it yet -- or a row written by an ember that is
+			// gone. Reported rather than marked cancelled, for the reason
+			// `ember ls --all` exits non-zero on a provider it could not
+			// ask: "I could not stop it" and "it is stopped" are different
+			// answers, and the first one must not render as the second over
+			// a card that may still be billing.
+			s.fail(w, http.StatusConflict, fmt.Errorf("request %s is recorded as generating, "+
+				"but no rental in this process is generating it; restart ember serve to have "+
+				"the queue reconcile it", id))
+			return
+		}
+		// Still running when this returns -- see above. The status is the one
+		// the row currently holds, which is honest, and `cancelling` is what
+		// says a stop is on its way.
+		s.ok(w, map[string]any{
+			"id": string(id), "status": string(req.Status), "cancelling": true,
+		})
 		return
 	}
 
@@ -507,7 +564,28 @@ func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.ok(w, map[string]string{"id": string(id), "status": string(genstore.StatusCancelled)})
+	// AND THE SIGNAL TOO, although the row said queued. ClaimNext is one
+	// statement and it can run between the Get above and the Update that
+	// follows it, so a request read as queued may be generating by now --
+	// in which case the row this handler just wrote is about to be
+	// overwritten by the queue's own finish, and the batch would carry on.
+	// Signalling closes that window: if it landed, the generation stops and
+	// the queue records it; if it did not, there was nothing running and
+	// this is a no-op.
+	s.cancelRunning(id)
+	s.ok(w, map[string]any{"id": string(id), "status": string(genstore.StatusCancelled)})
+}
+
+// cancelRunning asks the drain loop to stop one request, tolerating no queue.
+//
+// A nil Queue is a handler test and `ember serve`'s own shape before the loop
+// starts; running() already treats it the same way, so the two cannot
+// disagree about whether there is a loop to talk to.
+func (s *Server) cancelRunning(id genstore.ReqID) bool {
+	if s.opts.Queue == nil {
+		return false
+	}
+	return s.opts.Queue.Cancel(id)
 }
 
 // getEvents replays from a cursor.

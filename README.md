@@ -1405,9 +1405,32 @@ Ctrl-C destroys any rental before the process exits, and says so. `ember serve`
 waits for the queue's goroutine as well as the HTTP server: a rental does not
 live in a request, so draining connections would say nothing about a node.
 
-Cancelling a **queued** request is a button. Cancelling one that is already
-generating is not: it would mean destroying the node, which would take every
-other request on the same rental with it. Stop `ember serve` to end a rental.
+Cancelling a request is a button whether it is **queued** or **generating**.
+`POST /api/requests/{id}/cancel` takes both.
+
+Cancelling a generating one stops its current image and drops the jobs behind
+it; the rental is left alone, so anything else queued onto it keeps running on
+the same warm card. That is the difference between cancelling a *job* and
+cancelling a *rental*: sd-server's own `POST /sdcpp/v1/jobs/{id}/cancel` ends
+one generation and leaves the process, the node and the resident weights
+exactly as they were. Stop `ember serve` to end the rental itself.
+
+The in-flight job is where it gets interesting, and the honest answer is not
+"always". ember stops it only if the server reported
+`features.cancel_generating`, read from `/capabilities` when the weights went
+resident. If it did not, ember **does not refuse the cancel** — it drops the
+request's remaining jobs, which on a batch is most of the money, leaves the
+one in flight to finish, and says so on the progress stream: *"job 3/8: cannot
+be stopped, so it will finish and be paid for (…); 5 job(s) after it were
+dropped"*. Refusing instead would leave an operator who is trying to stop
+spending with no lever but stopping `ember serve`, which destroys the rental
+and takes every other request on it.
+
+A cancel reaches **one** request. Cancelling a request that is not the one
+generating — a row left as running by a restart, say — answers 409 and records
+nothing: "I could not stop it" and "it is stopped" are different answers, and
+the first must not render as the second over a card that may still be
+billing.
 
 ### What it cost
 

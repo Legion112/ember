@@ -112,10 +112,11 @@ type wireModelStatus struct {
 
 // wireCapabilities is trimmed to what ember reads.
 //
-// The full response also carries defaults, output formats, features, loras,
-// upscalers and three by-mode variants of most of those. Copying them in would
-// be a second schema to keep current for no behaviour; what ember needs is
-// enough to refuse a job before a GPU has been asked to do anything with it.
+// The full response also carries defaults, loras and three by-mode variants of
+// most of what is here. Copying them in would be a second schema to keep
+// current for no behaviour; what ember needs is enough to refuse a job before a
+// GPU has been asked to do anything with it, and enough to know what it may ask
+// of a generation already in flight.
 type wireCapabilities struct {
 	// Model is an object and not a string, which is the first thing a real
 	// server corrected about these types. api.md lists `model` among the
@@ -141,6 +142,30 @@ type wireCapabilities struct {
 	// ember's.
 	OutputFormats []string       `json:"output_formats"`
 	Upscalers     []wireUpscaler `json:"upscalers"`
+
+	// Features is the server's own account of what it can be asked to do, as
+	// opposed to what a job may contain. ember reads one flag out of it; see
+	// wireFeatures.
+	Features wireFeatures `json:"features"`
+}
+
+// wireFeatures is the one feature flag ember acts on.
+//
+// There are eleven in a captured response -- cache, control_image, hires,
+// init_image, ip_adapter_image, lora, mask_image, preview, ref_images,
+// vae_tiling and the two cancels -- and all but one of them describe what a
+// *request body* may carry, which Validate already checks against the lists
+// beside them. `cancel_generating` is different in kind: it is the only one
+// that says what ember may ask of a generation that is already running and
+// already billing, so it is the only one that changes a decision here.
+//
+// `cancel_queued` is deliberately absent. sd-server's own queue is one job
+// deep by construction -- runJobs submits one at a time precisely so a
+// finished result cannot be purged by async_jobs' 600-second TTL -- so there
+// is never a queued job on the server for ember to cancel. Reading the flag
+// would be reading a capability for a state ember cannot produce.
+type wireFeatures struct {
+	CancelGenerating bool `json:"cancel_generating"`
 }
 
 // wireUpscaler is one entry of the hires upscaler list.

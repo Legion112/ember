@@ -156,6 +156,21 @@ type Capabilities struct {
 	// what keeps a name from being a path component ember chose to trust.
 	OutputFormats []string
 	Upscalers     []string
+
+	// CancelGenerating is features.cancel_generating: whether this build will
+	// stop a generation that is already running.
+	//
+	// IT DEFAULTS TO FALSE, AND FALSE IS THE EXPENSIVE ANSWER, which is the
+	// opposite of how every other field here is read -- an empty Samplers
+	// list refuses a job, because a refusal before a card is rented costs
+	// nothing. This one is consulted while a rented card is sampling and the
+	// operator has just asked ember to stop spending, so "the server did not
+	// report it" cannot be a refusal: refusing leaves the operator with no
+	// lever but stopping ember serve, which destroys the rental and takes
+	// every other request on it. ember drops the request's remaining jobs --
+	// which on a batch is most of the money -- leaves the one in flight to
+	// finish, and says plainly that it could not be stopped. See runJobs.
+	CancelGenerating bool
 }
 
 // APIError is the server's structured refusal.
@@ -296,12 +311,13 @@ func mapCapabilities(w wireCapabilities) Capabilities {
 		ups = append(ups, u.Name)
 	}
 	return Capabilities{
-		Model:         w.Model.Name,
-		Samplers:      append([]string(nil), w.Samplers...),
-		Schedulers:    append([]string(nil), w.Schedulers...),
-		PreviewModes:  append([]string(nil), w.PreviewModes...),
-		OutputFormats: append([]string(nil), w.OutputFormats...),
-		Upscalers:     ups,
+		Model:            w.Model.Name,
+		CancelGenerating: w.Features.CancelGenerating,
+		Samplers:         append([]string(nil), w.Samplers...),
+		Schedulers:       append([]string(nil), w.Schedulers...),
+		PreviewModes:     append([]string(nil), w.PreviewModes...),
+		OutputFormats:    append([]string(nil), w.OutputFormats...),
+		Upscalers:        ups,
 		Limits: Limits{
 			MinWidth:      w.Limits.MinWidth,
 			MaxWidth:      w.Limits.MaxWidth,

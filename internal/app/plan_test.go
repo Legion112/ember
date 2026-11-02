@@ -203,7 +203,7 @@ func TestServed_GenerateRefusesEveryBadJobBeforeGeneratingAnything(t *testing.T)
 	err := s.Generate(t.Context(), report.Discard, testRun(
 		sdserver.Job{Prompt: "fine", Sampler: "euler"},
 		sdserver.Job{Prompt: "typo", Sampler: "eular"},
-	), t.TempDir())
+	), t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("a sampler the server does not have was accepted")
 	}
@@ -232,7 +232,7 @@ func TestServed_GenerateRunsTheBatchAndReportsIt(t *testing.T) {
 	if err := s.Generate(t.Context(), events, testRun(
 		sdserver.Job{Prompt: "a cat", Output: "cat"},
 		sdserver.Job{Prompt: "a dog", Output: "dog"},
-	), dir); err != nil {
+	), dir, nil); err != nil {
 		t.Fatal(err)
 	}
 

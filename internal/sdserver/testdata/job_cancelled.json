@@ -1,0 +1,15 @@
+{
+  "cancel_requested": true,
+  "completed": 1793646878160,
+  "created": 1793646877390,
+  "error": {
+    "code": "cancelled",
+    "message": "job cancelled by client"
+  },
+  "id": "job_1a19daf5ace_00000000",
+  "kind": "img_gen",
+  "queue_position": 0,
+  "result": null,
+  "started": 1793646877390,
+  "status": "cancelled"
+}

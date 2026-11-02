@@ -13,7 +13,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,8 +57,36 @@ type fakeSD struct {
 	// report a list.
 	samplers []string
 
+	// cancelGenerating is features.cancel_generating.
+	cancelGenerating bool
+
+	// cancelFails makes POST /jobs/{id}/cancel answer 500, which is the ask
+	// failing while the generation carries on billing.
+	cancelFails bool
+
 	submitted []map[string]any
 	polled    map[string]int
+
+	// mu guards the three fields a cancel touches, because a cancel arrives
+	// on the goroutine that asked for it while the poll loop is reading.
+	mu sync.Mutex
+
+	// cancelled is the ids the server was asked to stop, and asking is what
+	// MAKES a job end as cancelled here.
+	//
+	// A FAKE THAT TOOK THE CANCEL AND THEN COMPLETED THE JOB ANYWAY would
+	// let ember's "it ended as cancelled because we asked" branch pass
+	// without the ask ever being made, which is the preview fake that never
+	// repeated a frame, one package over: a fake tidier than the thing it
+	// stands in for tests a program that does not exist.
+	cancelled []string
+}
+
+// cancels is the ids the server was asked to stop, in order.
+func (f *fakeSD) cancels() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cancelled...)
 }
 
 func newFakeSD(t *testing.T) *fakeSD {
@@ -90,6 +120,7 @@ func (f *fakeSD) handler() http.HandlerFunc {
 				"schedulers":    []string{"karras"},
 				"preview_modes": []string{"none", "proj"},
 				"limits":        map[string]any{"min_width": 64, "max_width": 2048},
+				"features":      map[string]any{"cancel_generating": f.cancelGenerating},
 			})
 			_, _ = w.Write(b)
 
@@ -104,13 +135,47 @@ func (f *fakeSD) handler() http.HandlerFunc {
 			_, _ = fmt.Fprintf(w, `{"id":%q,"kind":"img_gen","status":"queued"}`, id)
 
 		case strings.HasSuffix(r.URL.Path, "/cancel"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/sdcpp/v1/jobs/"), "/cancel")
+			if f.cancelFails {
+				// The ask failed and the generation is still running. ember
+				// must keep polling: abandoning here would lose the image the
+				// card is about to produce AND the record of what it cost.
+				w.WriteHeader(500)
+				return
+			}
+			f.mu.Lock()
+			f.cancelled = append(f.cancelled, id)
+			f.mu.Unlock()
 			_, _ = w.Write([]byte(`{}`))
 
 		case strings.HasPrefix(r.URL.Path, "/sdcpp/v1/jobs/"):
 			id := strings.TrimPrefix(r.URL.Path, "/sdcpp/v1/jobs/")
+			// Under the lock, because a cancel test reads the count from its
+			// own goroutine in order to know the job is actually being polled
+			// -- and before that there was one goroutine here and the map
+			// needed no guard.
+			f.mu.Lock()
 			f.polled[id]++
 			n := f.polled[id]
+			cancelled := slices.Contains(f.cancelled, id)
+			f.mu.Unlock()
 			switch {
+			// Asking is what makes it end as cancelled, which is what the
+			// real server does -- and it takes precedence over the step
+			// count, so a job that "never finishes" still ends when stopped.
+			case cancelled:
+				// WITH THE ERROR OBJECT, which is what a real server sends
+				// and what this fake did not, until the preview lab captured
+				// one: testdata/job_cancelled.json carries
+				// {"code":"cancelled","message":"job cancelled by client"}
+				// beside the status. Without it ember's refusal check read
+				// every live cancel as "sd-server refused it", the queue read
+				// that as a failed batch, and the rental was destroyed --
+				// taking every other request on it. A fake tidier than the
+				// thing it stands in for tests a program that does not exist,
+				// and this one cost a rental.
+				_, _ = fmt.Fprintf(w, `{"id":%q,"status":"cancelled","cancel_requested":true,`+
+					`"error":{"code":"cancelled","message":"job cancelled by client"}}`, id)
 			case n < f.pollsBeforeDone:
 				// The same frame is returned to two consecutive polls before
 				// the step advances, which is what a real server does: a
@@ -190,7 +255,7 @@ func TestRunJobs_CollectsEveryImageAndPricesEachJob(t *testing.T) {
 	)
 
 	var out strings.Builder
-	if err := runJobs(t.Context(), report.Text(&out), c, run, dir, node.Rate(2_000_000)); err != nil {
+	if err := runJobs(t.Context(), report.Text(&out), c, run, dir, node.Rate(2_000_000), cancelSignal{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -245,7 +310,7 @@ func TestRunJobs_SubmitsOneJobAtATime(t *testing.T) {
 		sdserver.Job{Prompt: "two", Output: "b"},
 		sdserver.Job{Prompt: "three", Output: "c"},
 	)
-	if err := runJobs(t.Context(), report.Discard, c, run, filepath.Join(t.TempDir(), "r"), 0); err != nil {
+	if err := runJobs(t.Context(), report.Discard, c, run, filepath.Join(t.TempDir(), "r"), 0, cancelSignal{}); err != nil {
 		t.Fatal(err)
 	}
 	if submittedWhenFirstPolled != 1 {
@@ -267,7 +332,7 @@ func TestRunJobs_NumbersAJobThatNamesNothing(t *testing.T) {
 
 	if err := runJobs(t.Context(), report.Discard, c, testRun(
 		sdserver.Job{Prompt: "a"}, sdserver.Job{Prompt: "b"},
-	), dir, 0); err != nil {
+	), dir, 0, cancelSignal{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"001-00.png", "002-00.png"} {
@@ -289,7 +354,7 @@ func TestRunJobs_KeepsOnlyTheLatestPreviewFrame(t *testing.T) {
 
 	if err := runJobs(t.Context(), report.Discard, c, testRun(
 		sdserver.Job{Prompt: "a cat", Output: "cat"},
-	), dir, 0); err != nil {
+	), dir, 0, cancelSignal{}); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -328,7 +393,7 @@ func TestRunJobs_ReportsEachDistinctStepOnce(t *testing.T) {
 	var out strings.Builder
 	if err := runJobs(t.Context(), report.Text(&out), c, testRun(
 		sdserver.Job{Prompt: "a cat", Output: "cat"},
-	), filepath.Join(t.TempDir(), "r"), 0); err != nil {
+	), filepath.Join(t.TempDir(), "r"), 0, cancelSignal{}); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
@@ -352,7 +417,7 @@ func TestRunJobs_StopsAtAFailedJobAndSaysWhatTheServerSaid(t *testing.T) {
 	err := runJobs(t.Context(), report.Discard, c, testRun(
 		sdserver.Job{Prompt: "a", Output: "a"},
 		sdserver.Job{Prompt: "b", Output: "b"},
-	), filepath.Join(t.TempDir(), "r"), 0)
+	), filepath.Join(t.TempDir(), "r"), 0, cancelSignal{})
 	if err == nil {
 		t.Fatal("want an error")
 	}
@@ -378,7 +443,7 @@ func TestRunJobs_ACancelledJobIsNotASuccess(t *testing.T) {
 	c, _ := f.start(t)
 
 	err := runJobs(t.Context(), report.Discard, c, testRun(sdserver.Job{Prompt: "a"}),
-		filepath.Join(t.TempDir(), "r"), 0)
+		filepath.Join(t.TempDir(), "r"), 0, cancelSignal{})
 	if err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("err = %v, want it to name the status", err)
 	}
@@ -394,7 +459,7 @@ func TestRunJobs_ReportsAnUnusableOutputDirectory(t *testing.T) {
 	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := runJobs(t.Context(), report.Discard, c, testRun(sdserver.Job{Prompt: "a"}), blocked, 0)
+	err := runJobs(t.Context(), report.Discard, c, testRun(sdserver.Job{Prompt: "a"}), blocked, 0, cancelSignal{})
 	if err == nil {
 		t.Fatal("want an error")
 	}
@@ -411,7 +476,7 @@ func TestRunJobs_ReportsASubmissionFailure(t *testing.T) {
 	c := sdserver.Client{HTTP: httpx.Client{BaseURL: s.URL, HTTP: s.Client()}}
 
 	err := runJobs(t.Context(), report.Discard, c, testRun(sdserver.Job{Prompt: "a"}),
-		filepath.Join(t.TempDir(), "r"), 0)
+		filepath.Join(t.TempDir(), "r"), 0, cancelSignal{})
 	if err == nil || !strings.Contains(err.Error(), "job 1/1") {
 		t.Fatalf("err = %v, want the job named", err)
 	}
@@ -433,7 +498,7 @@ func TestRunJobs_ReportsAPollFailure(t *testing.T) {
 	c := sdserver.Client{HTTP: httpx.Client{BaseURL: s.URL, HTTP: s.Client()}}
 
 	err := runJobs(t.Context(), report.Discard, c, testRun(sdserver.Job{Prompt: "a"}),
-		filepath.Join(t.TempDir(), "r"), 0)
+		filepath.Join(t.TempDir(), "r"), 0, cancelSignal{})
 	if err == nil || !strings.Contains(err.Error(), "job 1/1") {
 		t.Fatalf("err = %v, want the job named", err)
 	}
@@ -455,7 +520,7 @@ func TestAwaitJob_StopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		_, err := awaitJob(ctx, report.Discard, c, "j", 1, 1, "a", root)
+		_, _, err := awaitJob(ctx, report.Discard, c, "j", 1, 1, "a", root, cancelSignal{})
 		done <- err
 	}()
 	cancel()
@@ -900,7 +965,7 @@ func TestRunJobs_TheProgressEventNamesTheFrameItWrote(t *testing.T) {
 	var rec recordingSink
 	if err := runJobs(t.Context(), &rec, c, testRun(
 		sdserver.Job{Prompt: "a cat", Output: "cat"},
-	), dir, 0); err != nil {
+	), dir, 0, cancelSignal{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -937,3 +1002,393 @@ func TestRunJobs_TheProgressEventNamesTheFrameItWrote(t *testing.T) {
 type recordingSink struct{ events []report.Event }
 
 func (r *recordingSink) Emit(e report.Event) { r.events = append(r.events, e) }
+
+// --- cancel ---
+
+// TestRunJobs_CancelStopsTheJobInFlightAndDropsTheRest is the whole feature.
+//
+// sdserver.Client.Cancel was written, covered by its own package's tests, and
+// called by NOTHING -- "a feature built end to end and never connected passes
+// every test it has", for the second time in this repository. This is the
+// join: the operator's stop reaches the server, and the jobs behind it never
+// start.
+//
+// BOTH HALVES ARE ASSERTED, and the second is the one with the money in it. A
+// cancel that only stopped the job in flight would let job 2 of 3 begin a
+// second later on the same card: the button would look like it worked and the
+// bill would not change, which is the "reads as working" defect that keeps
+// turning up here.
+func TestRunJobs_CancelStopsTheJobInFlightAndDropsTheRest(t *testing.T) {
+	shrinkPoll(t)
+	f := newFakeSD(t)
+	f.pollsBeforeDone = 1 << 20 // sampling, and would never finish on its own
+	c, _ := f.start(t)
+
+	stop := make(chan struct{})
+	var rec recordingSink
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runJobs(t.Context(), &rec, c, testRun(
+			sdserver.Job{Prompt: "a", Output: "a"},
+			sdserver.Job{Prompt: "b", Output: "b"},
+			sdserver.Job{Prompt: "c", Output: "c"},
+		), filepath.Join(t.TempDir(), "r"), node.Rate(2_000_000),
+			cancelSignal{on: stop, server: true})
+	}()
+
+	// Wait until the first job is actually being polled, so the cancel lands
+	// mid-generation rather than before anything started -- which is the
+	// other test below.
+	waitFor(t, func() bool { return f.polls("job-1") > 0 })
+	close(stop)
+
+	err := <-errc
+	if !errors.Is(err, ErrCancelled) {
+		t.Fatalf("err = %v, want ErrCancelled: a cancelled batch is not a failed one, and "+
+			"the queue reads that difference to decide whether the rental dies", err)
+	}
+	if got := f.cancels(); len(got) != 1 || got[0] != "job-1" {
+		t.Errorf("cancels = %v, want exactly job-1 asked once", got)
+	}
+	if len(f.submitted) != 1 {
+		t.Errorf("%d job(s) were submitted, want 1: the two behind it are the money", len(f.submitted))
+	}
+
+	e := findEvent(t, rec.events, report.KindJobCancelled)
+	if e.Err != "" {
+		t.Errorf("error = %q, want empty: the server took the ask", e.Err)
+	}
+	if e.Index != 1 || e.Total != 3 {
+		t.Errorf("index/total = %d/%d, want 1/3 so a reader can say 2 were dropped", e.Index, e.Total)
+	}
+	if e.Unit != report.UnitJob {
+		t.Errorf("unit = %q, want %q: a job was in flight", e.Unit, report.UnitJob)
+	}
+
+	// The card time it spent is still reported. A return that skipped the
+	// cost would make a cancelled batch look cheaper than it was, which is
+	// the one direction a money figure must never be wrong in.
+	cost := findEvent(t, rec.events, report.KindUnitCost)
+	if cost.Index != 1 {
+		t.Errorf("cost event is for job %d, want 1", cost.Index)
+	}
+}
+
+// A cancel that lands between two jobs stops the batch and names no job.
+//
+// Index is then the count that FINISHED, because "job 1/3" over a job whose
+// image is already on disk would name the one thing that was not cancelled.
+func TestRunJobs_CancelBetweenJobsDropsTheRestAndNamesNoJob(t *testing.T) {
+	shrinkPoll(t)
+	f := newFakeSD(t)
+	c, _ := f.start(t)
+	dir := filepath.Join(t.TempDir(), "r")
+
+	// Closed before the second job can start, by cancelling as soon as the
+	// first job's images have been written.
+	stop := make(chan struct{})
+	var rec recordingSink
+	gate := &gateSink{sink: &rec, on: report.KindJobImages, fire: func() { close(stop) }}
+
+	err := runJobs(t.Context(), gate, c, testRun(
+		sdserver.Job{Prompt: "a", Output: "a"},
+		sdserver.Job{Prompt: "b", Output: "b"},
+		sdserver.Job{Prompt: "c", Output: "c"},
+	), dir, 0, cancelSignal{on: stop, server: true})
+	if !errors.Is(err, ErrCancelled) {
+		t.Fatalf("err = %v, want ErrCancelled", err)
+	}
+
+	// The first job's image survives: it was produced and paid for.
+	if _, serr := os.Stat(filepath.Join(dir, "a-00.png")); serr != nil {
+		t.Errorf("job 1's image is missing although it completed: %v", serr)
+	}
+	if len(f.submitted) != 1 {
+		t.Errorf("%d job(s) submitted, want 1", len(f.submitted))
+	}
+	if got := f.cancels(); len(got) != 0 {
+		t.Errorf("cancels = %v, want none: nothing was in flight to stop", got)
+	}
+
+	e := findEvent(t, rec.events, report.KindJobCancelled)
+	if e.Unit != "" {
+		t.Errorf("unit = %q, want empty: no job was in flight", e.Unit)
+	}
+	if e.Index != 1 || e.Total != 3 {
+		t.Errorf("index/total = %d/%d, want 1/3 -- one finished, two dropped", e.Index, e.Total)
+	}
+}
+
+// A server that does not report cancel_generating is NOT ASKED, and NOT A
+// REFUSAL EITHER.
+//
+// "Fail loudly rather than skip quietly" points at refusing, and refusing is
+// the wrong answer here: the operator has just asked ember to stop spending,
+// and a 409 leaves them with no lever but stopping ember serve -- which
+// destroys the rental and takes every other request on it. ember cannot stop
+// the job in flight, and it can drop the two behind it, which on a batch is
+// most of the money. So it does the part it can and SAYS what it could not,
+// which is where the loudness belongs.
+func TestRunJobs_CancelWithoutTheCapabilityDropsTheRestAndSaysWhatItCannotStop(t *testing.T) {
+	shrinkPoll(t)
+	f := newFakeSD(t)
+	f.pollsBeforeDone = 4
+	c, _ := f.start(t)
+
+	stop := make(chan struct{})
+	var out strings.Builder
+	rec := &recordingSink{}
+	both := &teeSink{a: report.Text(&out), b: rec}
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runJobs(t.Context(), both, c, testRun(
+			sdserver.Job{Prompt: "a", Output: "a"},
+			sdserver.Job{Prompt: "b", Output: "b"},
+			sdserver.Job{Prompt: "c", Output: "c"},
+		), filepath.Join(t.TempDir(), "r"), 0,
+			// server: false -- the build did not report the flag.
+			cancelSignal{on: stop, server: false})
+	}()
+
+	waitFor(t, func() bool { return f.polls("job-1") > 0 })
+	close(stop)
+
+	if err := <-errc; !errors.Is(err, ErrCancelled) {
+		t.Fatalf("err = %v, want ErrCancelled: the cancel was honoured as far as it could be", err)
+	}
+	if got := f.cancels(); len(got) != 0 {
+		t.Errorf("cancels = %v, want none: a server that says it cannot would answer 404 and "+
+			"ember would report a transport problem instead of a capability", got)
+	}
+	if len(f.submitted) != 1 {
+		t.Errorf("%d job(s) submitted, want 1: the ones behind it are ember's to drop", len(f.submitted))
+	}
+
+	e := findEvent(t, rec.events, report.KindJobCancelled)
+	if !strings.Contains(e.Err, "cancel_generating") {
+		t.Errorf("error = %q, want it to name the missing capability", e.Err)
+	}
+	// And it is said in terms of what it costs, not of what the server lacks.
+	if got := out.String(); !strings.Contains(got, "will finish and be paid for") {
+		t.Errorf("output does not say the in-flight job keeps billing:\n%s", got)
+	}
+}
+
+// An ask the server refused is reported and the poll carries on.
+//
+// Abandoning here would be worse than not cancelling at all: the generation
+// is still running on a card that is still billing, so ember would lose the
+// image it is about to produce AND the record of what it cost.
+func TestRunJobs_AnAskTheServerRefusedIsReportedAndThePollCarriesOn(t *testing.T) {
+	shrinkPoll(t)
+	f := newFakeSD(t)
+	f.pollsBeforeDone = 4
+	f.cancelFails = true
+	c, _ := f.start(t)
+	dir := filepath.Join(t.TempDir(), "r")
+
+	stop := make(chan struct{})
+	var rec recordingSink
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runJobs(t.Context(), &rec, c, testRun(
+			sdserver.Job{Prompt: "a", Output: "a"},
+			sdserver.Job{Prompt: "b", Output: "b"},
+		), dir, 0, cancelSignal{on: stop, server: true})
+	}()
+
+	waitFor(t, func() bool { return f.polls("job-1") > 0 })
+	close(stop)
+
+	if err := <-errc; !errors.Is(err, ErrCancelled) {
+		t.Fatalf("err = %v, want ErrCancelled", err)
+	}
+	// The image the card had already paid for arrived anyway.
+	if _, serr := os.Stat(filepath.Join(dir, "a-00.png")); serr != nil {
+		t.Errorf("the in-flight job's image was lost when the cancel failed: %v", serr)
+	}
+	e := findEvent(t, rec.events, report.KindJobCancelled)
+	if e.Err == "" {
+		t.Error("the failed ask was not reported, so the operator thinks it stopped")
+	}
+}
+
+// Asking twice is asking once.
+//
+// A closed channel is permanently ready, so a loop that re-read it would ask
+// every poll -- a request a second against the program ember is waiting for,
+// on a 141-second FLUX.2 step.
+func TestAwaitJob_AsksToCancelOnceAndNotOncePerPoll(t *testing.T) {
+	shrinkPoll(t)
+	f := newFakeSD(t)
+	// Never ends on its own, and the fake's cancel branch is what ends it --
+	// so if the ask were repeated it would have to happen before the next
+	// poll reads it, which is why the count is checked as well as the end.
+	f.pollsBeforeDone = 1 << 20
+	c, _ := f.start(t)
+
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	stop := make(chan struct{})
+	close(stop) // already asked before the first poll
+	st, asked, err := awaitJob(t.Context(), report.Discard, c, "job-1", 1, 1, "a", root,
+		cancelSignal{on: stop, server: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !asked {
+		t.Error("awaitJob did not report that ember asked, so runJobs would read the " +
+			"cancelled status as an unexplained failure")
+	}
+	if st.Status != sdserver.StatusCancelled {
+		t.Errorf("status = %v, want cancelled", st.Status)
+	}
+	if got := f.cancels(); len(got) != 1 {
+		t.Errorf("asked %d time(s), want once", len(got))
+	}
+}
+
+// A job the SERVER cancelled with nobody asking is still an error.
+//
+// This is what the `asked` return is for. Without it, a server that cancelled
+// a job of its own accord -- or because something else on the node asked --
+// would be filed under "the operator pressed cancel", and a request nobody
+// stopped would be recorded as cancelled rather than as the thing ember could
+// not account for.
+func TestRunJobs_AJobTheServerCancelledWithNobodyAskingIsAFailure(t *testing.T) {
+	shrinkPoll(t)
+	f := newFakeSD(t)
+	f.cancelJob = true
+	c, _ := f.start(t)
+
+	err := runJobs(t.Context(), report.Discard, c, testRun(sdserver.Job{Prompt: "a"}),
+		filepath.Join(t.TempDir(), "r"), 0, cancelSignal{on: make(chan struct{}), server: true})
+	if err == nil || errors.Is(err, ErrCancelled) {
+		t.Fatalf("err = %v, want a plain failure naming the status", err)
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("err = %v, want it to name the status", err)
+	}
+}
+
+// served.Generate joins the capability to the signal, and nothing above it has
+// to know it did.
+//
+// The drain loop knows which request the operator stopped and has no business
+// knowing what the server build can do; this is the one place that holds
+// both. A Generate that dropped the capability on the floor would silently
+// never ask the server -- the quietest possible way for this whole path to do
+// nothing.
+// CAPS COME OFF THE WIRE AND ARE NOT WRITTEN BY HAND, which is the half the
+// first version of this test missed. With CancelGenerating set in a literal
+// here, unmapping features.cancel_generating in internal/sdserver left this
+// test green: the two components agreed with themselves and nothing crossed
+// the gap between them -- the same closed loop the unrecorded preview frame
+// sat in. Reading the live /capabilities response is what makes this a check
+// that the flag TRAVELS.
+func TestServed_GenerateAsksTheServerWhenItSaysItCan(t *testing.T) {
+	shrinkPoll(t)
+	f := newFakeSD(t)
+	f.pollsBeforeDone = 1 << 20
+	f.cancelGenerating = true
+	c, _ := f.start(t)
+	caps, err := c.Capabilities(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !caps.CancelGenerating {
+		t.Fatal("the server reported cancel_generating and it did not reach Capabilities")
+	}
+	s := served{client: c, caps: caps}
+
+	stop := make(chan struct{})
+	errc := make(chan error, 1)
+	go func() {
+		errc <- s.Generate(t.Context(), report.Discard,
+			testRun(sdserver.Job{Prompt: "a", Output: "a"}), t.TempDir(), stop)
+	}()
+	waitFor(t, func() bool { return f.polls("job-1") > 0 })
+	close(stop)
+
+	if err := <-errc; !errors.Is(err, ErrCancelled) {
+		t.Fatalf("err = %v, want ErrCancelled", err)
+	}
+	if got := f.cancels(); len(got) != 1 {
+		t.Errorf("cancels = %v, want the capability to have reached the ask", got)
+	}
+}
+
+// --- helpers for the cancel tests ---
+
+// polls is how many times one job has been asked about.
+func (f *fakeSD) polls(id string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.polled[id]
+}
+
+// waitFor spins until cond holds, failing rather than hanging.
+//
+// A condition and not a sleep: the thing being waited for is "the first job is
+// being polled", and a fixed sleep would be a guess about how fast an
+// httptest server is that is wrong on a loaded CI runner in the direction
+// that makes the test flaky.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("the condition never held")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// findEvent is the one event of a kind, failing when there is not exactly one.
+//
+// Exactly one, because "asked once and not once per poll" is a property of
+// this feature and a helper that returned the first would hide its violation.
+func findEvent(t *testing.T, es []report.Event, k report.Kind) report.Event {
+	t.Helper()
+	var found []report.Event
+	for _, e := range es {
+		if e.Kind == k {
+			found = append(found, e)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d %s event(s), want exactly 1", len(found), k)
+	}
+	return found[0]
+}
+
+// gateSink fires once when a kind goes past, then forwards everything.
+//
+// It exists so a cancel can be made to land in the gap BETWEEN two jobs,
+// which is a window a sleep cannot aim at.
+type gateSink struct {
+	sink report.Sink
+	on   report.Kind
+	fire func()
+	once bool
+}
+
+func (g *gateSink) Emit(e report.Event) {
+	g.sink.Emit(e)
+	if !g.once && e.Kind == g.on {
+		g.once = true
+		g.fire()
+	}
+}
+
+// teeSink sends every event to both.
+type teeSink struct{ a, b report.Sink }
+
+func (t *teeSink) Emit(e report.Event) {
+	t.a.Emit(e)
+	t.b.Emit(e)
+}

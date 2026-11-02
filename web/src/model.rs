@@ -452,12 +452,18 @@ impl Request {
 
     /// Whether the cancel button does anything.
     ///
-    /// Only a queued request. Cancelling one that is generating would mean
-    /// destroying its node, which takes every other request on the same
-    /// rental with it -- so the button is absent rather than present and
-    /// refused.
+    /// Queued OR generating, and the second half is the correction. The
+    /// button used to be absent for a running request because cancelling one
+    /// was believed to mean destroying its node and taking every other
+    /// request on the same rental with it. That is true of cancelling a
+    /// rental and was never true of cancelling a job: sd-server stops one
+    /// generation and the process, the node and the resident weights carry
+    /// on. So the condition is "anything that has not ended" -- which is
+    /// `!is_terminal()`, written as the negation rather than as a list of the
+    /// two live statuses, because a status added later is one the server will
+    /// answer about and a list here would silently leave it unstoppable.
     pub fn is_cancellable(&self) -> bool {
-        self.status == "queued"
+        !self.is_terminal()
     }
 
     /// The results, without the progress frames.
@@ -561,6 +567,20 @@ pub struct JobProgress {
     pub files: i32,
     pub bytes: i64,
     pub done: bool,
+
+    /// Set when the operator cancelled this request while this job was
+    /// sampling, and holding the reason the job could not be stopped when
+    /// there was one.
+    ///
+    /// SEPARATE FROM `done`, because the two answer different questions and
+    /// the row has to show both. `done` means images arrived; a cancelled job
+    /// usually has none, and marking it done would print "0 file(s)" over a
+    /// job that was stopped. Leaving it neither done nor cancelled is worse:
+    /// the row keeps its last step for ever, which is the frozen-progress
+    /// defect the plain map in views.rs exists to prevent, reached from the
+    /// other direction.
+    pub cancelled: bool,
+    pub cancel_error: String,
 }
 
 /// What a watcher has folded out of the event stream.
@@ -588,6 +608,15 @@ pub struct Progress {
 
     /// Lines the node itself wrote, newest last.
     pub log: Vec<String>,
+
+    /// How many jobs of this request were dropped because it was cancelled.
+    ///
+    /// ON THE REQUEST AND NOT ON A ROW, because the dropped jobs have no rows
+    /// -- they never started, so no unit_started ever named them. A watcher
+    /// that only marked the in-flight job would show one cancelled row above
+    /// nothing at all, and the question the operator pressed the button to
+    /// answer is how many of the ten are still coming.
+    pub dropped: i32,
 
     pub failure: String,
 }
@@ -651,6 +680,19 @@ impl Progress {
             "unit_cost" => {
                 self.spent = e.spent_micro_usd;
             }
+            "job_cancelled" => {
+                // An EMPTY unit means no job was in flight -- the cancel
+                // landed between two jobs -- and `index` is then the count
+                // that finished rather than a job number. Folding that into
+                // a row would mark the last COMPLETED job as cancelled,
+                // which is the one row on screen that is not.
+                if e.unit == "job" {
+                    let j = self.job_mut(e.index, e.total);
+                    j.cancelled = true;
+                    j.cancel_error = e.error.clone();
+                }
+                self.dropped = (e.total - e.index).max(0);
+            }
             "run_cost" => {
                 self.rental_cost = e.cost_micro_usd;
                 self.node = e.node.clone();
@@ -676,6 +718,26 @@ impl Progress {
         self.jobs.sort_by_key(|j| j.index);
         let pos = self.jobs.iter().position(|j| j.index == index).unwrap();
         &mut self.jobs[pos]
+    }
+
+    /// The jobs that still have a progress frame coming.
+    ///
+    /// `!cancelled` AS WELL AS `!done`, which is the half a cancel adds: a
+    /// stopped job will never produce another frame, so without it the last
+    /// half-sampled latent sits on screen under the caption "in progress"
+    /// for the rest of the rental -- a picture that reads as a generation
+    /// still running on a card nobody is paying for any more.
+    ///
+    /// A method rather than a closure in the view, because this is a
+    /// decision and the view is a layout: a predicate inside the Gallery
+    /// component can only be checked by a browser, and this one can be
+    /// checked here.
+    pub fn sampling(&self) -> Vec<JobProgress> {
+        self.jobs
+            .iter()
+            .filter(|j| !j.done && !j.cancelled && j.step > 0)
+            .cloned()
+            .collect()
     }
 
     /// The whole log as one string, for a `<pre>`.
@@ -837,6 +899,122 @@ mod tests {
         assert!(p.failure.is_empty());
     }
 
+    /// A cancel marks the job it reached and says how many never started.
+    ///
+    /// The drop count is the half an operator pressed the button for: the
+    /// jobs that will not run have no rows, because no `unit_started` ever
+    /// named them, so a watcher that only marked the in-flight job would show
+    /// one cancelled row and nothing about the other seven.
+    #[test]
+    fn a_cancel_marks_the_job_it_reached_and_counts_what_was_dropped() {
+        let mut p = Progress::default();
+
+        let mut started = ev(1, "unit_started");
+        started.unit = "job".into();
+        started.index = 3;
+        started.total = 8;
+        p.apply(&started);
+
+        let mut cancelled = ev(2, "job_cancelled");
+        cancelled.unit = "job".into();
+        cancelled.index = 3;
+        cancelled.total = 8;
+        p.apply(&cancelled);
+
+        assert_eq!(p.jobs.len(), 1);
+        assert!(p.jobs[0].cancelled);
+        assert!(p.jobs[0].cancel_error.is_empty());
+        assert!(!p.jobs[0].done, "a stopped job produced no images");
+        assert_eq!(p.dropped, 5);
+    }
+
+    /// A cancel the server could not honour says what it will still cost.
+    ///
+    /// `error` set means the generation is still running on a card that is
+    /// still billing, and the row has to say so rather than reading as
+    /// stopped -- which is the whole reason there is one kind with an error
+    /// field instead of two kinds a reader could handle one of.
+    #[test]
+    fn a_cancel_that_could_not_be_honoured_keeps_its_reason() {
+        let mut p = Progress::default();
+
+        let mut cancelled = ev(1, "job_cancelled");
+        cancelled.unit = "job".into();
+        cancelled.index = 1;
+        cancelled.total = 2;
+        cancelled.error = "this sd-server build does not report features.cancel_generating".into();
+        p.apply(&cancelled);
+
+        assert!(p.jobs[0].cancelled);
+        assert!(p.jobs[0].cancel_error.contains("cancel_generating"));
+        assert_eq!(p.dropped, 1);
+    }
+
+    /// A cancel with no unit belongs to no row.
+    ///
+    /// It lands in the gap between one job finishing and the next starting,
+    /// and `index` is then the count that FINISHED. Folding it into a row
+    /// would mark the last completed job -- the one whose image is in the
+    /// gallery -- as cancelled.
+    #[test]
+    fn a_cancel_between_jobs_marks_no_row() {
+        let mut p = Progress::default();
+
+        let mut images = ev(1, "job_images");
+        images.unit = "job".into();
+        images.index = 2;
+        images.total = 5;
+        images.files = 1;
+        p.apply(&images);
+
+        let mut cancelled = ev(2, "job_cancelled");
+        cancelled.index = 2;
+        cancelled.total = 5;
+        p.apply(&cancelled);
+
+        assert_eq!(p.jobs.len(), 1);
+        assert!(p.jobs[0].done);
+        assert!(
+            !p.jobs[0].cancelled,
+            "job 2 completed; it was not cancelled"
+        );
+        assert_eq!(p.dropped, 3);
+    }
+
+    /// A stopped job has no frame coming, so its last latent leaves the
+    /// screen.
+    ///
+    /// Without the `!cancelled` half of `sampling`, the half-sampled preview
+    /// of the job that was cancelled stays up under "in progress" for the
+    /// rest of the rental -- a picture of a generation that is not happening,
+    /// which is the preview caption defect in a different place.
+    #[test]
+    fn a_cancelled_job_has_no_frame_coming() {
+        let mut p = Progress::default();
+
+        let mut prog = ev(1, "job_progress");
+        prog.unit = "job".into();
+        prog.index = 1;
+        prog.total = 2;
+        prog.step = 3;
+        prog.total_steps = 20;
+        p.apply(&prog);
+
+        // Mid-sampling: the frame is what the operator is watching.
+        assert_eq!(p.sampling().len(), 1);
+
+        let mut cancelled = ev(2, "job_cancelled");
+        cancelled.unit = "job".into();
+        cancelled.index = 1;
+        cancelled.total = 2;
+        p.apply(&cancelled);
+
+        assert!(
+            p.sampling().is_empty(),
+            "a cancelled job still offers a progress frame, so a stale latent stays on screen"
+        );
+    }
+
     /// "destroy failed; the node may still be running and billing" is the one
     /// line an operator must not miss, so it is kept where the UI can shout.
     #[test]
@@ -966,13 +1144,16 @@ mod tests {
         assert!(queued.is_cancellable());
         assert!(!queued.is_terminal());
 
-        // Cancelling a running one would mean destroying its node, which
-        // takes every other request on the same rental with it.
+        // A RUNNING ONE IS CANCELLABLE TOO, which this test asserted the
+        // opposite of. The old reason -- that it would destroy the node and
+        // take every other request on the rental -- was true of cancelling a
+        // rental and false of cancelling a job, which is what
+        // `POST /sdcpp/v1/jobs/{id}/cancel` does.
         let running = Request {
             status: "running".into(),
             ..Default::default()
         };
-        assert!(!running.is_cancellable());
+        assert!(running.is_cancellable());
         assert!(!running.is_terminal());
 
         for s in ["done", "failed", "cancelled", "interrupted"] {
