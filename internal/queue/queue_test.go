@@ -1034,20 +1034,20 @@ func TestRun_SurvivesAStoreThatCannotMarkInterruptedRequests(t *testing.T) {
 }
 
 // TestQueue_UsesItsInjectedCollaborators, so a recorded timestamp is
-// comparable and the node's own output goes where the caller said.
+// comparable.
+//
+// It used to assert on an injected Out as well. There is no Out: the field and
+// its accessor were the ninth instance of AGENTS.md's written-covered-and-
+// connected-to-nothing defect, and these two assertions were the only thing
+// that ever read it.
 func TestQueue_UsesItsInjectedCollaborators(t *testing.T) {
 	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	var buf strings.Builder
 	q := &Queue{
 		Now: func() time.Time { return at },
-		Out: &buf,
 		Log: slog.New(slog.DiscardHandler),
 	}
 	if !q.at().Equal(at) {
 		t.Errorf("at() = %v, want the injected %v", q.at(), at)
-	}
-	if q.out() != &buf {
-		t.Error("out() is not the injected writer")
 	}
 	if q.log() == nil {
 		t.Error("log() is nil")

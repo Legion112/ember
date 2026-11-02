@@ -363,9 +363,6 @@ func TestQueue_DefaultsAreUsable(t *testing.T) {
 	if q.at().IsZero() {
 		t.Error("at() returned the zero time")
 	}
-	if q.out() == nil {
-		t.Error("out() is nil")
-	}
 }
 
 // TestAppPlanner_CarriesTheLogLevelIntoARental.

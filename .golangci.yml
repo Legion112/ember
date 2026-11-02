@@ -31,6 +31,27 @@ linters:
     - govet
     - ineffassign
     - staticcheck
+    # unused finds a declaration nothing references. It cannot find a
+    # declaration only *tests* reference, which is the defect AGENTS.md has
+    # counted nine times -- and it cannot be configured to, which was checked
+    # before cmd/check-coverage's TestNoProductionDeadCode was written rather
+    # than assumed:
+    #
+    #   - golangci-lint v2.15.0's schema accepts exactly
+    #     exported-fields-are-used, parameters-are-used,
+    #     local-variables-are-used, field-writes-are-uses,
+    #     post-statements-are-reads and generated-is-used. staticcheck's
+    #     `whole-program` and `check-exported` are refused outright.
+    #   - The only lever is the global `run.tests: false`, which is not a
+    #     setting on this linter: it stops *every* linter looking at test
+    #     files, and the exclusions below are scoped to `_test.go` precisely
+    #     because they are looked at. Run that way on a clean tree it reported
+    #     one symbol, `(*Queue).out`, which is also the one the real detector
+    #     found -- because `unused` reports only unexported identifiers in a
+    #     non-main package, and five of the nine instances were exported.
+    #
+    # So the two are complementary and both stay: this one reads reachability
+    # within a package, the guard reads it across the production/test line.
     - unused
     # The three beyond the usual set, each earning its place in this project:
     # gosec because ember handles private keys and opens sockets; bodyclose

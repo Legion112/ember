@@ -31,7 +31,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"path/filepath"
 	"sync"
@@ -88,10 +87,13 @@ type Queue struct {
 	// moment two of them used the same output stem.
 	Outputs string
 
-	// Out carries byte streams from the node -- the server's own stdout, a
-	// failing model load's complaint. ember's structured progress does not go
-	// here; it goes to the store and to whoever is watching.
-	Out io.Writer
+	// Out is deliberately absent. The node's byte streams reach the operator
+	// through AppPlanner.Out, which is the writer app.NewPlan is handed --
+	// and a second copy on the Queue was set by `ember serve`, read by an
+	// accessor nothing but two tests called, and therefore carried nothing
+	// for the life of the field. It is the ninth instance of the defect
+	// cmd/check-coverage's TestNoProductionDeadCode now reports, and the
+	// first one a detector found rather than a person.
 
 	Log *slog.Logger
 	Now func() time.Time
@@ -145,13 +147,6 @@ func (q *Queue) at() time.Time {
 // sdserver.WriteImages opens an os.Root over it.
 func (q *Queue) dirOf(id genstore.ReqID) string {
 	return filepath.Join(q.Outputs, string(id))
-}
-
-func (q *Queue) out() io.Writer {
-	if q.Out != nil {
-		return q.Out
-	}
-	return io.Discard
 }
 
 func (q *Queue) kicks() chan struct{} {
