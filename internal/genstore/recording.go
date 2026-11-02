@@ -134,7 +134,7 @@ func (s *RecordingStore) List(_ context.Context, f Filter) ([]Request, error) {
 	var out []Request
 	for _, id := range s.order {
 		r := s.reqs[id]
-		if f.Status != "" && r.Status != f.Status {
+		if !f.matches(*r) {
 			continue
 		}
 		out = append(out, clone(*r))
@@ -512,7 +512,10 @@ func (s *RecordingStore) Spend(_ context.Context, q SpendQuery) ([]Bucket, error
 				recorded++
 			}
 		}
-		if recorded == 0 {
+		// The same three conditions unrecorded applies, spelled against the
+		// values this store has: a request that has not finished is not
+		// missing anything.
+		if !r.Ended.IsZero() && len(r.Jobs) > 0 && recorded == 0 {
 			b.Unrecorded++
 		}
 	}
@@ -525,6 +528,111 @@ func (s *RecordingStore) Spend(_ context.Context, q SpendQuery) ([]Bucket, error
 	out := make([]Bucket, 0, len(keys))
 	for _, k := range keys {
 		out = append(out, *byKey[k])
+	}
+	return out, nil
+}
+
+// matches is the fake's half of filterWhere.
+//
+// A second implementation of the same predicate, which is normally the thing
+// to avoid and here is the point: TestRecordingAgreesWithSQLite drives both
+// stores through the same sequence and compares, and a fake that delegated to
+// the SQL could not disagree with it. The danger it guards against is the one
+// the conformance table already caught once in the other direction -- a fake
+// stricter than the store it stands in for grows callers a branch for an error
+// nothing returns.
+func (f Filter) matches(r Request) bool {
+	if f.Status != "" && r.Status != f.Status {
+		return false
+	}
+	// Half-open, as clauses.period is: Since includes, Until excludes.
+	if !f.Since.IsZero() && r.Created.Before(f.Since) {
+		return false
+	}
+	if !f.Until.IsZero() && !r.Created.Before(f.Until) {
+		return false
+	}
+	if f.Provider != "" && r.Provider != f.Provider {
+		return false
+	}
+	if f.GPU != "" && r.GPU != f.GPU {
+		return false
+	}
+	return true
+}
+
+// History returns the ledger, newest first.
+func (s *RecordingStore) History(_ context.Context, f Filter) ([]Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("History", string(f.Status)); err != nil {
+		return nil, err
+	}
+	if f.Status != "" && !f.Status.Valid() {
+		return nil, fmt.Errorf("status %q is not one ember writes", f.Status)
+	}
+
+	// Which rentals somebody else paid for, so a request that rode along can
+	// be told from one whose cost never arrived. Billable as well as cost
+	// because a free rental's cost is legitimately zero.
+	paid := map[string]ReqID{}
+	for _, id := range s.order {
+		r := s.reqs[id]
+		if r.RunID != "" && (r.Cost > 0 || r.Billable > 0) {
+			paid[r.RunID] = id
+		}
+	}
+
+	var out []Entry
+	for _, id := range s.order {
+		r, ok := s.reqs[id]
+		if !ok || !f.matches(*r) {
+			continue
+		}
+
+		e := Entry{
+			ID: r.ID, Created: r.Created, Status: r.Status,
+			Provider: r.Provider, GPU: r.GPU,
+			RunID: r.RunID, Node: r.Node,
+			Started: r.Started, Ended: r.Ended,
+			Cost: r.Cost, Rate: r.Rate,
+			Elapsed: r.Elapsed, Billable: r.Billable,
+			Jobs: len(r.Jobs),
+			Err:  r.Err,
+		}
+		if opener, ok := paid[r.RunID]; ok && opener != r.ID {
+			e.Rode = true
+		}
+
+		runs := s.runsOf(id)
+		recorded := 0
+		for i := 1; i <= len(r.Jobs); i++ {
+			j := runs[i]
+			if j == nil {
+				continue
+			}
+			e.Images += j.Images
+			e.Bytes += j.Bytes
+			e.JobCost += j.Cost
+			e.Steps += j.Steps
+			e.Sampling += j.Sampling()
+			if !j.Ended.IsZero() {
+				recorded++
+			}
+		}
+		e.Unrecorded = unrecorded(unixOrZero(r.Ended), e.Jobs, int64(recorded))
+		out = append(out, e)
+	}
+
+	// Newest first, as the SQL one orders.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Created.After(out[j].Created) })
+
+	limit := f.Limit
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }

@@ -187,9 +187,10 @@ func printSpend(out io.Writer, rows []genstore.Bucket, group genstore.GroupBy) {
 		// the division is over a smaller denominator than the money paid
 		// for. A figure that is wrong in the expensive direction and does
 		// not say so is worse than one that is missing.
-		outf(out, "%d request(s) ran before ember recorded per-job figures, so they contribute\n"+
-			"their rental cost and none of their images: per image is an upper bound here,\n"+
-			"and steps/s is computed only over what was recorded. Nothing backfills them.\n", skipped)
+		outf(out, "%d request(s) contribute their rental cost and no per-job figures -- they ran\n"+
+			"before ember recorded them, or finished without a job completing. So per image\n"+
+			"is an upper bound here, and steps/s is computed only over what was recorded.\n"+
+			"Nothing backfills them.\n", skipped)
 	}
 }
 

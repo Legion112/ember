@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Legion112/ember/internal/node"
@@ -183,20 +184,11 @@ func (s *SQLite) Spend(ctx context.Context, q SpendQuery) ([]Bucket, error) {
 		       COALESCE(SUM(j.cost), 0),
 		       COALESCE(SUM(j.steps), 0),
 		       COALESCE(SUM(j.span), 0),
-		       SUM(CASE WHEN COALESCE(j.recorded, 0) = 0 THEN 1 ELSE 0 END)
+		       SUM(CASE WHEN r.ended_unix != 0 AND COALESCE(j.n, 0) > 0
+		                     AND COALESCE(j.recorded, 0) = 0
+		                THEN 1 ELSE 0 END)
 		FROM requests r
-		LEFT JOIN (
-			SELECT req,
-			       COUNT(*) AS n,
-			       SUM(images) AS images,
-			       SUM(bytes) AS bytes,
-			       SUM(cost) AS cost,
-			       SUM(steps_done) AS steps,
-			       SUM(CASE WHEN started_unix > 0 AND ended_unix >= started_unix
-			                THEN (ended_unix - started_unix) * 1000000 ELSE 0 END) AS span,
-			       SUM(CASE WHEN ended_unix > 0 THEN 1 ELSE 0 END) AS recorded
-			FROM jobs GROUP BY req
-		) j ON j.req = r.id
+		LEFT JOIN (` + jobSideByRequest + `) j ON j.req = r.id
 		` + where + `
 		GROUP BY k
 		ORDER BY k`
@@ -240,6 +232,76 @@ func (s *SQLite) Spend(ctx context.Context, q SpendQuery) ([]Bucket, error) {
 	return out, rows.Err()
 }
 
+// jobSideByRequest rolls a request's jobs up to one row, named once because
+// two readers join against it.
+//
+// Spend sums these sums across a group and History reports them per request,
+// and the two must agree about what "images" and "card time" mean -- a second
+// spelling here is how `ember spend` and `ember history` end up disagreeing
+// about one run, with nothing to say which is right. Same rule as the journal
+// subdirectory that was a literal in two places until a lab read the wrong
+// directory and asserted nothing.
+//
+// span is milliseconds times 1000000 because started_unix and ended_unix are
+// UnixMilli and every duration above the store is a time.Duration.
+//
+// recorded counts jobs that reported finishing, which is what tells a row
+// whose per-job figures are zero because the work produced nothing from one
+// that ran before these columns existed.
+const jobSideByRequest = `
+	SELECT req,
+	       COUNT(*) AS n,
+	       SUM(images) AS images,
+	       SUM(bytes) AS bytes,
+	       SUM(cost) AS cost,
+	       SUM(steps_done) AS steps,
+	       SUM(CASE WHEN started_unix > 0 AND ended_unix >= started_unix
+	                THEN (ended_unix - started_unix) * 1000000 ELSE 0 END) AS span,
+	       SUM(CASE WHEN ended_unix > 0 THEN 1 ELSE 0 END) AS recorded
+	FROM jobs GROUP BY req`
+
+// clauses accumulates WHERE text and the parameters that go with it.
+//
+// It exists so the half-open period rule has ONE spelling. Two readers bound a
+// period -- the aggregate and the ledger -- and "Since includes, Until
+// excludes" written twice is the rule that drifts, which would put a request
+// in both of two consecutive periods or in neither. Every value goes in args
+// as a `?`; nothing a caller typed is ever concatenated.
+type clauses struct {
+	parts []string
+	args  []any
+}
+
+// eq adds `col = ?` unless the value is the empty string, which means "any".
+func (c *clauses) eq(col, v string) {
+	if v == "" {
+		return
+	}
+	c.parts = append(c.parts, col+" = ?")
+	c.args = append(c.args, v)
+}
+
+// period bounds r.created_unix, half-open. A zero bound is unbounded at that
+// end, which is what "what has ember ever cost" asks for.
+func (c *clauses) period(since, until time.Time) {
+	if !since.IsZero() {
+		c.parts = append(c.parts, "r.created_unix >= ?")
+		c.args = append(c.args, since.UnixMilli())
+	}
+	if !until.IsZero() {
+		c.parts = append(c.parts, "r.created_unix < ?")
+		c.args = append(c.args, until.UnixMilli())
+	}
+}
+
+// sql is the clause text, empty when nothing was added.
+func (c *clauses) sql() string {
+	if len(c.parts) == 0 {
+		return ""
+	}
+	return "WHERE " + strings.Join(c.parts, " AND ")
+}
+
 // groupExpr is the SELECT expression for a grouping, and whether it names
 // anything.
 //
@@ -272,24 +334,7 @@ func groupExpr(g GroupBy) (expr string, named bool) {
 // tile without a request landing in both. A zero bound is unbounded at that
 // end, which is what "what has ember ever cost" asks.
 func spendWhere(q SpendQuery) (string, []any) {
-	var (
-		clauses []string
-		args    []any
-	)
-	if !q.Since.IsZero() {
-		clauses = append(clauses, "r.created_unix >= ?")
-		args = append(args, q.Since.UnixMilli())
-	}
-	if !q.Until.IsZero() {
-		clauses = append(clauses, "r.created_unix < ?")
-		args = append(args, q.Until.UnixMilli())
-	}
-	if len(clauses) == 0 {
-		return "", nil
-	}
-	w := "WHERE " + clauses[0]
-	for _, c := range clauses[1:] {
-		w += " AND " + c
-	}
-	return w, args
+	var c clauses
+	c.period(q.Since, q.Until)
+	return c.sql(), c.args
 }
