@@ -2,6 +2,8 @@ package node
 
 import (
 	"math"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,6 +32,16 @@ func TestParseUSD_DoesNotRoundTripThroughFloat(t *testing.T) {
 		// publish 0.4290000000000001 after a float round-trip of their own,
 		// and refusing those would hide real offers.
 		{"0.4290000000000001", 429000},
+		// Space on either side of the dollar sign. " $1.00" worked and
+		// "$ 1.00" did not, which is a distinction nothing could justify in a
+		// field an operator types by hand.
+		{"$ 1.50", 1500000},
+		{"$\t1.50", 1500000},
+		// A fraction of nothing but zeros is zero, which is a figure an
+		// operator may legitimately write: zero means no ceiling. It is the
+		// boundary of the refusal below, and the reason that refusal asks
+		// whether truncation discarded a *non-zero* digit.
+		{"0.0000000", 0},
 	} {
 		got, err := ParseUSD(tc.in)
 		if err != nil {
@@ -45,6 +57,37 @@ func TestParseUSD_Refuses(t *testing.T) {
 	for _, in := range []string{"", " ", "-1", "-0.5", "abc", "1.2.3", "1,5", "1.", "$", "1e5", "99999999999999999999"} {
 		if got, err := ParseUSD(in); err == nil {
 			t.Errorf("ParseUSD(%q) = %d, want an error", in, got)
+		}
+	}
+}
+
+// TestParseUSD_RefusesBelowOneMicrodollar. Every digit of "0.0000001" is past
+// the sixth, so the seventh-digit truncation threw away the entire value and
+// returned zero with a nil error -- and zero is not "a very small price"
+// anywhere in ember. Budget.Allow guards on MaxRate > 0 and Filter.Match on
+// MaxPrice > 0, so a ceiling typed in the wrong unit silently became no
+// ceiling at all, on the one field whose job is to stop a run that costs too
+// much.
+func TestParseUSD_RefusesBelowOneMicrodollar(t *testing.T) {
+	for _, in := range []string{"0.0000001", "0.0000009", "0.000000499", "$0.0000001", "0." + strings.Repeat("0", 40) + "7"} {
+		if got, err := ParseUSD(in); err == nil {
+			t.Errorf("ParseUSD(%q) = %d, want an error: a positive price that reads as zero reads as no ceiling", in, got)
+		}
+	}
+}
+
+// TestParseUSD_ErrorsQuoteWhatWasTyped. The errors used to quote the trimmed
+// copy, so `max_hourly_usd: "$1,000"` reported `malformed price "1,000"` -- a
+// string the operator never wrote, with the one character that explains
+// nothing removed and the one that caused it left in.
+func TestParseUSD_ErrorsQuoteWhatWasTyped(t *testing.T) {
+	for _, in := range []string{"$1,000", "$abc", "$-1", "$0.0000001"} {
+		_, err := ParseUSD(in)
+		if err == nil {
+			t.Fatalf("ParseUSD(%q) was accepted", in)
+		}
+		if !strings.Contains(err.Error(), strconv.Quote(in)) {
+			t.Errorf("ParseUSD(%q) error %q does not quote the string as typed", in, err)
 		}
 	}
 }
