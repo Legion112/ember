@@ -86,6 +86,19 @@ const (
 	// KindNodeReady is a node that is usable.
 	KindNodeReady Kind = "node_ready"
 
+	// KindNodeMemory is what the node says about its memory, both views, on
+	// every rental.
+	//
+	// IT EXISTS FOR 81 SECONDS AND $0.056 PER IMAGE NOBODY COULD EXPLAIN.
+	// Two runs of the same configuration against the same card in the same
+	// datacentre differed by that much, depending on whether the node kept
+	// 56 GiB of weights in page cache -- and all eight nodes reported
+	// 620-708 GiB of free RAM, because `free` inside a container reports the
+	// HOST's memory and not the limit the container is bounded by. The
+	// figures are recorded rather than printed, because a number printed once
+	// into a terminal is not evidence.
+	KindNodeMemory Kind = "node_memory"
+
 	// KindRunCost is what the whole rental came to, reported after the node
 	// is destroyed.
 	KindRunCost Kind = "run_cost"
@@ -106,7 +119,7 @@ func Kinds() []Kind {
 		KindLog, KindServerStarting, KindModelResident,
 		KindUnitStarted, KindJobProgress, KindJobImages, KindUnitCost,
 		KindPreviewFailed,
-		KindNodeReady, KindRunCost, KindDestroyFailed,
+		KindNodeReady, KindNodeMemory, KindRunCost, KindDestroyFailed,
 		KindRunFinished, KindRunFailed,
 	}
 }
@@ -201,6 +214,30 @@ type Event struct {
 	// operator that short runs are nearly free.
 	Elapsed  time.Duration `json:"elapsed_ns,omitempty"`
 	Billable time.Duration `json:"billable_ns,omitempty"`
+
+	// MemLimit and MemCurrent are the node's own cgroup memory limit and
+	// usage; MemTotal and MemCached are the host's, as /proc/meminfo reports
+	// them inside a container.
+	//
+	// ALL FOUR, BECAUSE THE WHOLE POINT IS THAT THEY DISAGREE and only one of
+	// them bounds the page cache. Recording the one ember currently believes
+	// would be the load_elapsed_seconds mistake a second time: a single
+	// figure, believed, that was wrong by two orders of magnitude. A zero
+	// means "not reported", which is why internal/nodemem has methods for the
+	// derived answers rather than storing them.
+	//
+	// MemLimit zero means there is no cgroup limit at all, not a limit of
+	// nothing: cgroup v2 writes the literal "max" and v1 a sentinel near the
+	// top of int64, and both come through as zero.
+	MemLimit   int64 `json:"mem_limit_bytes,omitempty"`
+	MemCurrent int64 `json:"mem_current_bytes,omitempty"`
+	MemTotal   int64 `json:"mem_total_bytes,omitempty"`
+	MemCached  int64 `json:"mem_cached_bytes,omitempty"`
+
+	// MemCgroup is which hierarchy MemLimit came from: 2, 1, or 0 when
+	// neither could be read. Kept because the numbers are diagnostic and the
+	// first question about a surprising one is where it came from.
+	MemCgroup int `json:"mem_cgroup,omitempty"`
 
 	// Err is a failure, as a string, because an event is data that crosses a
 	// wire and gets stored.

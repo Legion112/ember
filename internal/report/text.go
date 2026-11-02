@@ -82,6 +82,22 @@ func render(e Event) string {
 		return fmt.Sprintf("%s: could not write the preview frame: %s\n",
 			Label(e.Unit, e.Index, e.Total), e.Err)
 
+	case KindNodeMemory:
+		// PRINTED, unlike the other lifecycle kinds, because the thing it
+		// answers is a question an operator asks while the run is happening:
+		// can this node hold the weights, or will every step re-read them off
+		// the store. The slog handler does not report it -- nothing did
+		// before this kind existed -- so there is no second spelling to drift
+		// from.
+		//
+		// Bytes rather than a verdict. What to DO about a node that cannot
+		// hold the model is a decision to make once there are measurements,
+		// and a line that said "this will be slow" would be that decision
+		// taken from a guess.
+		return fmt.Sprintf("node memory: %s limit %s, using %s; host reports %s total, %s cached; weights are %s\n",
+			cgroupName(e.MemCgroup), limitName(e.MemLimit), HumanBytes(e.MemCurrent),
+			HumanBytes(e.MemTotal), HumanBytes(e.MemCached), HumanBytes(e.Bytes))
+
 	case KindNodeReady, KindRunCost, KindDestroyFailed, KindRunFinished, KindRunFailed:
 		// Deliberately silent. The CLI already reports all five through its
 		// slog handler, and test/integration/lifecycle_test.go greps for the
@@ -92,4 +108,28 @@ func render(e Event) string {
 		return ""
 	}
 	return ""
+}
+
+// cgroupName names the hierarchy a memory limit came from.
+//
+// Here and not on the event, because this is the one spelling of a line and
+// the event carries the number rather than the sentence -- the rule that
+// keeps "every line lives in exactly one place" true.
+func cgroupName(version int) string {
+	if version <= 0 {
+		return "unreadable"
+	}
+	return fmt.Sprintf("cgroup v%d", version)
+}
+
+// limitName is a memory limit, where zero means there is not one.
+//
+// "none" and not "0 B", because a limit of zero bytes would be a container
+// that cannot allocate anything -- the opposite of what an unset limit means,
+// and the direction that would make an unbounded node look like the problem.
+func limitName(n int64) string {
+	if n <= 0 {
+		return "none"
+	}
+	return HumanBytes(n)
 }

@@ -64,6 +64,21 @@ var renderings = map[Kind]struct {
 		want:  "job 1/2: could not write the preview frame: disk full\n",
 	},
 
+	// Both views of memory, in bytes, with no verdict: what to do about a
+	// node that cannot hold the weights is a decision to take once there are
+	// measurements, and a line saying "this will be slow" would be that
+	// decision taken from a guess.
+	KindNodeMemory: {
+		event: Event{
+			Kind: KindNodeMemory, MemCgroup: 2,
+			MemLimit: 64 << 30, MemCurrent: 12 << 30,
+			MemTotal: 700 << 30, MemCached: 48 << 30,
+			Bytes: 56 << 30,
+		},
+		want: "node memory: cgroup v2 limit 64.0 GiB, using 12.0 GiB; " +
+			"host reports 700.0 GiB total, 48.0 GiB cached; weights are 56.0 GiB\n",
+	},
+
 	// Silent on purpose: the CLI reports all five through slog, and
 	// lifecycle_test.go greps for the slog spelling of "node ready".
 	KindNodeReady:     {event: Event{Kind: KindNodeReady, Node: "local/abc"}, want: ""},
@@ -71,6 +86,38 @@ var renderings = map[Kind]struct {
 	KindDestroyFailed: {event: Event{Kind: KindDestroyFailed, Err: "boom"}, want: ""},
 	KindRunFinished:   {event: Event{Kind: KindRunFinished}, want: ""},
 	KindRunFailed:     {event: Event{Kind: KindRunFailed, Err: "boom"}, want: ""},
+}
+
+// A node with no cgroup limit says "none" rather than "0 B".
+//
+// A limit of zero bytes would be a container that cannot allocate anything,
+// which is the opposite claim -- and the direction that would make an
+// unbounded node look like the problem. Its own test rather than a second
+// entry in the table above, because that table is keyed by Kind and a second
+// row for one kind would have to invent a key that is not one.
+func TestText_ANodeWithNoMemoryLimitSaysSo(t *testing.T) {
+	var buf bytes.Buffer
+	Text(&buf).Emit(Event{
+		Kind: KindNodeMemory, MemCgroup: 1,
+		MemTotal: 700 << 30, Bytes: 56 << 30,
+	})
+	want := "node memory: cgroup v1 limit none, using 0 B; " +
+		"host reports 700.0 GiB total, 0 B cached; weights are 56.0 GiB\n"
+	if got := buf.String(); got != want {
+		t.Errorf("rendered %q, want %q", got, want)
+	}
+}
+
+// And a node that answered nothing at all names the hierarchy as unreadable
+// rather than printing "cgroup v0".
+func TestText_ANodeThatAnsweredNothingSaysThatToo(t *testing.T) {
+	var buf bytes.Buffer
+	Text(&buf).Emit(Event{Kind: KindNodeMemory})
+	want := "node memory: unreadable limit none, using 0 B; " +
+		"host reports 0 B total, 0 B cached; weights are 0 B\n"
+	if got := buf.String(); got != want {
+		t.Errorf("rendered %q, want %q", got, want)
+	}
 }
 
 func TestText_RendersEachKindExactly(t *testing.T) {
@@ -151,7 +198,8 @@ func kindByName(t *testing.T, name string) Kind {
 		"KindModelResident": KindModelResident, "KindUnitStarted": KindUnitStarted,
 		"KindJobProgress": KindJobProgress, "KindJobImages": KindJobImages,
 		"KindUnitCost": KindUnitCost, "KindPreviewFailed": KindPreviewFailed,
-		"KindNodeReady": KindNodeReady, "KindRunCost": KindRunCost,
+		"KindNodeReady": KindNodeReady, "KindNodeMemory": KindNodeMemory,
+		"KindRunCost":       KindRunCost,
 		"KindDestroyFailed": KindDestroyFailed,
 		"KindRunFinished":   KindRunFinished, "KindRunFailed": KindRunFailed,
 	}

@@ -398,6 +398,18 @@ func (q *Queue) lifecycle(opener genstore.ReqID) report.Sink {
 			q.set(opener, func(r *genstore.Request) {
 				r.LoadMeasured, r.LoadReported = e.Measured, e.Reported
 			})
+		case report.KindNodeMemory:
+			// To the opener, like the rest of the rental's own facts: the
+			// memory limit is the NODE's, and every request that rode along
+			// ran under the same one. Writing it to each would be the same
+			// multiplication that attributing the whole rental's cost to
+			// every request would be.
+			q.set(opener, func(r *genstore.Request) {
+				r.MemCgroup = e.MemCgroup
+				r.MemLimit, r.MemCurrent = e.MemLimit, e.MemCurrent
+				r.MemTotal, r.MemCached = e.MemTotal, e.MemCached
+				r.AssetBytes = e.Bytes
+			})
 		}
 		// Flushed at once: these arrive from a deferred teardown, and a
 		// buffered destroy_failed is a buffer nobody will drain.

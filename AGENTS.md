@@ -713,6 +713,80 @@ that sentence made unrepresentable rather than merely tested.
   queued request still claimable, because a reader that had claimed it would
   leave the queue drained and a request "running" against a rental nothing
   holds.
+- **"All eight nodes reported 620-708 GiB free RAM" was the wrong number, and
+  it is withdrawn as evidence.** `/proc/meminfo` inside a container reports the
+  HOST's memory. Measured here with `docker run --memory 512m`: a container
+  bounded at **512 MiB** reports **125.7 GiB** of `MemTotal`, a factor of 252.
+  So the figure that looked like it ruled memory out of the unexplained 81
+  seconds per image was reading a number that cannot answer the question --
+  what bounds the page cache is the container's own `memory.max`, and nothing
+  had ever read it. The guess is unharmed and is now testable on the next
+  rental rather than on the next rental somebody remembers to type a command
+  during. What is still unknown is what RunPod sets: these captures are
+  Docker's defaults on one host, and `internal/nodemem/testdata/README.md` says
+  so rather than letting them read as an answer.
+- **The probe is ember's code and not the operator's `gpu_probe` string.**
+  #30 asked for the existing node-side probe to be extended, and the existing
+  one is a shell command in `ember.yaml` -- so extending it would have meant
+  every operator editing their config, and the values would have been
+  *printed* rather than recorded. A figure printed once into a terminal is not
+  evidence, which is the whole complaint the issue opens with.
+- **It reads and cannot fail a run.** Four file reads and a `stat` of the
+  weights, with every failure logged at warn and swallowed: a node that will
+  not answer them is a node whose generation should still happen. This is
+  deliberately NOT the shape of `gpucheck`, which destroys a node over a dead
+  card -- that one guards money already committed, and this one is a
+  diagnostic nothing yet acts on. A probe that could refuse would be a
+  diagnostic with the authority of a safety check.
+- **No verdict, and that is the issue's own instruction.** What to do about a
+  node that cannot hold the weights -- a warning naming the expected re-read
+  cost per step, or a corrected note if the guess turns out wrong -- is a
+  decision to take once there are measurements. `ember history --memory`
+  prints bytes and one subtraction; a column saying "this will be slow" would
+  be that decision taken from a guess, which is the `allowedCudaVersions`
+  mistake with better manners.
+- **Zero is "no limit" and a dash is "nobody read it", and conflating them
+  makes a slow node look fine.** cgroup v2 writes the literal `max` and v1 a
+  sentinel near the top of int64, so both come through as zero -- and
+  `mem_cgroup` is what says whether anything was read at all. `Limit()` then
+  falls back to the host's total rather than reading zero as a container that
+  cannot allocate anything, which is the opposite claim. Found by a test:
+  cutting the probe's output before trimming it meant a file that was readable
+  and EMPTY became indistinguishable from one that was not there.
+- **The v1 paths are named rather than derived from `/proc/self/cgroup`.** A
+  guess at where a hierarchy is mounted reports "no limit" on the one kernel it
+  is wrong about, and "no limit" is the answer that makes a node look fine.
+  Same direction as `Caps.PublicSSH` defaulting to the stricter check.
+- **The asset paths are arguments to `sh -c`, never script text.** A remote
+  command is argv and every word is quoted, so a path interpolated into the
+  script body would be shell text assembled from a config file -- the
+  injection `sshx.Quote` exists to prevent, reached from inside a script
+  instead of from a command line. As positional parameters they cannot be
+  anything but paths. The asset figure is a `stat` of the weights THIS run
+  names rather than a `du` of the mount, because a store holds other runs'
+  models and the question is whether this one fits.
+- **`Probe`'s first version had a branch nothing could reach**, and coverage
+  found it: it tested `err != nil` and then `res.ExitCode != 0`, but
+  `workload.Run` returns an error for a non-zero exit as well as for a
+  transport failure -- so the diagnostic carrying the node's own complaint
+  could never print. The two are told apart by the code, as `gpucheck.Wait`
+  does it.
+- **`human` is signed now, because one caller's figure is legitimately
+  negative.** A node that could not hold the weights has negative headroom,
+  and that is the interesting row -- it rendered as `-25769803776 B`,
+  unreadable in exactly the line an operator is looking for. Found by printing
+  it. The magnitude is taken in `uint64` so `math.MinInt64` cannot recurse
+  through a `"-" + human(-n)` that would not terminate.
+- **The headroom is a column and not a line of prose per row.** The first
+  version printed one sentence per request under the table, which over a
+  default page of two hundred is two hundred lines after it. Found by printing
+  it, as the `ember store ls` plural was.
+- **What #30 asks for and this change cannot do.** Its last done-when is
+  "`AGENTS.md:530-553` is amended with what the next rental actually showed".
+  No rental has happened, so what is amended above is what a *container*
+  showed -- which settles the mechanism and withdraws the misleading figure,
+  and does not settle what RunPod sets. That line stays open until somebody
+  rents a card, and it is now one command rather than a procedure.
 - **`max_hourly_usd` bounds a card, `max_run_usd` bounds a rental, and
   nothing bounded a sequence of them.** `ember serve` is the first thing here
   that can produce a sequence without the operator being at the keyboard for
@@ -902,11 +976,21 @@ A leaked node bills by the hour in silence. These are not style preferences.
   because every step re-read the whole model off the store at a measured
   868 MiB/s. That is 81s and $0.056 per image of variance between two runs of
   the same configuration against the same card in the same datacentre, and
-  what causes it is **not known** -- all eight nodes reported 620-708 GiB free
-  RAM, and the caching run was the last of the three rather than the first.
-  The leading guess is the pod's memory cgroup limit rather than host RAM,
-  since `free` in a container reports the host's; `/sys/fs/cgroup/memory.max`
-  on the next rental settles it. So the honest case for the resident model is
+  what causes it is **still not known** -- the caching run was the last of the
+  three rather than the first, so warm-up does not explain it either. What has
+  changed is that the "all eight nodes reported 620-708 GiB free RAM" half of
+  that sentence has been **withdrawn as evidence**: it never said anything.
+  Measured here, with `docker run --memory 512m` against the probe ember now
+  carries, a container bounded at **512 MiB** reports **125.7 GiB** of
+  `MemTotal` -- a factor of 252 -- because `/proc/meminfo` inside a container
+  is the host's. So the figure that looked like it ruled memory out was reading
+  the wrong number, and the leading guess is unharmed: what bounds the page
+  cache is the pod's own `memory.max`, and nothing had ever read it. `ember
+  history --memory` records it on every rental now, so the next FLUX.2 run
+  settles it without anybody remembering to type a command at the right
+  moment. See `internal/nodemem/testdata/README.md` for the captures and for
+  what they do **not** settle -- what RunPod actually sets is still unknown and
+  needs a rental. So the honest case for the resident model is
   not the mean saving but that it is the only one of the two whose per-image
   price is the same on every node. Crossover is between one and two images,
   not the ~5 the sd15 run predicted, because one image here is 140s of

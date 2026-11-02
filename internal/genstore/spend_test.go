@@ -513,6 +513,12 @@ func TestOpen_MigratesAVersionTwoFile(t *testing.T) {
 	if got.Billable != 0 || got.LoadMeasured != 0 {
 		t.Errorf("a version-2 row invented execution facts: %+v", got)
 	}
+	// Two migrations now run over this file rather than one, so it also
+	// proves the chain rather than a single step: the memory columns came
+	// later still and must read as zero for the same reason.
+	if got.MemCgroup != 0 || got.MemLimit != 0 || got.AssetBytes != 0 {
+		t.Errorf("a version-2 row invented memory facts: %+v", got)
+	}
 
 	// Writing works, which is the thing the missing-column failure broke.
 	if err := s.UpdateJob(t.Context(), "old1", 1, func(j *JobRun) { j.Cost = 7 }); err != nil {

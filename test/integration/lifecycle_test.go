@@ -201,3 +201,59 @@ func TestLifecycle_UpLeavesNoNetworkBehind(t *testing.T) {
 		t.Errorf("networks went from %d to %d: %s", before, after, strings.Join(names, ", "))
 	}
 }
+
+// TestLifecycle_UpReportsBothViewsOfTheNodesMemory.
+//
+// THE LINK NO UNIT TEST CAN MAKE. internal/nodemem parses what a node answers
+// and internal/app emits it, and both have unit tests -- but whether
+// Plan.prepare actually asks a real node is a question only a real node
+// answers. Reinstating the removal of that one call left the whole unit suite
+// green, which is the "feature built end to end and never connected" failure
+// this repository has paid for three times, caught this time by the
+// reinstatement pass rather than by a live run.
+//
+// It also exercises the script itself against a real container: `sh`, the
+// cgroup files, /proc/meminfo and `stat` are all assumptions until something
+// runs them somewhere other than in a fake.
+func TestLifecycle_UpReportsBothViewsOfTheNodesMemory(t *testing.T) {
+	l := harness.New(t)
+	port := harness.FreePort(t)
+
+	res := l.Run(t.Context(), "up",
+		"--hold", "2s",
+		"--port", fmt.Sprintf("sshd:22:%d", port),
+	)
+	if res.ExitCode != 0 {
+		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
+	}
+	out := res.Combined()
+
+	if !strings.Contains(out, "node memory:") {
+		t.Fatalf("ember never reported what the node said about its memory:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "node memory:") {
+			t.Logf("against a real container: %s", line)
+		}
+	}
+	// Both views, which is the whole point: the cgroup's limit is what bounds
+	// the page cache and /proc/meminfo reports the HOST's memory, and a probe
+	// that returned only one of them would be the figure that made eight
+	// nodes look like they had hundreds of gigabytes spare.
+	for _, want := range []string{"host reports", "weights are", "cgroup v"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the memory line does not mention %q:\n%s", want, out)
+		}
+	}
+	// A lab container is unlimited, so the limit is reported as none rather
+	// than as zero bytes -- which would be a container that cannot allocate
+	// anything, the opposite claim.
+	if !strings.Contains(out, "limit none") {
+		t.Errorf("an unlimited container's limit is not reported as none:\n%s", out)
+	}
+	// And the host's total is a real figure rather than a zero, which is what
+	// says /proc/meminfo was read rather than defaulted.
+	if strings.Contains(out, "host reports 0 B total") {
+		t.Errorf("the host's memory was not read:\n%s", out)
+	}
+}

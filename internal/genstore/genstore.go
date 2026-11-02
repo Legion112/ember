@@ -237,6 +237,30 @@ type Request struct {
 	LoadMeasured time.Duration `json:"load_measured_ns,omitempty"`
 	LoadReported time.Duration `json:"load_reported_ns,omitempty"`
 
+	// MemLimit and MemCurrent are the node's own cgroup memory limit and
+	// usage; MemTotal and MemCached are the host's, as /proc/meminfo reports
+	// them inside a container; AssetBytes is the weights this run was about
+	// to read.
+	//
+	// ALL OF THEM, BECAUSE THE TWO VIEWS DISAGREE AND ONLY ONE BOUNDS THE
+	// PAGE CACHE. Every node in the FLUX.2 measurement reported 620-708 GiB
+	// free and two of them differed by 81 seconds and $0.056 per image
+	// depending on whether the weights stayed cached, which is what `free`
+	// inside a container reporting the host's memory looks like from the
+	// outside.
+	//
+	// MemLimit zero means there is NO cgroup limit rather than a limit of
+	// nothing, so MemCgroup is what says whether anything was read at all.
+	// Written through from the same event that goes into `events`, on the
+	// precedent Cost and the load spans set; nothing backfills, because the
+	// facts do not exist for rentals that already happened.
+	MemCgroup  int   `json:"mem_cgroup,omitempty"`
+	MemLimit   int64 `json:"mem_limit_bytes,omitempty"`
+	MemCurrent int64 `json:"mem_current_bytes,omitempty"`
+	MemTotal   int64 `json:"mem_total_bytes,omitempty"`
+	MemCached  int64 `json:"mem_cached_bytes,omitempty"`
+	AssetBytes int64 `json:"asset_bytes,omitempty"`
+
 	Err string `json:"error,omitempty"`
 }
 
@@ -588,6 +612,18 @@ type Entry struct {
 	Steps    int64         `json:"steps,omitempty"`
 	Sampling time.Duration `json:"sampling_ns,omitempty"`
 
+	// The node's memory, both views, and the weights this run read. See
+	// Request's own copy of these for why all of them; `ember history
+	// --memory` is what prints them, because the cost table has no room and
+	// a verdict column would be a decision nothing has the measurements to
+	// make yet.
+	MemCgroup  int   `json:"mem_cgroup,omitempty"`
+	MemLimit   int64 `json:"mem_limit_bytes,omitempty"`
+	MemCurrent int64 `json:"mem_current_bytes,omitempty"`
+	MemTotal   int64 `json:"mem_total_bytes,omitempty"`
+	MemCached  int64 `json:"mem_cached_bytes,omitempty"`
+	AssetBytes int64 `json:"asset_bytes,omitempty"`
+
 	// Rode means this request generated on a rental another request opened,
 	// so its zero rental cost is by design and not a figure that went
 	// missing.
@@ -621,6 +657,34 @@ type Entry struct {
 // and no Elapsed at all. Zero when either end is missing, as JobRun.Sampling
 // is, rather than a duration measured against the zero time -- which would be
 // two thousand years and would poison every average it reached.
+// MemCeiling is the bound this node's page cache actually lived under.
+//
+// The cgroup's limit when there was one, the host's total otherwise -- which
+// is the whole hypothesis about the unexplained 81 seconds in one method, and
+// the same rule nodemem.Report.Limit applies to a live node. Zero when neither
+// was read, because an unanswered question and a limit of zero bytes are
+// different things.
+func (e Entry) MemCeiling() int64 {
+	if e.MemLimit > 0 {
+		return e.MemLimit
+	}
+	return e.MemTotal
+}
+
+// MemHeadroom is the ceiling less the weights, and whether it is knowable.
+//
+// Negative is a real answer and the interesting one: a node that could not
+// hold the model re-read it every step, at 868 MiB/s off a network store in
+// the one measurement there is. The bool is false when either figure is
+// missing, because a headroom computed over a number nobody read is the kind
+// that gets believed.
+func (e Entry) MemHeadroom() (int64, bool) {
+	if e.MemCeiling() <= 0 || e.AssetBytes <= 0 {
+		return 0, false
+	}
+	return e.MemCeiling() - e.AssetBytes, true
+}
+
 func (e Entry) Wall() time.Duration {
 	if e.Started.IsZero() || e.Ended.IsZero() || e.Ended.Before(e.Started) {
 		return 0
