@@ -116,7 +116,7 @@ func runSpend(args []string, out io.Writer, d deps) error {
 	}
 
 	if len(rows) == 0 {
-		outf(out, "no generations recorded%s.\n", periodPhrase(q))
+		outf(out, "no generations recorded%s.\n", periodPhrase(q.Since, q.Until))
 		return nil
 	}
 	printSpend(out, rows, group)
@@ -222,18 +222,22 @@ func parseDay(s, flagName string) (time.Time, error) {
 	return t, nil
 }
 
-// periodPhrase names the period in the nothing-found line, so "no generations
+// periodPhrase names the period in a nothing-found line, so "no generations
 // recorded" cannot be read as "ember has never generated anything" when it
 // means "none last Tuesday".
-func periodPhrase(q genstore.SpendQuery) string {
+//
+// Shared with `ember catalogue report`, which has the same half-open period
+// and the same hazard. Two copies of this sentence would drift, and the
+// drifted one would describe a period the command did not query.
+func periodPhrase(since, until time.Time) string {
 	const day = "2006-01-02"
 	switch {
-	case !q.Since.IsZero() && !q.Until.IsZero():
-		return fmt.Sprintf(" between %s and %s", q.Since.Format(day), q.Until.Format(day))
-	case !q.Since.IsZero():
-		return " since " + q.Since.Format(day)
-	case !q.Until.IsZero():
-		return " before " + q.Until.Format(day)
+	case !since.IsZero() && !until.IsZero():
+		return fmt.Sprintf(" between %s and %s", since.Format(day), until.Format(day))
+	case !since.IsZero():
+		return " since " + since.Format(day)
+	case !until.IsZero():
+		return " before " + until.Format(day)
 	default:
 		return ""
 	}

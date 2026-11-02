@@ -1425,3 +1425,13 @@ func TestLocal_LeftoverCapsMatchImplementation(t *testing.T) {
 	// Docker runs out of address pools.
 	providertest.AssertLeftoverCapsMatch(t, New(dockerengine.NewRecordingEngine()))
 }
+
+func TestLocal_CatalogueCapsMatchImplementation(t *testing.T) {
+	// The local provider has no catalogue to sample -- one offer, this
+	// machine, and no availability that moves on the scale of a day -- so
+	// this asserts the negative. Worth asserting anyway: the zero value is
+	// what makes "nothing to collect" the default, and an accidental
+	// Caps.Catalogue here would fail a type assertion the first time an
+	// hourly timer ran.
+	providertest.AssertCatalogueCapsMatch(t, New(dockerengine.NewRecordingEngine()))
+}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Legion112/ember/internal/catalogue"
 	"github.com/Legion112/ember/internal/exposure"
 	"github.com/Legion112/ember/internal/httpx"
 	"github.com/Legion112/ember/internal/node"
@@ -46,6 +47,21 @@ var platformPorts = []exposure.PlatformPort{{
 // checkpoint is tens of gigabytes, and a pod that runs out of disk mid-pull
 // fails after it has already started billing.
 const DefaultDiskGiB = 50
+
+// The two catalogue reads, spelled once each.
+//
+// `include=AVAILABILITY` is what adds the levels at all, and `product=POD`
+// is not optional with it: the endpoint refuses the pair without it, because
+// stock differs between pods and serverless. Written out rather than built
+// from url.Values at three call sites -- two offer paths and the availability
+// snapshot -- because the query is the difference between a catalogue with
+// capacity in it and one without, and three copies is three places to drop a
+// parameter. The spelling and the refusal are both in the live v2 OpenAPI
+// document.
+const (
+	gpuCataloguePath = "/v2/catalog/gpus?include=AVAILABILITY&product=POD"
+	cpuCataloguePath = "/v2/catalog/cpus?include=AVAILABILITY&product=POD"
+)
 
 // Provider rents pods from RunPod.
 type Provider struct {
@@ -111,6 +127,13 @@ func (p *Provider) Caps() provider.Caps {
 
 		PlatformPorts: platformPorts,
 
+		// The catalogue is worth sampling here and nowhere else so far:
+		// RunPod reports availability as a level with no timestamp and keeps
+		// no history of its own, and a store pins every future run to one
+		// datacentre. See provider.CatalogueAPI for why that is a capability
+		// rather than a method on Provider.
+		Catalogue: true,
+
 		// Network volumes, which ember calls stores. Secure cloud only --
 		// RunPod does not offer them on community hosts -- but the capability
 		// is reported unconditionally because it describes the provider
@@ -167,12 +190,8 @@ func (p *Provider) Offers(ctx context.Context, f node.Filter) ([]node.Offer, err
 		return p.cpuOffers(ctx, f)
 	}
 
-	q := url.Values{}
-	q.Set("include", "AVAILABILITY")
-	q.Set("product", "POD")
-
 	var resp listGpuTypesResponse
-	if err := p.HTTP.Get(ctx, "/v2/catalog/gpus?"+q.Encode(), &resp); err != nil {
+	if err := p.HTTP.Get(ctx, gpuCataloguePath, &resp); err != nil {
 		return nil, fmt.Errorf("list runpod gpu types: %w", err)
 	}
 
@@ -428,14 +447,8 @@ func cpuFor(o node.Offer) *cpuConfig {
 // every Offers call would double the latency of the common case to serve the
 // rare one.
 func (p *Provider) cpuOffers(ctx context.Context, f node.Filter) ([]node.Offer, error) {
-	q := url.Values{}
-	q.Set("include", "AVAILABILITY")
-	// Required: the endpoint refuses include=AVAILABILITY without it,
-	// because availability differs between pods and serverless.
-	q.Set("product", "POD")
-
 	var resp listCpuTypesResponse
-	if err := p.HTTP.Get(ctx, "/v2/catalog/cpus?"+q.Encode(), &resp); err != nil {
+	if err := p.HTTP.Get(ctx, cpuCataloguePath, &resp); err != nil {
 		return nil, fmt.Errorf("list runpod cpu types: %w", err)
 	}
 
@@ -445,4 +458,41 @@ func (p *Provider) cpuOffers(ctx context.Context, f node.Filter) ([]node.Offer, 
 			node.ErrNoCapacity, f.Region)
 	}
 	return provider.FilterOffers(f, offers), nil
+}
+
+// CatalogueSnapshot reads both catalogues once, for the availability history.
+//
+// Two GETs, no pod, no GPU, nothing billed -- which is the argument for
+// sampling hourly rather than when somebody remembers. What it records is the
+// one thing in this program that cannot be collected later: RunPod's
+// availability is a bare level with no timestamp and no window, so every read
+// is a point sample and nothing on its side remembers the previous one.
+//
+// A CPU failure returns the GPU rows ALONGSIDE the error, the way List returns
+// what it understood beside a status it did not. The caller records what came
+// back and then reports the failure: an hour of GPU observations is the thing
+// that cannot be recovered, and discarding it because the second request
+// failed would turn a partial answer into no answer. A GPU failure is fatal,
+// because that is the series the store decision is made from.
+func (p *Provider) CatalogueSnapshot(ctx context.Context, now time.Time) ([]catalogue.Sample, error) {
+	if now.IsZero() {
+		// Refused rather than defaulted to time.Now(). The caller passes the
+		// instant precisely so that what gets written is the instant it
+		// recorded, and a zero time silently replaced by this function's own
+		// clock is a row dated by whichever layer looked at a clock last.
+		return nil, fmt.Errorf("a catalogue snapshot was asked for with no observation time; " +
+			"observed_at is the only field RunPod does not supply and ember will not invent it")
+	}
+
+	var gpus listGpuTypesResponse
+	if err := p.HTTP.Get(ctx, gpuCataloguePath, &gpus); err != nil {
+		return nil, fmt.Errorf("list runpod gpu types: %w", err)
+	}
+	out := gpuSamples(gpus.Gpus, now)
+
+	var cpus listCpuTypesResponse
+	if err := p.HTTP.Get(ctx, cpuCataloguePath, &cpus); err != nil {
+		return out, fmt.Errorf("list runpod cpu types: %w", err)
+	}
+	return append(out, cpuSamples(cpus.Cpus, now)...), nil
 }
