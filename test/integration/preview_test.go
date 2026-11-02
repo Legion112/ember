@@ -335,7 +335,19 @@ func startLabServer(t *testing.T, l *harness.Lab) labServer {
 		done := make(chan error, 1)
 		go func() { done <- wait() }()
 		select {
-		case <-done:
+		case err := <-done:
+			// Logged, and never a failure. Stopping the server *is*
+			// cancelling the context, so ssh reports the session going away
+			// and a non-nil error here is the stop having worked -- the same
+			// reason sdserver's orExited prefers the operation's own answer
+			// when the context is already cancelled, or Ctrl-C reports a
+			// server that crashed. It is printed rather than discarded
+			// because the exit of a server that had already died for its own
+			// reasons arrives here too, and that status is then the
+			// explanation for every assertion above it.
+			if err != nil {
+				t.Logf("sd-server exited: %v", err)
+			}
 		case <-time.After(5 * time.Second):
 			t.Log("sd-server did not exit promptly after being stopped")
 		}

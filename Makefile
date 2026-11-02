@@ -152,21 +152,36 @@ cover-check: cover
 		-overall=$(COVER_OVERALL) \
 		-strict
 
-# vet runs twice. The default invocation never looks at files behind a build
-# tag, so without the second line the entire integration lab compiles only on
-# the machine that happens to run it.
+# Every build tag that gates Go source in this tree, in one place.
+#
+# It used to be spelled three times -- here and in two ci.yml steps -- and
+# .golangci.yml held a fourth list that named only `integration`, so the
+# image labs were vetted and linted nowhere for their whole life. The
+# workflows ask make for the tags now, the way workload-image.yml already
+# asks it for the image tag, and cmd/check-coverage's
+# TestEveryBuildTagReachesTheGates fails when this list or .golangci.yml's
+# does not name a tag the tree actually uses -- which is the only part of
+# this that cannot drift back.
+LAB_TAGS := integration imagelab
+
+# vet runs three times. The default invocation never looks at files behind a
+# build tag, so without the tagged lines the entire integration lab compiles
+# only on the machine that happens to run it.
 # The labs exist now, so this is unconditional. The earlier spelling skipped
 # the tagged vet when it found no lab sources, which was honest while there
 # were none and is a silent pass the moment someone deletes or moves them.
 vet:
 	$(GO) vet ./...
+	# `integration` alone, literally, because this is the tree as
+	# `make test-integration` builds it: the full set below would hide a lab
+	# that only compiles when imagelab is also set.
 	$(GO) vet -tags=integration ./test/...
-	# And behind the second tag. Nothing else compiles the image labs: CI runs
-	# only -tags=integration, and the workflow that uses them is dispatch-only,
-	# so a file that stopped compiling would not be noticed until a publish --
-	# after a twenty-minute build, which is exactly how `ember:lab is missing`
-	# reached a publish once.
-	$(GO) vet -tags='integration imagelab' ./test/...
+	# And behind every tag. Nothing else compiles the image labs: the ordinary
+	# CI run exercises only -tags=integration, and the workflow that uses them
+	# is dispatch-only, so a file that stopped compiling would not be noticed
+	# until a publish -- after a twenty-minute build, which is exactly how
+	# `ember:lab is missing` reached a publish once.
+	$(GO) vet -tags='$(LAB_TAGS)' ./test/...
 
 # gofmt directly, and not `go fmt ./...`.
 #

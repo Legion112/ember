@@ -85,6 +85,34 @@ moment it imports a sibling, the sibling's dependencies become its own.
   diffs rather than living unread in a Makefile variable.
 - **A test that skips itself reports success for something that never ran.** CI
   greps for `--- SKIP` in both the unit and the lab logs and fails on a hit.
+- **A gate's tag list is derived from the tree, never maintained beside it.**
+  `.golangci.yml` named `integration` and not `imagelab` while `go vet` ran
+  with both from three hand-written copies, so the image labs -- the ones
+  that stop a bad workload image reaching a registry, and the least
+  frequently executed code here -- were linted **nowhere** for their whole
+  life. The config's comment already made the right argument ("without it the
+  tagged tree is linted nowhere") and then named one tag, which is the
+  journal-subdirectory failure reached through a config file: a comment that
+  justifies the entry somebody remembered cannot catch the entry somebody
+  forgets. What had accumulated in there was an unchecked error and a helper
+  whose only callers were deleted in the commit that introduced it -- both
+  harmless, which is the point, because nothing would have reported a
+  dangerous one either. The vet copies are one `LAB_TAGS` in the Makefile
+  now, which the workflows *ask* make for rather than spelling, the idiom
+  `workload-image.yml` already uses for the image tag; the YAML list has to
+  stay a list, because CI lints through `golangci-lint-action` and the action
+  reads that file and never runs make. So the two remaining lists are checked
+  against the tree instead of against each other:
+  `TestEveryBuildTagReachesTheGates` walks it, reads the constraints with
+  `go/build/constraint` -- parsed, because `go list` resolves through a build
+  context and so cannot see the one tree this is about -- and asks `go/build`
+  itself which tags the toolchain already satisfies rather than guessing
+  `unix` from its spelling, which is `ParseBind`'s rule one layer up. It
+  fails on a tag missing from either list **and** on a list naming a tag no
+  file uses, because `imagelabs` in both lists would otherwise satisfy every
+  assertion while linting nothing. Checked by reinstating the gap, by
+  inventing a third tag the test had never heard of, and by pasting a
+  hand-written `-tags` back into CI.
 
 ## Threat model
 

@@ -22,7 +22,6 @@ package integration
 
 import (
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -323,13 +322,4 @@ func TestWorkloadImage_CarriesOneArchitectureAndNoPTX(t *testing.T) {
 			"unmeasured. Nothing is compiled on a rented machine. "+
 			"CMAKE_CUDA_ARCHITECTURES must be \"NN-real\" -- a bare NN emits PTX too.", got)
 	}
-}
-
-func sortedKeys(m map[int]bool) []int {
-	out := make([]int, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Ints(out)
-	return out
 }
