@@ -103,6 +103,23 @@ min_vram_gib: 80
 max_hourly_usd: "2.60"
 max_run_usd: "3.00"
 
+# max_day_usd and max_month_usd bound every rental in a UTC calendar day or
+# month TOGETHER, which nothing above does: max_hourly_usd bounds a card and
+# max_run_usd bounds one rental, so thirty queued requests at $3 each are
+# inside both and are $90.
+#
+# They are read by `ember serve`, where a queue drains unattended, and a
+# request can neither widen nor narrow them -- there is no field for either on
+# the wire, so the limit that stops a browser is one the browser cannot name.
+# A rental projected to take a period past its ceiling is refused before
+# anything is created, and the request says so. Commented out because an
+# unbounded queue is what ember did before these existed; set the month one if
+# you set only one.
+#
+# max_day_usd: "10.00"
+# max_month_usd: "100.00"
+
+
 # A store pins every node that mounts it to one datacentre, so the datacentre
 # is chosen for what is available in it rather than for the store. EUR-IS-1 is
 # the only one of the ten that serve the S3 API with three cards at 80 GiB or

@@ -1,0 +1,208 @@
+package queue
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/node"
+)
+
+// The ceiling nothing had, and why it is not the mid-run meter that was
+// refused.
+//
+// `max_hourly_usd` bounds a card. `max_run_usd` bounds a rental. NOTHING
+// BOUNDED A SEQUENCE OF RENTALS, and `ember serve` is the first thing here
+// that can produce one without the operator being at the keyboard for each:
+// thirty queued requests at $1.79/hour on a one-hour TTL are inside every
+// ceiling ember had and are $54.
+//
+// AGENTS.md already refuses a related request and was right to -- "max_run_usd
+// cannot name the step it bit on, because it bites before any step exists" --
+// and this is not that. A mid-run meter needs a clock, a price and a running
+// total kept correct WHILE a rental is in flight, which is the thing that was
+// declined. A period ceiling needs the completed cost of finished rentals,
+// which is already recorded, numbered and durable, and it is checked at
+// exactly the moment `max_run_usd` is: after the offer is chosen and before
+// anything is created. No new meter and no new clock -- one more SUM over rows
+// that already exist.
+//
+// WHAT IT READS IS COMPLETE, which is worth stating because `ember spend` has
+// to warn that its per-job figures are not. `requests.cost` was a column
+// before the execution columns existed, so the period total has no gap in it:
+// every rental ember has ever recorded contributes.
+//
+// IT REFUSES RATHER THAN QUIETLY RENTING SOMETHING CHEAPER. Narrowing the
+// run ceiling to the remaining headroom was the first design, and it would
+// have meant an operator who asked for an H100 getting a 4090 because the
+// month was nearly spent. ember exists to measure what a card costs, and a
+// run that silently happened on different hardware is a measurement nobody
+// can use.
+//
+// IT COUNTS RENTALS AND NOT STORE STANDING CHARGES. A store bills by the
+// gigabyte-month whether or not anything runs, and `reconcile.MonthlyTotal`
+// already prices one -- so a ceiling that ignores a $40/month store is wrong
+// by a known amount. Counting it would mean a provider scan inside the drain
+// loop, and a provider that could not be reached would leave two choices:
+// block the queue, which is worse than the gap, or carry on without that
+// store's charge, which is the gap with extra steps and a false sense that it
+// was covered. `ember ls` is where a store's standing charge is reported, and
+// it exits non-zero over a provider it could not ask.
+
+// Period is a calendar period a ceiling covers.
+//
+// CALENDAR AND NOT ROLLING, because the thing an operator is defending
+// against is an invoice and an invoice is calendar. The cost is a real hole,
+// written down rather than hidden: a day ceiling resets at midnight UTC, so a
+// queue can spend one day's allowance twice in two hours across the boundary.
+// What bounds that is the month ceiling, which is why both exist and why the
+// month is the one to set if only one is wanted.
+//
+// UTC, for the reason `ember spend`'s day bucket is UTC: a boundary in local
+// time puts the same spend in different periods depending on where the
+// operator was sitting, and a ceiling that moves with a laptop is a ceiling
+// that cannot be reasoned about.
+type Period string
+
+const (
+	PeriodDay   Period = "day"
+	PeriodMonth Period = "month"
+)
+
+// Start is the beginning of the period containing t.
+func (p Period) Start(t time.Time) time.Time {
+	t = t.UTC()
+	if p == PeriodMonth {
+		return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// Key names the period in a message, as the date its allowance began.
+func (p Period) Key(t time.Time) string {
+	if p == PeriodMonth {
+		return p.Start(t).Format("2006-01")
+	}
+	return p.Start(t).Format("2006-01-02")
+}
+
+// Ceilings are the configured per-period limits, zero for no limit.
+//
+// They are the config's and a request cannot narrow them, let alone widen
+// one: there is no field for either on the wire type, so a browser is never
+// consulted about the limit that stops it. That is the structural version of
+// "a request may narrow the config's ceilings and never widen them" -- the
+// request is not asked.
+type Ceilings struct {
+	Day   node.MicroUSD
+	Month node.MicroUSD
+}
+
+// IsZero reports whether no period is bounded.
+func (c Ceilings) IsZero() bool { return c.Day == 0 && c.Month == 0 }
+
+// Spender is the one read a ceiling needs.
+//
+// One method rather than genstore.Store, so what the planner can do to the
+// database is visible in its type: this is the layer that decides whether to
+// spend money, and handing it a writer would mean reading the body to know it
+// does not enqueue anything.
+type Spender interface {
+	Spend(ctx context.Context, q genstore.SpendQuery) ([]genstore.Bucket, error)
+}
+
+// Spent is what rentals in a period have come to so far.
+//
+// RunCost and not JobCost: the ceiling is about the invoice, and a rental is
+// counted once on the request that opened it -- which is exactly what a
+// period total must do, since every request that rode along was served by a
+// node already paid for.
+func Spent(ctx context.Context, s Spender, since time.Time) (node.MicroUSD, error) {
+	bs, err := s.Spend(ctx, genstore.SpendQuery{Since: since})
+	if err != nil {
+		return 0, fmt.Errorf("read what has been spent since %s: %w", since.Format(time.DateOnly), err)
+	}
+	if len(bs) == 0 {
+		// Nothing recorded in the period. An ungrouped aggregate over no rows
+		// is no rows rather than a zero row, which is the honest shape and
+		// the one `ember spend` prints "no generations recorded" for.
+		return 0, nil
+	}
+	return bs[0].RunCost, nil
+}
+
+// CeilingError is a rental refused because a period would be carried past its
+// ceiling.
+//
+// Typed, because the message is a contract: an operator reading it has to be
+// able to tell which period bit, what had already been spent and what the
+// limit is, without going to look any of it up. A bare "over budget" would
+// send them to `ember spend` to find out which of two ceilings they had hit.
+type CeilingError struct {
+	Period    Period
+	Since     time.Time
+	Spent     node.MicroUSD
+	Projected node.MicroUSD
+	Ceiling   node.MicroUSD
+}
+
+func (e *CeilingError) Error() string {
+	return fmt.Sprintf("the %s beginning %s has spent %v of its %s ceiling of %v, and this rental "+
+		"is projected at %v -- which would take it to %v. Nothing was rented. Raise %s in "+
+		"ember.yaml, or wait for the %s to turn over",
+		e.Period, e.Period.Key(e.Since), e.Spent, e.key(), e.Ceiling,
+		e.Projected, e.Spent+e.Projected, e.key(), e.Period)
+}
+
+// key is the config key that set this ceiling, so the remediation names the
+// line to edit rather than the concept.
+func (e *CeilingError) key() string { return "max_" + string(e.Period) + "_usd" }
+
+// Allow refuses a rental projected to cost projected when it would carry a
+// period past its ceiling.
+//
+// PROJECTED AND NOT SPENT, which is the whole difference between a ceiling and
+// a report. A check that refuses only once a period has already been exceeded
+// is a ceiling every period breaches by one rental -- and one rental is $54 in
+// the case this exists for. The projection is the offer's price over the TTL,
+// the same arithmetic provision.Budget.Allow uses for max_run_usd, so the two
+// cannot disagree about what a rental may come to.
+//
+// A FREE RENTAL IS NEVER REFUSED. The local provider's price is zero, so its
+// projection is zero and it adds nothing to any period -- and refusing one
+// because a paid month is spent would stop the one kind of run that costs
+// nothing, which is the opposite of what the ceiling is for.
+//
+// The periods are checked tightest first, because a day is the one an operator
+// hits before a month and is the more useful thing to be told about.
+func (c Ceilings) Allow(ctx context.Context, s Spender, now time.Time, projected node.MicroUSD) error {
+	if projected <= 0 || c.IsZero() {
+		return nil
+	}
+	for _, p := range []struct {
+		period  Period
+		ceiling node.MicroUSD
+	}{{PeriodDay, c.Day}, {PeriodMonth, c.Month}} {
+		if p.ceiling <= 0 {
+			continue
+		}
+		since := p.period.Start(now)
+		spent, err := Spent(ctx, s, since)
+		if err != nil {
+			// Returned and not swallowed. A ceiling that cannot read what has
+			// been spent does not know whether this rental is allowed, and
+			// renting on "probably fine" is the one answer a spend ceiling
+			// must never give -- the same rule as `ember ls --all` exiting
+			// non-zero over a provider it could not ask.
+			return err
+		}
+		if spent+projected > p.ceiling {
+			return &CeilingError{
+				Period: p.period, Since: now, Spent: spent,
+				Projected: projected, Ceiling: p.ceiling,
+			}
+		}
+	}
+	return nil
+}

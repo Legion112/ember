@@ -19,8 +19,9 @@
 // swappable because somebody will want Postgres, and because a seam is the
 // only honest way to test the layers above without a file on disk.
 //
-// MONEY IS AN INTEGER COLUMN. ParseFloat("0.29")*1e6 is 289999, which is why
-// node.ParseUSD is hand-written, and a budget that survives a round trip
+// MONEY IS AN INTEGER COLUMN. ParseFloat("2.01")*1e6 truncates to 2009999,
+// which is why node.ParseUSD is hand-written, and a budget that survives a
+// round trip
 // through a REAL column is a budget that is sometimes wrong by a rounding
 // error. cfg and guidance *are* REAL, and that is not the same decision: they
 // are generation parameters the API takes as float64, SQLite's REAL is the

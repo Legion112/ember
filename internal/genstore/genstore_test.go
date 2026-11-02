@@ -81,8 +81,8 @@ func TestEnqueue_RoundTripsEverythingAsked(t *testing.T) {
 		if got.TTL != time.Hour {
 			t.Errorf("ttl = %v, want 1h", got.TTL)
 		}
-		// Money through an integer column, because ParseFloat("0.29")*1e6 is
-		// 289999 and a ceiling that changes in the round trip is a ceiling
+		// Money through an integer column, because ParseFloat("2.01")*1e6
+		// truncates to 2009999 and a ceiling that changes in the round trip is a ceiling
 		// nobody trusts.
 		if got.MaxHourly != node.Rate(340000) {
 			t.Errorf("max_hourly = %v, want $0.34/hr exactly", got.MaxHourly)

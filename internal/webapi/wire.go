@@ -244,7 +244,8 @@ type newRequest struct {
 	TTL string `json:"ttl,omitempty"`
 
 	// Decimal strings and never JSON numbers. A JSON number is a float on
-	// both sides of this wire, and ParseFloat("0.29")*1e6 is 289999 -- which
+	// both sides of this wire, and ParseFloat("2.01")*1e6 truncates to
+	// 2009999 -- which
 	// is the whole reason node.ParseUSD is hand-written.
 	MaxHourlyUSD string `json:"max_hourly_usd,omitempty"`
 	MaxRunUSD    string `json:"max_run_usd,omitempty"`
