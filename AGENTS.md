@@ -329,6 +329,33 @@ that sentence made unrepresentable rather than merely tested.
   destroy-is-idempotent therefore passed against this fake *without the
   not-found path ever being taken* -- the exact shape of
   `AssertNoStray`-could-not-fail, in a fake rather than in a cleanup order.
+
+  **A route it does not serve is a path no lab can reach.** There was no
+  `/v2/catalog/cpus` handler, so a request for it 404'd and `cpuOffers` --
+  what `ember store sync` rents its cheap downloaders through -- had never run
+  against the fake at all. Two money invariants live behind that endpoint:
+  `Filter.CPUOnly`'s exclusivity, and the container-disk clamp, which was
+  exercised only against canned bodies. The clamp is the sharper case, because
+  a clamp means nothing unless the service would have said no: with the fake
+  accepting any disk size, **deleting the clamp passed everything**. It now
+  answers the live `400 "Container Disk must be less than or equal to 20"` for
+  a CPU pod and nothing for a GPU one, refuses `include=AVAILABILITY` without
+  `product`, and reports no availability levels when `include` does not ask
+  for them -- a catalogue read that forgot the parameter is a priced catalogue
+  with no capacity in it, which presents as "that card is sold out
+  everywhere". It also stopped echoing a `gpu` object and a 4090's hourly rate
+  onto every pod, because an assertion about whether a CPU-only run got a card
+  passed against either answer while it did.
+
+  The catalogue bodies are the provider's own committed fixtures, served
+  verbatim rather than copied here, and that is the opposite of the choice the
+  rest of this fake makes. What a fixture cannot express is time, and a
+  catalogue read has none; what is left is a field shape, and two copies of a
+  field shape is how `dataCenter` against `dataCenterId` stayed invisible. The
+  query refusals above are behaviour a file cannot hold, so they are code over
+  that one body rather than a second body. `internal/provider/runpod/testdata/README.md`
+  says which of them were observed and which rest on the endpoint's own
+  description.
 - **A UI has a class of bug no unit test can reach, so one lab drives a
   browser.** Three in this feature were invisible to the Go tests and to
   `cargo test` and obvious the moment a page loaded: a nil slice marshalled as

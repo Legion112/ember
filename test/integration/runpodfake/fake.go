@@ -18,7 +18,29 @@
 //   - `ssh` and `runtime` are always null on `GET /v2/pods`, which is why
 //     Inspect fetches one pod by id;
 //   - nothing ever reports a host key, which is what silently dropped ember
-//     into trust-on-first-use.
+//     into trust-on-first-use;
+//   - a CPU pod refuses a container disk above 20 GiB with a 400, a limit the
+//     published schema gives no maximum for -- so the clamp in
+//     Provider.disk is load-bearing and a fake that accepted any size would
+//     let its removal pass;
+//   - the catalogue endpoints refuse `include=AVAILABILITY` without
+//     `product`, and report no availability at all when it is not asked for,
+//     because `include` is the difference between a catalogue with capacity
+//     in it and one where every offer is filtered out as having none.
+//
+// The catalogue bodies are the provider's own committed fixtures rather than
+// copies kept here, and that is a decision worth stating because the rest of
+// this package argues the other way. What a fixture cannot express is time,
+// and a catalogue read has none: ember makes one GET and the answer does not
+// depend on how long anything has been alive. What is left is a field shape,
+// and a second copy of a field shape is exactly how RunPod's `dataCenter`
+// against `dataCenterId` disagreement between its two APIs stayed invisible
+// -- the unit tests would have gone on decoding a shape the fake invented.
+// Where the catalogue does need behaviour a file cannot hold -- the query
+// refusals above -- that is code in this package operating on the one body,
+// not a second body. Options.Catalogue stays for a lab that wants to serve a
+// different catalogue, which is a lab choosing an input rather than a second
+// account of what RunPod's fields are called.
 //
 // The control plane is fake; the data plane is not. Create starts a real
 // container through the Nodes seam, so a lab above this does a real SSH
@@ -45,6 +67,35 @@ import (
 // disable it. Named here as well as in the provider so a lab can assert that
 // ember tolerates exactly this and nothing else.
 const WebTerminalPort = 19123
+
+// cpuMaxDiskGiB is the ceiling a CPU pod's container disk is refused above.
+//
+// Spelled here rather than imported from the provider on purpose. This is the
+// fake's account of what the service does, and the provider's CPUMaxDiskGiB is
+// ember's account of what it must therefore ask for; sharing one constant
+// would mean a lab about the clamp could never fail, because raising ember's
+// number would raise the limit it is tested against at the same time. The
+// number was measured -- the schema gives the field no maximum -- and the
+// message is the one the API answers with.
+const cpuMaxDiskGiB = 20
+
+// cpuDiskRefusal is the API's own wording, so an operator who sees it in a
+// lab failure can search for the same string they would see live.
+const cpuDiskRefusal = "Container Disk must be less than or equal to 20"
+
+// cpuHourlyUSD is what the fake bills a CPU pod.
+//
+// Two cores of the captured catalogue's cheapest family, $0.03 per vCPU per
+// hour. A single hardcoded GPU price for every pod would have had ember read
+// an RTX 4090's rate back off a machine with no card -- and the rate is read
+// back from the pod precisely because it is the bill rather than a list
+// price, so a fake that quotes the wrong one makes `ember ls` and the spend
+// ledger agree with a number nothing charged.
+const cpuHourlyUSD = 0.06
+
+// gpuHourlyUSD is the rate a GPU pod reports, matching the captured
+// catalogue's RTX 4090.
+const gpuHourlyUSD = 0.89
 
 // Nodes is the data plane: something that can really start a machine.
 //
@@ -86,6 +137,11 @@ type Options struct {
 	// Catalogue is the GPU catalogue to serve. Empty serves the captured one
 	// from the provider's testdata.
 	Catalogue []byte
+
+	// CPUCatalogue is the same for the CPU endpoint, which is a different
+	// catalogue on a different path with a price quoted per core rather than
+	// per machine. Empty serves the captured cpus.json.
+	CPUCatalogue []byte
 }
 
 // Fake is a running stand-in.
@@ -108,7 +164,15 @@ type Fake struct {
 type Request struct {
 	Method string
 	Path   string
-	Body   map[string]any
+
+	// Query is the raw query string. Recorded because the catalogue paths
+	// carry `include=AVAILABILITY&product=POD` and the parameters are the
+	// difference between a catalogue with capacity in it and one without:
+	// a lab asserting ember asked for availability has to be able to see
+	// that it did, not only that the answer happened to contain some.
+	Query string
+
+	Body map[string]any
 }
 
 type pod struct {
@@ -117,6 +181,9 @@ type pod struct {
 	Image     string
 	GpuID     string
 	GpuCount  int
+	CpuID     string
+	VcpuCount int
+	Disk      int
 	Cloud     string
 	Env       map[string]string
 	Ports     []string
@@ -178,7 +245,9 @@ func (f *Fake) route(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 	f.mu.Lock()
-	f.requests = append(f.requests, Request{Method: r.Method, Path: r.URL.Path, Body: body})
+	f.requests = append(f.requests, Request{
+		Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, Body: body,
+	})
 	f.mu.Unlock()
 
 	// Authorization is checked, because a fake that accepts an unauthenticated
@@ -190,7 +259,13 @@ func (f *Fake) route(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v2/catalog/gpus":
-		f.catalogue(w)
+		f.catalogue(w, r, gpuFixture, f.opts.Catalogue)
+	case r.Method == http.MethodGet && r.URL.Path == "/v2/catalog/cpus":
+		// The endpoint `ember store sync` rents its cheap downloaders from.
+		// It had no route here at all, so cpuOffers -- and with it the
+		// CPUOnly exclusivity and the container-disk clamp -- had never run
+		// against the fake in any lab, and a request for it 404'd.
+		f.catalogue(w, r, cpuFixture, f.opts.CPUCatalogue)
 	case r.Method == http.MethodPost && r.URL.Path == "/v2/pods":
 		f.create(w, body)
 	case r.Method == http.MethodGet && r.URL.Path == "/v2/pods":
@@ -219,22 +294,138 @@ func (f *Fake) ok(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func (f *Fake) catalogue(w http.ResponseWriter) {
-	raw := f.opts.Catalogue
-	if raw == nil {
-		// The captured response from the provider's own testdata, so the
-		// fake and the unit tests cannot drift apart.
-		var err error
-		raw, err = os.ReadFile(filepath.Join("..", "..", "internal", "provider", "runpod", "testdata", "gpus.json"))
-		if err != nil {
-			f.t.Fatalf("read the captured catalogue: %v", err)
+// catalogue serves one of the two catalogue endpoints, as unhelpfully as the
+// live one does.
+//
+// override is the lab's own body, if it supplied one; otherwise the provider's
+// committed fixture is served verbatim, so the fake's field shapes and the
+// unit tests' cannot drift apart. The captured gpus.json carries entries with
+// no `dataCenters` key at all, which is a real omission and the reason
+// hasCapacity has to read the summary as well as the sites -- so that arrives
+// here for free, and a fake with its own tidier body would have lost it.
+func (f *Fake) catalogue(w http.ResponseWriter, r *http.Request, fixture string, override []byte) {
+	q := r.URL.Query()
+	wantAvailability := false
+	for _, inc := range q["include"] {
+		if strings.EqualFold(inc, "AVAILABILITY") {
+			wantAvailability = true
 		}
+	}
+
+	// `include=AVAILABILITY` is refused without `product`: stock differs
+	// between pods and serverless, so the endpoint will not answer the
+	// question without being told which it is about. Observed as a 400 on the
+	// CPU endpoint and stated in both endpoints' descriptions in the live v2
+	// OpenAPI document. Reproduced because the query lives in one constant
+	// per endpoint feeding three call sites -- two offer paths and the
+	// availability snapshot -- and a dropped parameter there is a catalogue
+	// with no capacity in it rather than an error anybody sees.
+	if wantAvailability && q.Get("product") == "" {
+		f.fail(w, http.StatusBadRequest,
+			"include=AVAILABILITY requires product; availability differs by product context")
+		return
+	}
+
+	raw := override
+	if raw == nil {
+		raw = f.captured(fixture)
+	}
+	if !wantAvailability {
+		// Not asked for, not reported. The levels exist only because
+		// `include` asks for them, and ember drops an entry nothing anywhere
+		// says has capacity -- so a request that forgot the parameter gets a
+		// priced catalogue that produces no offers at all, which presents as
+		// "that card is sold out everywhere". A fake that answered the full
+		// body regardless would make the parameter look optional.
+		raw = withoutAvailability(f.t, raw)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(raw)
 }
 
+// captured reads one of the provider's committed catalogue fixtures.
+//
+// A literal path per file rather than one assembled from the parameter,
+// because the set is closed at two and a read whose path came from somewhere
+// else is worth the second look gosec's G304 asks for. The relative path is
+// from test/integration, which is where every lab that drives this fake runs.
+func (f *Fake) captured(fixture string) []byte {
+	f.t.Helper()
+	var raw []byte
+	var err error
+	switch fixture {
+	case gpuFixture:
+		raw, err = os.ReadFile(filepath.Join("..", "..", "internal", "provider", "runpod", "testdata", "gpus.json"))
+	case cpuFixture:
+		raw, err = os.ReadFile(filepath.Join("..", "..", "internal", "provider", "runpod", "testdata", "cpus.json"))
+	default:
+		f.t.Fatalf("no captured catalogue named %q", fixture)
+	}
+	if err != nil {
+		f.t.Fatalf("read the captured catalogue %s: %v", fixture, err)
+	}
+	return raw
+}
+
+// The two catalogue fixtures, named so the router and captured cannot disagree
+// about which file an endpoint serves.
+const (
+	gpuFixture = "gpus.json"
+	cpuFixture = "cpus.json"
+)
+
+// withoutAvailability strips the levels from every entry of a catalogue body.
+//
+// Generic over the top-level array's name because the two endpoints spell it
+// differently ("gpus", "cpus") and the point is the shape of an entry, not
+// which catalogue it came from.
+func withoutAvailability(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode the catalogue to strip availability: %v", err)
+	}
+	for _, v := range doc {
+		entries, ok := v.([]any)
+		if !ok {
+			continue
+		}
+		for _, e := range entries {
+			entry, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			delete(entry, "availability")
+			delete(entry, "dataCenters")
+		}
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("re-encode the stripped catalogue: %v", err)
+	}
+	return out
+}
+
 func (f *Fake) create(w http.ResponseWriter, body map[string]any) {
+	cpu, isCPU := body["cpu"].(map[string]any)
+	disk := int(num(body["disk"]))
+
+	// A CPU pod refuses a container disk above 20 GiB, and the published
+	// schema gives the field no maximum -- the limit is enforced at the
+	// handler, which is why it was found by a 400 and not by reading
+	// anything. GPU pods have no such ceiling, so this is a property of the
+	// product rather than a cap that could be lowered for both.
+	//
+	// Reproduced here because ember clamps rather than refuses, and a clamp
+	// is only load-bearing against a service that would have said no: with
+	// the fake accepting any size, deleting the clamp passed every test. The
+	// status and the message are the live ones; the envelope around them is
+	// this package's own, because only the wording was captured.
+	if isCPU && disk > cpuMaxDiskGiB {
+		f.fail(w, http.StatusBadRequest, cpuDiskRefusal)
+		return
+	}
+
 	f.mu.Lock()
 	f.nextID++
 	id := fmt.Sprintf("fakepod%06d", f.nextID)
@@ -247,10 +438,15 @@ func (f *Fake) create(w http.ResponseWriter, body map[string]any) {
 		Created: time.Now(),
 		Env:     strMap(body["env"]),
 		Ports:   strSlice(body["ports"]),
+		Disk:    disk,
 	}
 	if g, ok := body["gpu"].(map[string]any); ok {
 		p.GpuID = str(g["id"])
 		p.GpuCount = int(num(g["count"]))
+	}
+	if isCPU {
+		p.CpuID = str(cpu["id"])
+		p.VcpuCount = int(num(cpu["vcpuCount"]))
 	}
 	f.pods[id] = p
 	nodes := f.nodes
@@ -362,11 +558,22 @@ func (f *Fake) render(p *pod, withDetail bool) map[string]any {
 		"image":        p.Image,
 		"cloud":        p.Cloud,
 		"dataCenterId": "US-IL-1",
-		"cost":         0.89,
+		"cost":         gpuHourlyUSD,
 		"createdAt":    p.Created.UTC().Format(time.RFC3339),
 		"gpu":          map[string]any{"id": p.GpuID, "count": p.GpuCount},
 		"ssh":          nil,
 		"runtime":      nil,
+	}
+	// A CPU pod reports the machine it is, which is one with no card. The
+	// previous shape echoed a `gpu` object onto every pod and quoted an RTX
+	// 4090's hourly rate for all of them, so an assertion about whether a
+	// CPU-only run got a card would have passed against either answer, and
+	// the rate ember reads back off the pod -- the bill, deliberately not the
+	// catalogue's list price -- was fifteen times what a CPU box costs.
+	if p.CpuID != "" {
+		delete(out, "gpu")
+		out["cpu"] = map[string]any{"id": p.CpuID, "count": p.VcpuCount}
+		out["cost"] = cpuHourlyUSD
 	}
 	// RunPod reports no host key at all. That is the default here because it
 	// is what dropped ember into trust-on-first-use against a brand-new IP,

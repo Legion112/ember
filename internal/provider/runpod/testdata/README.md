@@ -51,6 +51,21 @@ capacity" for a card that was rentable. Neither was visible from the schema.
 | `pod_unknown_status.json` | a status ember does not recognise, which must be an error |
 | `pods_list.json` | a list response: no runtime, no ssh, plus one pod that is not ember's |
 | `gpus.json` | the GPU catalogue, including entries ember must filter out |
+| `cpus.json` | the CPU catalogue, two families, priced per core |
+
+### Who reads these
+
+Both catalogue files have two readers, deliberately. The unit tests decode
+them, and `test/integration/runpodfake` **serves them verbatim** on
+`/v2/catalog/gpus` and `/v2/catalog/cpus` — so the field shapes the fake hands
+ember are the same bytes the mapping tests are written against, and neither can
+drift without the other noticing. The fake kept no catalogue bodies of its own,
+because a second copy of a field shape is how the `dataCenter` against
+`dataCenterId` disagreement below stayed invisible for as long as it did. What
+a file cannot express is time, and a catalogue read has none: one GET, one
+answer, no state. The `pod_*.json` files are the opposite case and the fake
+does not use them — a pod's shape changes as it provisions, which is the whole
+reason that package has state instead of handlers returning a blob.
 
 ## Network volumes: what the live API answered, 2026-10-30
 
@@ -240,3 +255,28 @@ these to fill a store.
 And a limit that is enforced but not published: a CPU pod refuses a container
 disk above 20 GiB ("Container Disk must be less than or equal to 20"). GPU
 pods have no such ceiling. `node.CPUMaxDiskGiB` holds the measured figure.
+
+### What the fake reproduces of the catalogue endpoints, and how it knows
+
+`runpodfake` had no catalogue CPU route at all, so `cpuOffers` — the path
+`ember store sync` rents its cheap downloaders through — had never run against
+it, and the container-disk clamp was only ever exercised against canned bodies.
+Four behaviours were added, and they are not equally well attested:
+
+| behaviour | how it is known |
+|---|---|
+| the bodies on both routes | **captured** — the two files above, served verbatim |
+| `400 "Container Disk must be less than or equal to 20"` on a CPU pod | **observed**, as a live 400. Only the wording and the status were recorded, so the envelope around the message in the fake is that package's own |
+| GPU pods are not subject to that limit | **observed** — ember has created plenty above 20 GiB |
+| `include=AVAILABILITY` refused without `product` | **observed as a 400 on `/v2/catalog/cpus`**, and stated in both endpoints' descriptions in the live OpenAPI document. The fake applies it to the GPU route as well, on the description alone |
+| no `availability` or `dataCenters` when `include` does not ask | **inferred** from the endpoint's own description — `include` is what adds the levels at all. Nobody has made the call without the parameter and read what came back |
+
+The last two are worth telling apart from the rest. A fake stricter than the
+service it stands in for is the usual danger inverted, and it grows callers a
+branch for an error nothing returns — the reason `runpodfake` is written down
+to this level of detail is that it is easier to argue with a table than with
+code. What makes these two safe to assume is that ember always sends both
+parameters, from one constant per endpoint; the fake refusing the pair it never
+sends costs nothing and guards the case where one of three call sites drops a
+parameter, which would otherwise surface as a catalogue with no capacity in it
+rather than as an error anybody sees.
