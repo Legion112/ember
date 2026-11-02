@@ -186,6 +186,7 @@ func port16(n int) (uint16, error) {
 // what a pod actually costs is read back from the pod itself.
 func mapOffers(gpus []gpuType, cloud string) []node.Offer {
 	community := strings.EqualFold(cloud, cloudCommunity)
+	reclaim := reclaimOf(cloud)
 
 	out := make([]node.Offer, 0, len(gpus))
 	for _, g := range gpus {
@@ -224,10 +225,11 @@ func mapOffers(gpus []gpuType, cloud string) []node.Offer {
 			GPU:      node.NormalizeGPU(g.ID),
 			GPUCount: 1,
 			// RunPod quotes GB; ember's Offer carries MiB.
-			VRAM:   node.GiB(g.Memory),
-			Price:  node.RateFromUSD(price),
-			Region: bestRegion(g),
-			Label:  fmt.Sprintf("%s, %d GiB, up to %d per pod, availability %s", g.Name, g.Memory, maxCount, strings.ToLower(availabilityOf(g))),
+			VRAM:    node.GiB(g.Memory),
+			Price:   node.RateFromUSD(price),
+			Region:  bestRegion(g),
+			Reclaim: reclaim,
+			Label:   fmt.Sprintf("%s, %d GiB, up to %d per pod, availability %s", g.Name, g.Memory, maxCount, strings.ToLower(availabilityOf(g))),
 		})
 	}
 	return out
@@ -238,6 +240,25 @@ const (
 	cloudCommunity   = "COMMUNITY"
 	availabilityNone = "NONE"
 )
+
+// reclaimOf is the one place RunPod's cloud tier becomes a reclaim answer.
+//
+// One function read by Caps and by both offer mappers, because the tier is
+// the whole of the fact: a community pod runs on hardware somebody else owns
+// and can take back, a secure one does not. Deriving it twice -- once for the
+// capability and once in the mapper -- is two sources of truth for one fact,
+// and the copy that disagreed would be the one that let a reclaimable pod
+// through the filter.
+//
+// Never ReclaimUnknown. Unknown is the answer for a provider that has not
+// been taught to say, and this one has: every pod is created with
+// Cloud: p.cloud(), so the tier is known before anything is rented.
+func reclaimOf(cloud string) node.Reclaim {
+	if strings.EqualFold(cloud, cloudCommunity) {
+		return node.ReclaimAnyTime
+	}
+	return node.ReclaimNever
+}
 
 // hasCapacity reports whether anything, anywhere, says this GPU can be had.
 func hasCapacity(g gpuType) bool {
@@ -437,10 +458,17 @@ const defaultVCPU = 2
 // Priced per machine rather than per core, because that is what a budget
 // ceiling compares against and what every other offer in this program means
 // by Price.
-func mapCPUOffers(cpus []cpuType, region string, vcpu int) []node.Offer {
+func mapCPUOffers(cpus []cpuType, cloud, region string, vcpu int) []node.Offer {
 	if vcpu <= 0 {
 		vcpu = defaultVCPU
 	}
+	// From the tier and not from the price, which is the one place these two
+	// disagree: the CPU catalogue quotes securePerVcpu and nothing else, so
+	// a community-configured run is quoted a secure rate -- but Create still
+	// sends Cloud: p.cloud(), so the machine it gets is a community one and
+	// can be reclaimed. Reading the reclaim answer off the price would
+	// therefore promise ReclaimNever about a pod that is not.
+	reclaim := reclaimOf(cloud)
 	var out []node.Offer
 	for _, c := range cpus {
 		avail := c.Availability
@@ -478,6 +506,7 @@ func mapCPUOffers(cpus []cpuType, region string, vcpu int) []node.Offer {
 			VCPU:     cores,
 			Price:    node.RateFromUSD(per * float64(cores)),
 			Region:   regionOrBest(c, region),
+			Reclaim:  reclaim,
 			Label:    fmt.Sprintf("%s, %d vCPU, %.0f GB RAM per core (%s)", c.Name, cores, c.RAMPerVCPU, availabilityOrUnknown(avail)),
 		})
 	}

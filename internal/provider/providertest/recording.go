@@ -93,9 +93,17 @@ func NewRecordingProvider(name node.ProviderID) *RecordingProvider {
 	return &RecordingProvider{
 		ProviderName: name,
 		Errors:       map[string]error{},
+		// Reclaim is stated and not left at its zero value, for the same
+		// reason the price and the VRAM are: a fake whose offers ember
+		// refuses by default is a fake that tests the refusal and nothing
+		// below it. node.ReclaimUnknown means "the provider did not say" and
+		// is refused unless the operator opted in, so a default of nothing
+		// would have every test that rents from this fake reading "no
+		// capacity". A test about interruptible hardware sets ReclaimAnyTime
+		// on its own OfferList.
 		OfferList: []node.Offer{{
 			Provider: name, Token: "offer-1", GPU: "rtx4090", GPUCount: 1,
-			VRAM: 24576, Price: 340000,
+			VRAM: 24576, Price: 340000, Reclaim: node.ReclaimNever,
 		}},
 		States: []node.State{node.StateReady},
 	}

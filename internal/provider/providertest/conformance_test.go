@@ -81,6 +81,13 @@ func (c *conformer) offerList() []node.Offer {
 	return []node.Offer{{
 		Provider: conformerName, Token: "offer-1", GPU: "rtx4090", GPUCount: 1,
 		VRAM: 24576, Price: 340000, Region: "conformance-1",
+
+		// A provider written to pass says so. node.ReclaimUnknown is the
+		// forgetful answer and FilterOffers refuses it, so leaving it out
+		// would make this fake offer nothing and every check below fail for
+		// a reason none of them is about -- which is how the defect first
+		// presented when the zero value changed meaning.
+		Reclaim: node.ReclaimNever,
 	}}
 }
 
@@ -580,6 +587,18 @@ func TestConformanceChecks_EveryInvariantCanFail(t *testing.T) {
 		{"a destroy that leaves the machine in the listing",
 			"a destroyed node stops being reported as billable",
 			func() provider.Provider { return &destroyLeavesItListed{conformer: newConformer()} }},
+
+		{"a provider that never says whether an offer can be reclaimed",
+			"every offer says whether it can be reclaimed",
+			func() provider.Provider { return reclaimUnsaid{newConformer()} }},
+		{"a provider claiming an interruptible tier whose offers promise otherwise",
+			"every offer says whether it can be reclaimed",
+			func() provider.Provider {
+				c := newConformer()
+				caps := c.Caps()
+				caps.InterruptibleTier = true
+				return capsWith{c, caps}
+			}},
 	} {
 		t.Run(tc.defect, func(t *testing.T) {
 			p := tc.p()
@@ -622,6 +641,24 @@ func TestConformance_CannotCatchARederivedRunID(t *testing.T) {
 				"delete it and add the row to TestConformanceChecks_EveryInvariantCanFail", c.name, err)
 		}
 	}
+}
+
+// reclaimUnsaid is the defect this whole issue was: offers that never say
+// whether the machine behind them can be taken back. It was unrepresentable to
+// state and so easy to leave out that no provider ever filled it in, and the
+// filter guard that read it refused nothing for the life of the code.
+type reclaimUnsaid struct{ *conformer }
+
+func (p reclaimUnsaid) Offers(_ context.Context, f node.Filter) ([]node.Offer, error) {
+	// Filtered first and blanked after, so this provider is wrong in exactly
+	// one way. Blanking first would have FilterOffers drop every offer
+	// unless the caller opted in, and the variant would then be caught by
+	// the no-capacity check instead of the one it is written for.
+	out := provider.FilterOffers(f, p.offerList())
+	for i := range out {
+		out[i].Reclaim = node.ReclaimUnknown
+	}
+	return out, nil
 }
 
 // platformPorts builds a provider whose Caps declare exactly these tolerated

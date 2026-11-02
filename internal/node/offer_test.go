@@ -49,7 +49,10 @@ func TestNormalizeGPU_PassesThroughUnknownCards(t *testing.T) {
 }
 
 func validOffer() Offer {
-	return Offer{Provider: "runpod", Token: "tok", GPU: "rtx4090", GPUCount: 1, VRAM: 24576, Price: 340000}
+	// Reclaim is stated, because the zero value is the unsafe answer and
+	// Filter.Match refuses it: an offer helper that left it out would make
+	// every filter test in this package a test of the reclaim guard.
+	return Offer{Provider: "runpod", Token: "tok", GPU: "rtx4090", GPUCount: 1, VRAM: 24576, Price: 340000, Reclaim: ReclaimNever}
 }
 
 func TestOffer_ValidateRefuses(t *testing.T) {

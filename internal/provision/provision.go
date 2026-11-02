@@ -321,6 +321,14 @@ func PickOffer(
 	// provider.FilterOffers for why that is a cost control.
 	offers = provider.FilterOffers(f, offers)
 	if len(offers) == 0 {
+		// Deliberately not where the "every offer was reclaimable" diagnosis
+		// lives, although this is where an empty list surfaces. Every
+		// provider runs FilterOffers over its own output before returning,
+		// so the offers the reclaim guard dropped never reach this function
+		// and provider.RefusedForReclaim here would always count zero -- a
+		// branch that cannot fire, which is the defect this change exists to
+		// fix. It belongs where the unfiltered list and the tier both are,
+		// which is the provider. See runpod.Offers.
 		return node.Offer{}, fmt.Errorf("%w: %s has nothing matching the filter", node.ErrNoCapacity, p.Name())
 	}
 

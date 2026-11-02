@@ -425,8 +425,8 @@ func TestWaitReady_ReportsAnInspectFailure(t *testing.T) {
 func TestPickOffer_RefusesWhatIsOverBudget(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
 	p.OfferList = []node.Offer{
-		{Provider: "test", Token: "dear", GPU: "h100", GPUCount: 1, Price: 900000},
-		{Provider: "test", Token: "cheap", GPU: "h100", GPUCount: 1, Price: 100000},
+		{Provider: "test", Token: "dear", GPU: "h100", GPUCount: 1, Price: 900000, Reclaim: node.ReclaimNever},
+		{Provider: "test", Token: "cheap", GPU: "h100", GPUCount: 1, Price: 100000, Reclaim: node.ReclaimNever},
 	}
 	o := opts(t)
 	o.Budget = Budget{MaxRate: 200000}
@@ -447,7 +447,7 @@ func TestPickOffer_RefusesWhatIsOverBudget(t *testing.T) {
 
 func TestPickOffer_EnforcesTheWholeRunCeiling(t *testing.T) {
 	p := providertest.NewRecordingProvider("test")
-	p.OfferList = []node.Offer{{Provider: "test", Token: "t", GPU: "h100", GPUCount: 1, Price: 1000000}}
+	p.OfferList = []node.Offer{{Provider: "test", Token: "t", GPU: "h100", GPUCount: 1, Price: 1000000, Reclaim: node.ReclaimNever}}
 	o := opts(t)
 	// $1/hr for an hour is $1; a 50-cent run ceiling must refuse it even
 	// though the hourly rate is fine.
@@ -463,7 +463,7 @@ func TestPickOffer_EnforcesTheWholeRunCeiling(t *testing.T) {
 func TestPickOffer_SkipsTheBudgetWhenTheProviderIsFree(t *testing.T) {
 	p := providertest.NewRecordingProvider("local")
 	p.Capabilities.Free = true
-	p.OfferList = []node.Offer{{Provider: "local", Token: "local", GPU: "none", GPUCount: 1, Price: 0}}
+	p.OfferList = []node.Offer{{Provider: "local", Token: "local", GPU: "none", GPUCount: 1, Price: 0, Reclaim: node.ReclaimNever}}
 	o := opts(t)
 	o.Budget = Budget{MaxRate: 1, MaxRun: 1}
 
@@ -730,7 +730,7 @@ func TestWithNode_ReportsTheCostOnTeardown(t *testing.T) {
 	p.Capabilities = provider.Caps{HostKeyFromAPI: true, PublicSSH: true, MinBilling: time.Minute}
 	p.OfferList = []node.Offer{{
 		Provider: "test", Token: "h100", GPU: node.NormalizeGPU("h100"),
-		GPUCount: 1, Price: node.Rate(2_690_000),
+		GPUCount: 1, Price: node.Rate(2_690_000), Reclaim: node.ReclaimNever,
 	}}
 
 	var logged bytes.Buffer

@@ -1271,6 +1271,41 @@ A leaked node bills by the hour in silence. These are not style preferences.
   downloader and got a 4090 costs fifteen times what it meant to. Neither may
   happen by default, so a CPU offer matches only a CPU filter and a GPU offer
   only a GPU one.
+- **An offer that did not say whether it can be reclaimed is treated as
+  reclaimable.** `node.Offer` carried an `Interruptible bool` that no provider
+  ever assigned, `provider.Caps` carried a *different* field of the same name
+  that was assigned correctly and read by nothing, and `Filter.Match`'s two
+  guards therefore compared against a constant false -- so
+  `allow_interruptible`, whose default is the strict answer, refused nothing
+  for the life of the code while `runpod_cloud: COMMUNITY` rented hardware
+  somebody else can take back. The fix is not "populate the field": a provider
+  can forget again, and that is the same bug one author at a time. So
+  `node.Reclaim` has three states, `ReclaimUnknown` is the zero value, and
+  only `ReclaimNever` reads as safe -- the direction `Caps.PublicSSH` and
+  `State.Billable` already default in, where a value added later is unsafe
+  until its author says otherwise. The same mistake as `Filter.CPUOnly` above,
+  reached from the other side: there the two kinds had to be told apart, here
+  the two *layers* did, and a name shared across them is what made it
+  invisible.
+- **The reclaim answer is per offer and the capability only implies it.**
+  `Caps.InterruptibleTier` is a whole-catalogue claim, which is how RunPod
+  models it: the operator picks the tier in config and everything in it is
+  somebody else's machine. Moving the refusal there would have been shorter
+  and wrong for Vast.ai, where interruptible bidding is per listing and is
+  most of the reason to use the provider -- a `Caps`-only check refuses its
+  on-demand offers along with its bids. So the gate is `Offer.Reclaim`, the
+  capability is a claim `providertest.RunConformance` holds the offers to in
+  both directions, and RunPod derives both from one `reclaimOf(cloud)` so the
+  two cannot disagree.
+- **A listing emptied by the reclaim guard says which key emptied it.** On the
+  community tier every offer is refused, and "no offers matched" reads as "that
+  card is sold out everywhere" -- the wrong story, same as the one the store's
+  datacentre refusal exists not to tell. It lives in the provider and not in
+  `provision.PickOffer`, because every provider runs `FilterOffers` over its
+  own output before returning: by the time `PickOffer` sees an empty list the
+  refused offers are gone, and the diagnosis there would have been a branch
+  that cannot fire. Which is this entry's own defect, so it was worth noticing
+  before shipping it.
 - **Offer.VCPU tells the two kinds apart, and is the number the create call
   needs.** A separate boolean would be a second source of truth for one fact,
   and the two could disagree.

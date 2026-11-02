@@ -196,10 +196,80 @@ type Offer struct {
 	// on a GPU offer.
 	MeasuredCap ComputeCap
 
-	Region        string
-	Interruptible bool
-	Label         string // one human line for `ember offers`
+	Region string
+
+	// Reclaim says whether the provider can take this machine back before
+	// ember is finished with it. See the type: the zero value is the unsafe
+	// answer on purpose.
+	//
+	// Per-offer rather than only per-provider, because on some marketplaces
+	// it is a property of the individual listing: Vast.ai's interruptible
+	// bidding is per-offer and is most of the reason to use that provider at
+	// all. On RunPod it is a tier chosen in config, so every offer of a run
+	// carries the same answer -- derived once from the tier, in one place,
+	// rather than in the mapper and again in the capability.
+	//
+	// Not the same field as provider.Caps.InterruptibleTier, which is the
+	// provider-wide claim and the thing a conformance suite can assert. This
+	// is the one Filter.Match reads and the one a provider must populate.
+	// They used to share the name Interruptible, which is how the filter
+	// comparing against the wrong one stayed invisible for the life of the
+	// code.
+	Reclaim Reclaim
+
+	Label string // one human line for `ember offers`
 }
+
+// Reclaim says whether the machine behind an offer can be taken back
+// mid-run.
+//
+// Three states and not a bool, because the zero value has to be the unsafe
+// answer. The defect: Offer carried an `Interruptible bool` that no provider
+// ever assigned, provider.Caps carried a *different* field of the same name
+// that was assigned correctly and never read, and Filter.Match's two guards
+// therefore compared against a constant false. The guard ran on every offer,
+// passed on every offer, and refused nothing -- while `runpod_cloud:
+// COMMUNITY` rented reclaimable hardware with `allow_interruptible` at its
+// default of false, so every operator who had never touched the key believed
+// a protection they did not have.
+//
+// A bool cannot tell "the provider promised it will not reclaim" from "the
+// provider said nothing", so a provider author who forgets the field gets the
+// permissive answer -- which is this bug again, one provider at a time. With
+// three states the forgetful case is refused instead. Same direction and same
+// reason as provider.Caps.PublicSSH defaulting to the stricter check.
+type Reclaim uint8
+
+const (
+	// ReclaimUnknown is the zero value: nothing has said. Interruptible
+	// treats it exactly like ReclaimAnyTime, so a provider that forgets to
+	// populate Offer.Reclaim has its offers refused unless the operator
+	// opted in, rather than rented in silence.
+	//
+	// providertest.RunConformance fails a provider that leaves it here, so
+	// "refused unless opted in" is the backstop and not the diagnosis.
+	ReclaimUnknown Reclaim = iota
+
+	// ReclaimNever is a promise: this machine stays rented until ember gives
+	// it up or the deadline passes. The only value Interruptible reads as
+	// safe, so it is the only one that admits an offer with
+	// Filter.AllowInterruptible at its default.
+	ReclaimNever
+
+	// ReclaimAnyTime means the provider may reclaim the machine whenever it
+	// likes. That is the one failure mode ember's TTL-and-journal apparatus
+	// does not cover: the node goes away without ember destroying it,
+	// mid-generation, and anything not yet fetched is gone.
+	ReclaimAnyTime
+)
+
+// Interruptible reports whether ember must treat this offer as reclaimable.
+//
+// Only ReclaimNever is not. Written as "everything except the promise" rather
+// than "equals ReclaimAnyTime" for the reason State.Billable is: a state added
+// later is unsafe by default, so the author has to think about it to make it
+// safe.
+func (r Reclaim) Interruptible() bool { return r != ReclaimNever }
 
 // GPUNone is the model a provider reports when a machine has no card.
 //

@@ -71,15 +71,36 @@ type Provider interface {
 // Caps describes what a provider can do, as data.
 //
 // A value rather than optional interfaces and type assertions: branching on
-// p.Caps().Interruptible reads, and `if x, ok := p.(interface{ ... })` does
+// p.Caps().PublicSSH reads, and `if x, ok := p.(interface{ ... })` does
 // not.
 type Caps struct {
 	// HostKeyFromAPI means the provider can report or accept a host key, so
 	// the first connection is authenticated rather than trusted on sight.
 	HostKeyFromAPI bool
 
-	// Interruptible means instances can be taken back mid-run.
-	Interruptible bool
+	// InterruptibleTier means every machine this provider will rent right
+	// now can be taken back mid-run, because the tier is a provider-level
+	// choice rather than a property of a card. RunPod's COMMUNITY cloud is
+	// one: the operator picks it in config and then everything in the
+	// catalogue is somebody else's machine.
+	//
+	// It is a claim and not a gate. The gate is node.Offer.Reclaim, which
+	// Filter.Match reads; this is what providertest.RunConformance holds the
+	// offers to, so a provider claiming the whole tier is reclaimable cannot
+	// also hand out offers that say otherwise.
+	//
+	// False does not mean "nothing here is interruptible" -- a marketplace
+	// where interruptibility is bid per listing, which is Vast.ai, reports
+	// false here and answers per offer. That is why the refusal could not
+	// live on this field: a Caps-only check would refuse Vast's on-demand
+	// offers along with its bids, and refusing the bids is refusing the
+	// reason to use it.
+	//
+	// It was called Interruptible, exactly like the field on node.Offer that
+	// nothing populated, and the two sharing a name is how a filter
+	// comparing against the wrong one went unnoticed for the life of the
+	// code. Renamed so the question "which one did you mean" answers itself.
+	InterruptibleTier bool
 
 	// Tags means the provider has a real tag API. Without it ember encodes
 	// its label into whatever free-text field exists, usually the name.
@@ -364,6 +385,38 @@ func FilterOffers(f node.Filter, in []node.Offer) []node.Offer {
 		return out[i].Token < out[j].Token
 	})
 	return out
+}
+
+// RefusedForReclaim counts the offers FilterOffers dropped only because they
+// can be taken back mid-run and the operator has not opted in.
+//
+// An empty offer list has two very different causes and reads as one.
+// "nothing matched" sends the operator to try a different card, when the real
+// answer may be that every card on this tier is reclaimable and
+// `allow_interruptible` is false -- the same shape as the refusal
+// runpod.Offers makes when a store pins placement to a site with no capacity,
+// where "that GPU is sold out everywhere" was the wrong story to tell.
+//
+// It re-runs the same filter with the opt-in flipped rather than inspecting
+// Reclaim directly, so what it reports is "this and nothing else is why",
+// which is the only form of the sentence worth printing: an offer that was
+// also too dear or in the wrong region must not be blamed on the key.
+func RefusedForReclaim(f node.Filter, in []node.Offer) int {
+	if f.AllowInterruptible {
+		return 0
+	}
+	allowed := f
+	allowed.AllowInterruptible = true
+	n := 0
+	for _, o := range in {
+		if o.Validate() != nil {
+			continue
+		}
+		if !f.Match(o) && allowed.Match(o) {
+			n++
+		}
+	}
+	return n
 }
 
 // LabelPrefix marks everything ember creates.
