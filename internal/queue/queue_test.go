@@ -85,6 +85,15 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 		return r.rentErr
 	}
 	sink.Emit(report.Event{Kind: report.KindNodeReady, Node: "local/n1"})
+	// What app.Plan.prepare emits before the workload, so the drain loop's
+	// write-through of it is exercised by every rental here rather than by
+	// one test that remembered to send it.
+	sink.Emit(report.Event{
+		Kind: report.KindNodeMemory, MemCgroup: 2,
+		MemLimit: 32 << 30, MemCurrent: 31 << 30,
+		MemTotal: 700 << 30, MemCached: 29 << 30,
+		Bytes: 56 << 30,
+	})
 	err := fn(ctx, r.served)
 	if r.block != nil {
 		// Held open so a test can see the rental alive while it cancels.
@@ -1117,5 +1126,54 @@ func TestOnce_AProgressEventWithNoFrameRecordsNothing(t *testing.T) {
 	}
 	if len(ims) != 0 {
 		t.Fatalf("recorded %d image(s) for a run that wrote none: %+v", len(ims), ims)
+	}
+}
+
+// TestOnce_RecordsWhatTheNodeSaidAboutItsMemory.
+//
+// Written through to the OPENER, like the rest of the rental's own facts: the
+// memory limit is the node's, and every request that rode along ran under the
+// same one. Writing it to each would be the same multiplication that
+// attributing the whole rental's cost to every request would be.
+//
+// The figures are the two arms of the FLUX.2 measurement in miniature: a
+// container bounded at 32 GiB on a host reporting 700 GiB, about to read a
+// 56 GiB model. Which is to say -- a node that cannot hold the weights, with
+// nothing in the host's view to say so.
+func TestOnce_RecordsWhatTheNodeSaidAboutItsMemory(t *testing.T) {
+	pl := &fakePlanner{served: &fakeServed{}}
+	q, st := newQueue(t, pl)
+
+	opener := enqueue(t, st, "rtx2080ti", "first")
+	rider := enqueue(t, st, "rtx2080ti", "second")
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.Get(t.Context(), opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MemCgroup != 2 {
+		t.Errorf("mem cgroup = %d, want the hierarchy the probe read", got.MemCgroup)
+	}
+	if got.MemLimit != 32<<30 || got.MemCurrent != 31<<30 {
+		t.Errorf("the cgroup's view was not recorded: %+v", got)
+	}
+	if got.MemTotal != 700<<30 || got.MemCached != 29<<30 {
+		t.Errorf("the host's view was not recorded: %+v", got)
+	}
+	if got.AssetBytes != 56<<30 {
+		t.Errorf("asset bytes = %d, want the weights the run was about to read", got.AssetBytes)
+	}
+
+	second, err := st.Get(t.Context(), rider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.MemLimit != 0 {
+		t.Errorf("the rider carries the node's memory limit too (%d); it belongs to the rental",
+			second.MemLimit)
 	}
 }

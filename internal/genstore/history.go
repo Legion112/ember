@@ -70,6 +70,8 @@ func (s *SQLite) History(ctx context.Context, f Filter) ([]Entry, error) {
 		SELECT r.id, r.created_unix, r.status, r.provider, r.gpu,
 		       r.run_id, r.node, r.started_unix, r.ended_unix,
 		       r.cost, r.rate, r.elapsed_ns, r.billable_ns, r.err,
+		       r.mem_cgroup, r.mem_limit, r.mem_current,
+		       r.mem_total, r.mem_cached, r.asset_bytes,
 		       COALESCE(j.n, 0),
 		       COALESCE(j.images, 0),
 		       COALESCE(j.bytes, 0),
@@ -106,6 +108,8 @@ func (s *SQLite) History(ctx context.Context, f Filter) ([]Entry, error) {
 		if err := rows.Scan(&id, &created, &status, &e.Provider, &e.GPU,
 			&e.RunID, &e.Node, &started, &ended,
 			&cost, &rate, &elapsed, &billable, &e.Err,
+			&e.MemCgroup, &e.MemLimit, &e.MemCurrent,
+			&e.MemTotal, &e.MemCached, &e.AssetBytes,
 			&e.Jobs, &e.Images, &e.Bytes, &jobCost, &e.Steps, &span,
 			&recorded, &rode); err != nil {
 			return nil, fmt.Errorf("read a ledger row: %w", err)

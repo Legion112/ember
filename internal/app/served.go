@@ -114,7 +114,7 @@ func (p Plan) WithServed(ctx context.Context, out io.Writer, sink report.Sink,
 			// No output directory decided here: fn is a drain loop serving
 			// several requests on this one rental, and each of them writes
 			// into its own, which is also its key in the blob store.
-			client, so, err := p.prepare(ctx, out, s)
+			client, so, err := p.prepare(ctx, out, sink, s)
 			if err != nil {
 				return err
 			}

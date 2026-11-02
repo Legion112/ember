@@ -1,0 +1,3 @@
+mem_total_kb 131817620
+mem_cached_kb 81098812
+assets 0

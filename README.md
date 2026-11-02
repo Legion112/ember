@@ -1398,6 +1398,54 @@ that broke before a job completed. Both divide a rental cost into no images,
 which is why they are counted together and why `ember spend` calls per image
 an upper bound when there are any.
 
+**It reports what each node said about its memory.** `--memory` prints the
+same rows with the memory facts instead of the costs:
+
+```
+$ ember history --memory
+when (utc)       request          provider   card         cgroup       limit       using  host total     weights    headroom
+2026-10-31 18:02 5f324627337df6f5 runpod     rtx4090          v2    32.0 GiB    31.0 GiB   700.0 GiB    56.0 GiB   -24.0 GiB
+2026-10-29 09:14 15d87a1aae672727 runpod     a100-80g         v2    64.0 GiB    58.0 GiB   700.0 GiB    56.0 GiB     8.0 GiB
+```
+
+Those two rows are the measurement this exists for. Eight runs of FLUX.2 on
+the same card in the same datacentre split in two: a node that kept the 56 GiB
+of weights in page cache spent 145.3 s per step, and one that did not spent
+226.6 s, because every step re-read the whole model off the network store at a
+measured 868 MiB/s. **81 seconds and $0.056 per image of variance between two
+runs of the same configuration**, and nothing in ember could see why — all
+eight nodes reported 620–708 GiB of free RAM.
+
+That figure was the wrong number. `/proc/meminfo` inside a container reports
+the **host's** memory: measured with `docker run --memory 512m`, a container
+bounded at 512 MiB reports 125.7 GiB of `MemTotal`, a factor of 252. So the
+host's view never said anything about the limit the page cache actually lives
+under, which is the container's own `memory.max` — and nothing read it. Two
+file reads on a node that is already billing, and ember was not doing them.
+
+Both views are recorded now, on every rental, before the workload. `limit` is
+the cgroup's and `host total` is `/proc/meminfo`'s; `headroom` is the ceiling
+the page cache lived under less the weights that had to fit in it, and a
+negative number there is a node that re-read the model every step. A dash is
+"nobody read it", which is a different claim from zero — `cgroup` says which
+hierarchy answered, and `v1`'s paths are named rather than derived because a
+guess at where a hierarchy is mounted reports "no limit" on the one kernel it
+is wrong about.
+
+**There is no verdict column, deliberately.** What to *do* about a node that
+cannot hold the weights — a warning naming the expected re-read cost per step,
+or a corrected note if the guess turns out wrong — is a decision to take once
+there are measurements, and a column saying "this will be slow" would be that
+decision taken from a guess. The probe cannot fail a run either: it is four
+file reads and a `stat`, and a node that will not answer them is a node whose
+generation should still happen.
+
+**What is still unknown is what RunPod sets.** The captures in
+`internal/nodemem/testdata/` are Docker's defaults on one host; whether a pod's
+`memory.max` is below its asset set is the question, and it needs a rental.
+The point of recording it is that the next one answers it without anybody
+remembering to type a command at the right moment.
+
 **It cannot spend.** No provider is constructed anywhere on the path, and the
 only statement it runs is a `SELECT` — so "a listing command must not be able
 to rent, enqueue or claim" is a property of what the command has rather than a

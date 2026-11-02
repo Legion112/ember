@@ -13,6 +13,7 @@ import (
 	"github.com/Legion112/ember/internal/gpucheck"
 	"github.com/Legion112/ember/internal/keys"
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/nodemem"
 	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/session"
@@ -110,7 +111,7 @@ func (p Plan) SyncAssets(ctx context.Context, out io.Writer) error {
 // then the weights, then whatever the node was rented for.
 //
 // The returned client is the caller's to close.
-func (p Plan) prepare(ctx context.Context, out io.Writer, s provision.Session) (*sshdial.Client, session.Options, error) {
+func (p Plan) prepare(ctx context.Context, out io.Writer, sink report.Sink, s provision.Session) (*sshdial.Client, session.Options, error) {
 	client, so, err := dialNode(ctx, s, p.Options, p.Hold)
 	if err != nil {
 		return nil, so, err
@@ -131,7 +132,58 @@ func (p Plan) prepare(ctx context.Context, out io.Writer, s provision.Session) (
 		_ = client.Close()
 		return nil, so, err
 	}
+
+	// And the memory facts last, because the asset figure is a stat of the
+	// weights and the weights are only there once the step above has run.
+	// Still before the workload, which is what matters: this is the question
+	// "can this node hold the model" asked before the card is paid to find
+	// out the hard way.
+	reportMemory(ctx, sink, sshexec.New(client.SSH()), p.Spec, so)
 	return client, so, nil
+}
+
+// reportMemory records what the node says about its memory, and swallows
+// every failure.
+//
+// IT CANNOT FAIL A RUN, which is the whole shape of it: these are reads of
+// four files and a stat of the weights, and a node that will not answer them
+// is a node whose generation should still happen. The alternative -- a probe
+// that can refuse -- would be a diagnostic with the authority of a safety
+// check, over a value nothing yet acts on.
+//
+// Logged at warn rather than silently, because a probe that stopped working
+// would otherwise leave an empty column that reads as "this node had no
+// limit" -- which is the answer that makes a slow node look fine.
+func reportMemory(ctx context.Context, sink report.Sink, r sshx.Runner, spec node.Spec, so session.Options) {
+	if sink == nil {
+		return
+	}
+	paths, err := nodemem.AssetPaths(spec.Mount, spec.Assets)
+	if err != nil {
+		so.Log.Warn("could not name this run's assets for the memory probe", "err", err)
+		return
+	}
+	rep, err := nodemem.Probe(ctx, r, paths)
+	if err != nil {
+		so.Log.Warn("could not read the node's memory facts; the run is unaffected", "err", err)
+		return
+	}
+	if rep.IsZero() {
+		// Nothing at all came back, which is not the same as a node with no
+		// limit: recording zeros would put a row in the history claiming
+		// facts nobody read.
+		so.Log.Warn("the node reported no memory facts at all; nothing recorded")
+		return
+	}
+	sink.Emit(report.Event{
+		Kind:       report.KindNodeMemory,
+		MemCgroup:  rep.CgroupVersion,
+		MemLimit:   rep.CgroupMax,
+		MemCurrent: rep.CgroupCurrent,
+		MemTotal:   rep.HostTotal,
+		MemCached:  rep.HostCached,
+		Bytes:      rep.Assets,
+	})
 }
 
 // serve opens the tunnel and does what the spec asks.
@@ -140,7 +192,7 @@ func (p Plan) prepare(ctx context.Context, out io.Writer, s provision.Session) (
 // refuse one -- live in internal/session, where they can be tested against an
 // in-process SSH server instead of a rented machine.
 func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s provision.Session) error {
-	client, so, err := p.prepare(ctx, out, s)
+	client, so, err := p.prepare(ctx, out, sink, s)
 	if err != nil {
 		return err
 	}

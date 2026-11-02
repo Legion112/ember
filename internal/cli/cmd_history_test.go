@@ -426,3 +426,146 @@ func TestHistory_DashesTheWallTimeOfACancelledRequest(t *testing.T) {
 		}
 	}
 }
+
+// memRow seeds a finished request with what its node said about memory.
+func memRow(t *testing.T, st genstore.Store, gpu string, created time.Time,
+	cgroup int, limit, current, hostTotal, hostCached, assets int64) genstore.ReqID {
+	t.Helper()
+	id, err := st.Enqueue(t.Context(), genstore.Request{
+		Provider: "runpod", GPU: gpu, TTL: time.Hour, Created: created,
+		Jobs: []genstore.Job{{Prompt: "a cat"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Update(t.Context(), id, func(g *genstore.Request) {
+		g.Status = genstore.StatusDone
+		g.RunID, g.Cost = "run-"+gpu, 2_490_000
+		g.Started, g.Ended = created, created.Add(42*time.Minute)
+		g.MemCgroup = cgroup
+		g.MemLimit, g.MemCurrent = limit, current
+		g.MemTotal, g.MemCached = hostTotal, hostCached
+		g.AssetBytes = assets
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// TestHistory_ReportsBothViewsOfTheNodesMemory.
+//
+// The two rows are the two arms of the FLUX.2 measurement: one node whose
+// cgroup could hold the 56 GiB of weights and one whose could not, both
+// reporting hundreds of gigabytes of host memory. That is the whole reason
+// both views are recorded.
+func TestHistory_ReportsBothViewsOfTheNodesMemory(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, "")
+	seedSpend(t, cfg, d, func(t *testing.T, st genstore.Store) {
+		memRow(t, st, "held", spendDay(1), 2, 64<<30, 58<<30, 700<<30, 56<<30, 56<<30)
+		memRow(t, st, "spilled", spendDay(2), 2, 32<<30, 31<<30, 700<<30, 29<<30, 56<<30)
+	})
+
+	var out bytes.Buffer
+	if err := runHistory([]string{"-config", cfg, "-memory"}, &out, d); err != nil {
+		t.Fatalf("history --memory = %v\n%s", err, out.String())
+	}
+	got := out.String()
+	t.Logf("ember history --memory:\n%s", got)
+
+	for _, want := range []string{
+		"cgroup", "limit", "using", "host total", "weights",
+		"v2", "64.0 GiB", "32.0 GiB", "700.0 GiB", "56.0 GiB",
+		// The one derived figure, and the one the measurement turns on.
+		"headroom",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("history --memory does not report %q:\n%s", want, got)
+		}
+	}
+	// The node that could not hold the model has NEGATIVE headroom, which is
+	// the interesting answer and must not be printed as a positive one.
+	if !strings.Contains(got, "-24.0 GiB") {
+		t.Errorf("a node that could not hold the weights does not report negative headroom:\n%s", got)
+	}
+	if !strings.Contains(got, "8.0 GiB") {
+		t.Errorf("a node that could hold the weights does not report its headroom:\n%s", got)
+	}
+
+	// And the cost table is unchanged by the flag, because they are two
+	// projections of the same rows rather than two listings.
+	var costs bytes.Buffer
+	if err := runHistory([]string{"-config", cfg}, &costs, d); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(costs.String(), "host total") {
+		t.Errorf("the default table grew a memory column:\n%s", costs.String())
+	}
+}
+
+// A node that answered nothing is not a node with no limit, and a row of
+// zeros that reads as "this node was fine" is the misreading to prevent.
+func TestHistory_SaysWhenNoMemoryFactsWereRead(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, "")
+	seedSpend(t, cfg, d, func(t *testing.T, st genstore.Store) {
+		// A request from before these columns existed: no memory facts at all.
+		memRow(t, st, "rtx4090", spendDay(1), 0, 0, 0, 0, 0, 0)
+	})
+
+	var out bytes.Buffer
+	if err := runHistory([]string{"-config", cfg, "-memory"}, &out, d); err != nil {
+		t.Fatalf("history --memory = %v\n%s", err, out.String())
+	}
+	got := out.String()
+	t.Logf("ember history --memory over an unread node:\n%s", got)
+
+	if !strings.Contains(got, "before ember read the node's memory") {
+		t.Errorf("a request with no memory facts is not named:\n%s", got)
+	}
+	if strings.Contains(got, "0 B") {
+		t.Errorf("an unread figure is printed as zero bytes, which is a different claim:\n%s", got)
+	}
+	// Every cell a dash, headroom included: a figure computed over numbers
+	// nobody read is the kind that gets believed.
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.Contains(line, "rtx4090") {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) != 11 {
+			t.Fatalf("the row has %d columns, want 11: %q", len(f), line)
+		}
+		for _, cell := range f[5:] {
+			if cell != "-" {
+				t.Errorf("a figure nobody read printed as %q: %q", cell, line)
+			}
+		}
+	}
+}
+
+// A node with no cgroup limit falls back to the host's total, which is the
+// honest ceiling for a container that is not bounded.
+func TestHistory_FallsBackToTheHostsTotalWithNoCgroupLimit(t *testing.T) {
+	d := labDeps(t)
+	cfg := storeConfig(t, d, "")
+	seedSpend(t, cfg, d, func(t *testing.T, st genstore.Store) {
+		// cgroup v1 read, no limit set, so the host's total is the bound.
+		memRow(t, st, "rtx4090", spendDay(1), 1, 0, 0, 64<<30, 12<<30, 8<<30)
+	})
+
+	var out bytes.Buffer
+	if err := runHistory([]string{"-config", cfg, "-memory"}, &out, d); err != nil {
+		t.Fatalf("history --memory = %v\n%s", err, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "v1") {
+		t.Errorf("the hierarchy that was read is not named:\n%s", got)
+	}
+	// 64 GiB of host memory less 8 GiB of weights.
+	// 64 GiB of host memory less 8 GiB of weights, with the limit column a
+	// dash because there was none.
+	if !strings.Contains(got, "56.0 GiB") {
+		t.Errorf("the headroom is not computed against the host's total:\n%s", got)
+	}
+}

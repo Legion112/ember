@@ -32,7 +32,7 @@ const FileName = "generations.db"
 // internal/statestore's reason: reading a newer layout as an older one drops
 // columns, and the column it would drop is the one that says a request is
 // still running.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // migrations takes an existing file forward, one version per entry:
 // migrations[0] moves a version-1 file to version 2.
@@ -116,6 +116,39 @@ var migrations = [][]string{
 		`ALTER TABLE requests ADD COLUMN billable_ns INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE requests ADD COLUMN load_measured_ns INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE requests ADD COLUMN load_reported_ns INTEGER NOT NULL DEFAULT 0`,
+	},
+
+	// 3 -> 4: what the node said about its memory, both views.
+	//
+	// 81 SECONDS AND $0.056 PER IMAGE NOBODY COULD EXPLAIN is what these are
+	// for. Two runs of the same configuration against the same card in the
+	// same datacentre differed by that much depending on whether the node
+	// kept 56 GiB of weights in page cache, and every one of those nodes
+	// reported 620-708 GiB of free RAM -- because `free` inside a container
+	// reports the HOST's memory and not the limit the container is bounded
+	// by. The leading guess was the pod's memory cgroup, and the file that
+	// would settle it was two reads on a node that was already billing.
+	//
+	// Columns rather than events-only, on the precedent the execution columns
+	// set one version ago: a figure a performance question is about has to be
+	// queryable, and "was this node able to hold the model" asked over the
+	// event table means JSON-parsing every row of the table that grows per
+	// step per job per rental. The event stream stays the truth and these are
+	// a derived index of it.
+	//
+	// mem_limit zero means NO cgroup limit rather than a limit of nothing --
+	// cgroup v2 writes the literal "max" and v1 a sentinel near the top of
+	// int64, and both are read as zero -- so mem_cgroup is what says whether
+	// anything was read at all. Nothing backfills: the facts do not exist for
+	// rentals that have already happened, and inventing them from the host's
+	// view is precisely the mistake these columns were added to end.
+	{
+		`ALTER TABLE requests ADD COLUMN mem_cgroup INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN mem_limit INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN mem_current INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN mem_total INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN mem_cached INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN asset_bytes INTEGER NOT NULL DEFAULT 0`,
 	},
 }
 
@@ -229,6 +262,24 @@ CREATE TABLE IF NOT EXISTS requests (
 	-- wrong with, and the disagreement is itself the finding #30 turns on.
 	load_measured_ns INTEGER NOT NULL DEFAULT 0,
 	load_reported_ns INTEGER NOT NULL DEFAULT 0,
+
+	-- What the node said about its memory, both views, and the weights it was
+	-- about to read.
+	--
+	-- BOTH VIEWS BECAUSE THEY DISAGREE AND ONLY ONE BOUNDS THE PAGE CACHE.
+	-- "free" inside a container reports the host's memory: every node in the
+	-- FLUX.2 measurement said it had 620-708 GiB free, and two of them
+	-- differed by 81 seconds and $0.056 per image depending on whether the
+	-- weights stayed cached. mem_limit is the container's own cgroup limit,
+	-- where zero means there is NO limit rather than a limit of nothing --
+	-- cgroup v2 writes the literal "max" and v1 a sentinel near the top of
+	-- int64 -- so mem_cgroup is what says whether anything was read at all.
+	mem_cgroup    INTEGER NOT NULL DEFAULT 0,
+	mem_limit     INTEGER NOT NULL DEFAULT 0,
+	mem_current   INTEGER NOT NULL DEFAULT 0,
+	mem_total     INTEGER NOT NULL DEFAULT 0,
+	mem_cached    INTEGER NOT NULL DEFAULT 0,
+	asset_bytes   INTEGER NOT NULL DEFAULT 0,
 
 	err           TEXT    NOT NULL DEFAULT ''
 );
@@ -463,7 +514,9 @@ func (s *SQLite) Enqueue(ctx context.Context, r Request) (ReqID, error) {
 const requestColumns = `id, created_unix, status, provider, gpu, offer, ttl_ns,
 	max_hourly, max_run, preview, preview_every, run_id, node,
 	started_unix, ended_unix, cost, rate, elapsed_ns, billable_ns,
-	load_measured_ns, load_reported_ns, err`
+	load_measured_ns, load_reported_ns,
+	mem_cgroup, mem_limit, mem_current, mem_total, mem_cached, asset_bytes,
+	err`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -477,6 +530,9 @@ func scanRequest(sc scanner) (Request, error) {
 		ttl, hourly, maxRun, cost     int64
 		rate, elapsed, billable       int64
 		loadMeasured, loadReported    int64
+		memLimit, memCurrent          int64
+		memTotal, memCached, assets   int64
+		memCgroup                     int
 		provider, gpu, offer          string
 		preview, runID, nodeID, errTx string
 		previewEvery                  int
@@ -484,7 +540,9 @@ func scanRequest(sc scanner) (Request, error) {
 	if err := sc.Scan(&id, &created, &status, &provider, &gpu, &offer, &ttl,
 		&hourly, &maxRun, &preview, &previewEvery, &runID, &nodeID,
 		&started, &ended, &cost, &rate, &elapsed, &billable,
-		&loadMeasured, &loadReported, &errTx); err != nil {
+		&loadMeasured, &loadReported,
+		&memCgroup, &memLimit, &memCurrent, &memTotal, &memCached, &assets,
+		&errTx); err != nil {
 		return Request{}, err
 	}
 	r = Request{
@@ -507,6 +565,12 @@ func scanRequest(sc scanner) (Request, error) {
 		Billable:        time.Duration(billable),
 		LoadMeasured:    time.Duration(loadMeasured),
 		LoadReported:    time.Duration(loadReported),
+		MemCgroup:       memCgroup,
+		MemLimit:        memLimit,
+		MemCurrent:      memCurrent,
+		MemTotal:        memTotal,
+		MemCached:       memCached,
+		AssetBytes:      assets,
 		Err:             errTx,
 	}
 	// Zero stays zero rather than becoming the epoch: "this never started"
@@ -693,12 +757,16 @@ func (s *SQLite) Update(ctx context.Context, id ReqID, fn func(*Request)) error 
 		UPDATE requests SET status = ?, offer = ?, run_id = ?, node = ?,
 			started_unix = ?, ended_unix = ?, cost = ?,
 			rate = ?, elapsed_ns = ?, billable_ns = ?,
-			load_measured_ns = ?, load_reported_ns = ?, err = ?
+			load_measured_ns = ?, load_reported_ns = ?,
+			mem_cgroup = ?, mem_limit = ?, mem_current = ?,
+			mem_total = ?, mem_cached = ?, asset_bytes = ?, err = ?
 		WHERE id = ?`,
 		string(r.Status), r.Offer, r.RunID, r.Node,
 		unixOrZero(r.Started), unixOrZero(r.Ended), int64(r.Cost),
 		int64(r.Rate), int64(r.Elapsed), int64(r.Billable),
-		int64(r.LoadMeasured), int64(r.LoadReported), r.Err, string(id))
+		int64(r.LoadMeasured), int64(r.LoadReported),
+		r.MemCgroup, r.MemLimit, r.MemCurrent,
+		r.MemTotal, r.MemCached, r.AssetBytes, r.Err, string(id))
 	if err != nil {
 		return fmt.Errorf("update request %s: %w", id, err)
 	}

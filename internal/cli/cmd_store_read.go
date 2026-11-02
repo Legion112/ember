@@ -426,14 +426,29 @@ func stamp(t time.Time) string {
 // exported helper would be an invitation for the two to drift into one
 // format that suits neither.
 func human(n int64) string {
+	// SIGNED, because one caller's figure is legitimately negative: `ember
+	// history --memory` prints the headroom a node had under its memory
+	// limit, and a node that could not hold the weights is the interesting
+	// answer. Without this it rendered as "-25769803776 B" -- unreadable in
+	// exactly the row an operator is looking for, and found by printing it
+	// rather than by a test.
+	//
+	// The magnitude is taken in uint64 so math.MinInt64 cannot overflow back
+	// to itself, which as a recursive "-" + human(-n) would not terminate. No
+	// byte count reaches it; a formatter that can loop is still worse than
+	// one that cannot.
+	mag, sign := uint64(n), "" //nolint:gosec // G115: a negative n is converted deliberately and negated below
+	if n < 0 {
+		mag, sign = -mag, "-"
+	}
 	switch {
-	case n >= 1<<30:
-		return fmt.Sprintf("%.1f GiB", float64(n)/float64(int64(1)<<30))
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MiB", float64(n)/float64(int64(1)<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.1f KiB", float64(n)/float64(int64(1)<<10))
+	case mag >= 1<<30:
+		return fmt.Sprintf("%s%.1f GiB", sign, float64(mag)/float64(uint64(1)<<30))
+	case mag >= 1<<20:
+		return fmt.Sprintf("%s%.1f MiB", sign, float64(mag)/float64(uint64(1)<<20))
+	case mag >= 1<<10:
+		return fmt.Sprintf("%s%.1f KiB", sign, float64(mag)/float64(uint64(1)<<10))
 	default:
-		return fmt.Sprintf("%d B", n)
+		return fmt.Sprintf("%s%d B", sign, mag)
 	}
 }

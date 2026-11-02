@@ -597,8 +597,12 @@ func (s *RecordingStore) History(_ context.Context, f Filter) ([]Entry, error) {
 			Started: r.Started, Ended: r.Ended,
 			Cost: r.Cost, Rate: r.Rate,
 			Elapsed: r.Elapsed, Billable: r.Billable,
-			Jobs: len(r.Jobs),
-			Err:  r.Err,
+			MemCgroup: r.MemCgroup,
+			MemLimit:  r.MemLimit, MemCurrent: r.MemCurrent,
+			MemTotal: r.MemTotal, MemCached: r.MemCached,
+			AssetBytes: r.AssetBytes,
+			Jobs:       len(r.Jobs),
+			Err:        r.Err,
 		}
 		if opener, ok := paid[r.RunID]; ok && opener != r.ID {
 			e.Rode = true

@@ -42,6 +42,7 @@ func runHistory(args []string, out io.Writer, d deps) error {
 		gpu      = fs.String("gpu", "", "only requests that named this card")
 		status   = fs.String("status", "", "only requests in this status")
 		limit    = fs.Int("limit", 0, "how many rows at most, newest first")
+		memory   = fs.Bool("memory", false, "print what each node said about its memory instead of the costs")
 		asJSON   = fs.Bool("json", false, "print the rows as JSON")
 	)
 	fs.Usage = func() {
@@ -49,6 +50,7 @@ func runHistory(args []string, out io.Writer, d deps) error {
 		outf(out, "Out of the database `ember serve` writes, which is the only thing that\nrecords a generation. `ember up` prints its cost and keeps nothing, so a\nrun made that way is not in here -- see README.\n\n")
 		outf(out, "Two cost columns. rental is what the provider charged for the node;\ncard time is what this request's own jobs took. A rental serves every\nqueued request it can, so the rental is charged to the request that\nopened it and a dash means this one rode along on somebody else's.\n\n")
 		outf(out, "Dates are UTC and the period is half-open -- --since includes, --until\nexcludes -- the same rule `ember spend` uses, so the two tile alike.\n\n")
+		outf(out, "--memory prints what each node said about its memory instead of the cost\ncolumns. Both views, because they disagree: a container's cgroup limit is\nwhat bounds its page cache, and /proc/meminfo reports the HOST's memory --\nwhich is why eight nodes could all claim 620-708 GiB free while two of them\ndiffered by 81 seconds and $0.056 per image. See README.\n\n")
 		outf(out, "It reads and nothing else: no provider is contacted and the queue cannot\nbe advanced through it.\n\n")
 		outf(out, "usage: ember history [flags]\n\n")
 		fs.PrintDefaults()
@@ -125,8 +127,87 @@ func runHistory(args []string, out io.Writer, d deps) error {
 		outf(out, "no generations recorded%s.\n", historyPhrase(f))
 		return nil
 	}
+	if *memory {
+		printMemory(out, rows)
+		return nil
+	}
 	printHistory(out, rows)
 	return nil
+}
+
+// memoryRow is the --memory layout, named once beside its header for the
+// reason historyRow is.
+const memoryRow = "%-16s %-16s %-10s %-12s %6s %11s %11s %11s %11s %11s\n"
+
+// printMemory writes what each node said about its memory.
+//
+// A SEPARATE PROJECTION AND NOT MORE COLUMNS, because the cost table is
+// already ten wide and six numbers of bytes would make neither readable. Same
+// rows, same filters, different question.
+//
+// NO VERDICT COLUMN. The issue that asked for these numbers was explicit that
+// what to DO about a node which cannot hold the weights is a decision to take
+// once there are measurements -- a warning naming the expected re-read cost
+// per step if the limit is reliably below the asset set, or a corrected note
+// if it is not. headroom is a subtraction of two columns that are both here,
+// which is as far as the evidence goes.
+func printMemory(out io.Writer, rows []genstore.Entry) {
+	outf(out, memoryRow, "when (utc)", "request", "provider", "card",
+		"cgroup", "limit", "using", "host total", "weights", "headroom")
+
+	var unread int
+	for _, e := range rows {
+		if e.MemCgroup == 0 && e.MemTotal == 0 {
+			unread++
+		}
+		// The one derived figure, and the one the measurement turns on: the
+		// ceiling the page cache lived under, less the weights that had to
+		// fit in it. NEGATIVE IS THE INTERESTING ANSWER -- a node that could
+		// not hold the model re-read it every step, at 868 MiB/s off a
+		// network store in the one measurement there is -- so it is a column
+		// rather than a line of prose per row, which over a full page would
+		// be two hundred lines after the table.
+		headroom := "-"
+		if h, ok := e.MemHeadroom(); ok {
+			headroom = human(h)
+		}
+		outf(out, memoryRow,
+			e.Created.UTC().Format("2006-01-02 15:04"), string(e.ID),
+			e.Provider, keyOr(e.GPU),
+			cgroupCell(e.MemCgroup), bytesOrDash(e.MemLimit),
+			bytesOrDash(e.MemCurrent), bytesOrDash(e.MemTotal),
+			bytesOrDash(e.AssetBytes), headroom)
+	}
+
+	if unread > 0 {
+		outf(out, "\n")
+		outf(out, "%d request(s) ran before ember read the node's memory, or on a node that\n"+
+			"would not answer. Nothing backfills them: the facts do not exist for a\nrental that has already ended.\n", unread)
+	}
+}
+
+// cgroupCell names which hierarchy a limit came from.
+//
+// A dash and not "v0" for a node that answered nothing, because v0 is not a
+// thing and a reader would go looking for it.
+func cgroupCell(version int) string {
+	if version <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("v%d", version)
+}
+
+// bytesOrDash is a byte count, or a dash where there is no figure.
+//
+// A dash and not "0 B", for the reason the wall-time column uses one: zero
+// bytes of memory limit would be a container that cannot allocate anything,
+// and zero bytes of weights a run with none -- both different claims from
+// "nobody read it".
+func bytesOrDash(n int64) string {
+	if n <= 0 {
+		return "-"
+	}
+	return human(n)
 }
 
 // historyRow is the column layout, named once so the header and the rows

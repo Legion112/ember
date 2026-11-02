@@ -1,0 +1,5 @@
+cgroup2_max max
+cgroup2_current 2469888
+mem_total_kb 131817620
+mem_cached_kb 81098320
+assets 0
