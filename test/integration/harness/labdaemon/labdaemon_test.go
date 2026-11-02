@@ -128,8 +128,12 @@ func TestAcquire_RefusesWhileHeldAndYieldsAfterRelease(t *testing.T) {
 	// Waiting rather than refusing is the suite's answer, so a wait that
 	// cannot be satisfied has to end in an error naming the holder -- never in
 	// a silent pass, and never in a hang.
+	// Longer than the one-second grace before the first progress report: the
+	// holder stamps its identity after taking the lock, so a report sent
+	// immediately can name the previous holder -- which is what happened the
+	// first time two suites were started together.
 	waited := false
-	_, err = Acquire(id, 300*time.Millisecond, func(time.Duration, string) { waited = true })
+	_, err = Acquire(id, 1500*time.Millisecond, func(time.Duration, string) { waited = true })
 	if err == nil {
 		t.Fatal("a bounded wait succeeded while the lock was held")
 	}

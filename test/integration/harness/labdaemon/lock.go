@@ -104,8 +104,15 @@ func Acquire(daemonID string, wait time.Duration, onWait func(waited time.Durati
 				"The lock is %s and it cannot go stale: the kernel releases it when the process holding it dies, so if no suite is running any more, the process named above is stuck and killing it is the fix",
 				holder, waited.Round(time.Second), path)
 		}
-		if onWait != nil {
-			// Once every ten seconds, not once per poll.
+		// Once every ten seconds, not once per poll -- and never within the
+		// first second, because the holder stamps its identity *after* taking
+		// the lock and a poll can land in between. That is not theoretical: on
+		// the first run of two suites started together, the waiter's first
+		// message named a process that had finished three minutes earlier,
+		// because it read the line the previous holder left behind. A
+		// diagnostic that names the wrong process is worse than one that waits
+		// a second to be right.
+		if onWait != nil && time.Since(start) >= time.Second {
 			if w := time.Since(start).Round(10 * time.Second); w != reported {
 				reported = w
 				onWait(time.Since(start), readHolder(f))
