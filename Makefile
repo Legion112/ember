@@ -601,7 +601,17 @@ test-serve-lab: web
 # The video lab is deliberately absent. It needs ember:sd, the CPU build, and
 # a publish of the CUDA image should not require an unrelated image to exist.
 # TestWorkloadImages_PinTheSameUpstreamRevision is what keeps the two honest.
-PUBLISH_LABS := 'TestWorkloadImage_(ListensOnNothingButSSH|CarriesNoWeights|UnderstandsTheFetchCommand|CarriesOneArchitectureAndNoPTX)'
+#
+# LinksNothingItDoesNotShip belongs here for the reason the paragraph above
+# exists. The image's final stage is nvidia/cuda:*-base plus an explicit COPY
+# of the three CUDA libraries the binaries link, rather than *-runtime, which
+# carries every library NVIDIA publishes -- so a dependency the binary gained,
+# or one a CUDA bump renamed, is a library the loader cannot resolve. That is
+# `error while loading shared libraries` after a pod was rented, the image
+# pulled and the weights fetched, all of it billed, and the only place it can
+# be caught for free is before the push. It needs no GPU, no network and no
+# weights, so there is no reason for it to be outside the gate.
+PUBLISH_LABS := 'TestWorkloadImage_(ListensOnNothingButSSH|CarriesNoWeights|UnderstandsTheFetchCommand|CarriesOneArchitectureAndNoPTX|LinksNothingItDoesNotShip)'
 
 # The subset of the image labs that needs only the CUDA image and ember:lab.
 test-image-labs-publish:
