@@ -472,10 +472,11 @@ func rmTargets(ctx context.Context, store genstore.Store, ids []string, olderTha
 //
 // THE THIRD FIGURE IS THE ONE THAT WOULD OTHERWISE MISLEAD. Part of the output
 // tree is named by no image row, because `ember up` writes into the same
-// directory and records nothing in the database -- "`ember up` prints its cost
-// and keeps nothing", as `ember history`'s own usage says. Without that line
-// an operator reads one total, removes every request's images, frees a
-// fraction of it and concludes ember is broken.
+// directory and records no image rows: it records what it rented and what each
+// job did, and its files go into a timestamped run directory that no gallery
+// serves, so there is no blob key to name them by. Without that line an
+// operator reads one total, removes every request's images, frees a fraction
+// of it and concludes ember is broken.
 func runHistoryDu(args []string, out io.Writer, d deps) error {
 	fs := flag.NewFlagSet("history du", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -487,7 +488,7 @@ func runHistoryDu(args []string, out io.Writer, d deps) error {
 		outf(out, "ember history du says what the generation history occupies.\n\n")
 		outf(out, "Split into the database, which holds the rows, and the output tree, which\nholds the images -- they are removed by different commands, and only one\nof the two is removable by age at all.\n\n")
 		outf(out, "The database figure includes SQLite's write-ahead log, which is disk in\nuse and can be larger than the file beside it: a figure that counted only\ngenerations.db would report a fraction of what is there and would drop\nwhenever a checkpoint happened, for no reason you could see.\n\n")
-		outf(out, "Part of the output tree is named by no row in the database: `ember up`\nwrites into the same directory and records nothing, so `ember history rm`\ncan never reach it. That figure is printed rather than folded in.\n\n")
+		outf(out, "Part of the output tree is named by no image row: `ember up` writes a\ntimestamped run directory into the same place and records no image rows for\nit, so `ember history rm` can never reach those files. That figure is\nprinted rather than folded in.\n\n")
 		outf(out, "usage: ember history du [flags]\n\n")
 		fs.PrintDefaults()
 	}
@@ -564,8 +565,9 @@ func runHistoryDu(args []string, out io.Writer, d deps) error {
 	outf(out, "          %d file(s)\n", files)
 
 	if extra := unrecordedBytes(treeBytes, u.ImageBytes); extra > 0 {
-		outf(out, "\n%s under outputs is named by no image row. `ember up` writes into this\n"+
-			"tree and records nothing, so `ember history rm` can never reach it.\n", human(extra))
+		outf(out, "\n%s under outputs is named by no image row. `ember up` writes a timestamped\n"+
+			"run directory here and records no image rows for it, so `ember history rm`\n"+
+			"can never reach these.\n", human(extra))
 	}
 	// The plural rule these lines follow, which the first version did not: a
 	// count in a LIST of counts or a table column keeps "(s)", because the

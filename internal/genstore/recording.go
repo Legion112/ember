@@ -84,6 +84,34 @@ func (s *RecordingStore) Enqueue(_ context.Context, r Request) (ReqID, error) {
 	if err := r.Validate(); err != nil {
 		return "", err
 	}
+	return s.put("Enqueue", r, StatusQueued, false)
+}
+
+// Adopt records a run that is already happening, as running.
+//
+// StatusRunning and the started stamp, for the reasons the Store interface
+// gives: a queued row is claimable, and a claimable `ember up` row is a second
+// card rented for a run already in flight.
+func (s *RecordingStore) Adopt(_ context.Context, r Request) (ReqID, error) {
+	if err := r.ValidateRun(); err != nil {
+		return "", err
+	}
+	return s.put("Adopt", r, StatusRunning, true)
+}
+
+// put is the fake's half of SQLite.insert, and it forgets exactly what that
+// statement does not name.
+//
+// NOT A COPY OF THE REQUEST, which is the point of the list below. The real
+// INSERT names the ask and nothing a run produces, so a caller that set the
+// cost, the node, the memory figures or the model on the way in has them
+// dropped against a file on disk -- and a fake that remembered them would be
+// kinder than the thing it stands in for in the one direction that matters:
+// the caller sees the value come back, builds on it, and the behaviour changes
+// the day a real store is underneath. The model was already forgotten here for
+// that reason; the rest were not, which is the same divergence one field at a
+// time.
+func (s *RecordingStore) put(op string, r Request, status Status, started bool) (ReqID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -91,7 +119,7 @@ func (s *RecordingStore) Enqueue(_ context.Context, r Request) (ReqID, error) {
 		s.nextID++
 		r.ID = ReqID(fmt.Sprintf("req-%d", s.nextID))
 	}
-	if err := s.record("Enqueue", string(r.ID)); err != nil {
+	if err := s.record(op, string(r.ID)); err != nil {
 		return "", err
 	}
 	if _, dup := s.reqs[r.ID]; dup {
@@ -100,18 +128,31 @@ func (s *RecordingStore) Enqueue(_ context.Context, r Request) (ReqID, error) {
 	if r.Created.IsZero() {
 		r.Created = s.at()
 	}
-	r.Status = StatusQueued
+	r.Status = status
 
 	copied := r
 	copied.Jobs = append([]Job(nil), r.Jobs...)
-	// A MODEL IS NOT PART OF THE ASK, so it is forgotten here exactly as the
-	// real store's INSERT forgets it -- that statement does not name the
-	// column. Remembering it would make this fake KINDER than SQLite in the
-	// one direction that matters: a caller could set it on the way in, see it
-	// come back from the fake, and build on a field that is silently dropped
-	// against a file on disk. The queue writes it through Update once a
-	// rental has read it off /capabilities.
+	copied.RunID, copied.Node = "", ""
+	copied.Cost, copied.Rate = 0, 0
+	copied.Elapsed, copied.Billable = 0, 0
+	copied.LoadMeasured, copied.LoadReported = 0, 0
+	copied.MemCgroup = 0
+	copied.MemLimit, copied.MemCurrent = 0, 0
+	copied.MemTotal, copied.MemCached = 0, 0
+	copied.AssetBytes = 0
 	copied.Model = ""
+	copied.Err = ""
+	copied.Ended = time.Time{}
+	copied.Started = time.Time{}
+	if started {
+		// The run has started, because Adopt is called before the create
+		// call. Taken from Created when the caller named no other moment, as
+		// the real store does it.
+		copied.Started = r.Started
+		if copied.Started.IsZero() {
+			copied.Started = r.Created
+		}
+	}
 	s.reqs[r.ID] = &copied
 	s.order = append(s.order, r.ID)
 	return r.ID, nil
@@ -616,10 +657,11 @@ func (s *RecordingStore) Spend(_ context.Context, q SpendQuery) ([]Bucket, error
 				recorded++
 			}
 		}
-		// The same three conditions unrecorded applies, spelled against the
-		// values this store has: a request that has not finished is not
-		// missing anything.
-		if !r.Ended.IsZero() && len(r.Jobs) > 0 && recorded == 0 {
+		// The same conditions unrecorded applies, spelled against the values
+		// this store has: a request that has not finished is not missing
+		// anything, and one that finished with no job reporting is -- whether
+		// it had jobs that never reported or, after Adopt, no jobs at all.
+		if unrecorded(unixOrZero(r.Ended), int64(recorded)) {
 			b.Unrecorded++
 		}
 	}
@@ -728,7 +770,7 @@ func (s *RecordingStore) History(_ context.Context, f Filter) ([]Entry, error) {
 				recorded++
 			}
 		}
-		e.Unrecorded = unrecorded(unixOrZero(r.Ended), e.Jobs, int64(recorded))
+		e.Unrecorded = unrecorded(unixOrZero(r.Ended), int64(recorded))
 		out = append(out, e)
 	}
 

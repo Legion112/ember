@@ -256,15 +256,23 @@ func withServer(
 	// Both numbers go on the event, even though only ember's is printed: a UI
 	// that showed the server's figure beside a log line carrying ember's
 	// would reproduce the exact confusion this comment exists to prevent.
+	// EMITTED WHATEVER THE BATCH SIZE, and the gate that used to be here moved
+	// into report.Text. "paid once rather than 1 times" is not a saving and is
+	// not printed, which is a decision about a line of prose -- and making it
+	// here meant a single-job run emitted no event, so its load span and the
+	// model that served it were recorded nowhere. Those are the columns #30
+	// and #32 added to answer this exact question, and `ember up` with one job
+	// is how most of README's measurements were taken. The output is
+	// unchanged: the renderer is silent for Total <= 1.
 	so.Log.Debug("sd-server load", "measured", time.Since(serveStart), "server_reported", load)
-	if batch > 1 {
-		sink.Emit(report.Event{
-			Kind:     report.KindModelResident,
-			Measured: time.Since(serveStart),
-			Reported: load,
-			Total:    batch,
-		})
-	}
+	sink.Emit(report.Event{
+		Kind:     report.KindModelResident,
+		Measured: time.Since(serveStart),
+		Reported: load,
+		Total:    batch,
+		// What the server says it loaded, which is the only authority on it.
+		Model: caps.Model,
+	})
 
 	return fn(ctx, served{client: c, caps: caps, rate: rate})
 }

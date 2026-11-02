@@ -1203,6 +1203,72 @@ that sentence made unrepresentable rather than merely tested.
   would have to re-derive the step counts from progress frames whose poll
   interval is unknown for those runs, which is the one number this schema is
   careful not to infer.
+- **`ember up` records, and not through the queue.** `ember serve` was the only
+  writer to the generation history, so the command every measurement in README
+  was taken with printed its cost and kept nothing: `ember history`, `ember
+  spend --by gpu|day|provider|model` and every per-job cost, timing and
+  node-memory column were blind to it. Enqueueing instead would have been four
+  separate wrongs, each of which costs money or changes behaviour: `queue.Run`
+  claims whatever is **queued** rather than one named request, so an `up` would
+  serve the web UI's backlog and bill a measurement run for it; `Run` begins by
+  marking everything it finds running as interrupted, which is right for a
+  restarting server and wrong for a second process; `AppPlanner` *narrows* a
+  request against the config where `up`'s `applyFlags` *replaces*, so
+  `--max-hourly-usd 999` would stop raising the ceiling; and `Enqueue` refuses
+  a request with no jobs, which two of `up`'s three shapes are. Writing a
+  second recorder was the other horn -- two sources of truth for one set of
+  columns, drifting the first time one is added -- so the recorder moved **out**
+  of `Queue` into `queue.Recorder` and both callers use it. One rental at a time
+  is untouched by any of it: that is structural because a rental lives inside
+  one iteration of one drain goroutine, and `up` never enters the loop.
+- **A queued row for a run already in flight is two GPUs.** `Enqueue` writes
+  `StatusQueued` whatever the caller said -- it is how a request *enters* a
+  queue -- and a queued row is exactly what `ClaimNext` takes. An `ember serve`
+  in another terminal, which is the ordinary setup for somebody who has both,
+  would claim the `up` row, rent a **second** card and generate the batch again
+  from the record of the run still happening. So `genstore.Adopt` is a separate
+  method that writes `StatusRunning`, which no claim will take, rather than a
+  flag on `Enqueue`.
+- **The row is written before the create call, and keyed by a fresh random
+  id.** The journal's rule -- the window between asking a provider for a
+  machine and reading the answer is where a rental nothing recorded is born --
+  so a run whose create call failed, and a run whose node billed without ever
+  becoming ready, both have a row. The run id would have been the tidier key
+  and is not available: `provision.WithNode` mints it *after* that point, so
+  keying on it would have meant writing the row from the first event, which
+  drops exactly those two runs. `requests.run_id` therefore stays empty for an
+  `up` row and the node's own handle, written through from `node_ready`, is the
+  join to `ember ls`; neither reader prints the run id.
+- **A `cmds` step is not a job row, and a plain `ember up` has no jobs at
+  all.** Both record the request row and the full event stream and no `jobs`
+  rows: a step's own cost and span are on its `unit_cost` event, and the
+  figures the jobs table exists for -- images, passes, steps per second -- are
+  not things an `ffmpeg` invocation has. A `steps` table was the alternative
+  and is a new table, a migration, a `Store` method, a fake method and
+  conformance rows for a shape nothing aggregates; argv on `genstore.Job` was
+  the other, and that is the wire type a browser posts, which is what `Extra`
+  is kept off it for. The honest consequence is printed rather than hidden:
+  `ember history` shows such a run with no jobs, a dash for images and card
+  time, and a footnote saying which runs those are.
+- **`unrecorded` required a job, and that condition could not fire.**
+  `Validate` refuses a queued request with no jobs, so `jobs > 0` was true of
+  every row any reachable state could produce -- the dead half of a seal, which
+  `History` had already removed one of. `Adopt` makes it reachable and the
+  answer it then gives is the right one: a rental that paid for a node and
+  divided it into no images is precisely what the flag means, so both readers
+  print a dash rather than a zero and say how many rows they left out. A column
+  of zeros in a money ledger reads as free.
+- **The model travels on the event, and the decision not to print it moved to
+  the renderer.** `model_resident` was emitted only for a batch of **more than
+  one**, because "paid once rather than 1 times" is not a saving -- a
+  presentation choice made at the emitter, which meant a single-job run
+  recorded no load span and no model name at all, in the two columns added to
+  explain exactly that. `ember up` with one job is how most of README's
+  measurements were taken. The event is now always emitted and carries
+  `capabilities.model.name`; `report.Text` is silent for `Total <= 1`, so the
+  output is byte-for-byte what it was. The queue still writes the model from
+  `s.Caps()` as well, because a rider never sees the rental's own events: one
+  authority, two carriers, and each is the only one available on its path.
 - **Steps are summed from each pass's declared total, never counted from the
   frames.** ember deduplicates progress on the step, so at a poll slower than
   the card samples it *observes* fewer frames than there were steps -- a count

@@ -340,3 +340,32 @@ func TestText_MoneyIsRenderedByTheMoneyType(t *testing.T) {
 		t.Errorf("got %q, want it to contain %q and %q", got, cost, spent)
 	}
 }
+
+// TestText_ModelResidentSaysNothingAboutABatchOfOne.
+//
+// "paid once rather than 1 times" is not a saving and was never printed. The
+// gate used to be on the EMITTER, which meant a single-job run emitted no
+// event either -- so nothing recorded its load span or which model served it,
+// in the columns added to explain exactly that. It is here now, where a
+// decision about a line of prose belongs, and the event is always a fact.
+func TestText_ModelResidentSaysNothingAboutABatchOfOne(t *testing.T) {
+	var b strings.Builder
+	s := Text(&b)
+	for _, total := range []int{0, 1} {
+		s.Emit(Event{
+			Kind: KindModelResident, Total: total,
+			Measured: 90 * time.Second, Model: "sd15.gguf",
+		})
+	}
+	if b.String() != "" {
+		t.Errorf("output = %q, want nothing for a batch that saves nothing", b.String())
+	}
+
+	// And two is still the line it has always been, so the move did not
+	// silence the case the line exists for.
+	b.Reset()
+	s.Emit(Event{Kind: KindModelResident, Total: 2, Measured: 6 * time.Second})
+	if !strings.Contains(b.String(), "paid once rather than 2 times") {
+		t.Errorf("output = %q", b.String())
+	}
+}

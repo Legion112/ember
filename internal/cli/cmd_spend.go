@@ -42,10 +42,10 @@ func runSpend(args []string, out io.Writer, d deps) error {
 	)
 	fs.Usage = func() {
 		outf(out, "ember spend reports what the generation history says was spent.\n\n")
-		outf(out, "Out of the database `ember serve` writes, which is the only thing that\nrecords a generation. `ember up` prints its cost and keeps nothing, so a\nrun made that way is not in here -- see README.\n\n")
+		outf(out, "Out of the database both `ember serve` and `ember up` write to, so a\nrental shows up here however it was started. An `ember up` that forwarded\nports or ran `cmds` contributes its rental cost and no per-job figures,\nbecause it had no jobs to report -- see README.\n\n")
 		outf(out, "Two cost figures, and the difference between them is the point. The\nrental is what the provider charges; card time is what the jobs\nthemselves took. A batch pays provisioning, the image pull, the store\nread and the model load once for everything it serves, and that gap is\nthe overhead column.\n\n")
 		outf(out, "Dates are UTC and the period is half-open -- --since includes, --until\nexcludes -- so consecutive periods tile without counting a day twice.\n\n")
-		outf(out, "--by model groups by the name the generation server reported when the\nweights went resident, not by what `sd.serve` names today: a config edited\nbetween two rentals would otherwise attribute last week's spend to this\nweek's weights. It is the checkpoint's filename, or the diffusion model's\nwhere a configuration names its text encoder and VAE separately -- so two\nsetups differing only in those two read as one model. A request from\nbefore ember recorded it, or one that never got a node, groups under a\ndash; nothing backfills.\n\n")
+		outf(out, "--by model groups by the name the generation server reported when the\nweights went resident, not by what `sd.serve` names today: a config edited\nbetween two rentals would otherwise attribute last week's spend to this\nweek's weights. It is the checkpoint's filename, or the diffusion model's\nwhere a configuration names its text encoder and VAE separately -- so two\nsetups differing only in those two read as one model. A request from\nbefore ember recorded it, one that never got a node, and a run that\nstarted no generation server at all -- any `ember up` with ports or\n`cmds` -- group under a dash; nothing backfills.\n\n")
 		outf(out, "usage: ember spend [flags]\n\n")
 		fs.PrintDefaults()
 	}
@@ -228,10 +228,10 @@ func printSpend(out io.Writer, rows []genstore.Bucket, group genstore.GroupBy) {
 		// the division is over a smaller denominator than the money paid
 		// for. A figure that is wrong in the expensive direction and does
 		// not say so is worse than one that is missing.
-		outf(out, "%d request(s) contribute their rental cost and no per-job figures -- they ran\n"+
-			"before ember recorded them, or finished without a job completing. So per image\n"+
-			"is an upper bound here, and steps/s is computed only over what was recorded.\n"+
-			"Nothing backfills them.\n", skipped)
+		outf(out, "%d request(s) contribute their rental cost and no per-job figures -- they had\n"+
+			"no jobs at all, or they ran before ember recorded them, or they finished\n"+
+			"without a job completing. So per image is an upper bound here, and steps/s is\n"+
+			"computed only over what was recorded. Nothing backfills them.\n", skipped)
 	}
 }
 
