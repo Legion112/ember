@@ -427,16 +427,44 @@ func TestServe_UI(t *testing.T) {
 	}
 
 	// A small generation: enough steps that the progress row has something
-	// to show, small enough that a laptop CPU finishes it.
+	// to show, small enough that a laptop CPU finishes it. It is also
+	// smaller than it used to be, measured: with the width asserted the lab
+	// runs in 39s against 86s, because the generation it had been doing all
+	// along was the panel's full 512x512.
+	setNumber(t, ctx, "width", "192", console)
 	if err := chromedp.Do(ctx,
 		chromedp.SendKeys(`textarea`, "a paper boat on a slow river"),
-		// SetValue and not SendKeys: a number input already holds 512, and
-		// SendKeys would append to it.
-		chromedp.SetValue(`input[type=number]`, "192"),
 		chromedp.Click(`button.primary`),
 		chromedp.WaitVisible(`.jobs li`),
 	); err != nil {
 		t.Fatalf("queueing a generation: %v\n%s", err, console.text())
+	}
+
+	// THE WIDTH REACHED THE REQUEST, and for the life of this lab nothing
+	// checked that it did.
+	//
+	// The control was driven and the request was queued and no assertion
+	// crossed the gap, so a page that took the value into the element and
+	// not into the draft would have gone on passing while generating at the
+	// panel's default -- which is the AssertNoStray shape inside the one lab
+	// that exists because no unit test can reach this class of bug. It is
+	// also precisely the frozen-row bug's sibling: the value is on screen
+	// and the state behind it is stale.
+	//
+	// What is asserted is a claim about Chrome and about Leptos rather than
+	// about ember: a keystroke has to reach an `on:input` handler, that
+	// handler has to update the draft, and the draft has to be what the
+	// generate button posts. Read off the request the SERVER stored, because
+	// reading it back out of the page would be the page agreeing with
+	// itself.
+	//
+	// Errorf and not Fatalf: at the default of 512 this generation still
+	// finishes well inside the budget, so there is no reason to stop and
+	// lose everything the rest of the lab would have said. The picker lab
+	// fatals on the same assertion because 512 would time it out there.
+	queued := waitForQueuedRequest(t, srv, 30*time.Second)
+	if raw := string(getRaw(t, srv, queued)); !strings.Contains(raw, `"width":192`) {
+		t.Errorf("the width typed into the page did not reach the request: %s", raw)
 	}
 
 	// THE PROGRESS ROW ADVANCES, which is the assertion the frozen-row bug
@@ -664,6 +692,55 @@ func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
 
 	if errs := console.errors(); errs != "" {
 		t.Errorf("the page logged errors:\n%s", errs)
+	}
+}
+
+// setNumber types a value into one of the page's number controls, named by
+// the label beside it.
+//
+// ONE SPELLING FOR BOTH BROWSER LABS. It was inlined in each, and the two
+// disagreed about which mechanism drives a Leptos control -- which is how a
+// lab came to set a geometry through a call it had written down as doing
+// nothing, and assert nothing about where the value went.
+//
+// End, then enough backspaces to empty whatever was there, then the digits,
+// all as REAL KEY EVENTS. Extra backspaces on an empty field do nothing,
+// which is cheaper than asking how many digits the default has.
+//
+// WHAT chromedp.SetValue ACTUALLY DOES, measured, because what was written
+// down about it in this file and in AGENTS.md was wrong. It is
+// `SetJavascriptAttribute(sel, "value", v)`, and the pinned v0.21.0's
+// embedded `js/setAttribute.js` dispatches a bubbling `input` AND a bubbling
+// `change` exactly when the name is `value` -- so it does reach an `on:input`
+// handler, and the width TestServe_UI set that way had been arriving in the
+// request all along. Driven both ways against the real page: SetValue 192
+// queues `"width":192`, SetValue 256 queues `"width":256`. The claim that it
+// dispatches nothing was a reading of the call rather than of a run, which is
+// the `allowedCudaVersions` and `capabilities.model` mistake one more time,
+// in a test helper instead of against an API.
+//
+// Keystrokes anyway, and NOT because SetValue is broken. A property
+// assignment plus a synthesized `Event('input')` exercises one binding; a
+// real key event goes through `beforeinput`, the browser's own parsing of
+// what a number box will accept, and the element's validity state, none of
+// which an assignment touches. So it is the stronger exercise of the path a
+// person uses, and it is one mechanism in this file rather than two.
+//
+// The limit is unchanged and is a limit of TYPING: a decimal point does not
+// reach an `<input type=number>` through a synthesized keystroke at all, so a
+// fractional value is set with the stepper and no lab here can assert one
+// that was typed.
+//
+// The label's own help span is the selector rather than `input[type=number]`,
+// which picks whichever number control the layout happens to put first -- a
+// selector that silently follows a reflow is a selector that drives the wrong
+// control.
+func setNumber(t *testing.T, ctx context.Context, label, value string, console *consoleLog) {
+	t.Helper()
+	sel := fmt.Sprintf(`//label[span[@class="help" and text()=%q]]/input`, label)
+	keys := kb.End + strings.Repeat(kb.Backspace, 8) + value
+	if err := chromedp.Do(ctx, chromedp.SendKeys(sel, keys)); err != nil {
+		t.Fatalf("setting %s to %s: %v\n%s", label, value, err, console.text())
 	}
 }
 
@@ -1094,22 +1171,13 @@ func TestServe_UIStagesAFileFromARealFilePicker(t *testing.T) {
 	}
 
 	// A SMALL GENERATION, set the way a person sets it: select what is there
-	// and type over it. chromedp.SetValue assigns the DOM property and
-	// dispatches no event, so a fine-grained signal never hears about it and
-	// the draft keeps its default -- which is a trap worth naming, because it
-	// is silent and the page still looks right.
+	// and type over it. setNumber is that, and it is shared with TestServe_UI
+	// so the two labs cannot come to disagree about what drives a control --
+	// which they did, and the disagreement is written up there.
 	for _, f := range []struct{ label, value string }{
 		{"width", "192"}, {"height", "192"}, {"steps", "4"}, {"seed", "77"},
 	} {
-		sel := fmt.Sprintf(`//label[span[@class="help" and text()=%q]]/input`, f.label)
-		// End, then enough backspaces to empty whatever was there, then the
-		// value -- all as REAL KEY EVENTS. Extra backspaces on an empty
-		// field do nothing, which is cheaper than asking how many digits the
-		// default has.
-		keys := kb.End + strings.Repeat(kb.Backspace, 8) + f.value
-		if err := chromedp.Do(ctx, chromedp.SendKeys(sel, keys)); err != nil {
-			t.Fatalf("setting %s: %v\n%s", f.label, err, console.text())
-		}
+		setNumber(t, ctx, f.label, f.value, console)
 	}
 	if err := chromedp.Do(ctx,
 		chromedp.SendKeys(`textarea`, "a paper boat on a slow river"),

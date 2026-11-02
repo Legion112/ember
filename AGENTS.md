@@ -1146,14 +1146,44 @@ that sentence made unrepresentable rather than merely tested.
   of test here. The lab picks a real file in a real Chrome and asserts that
   the queued request names the sha256 **the lab computed itself**, which is
   the join rather than either half agreeing with itself.
-- **`chromedp.SetValue` dispatches no event, so a fine-grained signal never
-  hears about it.** It is `SetJavascriptAttribute(sel, "value", ...)` in the
-  pinned version: the DOM property changes, the page's `on:input` does not
-  run, and the draft keeps its default -- silently, with the page still
-  looking right. `TestServe_UI` sets a width of 192 that way and asserts
-  nothing about it. The image lab sends real key events instead and asserts
-  the geometry reached the request, so a timeout there names its cause rather
-  than being guessed at.
+- **`chromedp.SetValue` DOES dispatch an event, the entry that said otherwise
+  was a reading of the call rather than of a run, and what it explained was
+  real anyway: the lab set a geometry and asserted nothing about where it
+  went.** The claim here was that the DOM property changes, `on:input` never
+  runs and the draft keeps its default. It is
+  `SetJavascriptAttribute(sel, "value", v)`, and the pinned v0.21.0's embedded
+  `js/setAttribute.js` dispatches a bubbling `input` **and** a bubbling
+  `change` exactly when the name is `value` -- so the width `TestServe_UI`
+  set that way had been reaching the request all along. Measured both ways
+  against the real page: `SetValue` 192 queues `"width":192` and 256 queues
+  `"width":256`, and the second is the negative control, because an assertion
+  that passes for one value and cannot fail for another is the thing being
+  fixed. Believing the signature over a run is the `allowedCudaVersions` and
+  `capabilities.model` mistake, reached through a dependency's source instead
+  of an API. **The defect is one bullet down from the mechanism**: a control
+  the lab drove and a request the lab queued were two halves with no
+  assertion crossing the gap, so a page that stopped driving the draft -- the
+  frozen-row bug's sibling, where the value is on screen and the state behind
+  it is stale -- would have gone on passing while generating at the default.
+  That is `AssertNoStray` inside the one lab this file defends on the grounds
+  that no unit test can reach the class of bug it covers. Both browser labs
+  now assert the geometry on the request the **server stored**, and both go
+  through one `setNumber`, because two inlined spellings are how the two labs
+  came to disagree about what drives a control. Real key events in both, not
+  because `SetValue` is broken but because an assignment plus a synthesized
+  `Event('input')` exercises one binding while a keystroke goes through
+  `beforeinput`, the browser's own parsing of what a number box accepts and
+  the element's validity state. **No guard, and that is a decision.** The rule
+  somebody would want -- no setting a control whose value is later asserted
+  through a mechanism that does not reach the signal -- is not derivable from
+  the tree: which mechanisms reach a Leptos signal is a question about Chrome,
+  answerable only by running one, and the path from a control to the assertion
+  crosses a browser, a websocket, SQLite and an HTTP route. The rule that *is*
+  cheaply expressible, banning `SetValue` by name, would fire on a call the
+  measurement says is correct -- which is the defect
+  `TestNoListenOutsideLoopback` records about its own first version, where it
+  flagged `loopback.Listen`. What stands in its place is the assertion itself,
+  which re-measures the mechanism against a real browser on every lab run.
 - **A decimal point does not reach an `<input type=number>` through a
   synthesized key event, and the stepper does.** Typing `0`, `.`, `2` into the
   strength box leaves it holding `0` after the second keystroke -- the `.`
