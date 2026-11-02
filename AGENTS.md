@@ -85,6 +85,46 @@ moment it imports a sibling, the sibling's dependencies become its own.
   diffs rather than living unread in a Makefile variable.
 - **A test that skips itself reports success for something that never ran.** CI
   greps for `--- SKIP` in both the unit and the lab logs and fails on a hit.
+- **Every provider is held to `providertest.RunConformance`, because the
+  guarantees are not in the interface.** `provider.Provider` is six methods
+  and says nothing about Destroy being idempotent, about a label surviving
+  `Create` → `List` → `ParseLabel`, about `Inspect` on a handle the provider
+  does not have, or about `Caps` matching fact rather than intent -- and every
+  one of those is a defect this repository has already paid for and was
+  re-proving by hand, per provider. The suite is credential-free and
+  network-free by construction: it only calls the provider handed to it, so
+  runpod runs it against `runpodfake` over `httptest` and local against the
+  recording Docker engine, and nothing in the suite knows which. Its own
+  checks are `func(ctx, Provider) error` rather than assertions on a `*T`, so
+  `conformance_test.go` can run each one against a provider built to be
+  correct and then against a provider that breaks exactly that invariant and
+  nothing else, and require the matching check to go red: an assertion suite is
+  the easiest kind of code to write so that it cannot fail. Both providers
+  passed it unchanged on the first run, which on its own proves nothing --
+  what proves something is that reinstating sixteen defects in their real code
+  turned fifteen of them red.
+  **The exposure decision is not reimplemented, it is called**:
+  `RunConformance` applies the same `AssertSSHOnly`-or-`AssertNoPublishedPorts`
+  choice `provision` makes from the same `Caps` field, because a provider
+  checking its own exposure is a provider grading its own homework and a
+  second copy of the rule is a second place for it to drift.
+  **Nothing in it skips.** A check that does not apply is driven by `Caps` and
+  asserts the capability claim instead, which is why the leftover check's
+  "this provider has nothing to sweep" branch fails a provider that implements
+  `LeftoverAPI` without the flag.
+  **Two invariants are deliberately left out, and that is recorded in code
+  rather than in silence.** A provider's int port being range-checked rather
+  than narrowed is not observable through the interface -- `node.Endpoint.Port`
+  is already a `uint16`, so an assertion there is vacuous and the real check
+  stays beside `runpod.port16`. And a `Destroy` that re-derives the run id
+  from the machine instead of taking the argument only goes wrong once the
+  machine is gone, which means staging it behind the provider's back: the only
+  route is a hook per fake, which is the escape hatch that would stop the
+  suite holding a provider to its interface at all. So that one lives in
+  `local`'s own `TestDestroy_RemovesTheNetworkWhenTheContainerIsAlreadyGone`,
+  and `TestConformance_CannotCatchARederivedRunID` asserts that the suite
+  still cannot see it -- a limitation nobody can read out of the code is a
+  limitation that will be forgotten.
 - **A gate's tag list is derived from the tree, never maintained beside it.**
   `.golangci.yml` named `integration` and not `imagelab` while `go vet` ran
   with both from three hand-written copies, so the image labs -- the ones
@@ -278,7 +318,17 @@ that sentence made unrepresentable rather than merely tested.
   because each of those is a real RunPod behaviour that broke ember once. A
   fake that is tidier than the service it stands in for tests a service that
   does not exist. The previous RunPod tests used one-off handlers returning a
-  canned blob, which cannot express the thing that actually breaks: time.
+  canned blob, which cannot express the thing that actually breaks: time --
+  and the conformance suite now points the real provider at this fake instead,
+  which is what that comment was asking for.
+
+  It was tidier in one place, and the conformance suite is what found it: a
+  `DELETE` of a pod already deleted answered **200**, because the handler
+  checked whether the pod was in its map and not whether it was gone. The
+  live API 404s, `httpx.Delete` turns that into success, and
+  destroy-is-idempotent therefore passed against this fake *without the
+  not-found path ever being taken* -- the exact shape of
+  `AssertNoStray`-could-not-fail, in a fake rather than in a cleanup order.
 - **A UI has a class of bug no unit test can reach, so one lab drives a
   browser.** Three in this feature were invisible to the Go tests and to
   `cargo test` and obvious the moment a page loaded: a nil slice marshalled as

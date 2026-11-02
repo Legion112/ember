@@ -306,6 +306,17 @@ func (f *Fake) list(w http.ResponseWriter) {
 func (f *Fake) destroy(w http.ResponseWriter, id string) {
 	f.mu.Lock()
 	p, ok := f.pods[id]
+	// A pod that has already been deleted is gone, so the second DELETE is a
+	// 404 exactly as the first DELETE of a pod that never existed is. This
+	// used to check only `ok`, which left a destroyed pod in the map and
+	// answered 200 to every later delete -- so a destroy ember repeated
+	// looked successful here for a reason the live API does not have, and
+	// providertest's destroy-is-idempotent check passed against this fake
+	// without the not-found path ever being taken. A fake tidier than the
+	// service it stands in for tests a service that does not exist.
+	if ok && p.Destroyed {
+		ok = false
+	}
 	if ok {
 		p.Destroyed = true
 	}

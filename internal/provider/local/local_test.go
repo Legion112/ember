@@ -1435,3 +1435,32 @@ func TestLocal_CatalogueCapsMatchImplementation(t *testing.T) {
 	// hourly timer ran.
 	providertest.AssertCatalogueCapsMatch(t, New(dockerengine.NewRecordingEngine()))
 }
+
+// TestLocal_Conformance holds this provider to the guarantees that are not in
+// the Provider interface.
+//
+// Against the recording engine rather than a daemon, so it needs no Docker,
+// no network and no credentials: the suite only ever calls the provider handed
+// to it, and the provider only ever calls the engine. Every layer under test
+// is the production one.
+//
+// The image has to be registered because Create refuses an image the daemon
+// does not have -- a hard failure naming `make docker-build`, rather than a
+// pull that would fetch somebody else's node image.
+func TestLocal_Conformance(t *testing.T) {
+	p, e := newProvider(t)
+	e.AddImage(providertest.ConformanceImage)
+	providertest.RunConformance(t, p)
+}
+
+// TestLocal_ConformanceWithACardIsTheSameProvider: the GPU-flavoured provider
+// is the same code with a different offer, and the conformance guarantees say
+// nothing about hardware -- so a card must not change any of them. Run
+// separately because newProvider pins "no GPU" for every other assertion in
+// this file, and a conformance run that silently depended on which of the two
+// it got would be a suite nobody could reproduce.
+func TestLocal_ConformanceWithACardIsTheSameProvider(t *testing.T) {
+	p, e := newGPUProvider(t)
+	e.AddImage(providertest.ConformanceImage)
+	providertest.RunConformance(t, p)
+}
