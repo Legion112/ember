@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/node"
 )
 
@@ -363,5 +365,67 @@ func TestQueue_DefaultsAreUsable(t *testing.T) {
 	}
 	if q.out() == nil {
 		t.Error("out() is nil")
+	}
+}
+
+// TestAppPlanner_CarriesTheLogLevelIntoARental.
+//
+// `ember serve --log-level debug` is one flag and two destinations: the
+// logger this process writes with, and the logger a rental's own lines come
+// out of -- which is built inside app.BuildOptions, several layers below any
+// handler. Without this field the flag would have covered the server and left
+// the expensive half, the rental, at info; the symptom would have been an
+// operator turning the logs up, seeing the HTTP side get louder and the
+// provisioning stay quiet, and concluding that provisioning has no debug
+// lines. It has four, and they are the ones a rented machine is debugged
+// with.
+//
+// It asserts on the LOGGER THE PLAN HOLDS and not on the field it was given,
+// because the field agreeing with itself is what a test of the struct would
+// show: the gap this crosses is AppPlanner -> app.Request -> BuildOptions.
+func TestAppPlanner_CarriesTheLogLevelIntoARental(t *testing.T) {
+	engine := dockerengine.NewRecordingEngine()
+	engine.GPURuntime = true
+
+	cfg := config.Config{
+		Provider: "local",
+		Image:    "ghcr.io/example/sd@sha256:" + strings.Repeat("a", 64),
+		TTL:      time.Hour,
+		SD:       config.SDConfig{Serve: []string{"sd-server", "--model", "/m.gguf"}},
+	}
+	deps := app.Deps{
+		Engine: engine, HomeDir: t.TempDir(),
+		Creds:     &config.Credentials{},
+		DetectGPU: func(context.Context) local.GPU { return local.GPU{} },
+	}
+	req := genstore.Request{
+		Provider: "local", TTL: 30 * time.Minute,
+		Jobs: []genstore.Job{{Prompt: "a cat", Width: 512, Height: 512, Steps: 4}},
+	}
+
+	for _, tc := range []struct {
+		name string
+		opts logx.Options
+		want bool
+	}{
+		{"the default is still info", logx.Options{}, false},
+		{"--log-level debug reaches the rental", logx.Options{Level: slog.LevelDebug}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rental, err := AppPlanner{Config: cfg, Deps: deps, Log: tc.opts}.Plan(t.Context(), req)
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			ar, ok := rental.(appRental)
+			if !ok {
+				t.Fatalf("Plan returned %T, not the rental this test can read", rental)
+			}
+			if got := ar.plan.Options.Log.Enabled(t.Context(), slog.LevelDebug); got != tc.want {
+				t.Errorf("debug enabled on the rental's logger = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if n := len(engine.Containers()); n != 0 {
+		t.Errorf("%d container(s) were created by a plan", n)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Legion112/ember/internal/config"
+	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/loopback"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
@@ -552,5 +555,94 @@ func TestRunSteps_PutsEveryStepInOneDirectory(t *testing.T) {
 	}
 	if n := strings.Count(out.String(), "fetching 1 output path(s) into "+dir); n != 3 {
 		t.Errorf("announced %d fetches into %s, want 3:\n%s", n, dir, out.String())
+	}
+}
+
+// TestCollectNodeLog_BringsEmbernodesOwnLogHome.
+//
+// The node's logs used to die with the node: embernode installs the host key,
+// starts sshd and arms the self-destruct, and it wrote to a stream nothing in
+// ember read -- on a machine ember then destroys on a context that survives
+// Ctrl-C.
+func TestCollectNodeLog_BringsEmbernodesOwnLogHome(t *testing.T) {
+	r := sshx.NewRecordingRunner()
+	cmd, err := transfer.TarCommand(logx.NodeLogPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Outputs[cmd.String()] = tarOne(t, "embernode.log", "level=INFO msg=\"sshd started\"\n")
+
+	dir := transfer.RunDir(t.TempDir(), "0123456789abcdef", time.Now())
+	collectNodeLog(t.Context(), r, dir, slog.New(slog.DiscardHandler))
+
+	b, err := os.ReadFile(filepath.Join(dir, "embernode.log"))
+	if err != nil {
+		t.Fatalf("the node's log did not come home: %v", err)
+	}
+	if !strings.Contains(string(b), "sshd started") {
+		t.Errorf("the log arrived empty of what the node did: %q", b)
+	}
+}
+
+// TestCollectNodeLog_CannotFailARun is the rule that is not negotiable.
+//
+// Logging is the one subsystem that must never be load-bearing, and the ways
+// this fails are ordinary: a node image whose embernode predates the file, an
+// sshd already gone, a read-only /tmp. GNU tar over a missing path exits
+// non-zero and writes a valid *empty* archive, so "there is no log" arrives
+// here as an error rather than as an empty result -- which is why the
+// swallowing has to be tested rather than assumed from the shape of the code.
+//
+// There is no return value to assert on, deliberately: a function that
+// reported a failure would be a function a caller could decide to propagate.
+// So what is checked is that it does not panic, writes nothing, and says so
+// at debug -- the level that exists for exactly this.
+func TestCollectNodeLog_CannotFailARun(t *testing.T) {
+	r := sshx.NewRecordingRunner()
+	r.FailOn = "tar"
+
+	var logged bytes.Buffer
+	// A test reading what was logged, which is why seal_test.go exempts
+	// _test.go files from the one-construction-site rule.
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	dir := transfer.RunDir(t.TempDir(), "0123456789abcdef", time.Now())
+	collectNodeLog(t.Context(), r, dir, log)
+
+	if !strings.Contains(logged.String(), "could not bring the node's own log home") {
+		t.Errorf("a failed collection was not reported at debug:\n%s", logged.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "embernode.log")); err == nil {
+		t.Error("a failed collection left a file behind")
+	}
+}
+
+// TestBuildOptions_HonoursTheLevelItWasGiven.
+//
+// This is the whole of `--log-level debug` arriving where it has to arrive.
+// The level was hard-coded to info at this call site, so seventeen debug
+// lines in this tree could not be displayed by any invocation of ember that
+// shipped -- and the plumbing between the flag and the handler is the half a
+// test can hold still.
+func TestBuildOptions_HonoursTheLevelItWasGiven(t *testing.T) {
+	ps := Paths{State: t.TempDir(), Config: t.TempDir(), Outputs: t.TempDir()}
+
+	for _, tc := range []struct {
+		name string
+		opts logx.Options
+		want bool
+	}{
+		{"the default is still info", logx.Options{}, false},
+		{"debug is reachable", logx.Options{Level: slog.LevelDebug}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, err := BuildOptions(ps, config.Config{}, io.Discard, tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := o.Log.Enabled(t.Context(), slog.LevelDebug); got != tc.want {
+				t.Errorf("debug enabled = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

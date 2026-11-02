@@ -4,8 +4,10 @@ package integration
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -129,14 +131,47 @@ func TestLifecycle_UpFetchesOutputsBeforeDestroyingTheNode(t *testing.T) {
 		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
 	}
 
+	// TWO FILES: the configured output, and embernode's own log.
+	//
+	// The second is not an output the operator asked for. It is brought home
+	// by internal/app on every run because the node's logs used to die with
+	// the node -- the component that installs the host key, starts sshd and
+	// arms the self-destruct wrote to a stream nothing in ember read, on a
+	// machine ember then destroyed. This assertion is also what caught the
+	// collection working: this lab counted exactly one file and went red the
+	// first time the log arrived beside it.
 	files := l.FetchedFiles()
-	if len(files) != 1 {
-		t.Fatalf("fetched %v, want exactly one file\n%s", files, res.Combined())
+	if len(files) != 2 {
+		t.Fatalf("fetched %v, want the configured output and the node's log\n%s", files, res.Combined())
 	}
 	// The run directory's name is a timestamp plus the run id, so the
-	// assertion is on the tail.
-	if !strings.HasSuffix(files[0], filepath.Join("host", "hostname")) {
-		t.Errorf("fetched %q, want it to end in host/hostname", files[0])
+	// assertions are on the tails.
+	if !strings.HasSuffix(files[1], filepath.Join("host", "hostname")) {
+		t.Errorf("fetched %q, want it to end in host/hostname", files[1])
+	}
+	if !strings.HasSuffix(files[0], "embernode.log") {
+		t.Fatalf("fetched %q, want the node's own log", files[0])
+	}
+
+	// And it has to carry what embernode did, not merely exist. A file
+	// created by the open and never written is what a logger pointed at the
+	// wrong path leaves, and it would satisfy every assertion above.
+	nodeLog := readFetched(t, l, files[0])
+	for _, want := range []string{"keys installed", "sshd started", "deadline armed"} {
+		if !strings.Contains(nodeLog, want) {
+			t.Errorf("the node's log does not record %q:\n%s", want, nodeLog)
+		}
+	}
+	// THE KEYS ARE FINGERPRINTS. This file is now on the operator's disk
+	// beside the images, so a line that printed the material would be the
+	// permanent-in-the-journal failure node.Secret exists to prevent, one hop
+	// further out and durable.
+	if strings.Contains(nodeLog, "PRIVATE KEY") {
+		t.Errorf("the node's log carries key material:\n%s", nodeLog)
+	}
+	if !strings.Contains(nodeLog, "SHA256:") {
+		t.Errorf("the node's log records no host key fingerprint, so a mismatch "+
+			"cannot be told from a node that installed the wrong key:\n%s", nodeLog)
 	}
 
 	// And the operator is told, with a count and a size: "3 of 4 paths,
@@ -150,6 +185,117 @@ func TestLifecycle_UpFetchesOutputsBeforeDestroyingTheNode(t *testing.T) {
 	if n := len(l.Nodes(t.Context())); n != 0 {
 		t.Errorf("%d node(s) survived", n)
 	}
+}
+
+// TestLifecycle_TheNodesOwnLogSurvivesAnInterruptedRun.
+//
+// Ctrl-C IS THE CASE, and it is why the collection runs on a context that
+// survives cancellation. An interrupted run is the one whose evidence is
+// worth most and the one ember is most likely to destroy before anybody has
+// read anything -- the host-key incident, the trust-on-first-use fallback and
+// the missing /workspace were all diagnosed by a person watching a terminal
+// at the time, because nothing survived to be read later.
+//
+// The signal is SIGINT and not SIGKILL on purpose. SIGINT unwinds through
+// provision.WithNode's deferred destroy, which is the path a collection on
+// context.WithoutCancel is written for; a SIGKILL skips every defer in the
+// process, so the log stays on a node nothing is left to fetch from -- which
+// is the limit of this mechanism and is stated rather than tested for.
+func TestLifecycle_TheNodesOwnLogSurvivesAnInterruptedRun(t *testing.T) {
+	l := harness.New(t)
+	l.WriteConfig(nil)
+	port := harness.FreePort(t)
+
+	// --log-level debug through the real binary, because this is the only
+	// place the flag, the handler and a line that was previously undisplayable
+	// meet. Asserted below.
+	cmd, wait := l.Start(t.Context(), "up",
+		"--log-level", "debug",
+		"--hold", "10m",
+		"--port", fmt.Sprintf("sshd:22:%d", port),
+	)
+
+	// WAIT FOR THE TUNNEL AND NOT FOR THE CONTAINER. The first version of
+	// this lab waited for the node to exist and for its record to be
+	// written, and then interrupted -- which landed inside session.Dial's
+	// retry loop, before ember had a connection at all. The log could not
+	// come home because there was nothing to fetch it over, and the lab was
+	// asserting about a window this mechanism does not cover: an interrupt
+	// before the handshake is the SIGKILL case with a different signal.
+	// "Ctrl-C to stop" is printed once the forwards are up, which is the
+	// first moment a fetch is possible.
+	l.WaitForLine(t.Context(), "Ctrl-C to stop")
+
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatalf("interrupt ember: %v", err)
+	}
+	out := wait()
+
+	// The seventeen debug lines in this tree were unreachable: the handler
+	// was built in two places and both pinned the level to info. This is one
+	// of them, from internal/provision, displayed by a shipped binary.
+	if !strings.Contains(out, "level=DEBUG") {
+		t.Errorf("--log-level debug printed no debug line:\n%s", out)
+	}
+	// And every line inside the rental names the rental, which is what makes
+	// one filterable in a log store.
+	assertEveryRentalLineNamesItsRun(t, out)
+
+	// The node is gone, which is the property Ctrl-C must never cost.
+	l.WaitNoNodes(t.Context(), 2*time.Minute, func() string { return out })
+
+	files := l.FetchedFiles()
+	if len(files) != 1 || !strings.HasSuffix(files[0], "embernode.log") {
+		t.Fatalf("fetched %v after a Ctrl-C, want the node's own log\n%s", files, out)
+	}
+	if nodeLog := readFetched(t, l, files[0]); !strings.Contains(nodeLog, "sshd started") {
+		t.Errorf("the log came home empty of what the node did:\n%s", nodeLog)
+	}
+}
+
+// assertEveryRentalLineNamesItsRun checks the correlation convention against
+// the output of a real `ember up`.
+//
+// The unit test in internal/provision asserts the same property against a
+// buffer; this one asserts it about the bytes a person reads, which is where
+// a logger rebuilt somewhere in the middle would show up. The run id is taken
+// from the "node ready" line rather than being predicted, because it is
+// minted per run.
+func assertEveryRentalLineNamesItsRun(t *testing.T, out string) {
+	t.Helper()
+
+	var runID string
+	for _, line := range strings.Split(out, "\n") {
+		if i := strings.Index(line, " run="); i >= 0 {
+			runID = strings.Fields(line[i+len(" run="):])[0]
+			break
+		}
+	}
+	if runID == "" {
+		t.Fatalf("no line carries a run id at all:\n%s", out)
+	}
+
+	for _, line := range strings.Split(out, "\n") {
+		// Only slog records: the operator-facing text around them -- the
+		// forward list, "Ctrl-C to stop" -- is prose and not a log line.
+		if !strings.HasPrefix(line, "time=") {
+			continue
+		}
+		if !strings.Contains(line, "run="+runID) {
+			t.Errorf("a line inside the rental cannot be filtered to it:\n  %s", line)
+		}
+	}
+}
+
+// readFetched reads one file the run brought home, named relative to the
+// output directory the way FetchedFiles reports it.
+func readFetched(t *testing.T, l *harness.Lab, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(l.OutputDir(), rel))
+	if err != nil {
+		t.Fatalf("read the fetched file: %v", err)
+	}
+	return string(b)
 }
 
 // TestLifecycle_AFailedOutputFetchStillDestroysTheNode. The fetch happens on

@@ -876,3 +876,57 @@ func TestWithNode_DestroyCarriesTheRunID(t *testing.T) {
 		t.Errorf("destroy was given %q, which is not a run id: %v", runs[0], err)
 	}
 }
+
+// TestWithNode_EveryLineInARentalNamesItsRun is the correlation convention as
+// a test rather than a note in a document.
+//
+// WHY IT ASSERTS OVER EVERY LINE AND NOT OVER A CHOSEN ONE. Of the log lines
+// in this tree, seven carried a run or request id and the rest carried
+// nothing -- so "node running but not yet reachable" named no node, in a
+// program whose whole subject is that a node bills by the hour. A test naming
+// the lines it knew about would pass for the lines somebody adds next, which
+// is the half that matters: the key is attached once in WithNode and the point
+// is that a NEW call site cannot forget it.
+//
+// It runs at debug, because debug is now reachable and the lines it makes
+// visible are exactly the ones nothing was checking.
+//
+// The logger handed to the closure is asserted too. It used to be read off
+// Options by internal/app -- the untagged copy -- so every line from session,
+// tunnel, gpucheck, sdserver and app itself was unjoinable while provision's
+// own lines were fine, which is the failure this test would otherwise miss
+// entirely.
+func TestWithNode_EveryLineInARentalNamesItsRun(t *testing.T) {
+	p := providertest.NewRecordingProvider("test")
+
+	var logged bytes.Buffer
+	o := opts(t)
+	o.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	var fromClosure node.RunID
+	if err := withNode(t.Context(), p, spec(t), o, func(_ context.Context, s Session) error {
+		fromClosure = s.RunID
+		if s.Log == nil {
+			t.Fatal("Session carries no logger, so nothing below provision can inherit the run id")
+		}
+		s.Log.Debug("a line from a layer above")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "run=" + string(fromClosure)
+	lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("a whole rental logged %d line(s); the assertion below would be vacuous:\n%s",
+			len(lines), logged.String())
+	}
+	for _, l := range lines {
+		if !strings.Contains(l, want) {
+			t.Errorf("a line with no %s, so it cannot be filtered to its rental:\n  %s", want, l)
+		}
+	}
+	if !strings.Contains(logged.String(), "a line from a layer above") {
+		t.Error("the closure's own line was not written through Session.Log")
+	}
+}

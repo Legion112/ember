@@ -9,6 +9,7 @@ import (
 	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provision"
@@ -71,6 +72,16 @@ type AppPlanner struct {
 	// Now is injected because a ceiling is a question about a calendar
 	// period, and a test that could not choose the day could not ask it.
 	Now func() time.Time
+
+	// Log is the level and the format the operator chose on `ember serve`.
+	//
+	// IT IS NOT A CEILING AND IT IS NOT FROM THE REQUEST, which is why it
+	// sits here beside the config rather than on genstore.Request: a browser
+	// has no business deciding how verbosely the process it is talking to
+	// writes to the operator's terminal. It is carried through only so that
+	// a rental's own lines -- which come from internal/provision, inside
+	// app.Plan.Do -- obey the same flag as the server's.
+	Log logx.Options
 }
 
 func (p AppPlanner) now() time.Time {
@@ -98,6 +109,7 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 		Jobs:            jobs,
 		Preview:         r.Preview,
 		PreviewInterval: r.PreviewInterval,
+		Log:             p.Log,
 		Budget:          &budget,
 	}, p.Out)
 	if err != nil {
