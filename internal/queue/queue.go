@@ -317,8 +317,31 @@ func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat ge
 		// event carrying the model, so unlike the cost columns this one is
 		// not a derived index of the event stream -- the response is the
 		// authority, read once per rental, cached by PutCaps a few lines up.
-		// An empty name is written as empty: a server that reported no model
-		// (neither --model nor --diffusion-model named) is a fact, and
+		// AN EMPTY NAME MEANS NOBODY READ A MODEL, and never "a server
+		// answered and named nothing". This write happens only after
+		// WaitModel reported ready, and a server with no weights reports
+		// `empty`, which that loop retries and ends as a NotReadyError -- so
+		// the rental fails before a claim gets this far, and s.Caps() is only
+		// ever read from a server that loaded something. What leaves the
+		// column empty is an `ember up` with `cmds` and no server at all, or
+		// a request from before the column existed. That is what groupExpr
+		// and keyOr already act on, and what `ember history`'s footnote says
+		// in words.
+		//
+		// The earlier version of this comment defended the same write with
+		// the unreachable case -- and the shape does exist, because
+		// capabilities_no_model.json really reports
+		// `{"name":"","path":"","stem":""}`; it is still the right fixture
+		// for the feature-gating path, which is a different question and does
+		// not pass through here. A reader who believed it had two ways to
+		// act, both wrong: make the column nullable to tell the two states
+		// apart, which is a branch nothing can reach, or read a stored `''`
+		// as evidence that a server answered with no name, when it is
+		// evidence that no server was asked. A comment that is wrong about
+		// why a seal holds is how the seal gets removed by somebody being
+		// helpful -- the AssertNoStray comment that claimed the cleanup ran
+		// "before AssertNoStray records the failure, never instead of it"
+		// while the code did the opposite. Nothing is invented either way:
 		// inventing a value here is the mistake the column exists to end.
 		//
 		// The model_resident event carries the same name, so the OPENER has

@@ -1507,6 +1507,29 @@ that sentence made unrepresentable rather than merely tested.
   backfill would have to read the cached caps row and stamp every row in the
   history with whatever is loaded today. A row from before the column is empty
   and both readers print a dash.
+- **The empty model means nobody read one, and the comment that said otherwise
+  named a case the write cannot reach.** `queue.go` justified writing `''` as
+  "a server that reported no model is a fact" -- and that response shape does
+  exist, `capabilities_no_model.json` reports `{"name":"","path":"","stem":""}`
+  -- but it never gets to the write. `sdserver.WaitModel` retries `empty` and
+  ends as a `NotReadyError`, so a server with no weights fails the rental
+  before a claim is recorded and `s.Caps()` is only ever read from a server
+  that loaded something. What leaves the column empty is an `ember up` with
+  `cmds` and no server, or a row from before the column -- which is exactly
+  what `groupExpr` and `keyOr` already act on, so the comment contradicted
+  both of its readers. This is "'it has no figures' is the fact; 'it ran
+  before ember recorded them' was a guess at the cause" one column over, and
+  it matters because a reader who believed it had two moves and both are
+  refused elsewhere in this file: make the column nullable to tell the two
+  states apart, which is a branch nothing can reach, or read a stored `''` as
+  evidence that a server answered with no name, when it is evidence that no
+  server was asked. A comment that is wrong about why a seal holds is how the
+  seal gets removed by somebody being helpful -- the `AssertNoStray` comment
+  that claimed the cleanup ran "before AssertNoStray records the failure,
+  never instead of it" while the code did the opposite. **There is no test to
+  prove this one, and that is stated rather than papered over**: a comment has
+  no exit code, and inventing an assertion that the column is empty for a
+  `cmds` run would test a behaviour that was never wrong.
 - **What the server reports is the diffusion model, and that bounds what the
   grouping can distinguish.** `resolve_display_model_path` in sd-server's
   `routes_sdcpp.cpp` answers the basename of `--model`, else of
