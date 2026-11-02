@@ -51,7 +51,7 @@ import (
 // Bytes throughout, although /proc/meminfo reports kibibytes: one unit above
 // this package, so nothing downstream has to remember which fields were
 // scaled. Zero means "not reported", which is a different claim from zero
-// bytes and is why Limit and Headroom say so rather than computing over it.
+// bytes and is why node.Memory says so rather than computing over it.
 type Report struct {
 	// CgroupVersion is 2, 1, or 0 when neither hierarchy could be read.
 	CgroupVersion int
@@ -76,31 +76,21 @@ type Report struct {
 	Assets int64
 }
 
-// Limit is the bound the page cache actually lives under.
+// THE DERIVED ANSWERS ARE node.Memory's AND THERE IS NO SECOND COPY HERE.
+// This package had a Limit and a Headroom of its own, four lines each, and
+// nothing ever called either: the pair an operator reaches is on the stored
+// row, through `ember history --memory`, and these two were the same rule on
+// the other side of a SQLite round trip. They agreed with the live pair for
+// the life of the feature because one of them never ran -- and their tests
+// were split, so each copy proved the half the other did not, which is how
+// `go test ./...` stayed green with half the live rule deleted.
 //
-// The cgroup's when there is one, the host's otherwise -- which is the whole
-// hypothesis in one method. Zero when neither was reported, because a limit
-// of zero bytes and an unanswered question are different things and only one
-// of them means the weights cannot be held.
-func (r Report) Limit() int64 {
-	if r.CgroupMax > 0 {
-		return r.CgroupMax
-	}
-	return r.HostTotal
-}
-
-// Headroom is the limit less the asset set, and whether it is knowable.
-//
-// Negative is a real answer and the interesting one: it is a node that cannot
-// hold the model and will re-read it every step. The bool is false when the
-// limit or the asset set was not reported, because a headroom computed over a
-// missing figure is the kind of number that gets believed.
-func (r Report) Headroom() (int64, bool) {
-	if r.Limit() <= 0 || r.Assets <= 0 {
-		return 0, false
-	}
-	return r.Limit() - r.Assets, true
-}
+// So whoever writes the verdict this package defers -- a warning naming the
+// expected re-read cost per step for a node that cannot hold the weights --
+// builds a node.Memory{CgroupLimit: r.CgroupMax, HostTotal: r.HostTotal,
+// Assets: r.Assets} and asks it, rather than adding the subtraction back
+// here. A comment where somebody would add the second copy, as httpx's
+// no-retry note is.
 
 // IsZero reports whether nothing at all was read.
 func (r Report) IsZero() bool { return r == Report{} }
@@ -167,8 +157,8 @@ func Command(paths []string) []string {
 //
 // Empty for a run with no assets, which is not an error: a baked image or a
 // local container has nothing on a store, and the memory facts are still
-// worth having -- the asset figure is simply unreported, which Headroom says
-// rather than treating as zero bytes of weights.
+// worth having -- the asset figure is simply unreported, which
+// node.Memory.Headroom says rather than treating as zero bytes of weights.
 func AssetPaths(mount node.Mount, assets []node.Asset) ([]string, error) {
 	if mount.IsZero() || len(assets) == 0 {
 		return nil, nil
@@ -277,8 +267,9 @@ func Parse(s string) Report {
 // cgroup v2 writes the literal "max" -- observed, in
 // testdata/container_unlimited.txt, not assumed; v1 writes a sentinel near the
 // top of int64; and an unreadable file is an empty value. All three mean the
-// same thing to a caller and all three are zero here -- which Limit then reads
-// as "fall back to the host's total" rather than as a limit of nothing.
+// same thing to a caller and all three are zero here -- which
+// node.Memory.Ceiling then reads as "fall back to the host's total" rather
+// than as a limit of nothing.
 //
 // The "max" case is deliberately redundant with parseBytes, which returns zero
 // for anything that is not a number and would reach the same answer. It is

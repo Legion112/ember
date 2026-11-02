@@ -300,6 +300,21 @@ var testSupport = []struct{ path, why string }{
 // What the list buys is the thirty-third. A new symbol with no production
 // caller is a failed build, and adding it to this list is a line in a review
 // diff with a sentence attached -- which is exactly what none of the eight had.
+//
+// ONE STATED LIMIT, WHICH THE THIRTY-FOURTH WAS FOUND BY HAND BECAUSE OF. A
+// call from a production file is a production reference whether or not the
+// function making it is itself reachable, so an excluded symbol's own callees
+// are never reported. `nodemem.Report.Limit` sat behind the entry that used to
+// be here for `nodemem.Report.Headroom` exactly that way -- `Limit`'s only
+// caller was the dead `Headroom`, so the guard saw a live reference, and the
+// waiver justified one dead symbol by naming another ("beside Limit which is
+// read"). Both are gone now; the hole is not. Closing it means reachability
+// from an entry point rather than a reference count, which is a different walk
+// and would report a cascade this list has no measured opinion about -- so it
+// is written down rather than guessed at, because a limitation nobody can read
+// out of the code is a limitation that will be forgotten. The practical rule
+// for a reviewer: an exclusion's reason may not point at another symbol as
+// evidence that it is live.
 var deadExcluded = []struct{ sym, why string }{
 	// Deliberately unreachable from production, and AGENTS.md says so in
 	// words. These two are the entries that are not a backlog: they are the
@@ -341,7 +356,6 @@ var deadExcluded = []struct{ sym, why string }{
 	{"internal/node.(ReadyNode).HostKey", "the key a ready node reported; the pin is built from the minted key and never from this"},
 	{"internal/node.(State).Valid", "whether a state is one this package defined; Billable is the guard that matters and defaults to true"},
 	{"internal/node.(StorePrice).Hourly", "a store's hourly rate; ls prices stores by the month, which is how they bill"},
-	{"internal/nodemem.(Report).Headroom", "RAM above the model, beside Limit which is read"},
 	{"internal/report.(*Stream).Seq", "the sequence the stream has reached; the number travels on the event"},
 	{"internal/statestore.(*Store).Dir", "the journal directory -- AGENTS.md's 'one name for a path': the harness reads it through this package, and through Open rather than through here"},
 }

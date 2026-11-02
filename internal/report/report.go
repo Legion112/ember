@@ -261,8 +261,10 @@ type Event struct {
 	// them bounds the page cache. Recording the one ember currently believes
 	// would be the load_elapsed_seconds mistake a second time: a single
 	// figure, believed, that was wrong by two orders of magnitude. A zero
-	// means "not reported", which is why internal/nodemem has methods for the
-	// derived answers rather than storing them.
+	// means "not reported", which is why node.Memory computes the derived
+	// answers on the way out rather than anything storing them -- and why
+	// there is one of it: the same subtraction existed on both sides of the
+	// store, and the copy on the live-node side was never called.
 	//
 	// MemLimit zero means there is no cgroup limit at all, not a limit of
 	// nothing: cgroup v2 writes the literal "max" and v1 a sentinel near the
