@@ -347,7 +347,11 @@ func TestDestroy_RemovesTheContainerThenTheNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Destroy(t.Context(), h); err != nil {
+	// No run id on purpose: this is the ordinary path, where the container is
+	// still there and its own label is the authority on which run it belongs
+	// to. Passing one here would mean the test could not tell the label path
+	// from the argument path.
+	if err := p.Destroy(t.Context(), h, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(e.Containers()) != 0 || len(e.Networks()) != 0 {
@@ -373,13 +377,13 @@ func TestDestroy_IsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Destroy(t.Context(), h); err != nil {
+	if err := p.Destroy(t.Context(), h, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Destroy(t.Context(), h); err != nil {
+	if err := p.Destroy(t.Context(), h, ""); err != nil {
 		t.Fatalf("destroying twice: %v", err)
 	}
-	if err := p.Destroy(t.Context(), node.Handle{Provider: Name, ID: "never-existed"}); err != nil {
+	if err := p.Destroy(t.Context(), node.Handle{Provider: Name, ID: "never-existed"}, ""); err != nil {
 		t.Fatalf("destroying something that never existed: %v", err)
 	}
 }
@@ -397,7 +401,7 @@ func TestDestroy_SurfacesRealFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		e.FailOn = failOn
-		if err := p.Destroy(t.Context(), h); err == nil {
+		if err := p.Destroy(t.Context(), h, ""); err == nil {
 			t.Errorf("%s: Destroy reported success; the record would be cleared while the node still runs", name)
 		}
 	}
@@ -737,7 +741,7 @@ func TestLocal_DestroyingANodeLeavesTheStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Destroy(ctx, h); err != nil {
+	if err := p.Destroy(ctx, h, ""); err != nil {
 		t.Fatal(err)
 	}
 	got, err := p.StoreList(ctx)
@@ -1142,4 +1146,282 @@ func TestOffers_ExplainsACardDockerCannotReach(t *testing.T) {
 	if len(got) != 1 {
 		t.Errorf("got %d offers for a CPU request, want 1", len(got))
 	}
+}
+
+// TestDestroy_RemovesTheNetworkWhenTheContainerIsAlreadyGone is the bug.
+//
+// Destroy used to find the run id by inspecting the container. A container
+// removed by anything other than ember -- `docker rm`, a prune, a daemon
+// restart, a crashed lab's cleanup -- makes that inspect return not-found,
+// which Destroy treats as success, so the run id stayed empty and Destroy
+// returned nil *before* the network lookup. The bridge network survived
+// wearing ember's label and Destroy reported success.
+//
+// Nothing bills for a bridge network, which is why the leak was invisible.
+// What it costs is every local run failing at once, weeks later, with "all
+// predefined address pools have been fully subnetted" -- an error that names
+// Docker and not ember.
+func TestDestroy_RemovesTheNetworkWhenTheContainerIsAlreadyGone(t *testing.T) {
+	p, e := newProvider(t)
+	req := request(t)
+	h, err := p.Create(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(e.Networks()) != 1 {
+		t.Fatalf("create made %d networks, want 1", len(e.Networks()))
+	}
+
+	// Out-of-band, straight at the daemon, because that is the whole premise:
+	// something that is not ember removed the container. Going through
+	// p.Destroy would be testing ember against itself.
+	if err := e.ContainerRemove(t.Context(), h.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Destroy(t.Context(), h, req.RunID); err != nil {
+		t.Fatalf("destroying a node whose container is already gone: %v", err)
+	}
+	if n := e.Networks(); len(n) != 0 {
+		t.Errorf("destroy reported success and left %d network(s): %+v", len(n), n)
+	}
+}
+
+// TestDestroy_WithNoRunIdAnywhereStillSucceeds is `ember down provider/id` on
+// a node with no local record whose container somebody already removed.
+//
+// There is nothing left to identify the run: no container to read a label off
+// and no record to read one from. The node is gone, so this is success --
+// Destroy's contract is that a missing machine is success, and an error here
+// would make the ordinary idempotent case fail. What catches the network
+// instead is LeftoverList, which finds it by label.
+func TestDestroy_WithNoRunIdAnywhereStillSucceeds(t *testing.T) {
+	p, e := newProvider(t)
+	h, err := p.Create(t.Context(), request(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ContainerRemove(t.Context(), h.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Destroy(t.Context(), h, ""); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if len(e.Networks()) != 1 {
+		t.Fatal("the network is supposed to still be here; this test is what makes LeftoverList necessary")
+	}
+	// And the sweep is what finds it.
+	got, err := p.LeftoverList(t.Context())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("LeftoverList = %+v, %v; the network is unreachable from here", got, err)
+	}
+}
+
+// TestDestroy_PrefersTheContainersOwnLabelOverTheArgument matters in the
+// direction that costs something.
+//
+// The label cannot be wrong about which run a container belongs to; the
+// argument can. Believing a wrong argument would mean removing a *live* run's
+// network, so the authority is used whenever it is readable and the argument
+// only fills the gap it leaves.
+func TestDestroy_PrefersTheContainersOwnLabelOverTheArgument(t *testing.T) {
+	p, e := newProvider(t)
+
+	live := request(t)
+	if _, err := p.Create(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+	doomed := request(t)
+	h, err := p.Create(t.Context(), doomed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A caller that names the wrong run. Destroy must still take out the
+	// network belonging to the container it was given, and leave the other
+	// one alone.
+	if err := p.Destroy(t.Context(), h, live.RunID); err != nil {
+		t.Fatal(err)
+	}
+
+	nets := e.Networks()
+	if len(nets) != 1 {
+		t.Fatalf("want exactly the live run's network left, got %d: %+v", len(nets), nets)
+	}
+	if got := nets[0].Labels[dockerengine.LabelRunID]; got != string(live.RunID) {
+		t.Errorf("the surviving network belongs to run %q, want the live run %q; destroy followed the argument instead of the label", got, live.RunID)
+	}
+}
+
+func TestLeftoverList_ReportsOnlyNetworksWhoseNodeIsGone(t *testing.T) {
+	p, e := newProvider(t)
+
+	live := request(t)
+	if _, err := p.Create(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+	stale := request(t)
+	h, err := p.Create(t.Context(), stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ContainerRemove(t.Context(), h.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Somebody else's network, carrying neither of ember's labels. `ember
+	// reap` removes what this returns, so a foreign object must not appear in
+	// it -- the same rule ParseStoreLabel exists for.
+	if _, err := e.NetworkCreate(t.Context(), "bridge", map[string]string{"com.example": "1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := p.LeftoverList(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("LeftoverList = %+v, want exactly the network whose node is gone", got)
+	}
+	l := got[0]
+	if l.RunID != stale.RunID {
+		t.Errorf("leftover names run %q, want %q", l.RunID, stale.RunID)
+	}
+	if l.Kind != "network" || l.Name != "ember-"+string(stale.RunID) {
+		t.Errorf("leftover = %+v, want the bridge network's own kind and name", l)
+	}
+	if !l.Deadline.Equal(stale.Deadline.Truncate(time.Second)) {
+		t.Errorf("deadline = %s, want %s read back off the label", l.Deadline, stale.Deadline)
+	}
+	if l.Handle.Provider != Name || l.Handle.ID == "" {
+		t.Errorf("handle = %+v, want this provider and the daemon's own network id", l.Handle)
+	}
+}
+
+// TestLeftoverList_SkipsANodesOwnKindLabel guards the filter in the direction
+// that would be expensive: ember's store volumes and node containers are
+// labelled with the same key, and a sweep that matched on the key alone would
+// hand `ember reap` something that is not a network.
+func TestLeftoverList_SkipsAnythingThatIsNotANetwork(t *testing.T) {
+	p, e := newProvider(t)
+	if _, err := e.NetworkCreate(t.Context(), "not-a-network", map[string]string{
+		LabelKind: "store",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.LeftoverList(t.Context())
+	if err != nil || len(got) != 0 {
+		t.Fatalf("LeftoverList = %+v, %v; only a network ember made is a leftover", got, err)
+	}
+}
+
+// TestLeftoverList_ReportsANetworkWithNoReadableLabel: it still wears ember's
+// kind label, so it is ember's to clean up, and nothing else will ever look at
+// it. The run cannot be named and is not guessed at.
+func TestLeftoverList_ReportsANetworkWithNoReadableLabel(t *testing.T) {
+	p, e := newProvider(t)
+	if _, err := e.NetworkCreate(t.Context(), "ember-ancient", map[string]string{
+		LabelKind:  "network",
+		LabelLabel: "ember-but-not-in-a-spelling-this-version-writes",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.LeftoverList(t.Context())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("LeftoverList = %+v, %v", got, err)
+	}
+	if got[0].RunID != "" || !got[0].Deadline.IsZero() {
+		t.Errorf("leftover = %+v, want no run and no deadline rather than a guess", got[0])
+	}
+}
+
+func TestLeftoverList_AsksAboutContainersOnlyWhenThereAreNetworks(t *testing.T) {
+	// A daemon with nothing of ember's on it is every `ember ls` an operator
+	// runs, and it should cost one call rather than two.
+	p, e := newProvider(t)
+	got, err := p.LeftoverList(t.Context())
+	if err != nil || got != nil {
+		t.Fatalf("LeftoverList on a fresh engine = %+v, %v", got, err)
+	}
+	for _, c := range e.Recorded() {
+		if strings.HasPrefix(c, "ContainerList") {
+			t.Errorf("asked about containers with no networks to explain:\n%s", strings.Join(e.Recorded(), "\n"))
+		}
+	}
+}
+
+func TestLeftoverList_SurfacesRealFailures(t *testing.T) {
+	for name, failOn := range map[string]string{
+		"network list fails":   "NetworkList",
+		"container list fails": "ContainerList",
+	} {
+		p, e := newProvider(t)
+		if _, err := p.Create(t.Context(), request(t)); err != nil {
+			t.Fatal(err)
+		}
+		e.FailOn = failOn
+		if _, err := p.LeftoverList(t.Context()); err == nil {
+			t.Errorf("%s: LeftoverList reported success; a sweep that cannot see is not a clean daemon", name)
+		}
+	}
+}
+
+func TestLeftoverDestroy_RemovesAndIsIdempotent(t *testing.T) {
+	p, e := newProvider(t)
+	h, err := p.Create(t.Context(), request(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ContainerRemove(t.Context(), h.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.LeftoverList(t.Context())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("LeftoverList = %+v, %v", got, err)
+	}
+
+	if err := p.LeftoverDestroy(t.Context(), got[0].Handle); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.Networks(); len(n) != 0 {
+		t.Fatalf("LeftoverDestroy left %+v", n)
+	}
+	// Removing it twice is success, as destroying a node twice is: the goal is
+	// that it is gone, and it is.
+	if err := p.LeftoverDestroy(t.Context(), got[0].Handle); err != nil {
+		t.Errorf("removing it twice: %v", err)
+	}
+}
+
+func TestLeftoverDestroy_RefusesAnEmptyHandleAndSurfacesFailures(t *testing.T) {
+	p, e := newProvider(t)
+	if err := p.LeftoverDestroy(t.Context(), node.LeftoverHandle{}); err == nil {
+		t.Error("an empty handle was accepted; the call would be made against nothing and the error blamed on the daemon")
+	}
+	h, err := p.Create(t.Context(), request(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ContainerRemove(t.Context(), h.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.LeftoverList(t.Context())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("LeftoverList = %+v, %v", got, err)
+	}
+	e.FailOn = "NetworkRemove"
+	if err := p.LeftoverDestroy(t.Context(), got[0].Handle); err == nil {
+		t.Error("LeftoverDestroy reported success over a daemon that refused the removal")
+	}
+}
+
+func TestLocal_LeftoverCapsMatchImplementation(t *testing.T) {
+	// Same reason the store assertion lives here: internal/provider cannot
+	// import a provider without a cycle, and a Caps.Leftovers set without a
+	// LeftoverAPI -- or a LeftoverAPI nothing will ever ask for -- should fail
+	// next to the provider that got it wrong. The second direction is the one
+	// that leaks: a provider nothing sweeps accumulates bridge networks until
+	// Docker runs out of address pools.
+	providertest.AssertLeftoverCapsMatch(t, New(dockerengine.NewRecordingEngine()))
 }

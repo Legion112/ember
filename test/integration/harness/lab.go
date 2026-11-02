@@ -542,6 +542,45 @@ func (l *Lab) CreateVolume(ctx context.Context, name string) {
 	})
 }
 
+// CreateNetwork makes a bridge network wearing ember's labels, with no node
+// container beside it.
+//
+// This is what a destroy that could not find the run id leaves on the daemon:
+// nothing bills for it, nothing is attached to it, and before `ember reap`
+// learned to sweep, nothing in ember would ever look at it again. Seeded
+// out-of-band through Docker rather than by running ember and interrupting it,
+// because the thing under test is the sweep and a lab that created the object
+// through the code under test would be asserting that ember agrees with
+// itself.
+//
+// deadline goes into the ember label, so a lab can produce one that is already
+// past without waiting for a clock -- the same trick NodeSpec.Deadline uses.
+//
+// The helper owns what it made, as CreateVolume does: cleanups run
+// last-registered-first, so this one runs before the lab's own stray check and
+// a seeded network is not reported as a leak, while a network ember itself
+// left behind still is.
+func (l *Lab) CreateNetwork(ctx context.Context, runID node.RunID, deadline time.Time) string {
+	l.t.Helper()
+	name := "ember-" + string(runID)
+	resp, err := l.cli.NetworkCreate(ctx, name, network.CreateOptions{
+		Labels: map[string]string{
+			dockerengine.LabelRunID: string(runID),
+			local.LabelKind:         "network",
+			local.LabelLabel:        provider.Label(runID, deadline),
+		},
+	})
+	if err != nil {
+		l.t.Fatalf("create network %s: %v", name, err)
+	}
+	l.t.Cleanup(func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = l.cli.NetworkRemove(rctx, resp.ID)
+	})
+	return resp.ID
+}
+
 // CreateStore runs `ember store create` and registers its removal.
 //
 // Through ember, unlike CreateVolume, because some labs are about the command

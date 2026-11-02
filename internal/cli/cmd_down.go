@@ -53,19 +53,31 @@ func runDown(args []string, out io.Writer, d deps) error {
 		return usageError{err}
 	}
 
+	// Read before the destroy and forgotten after, which are two different
+	// questions. The run id has to travel into Destroy -- it is how a
+	// provider finds what the node was created alongside, and a container
+	// somebody else removed takes the only other copy with it -- so reading
+	// it afterwards would be reading it too late. Clearing the record is
+	// still the thing that waits for the provider to confirm: a record
+	// forgotten before that is a node nothing will ever look for again.
+	//
+	// Not found is not an error. `ember down` on a node this machine has no
+	// record of is the untracked case `ember ls` reports, and it is exactly
+	// when an operator reaches for this command; the destroy still happens,
+	// and an empty run id means the provider cleans up what it can still see.
+	rec, hasRecord := recordFor(store, h)
+
 	// No not-found special case here. The Provider interface already requires
 	// Destroy to treat "no such machine" as success -- the goal of destroy is
 	// that the node is gone, and it is -- so a second check would be an
 	// unreachable branch guarding against a provider breaking its own
 	// contract, and that belongs in the provider's tests, not hidden here.
-	if err := p.Destroy(context.Background(), h); err != nil {
+	if err := p.Destroy(context.Background(), h, rec.RunID); err != nil {
 		return fmt.Errorf("destroy %s: %w", h, err)
 	}
 	outf(out, "destroyed %s\n", h)
 
-	// The record is cleared only after the provider confirmed. A record
-	// forgotten before that is a node nothing will ever look for again.
-	if rec, found := recordFor(store, h); found {
+	if hasRecord {
 		if err := store.Forget(rec.RunID); err != nil {
 			return fmt.Errorf("the node is gone but its record could not be cleared, so ember ls will keep reporting it: %w", err)
 		}

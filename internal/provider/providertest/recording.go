@@ -77,10 +77,11 @@ type RecordingProvider struct {
 	// Existing is what List returns.
 	Existing []node.Node
 
-	inspects  int
-	created   []node.Handle
-	destroyed []node.Handle
-	nextID    int
+	inspects      int
+	created       []node.Handle
+	destroyed     []node.Handle
+	destroyedRuns []node.RunID
+	nextID        int
 
 	// injected records the host key ember supplied per node.
 	injected map[string]node.HostKey
@@ -240,14 +241,27 @@ func (p *RecordingProvider) exposure() []node.Exposed {
 	return []node.Exposed{}
 }
 
-func (p *RecordingProvider) Destroy(_ context.Context, h node.Handle) error {
+func (p *RecordingProvider) Destroy(_ context.Context, h node.Handle, runID node.RunID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.record("Destroy", h.ID); err != nil {
 		return err
 	}
 	p.destroyed = append(p.destroyed, h)
+	// Recorded beside the handle rather than folded into the Calls line,
+	// which other tests match on. A caller that destroys the right node with
+	// an empty run id is the bug this parameter exists to fix, and a fake that
+	// dropped the argument could not tell the two apart -- which is the same
+	// mistake as a preview fake that never repeats a frame.
+	p.destroyedRuns = append(p.destroyedRuns, runID)
 	return nil
+}
+
+// DestroyedRuns is the run id each Destroy was given, in order.
+func (p *RecordingProvider) DestroyedRuns() []node.RunID {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]node.RunID(nil), p.destroyedRuns...)
 }
 
 func (p *RecordingProvider) List(_ context.Context) ([]node.Node, error) {
@@ -287,7 +301,7 @@ func (d DryProvider) Create(_ context.Context, req node.CreateRequest) (node.Han
 	return node.Handle{}, fmt.Errorf("dry run: refusing to create a node")
 }
 
-func (d DryProvider) Destroy(_ context.Context, h node.Handle) error {
+func (d DryProvider) Destroy(_ context.Context, h node.Handle, _ node.RunID) error {
 	d.say("would destroy %s", h)
 	return nil
 }

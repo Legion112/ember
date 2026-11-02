@@ -293,10 +293,55 @@ that sentence made unrepresentable rather than merely tested.
   declares the orphan as deliberate and keeps the check unconditional for
   every lab that leaks by mistake. Relaxing the check instead would have put
   it straight back where it was.
-- **Known gap:** `local.Destroy` finds the run id by inspecting the container,
-  so a node whose container was already removed by something else leaves its
-  network behind. `reconcile` holds the run id and is the right place to fix
-  it; nothing does yet.
+- **The run id travels into `Destroy`; it is never re-derived from the thing
+  being destroyed.** `local.Destroy` used to read it off the container's own
+  label in order to find the bridge network beside it -- and a container
+  removed by anything but ember (`docker rm`, a prune, a crashed lab's
+  cleanup) made that inspect return not-found, which Destroy treats as
+  success, so the run id stayed empty and `Destroy` returned `nil` over a
+  network that is still there. Nothing bills for a bridge network, which is
+  why it was invisible; what it costs is every local run failing at once,
+  weeks later, with "all predefined address pools have been fully subnetted",
+  an error naming Docker and not ember. Every caller already had the run id
+  -- provision is destroying a run it created, reap reads it off the finding,
+  `ember down` off the record -- so the parameter asks for nothing that was
+  not known. The container's own label still wins where there is one: the
+  label cannot be wrong about which run a container belongs to and the
+  argument can, and believing a wrong argument would remove a *live* run's
+  network.
+- **A leftover is swept by label, because the label is what survives.**
+  Passing the run id closes the case going forward and can do nothing for a
+  network that leaked before, or for `ember down provider/id` on a node with
+  no record whose container somebody already removed -- there, nothing
+  anywhere knows which run it was. So `provider.LeftoverAPI` lists networks
+  whose run has no node container and `ember reap` removes them, reported by
+  `ember ls` rather than discovered by an exhausted address pool.
+  Containment twice, by two mechanisms, as the tar extractor is: the argument
+  cannot help what is already on the daemon, and the sweep cannot act until a
+  deadline has passed.
+- **A leftover needs attention and a store does not, because ember can tell.**
+  A store existing is the expected state and ember cannot know whether the
+  weights on it are still wanted, so flagging one would teach the operator to
+  ignore exit 2. A network whose node is gone is unambiguously garbage.
+- **The sweep is bounded by the deadline, and that is the create window.**
+  `local.Create` makes the network before the container, so for a moment every
+  healthy run has a labelled network with nothing attached -- identical to
+  wreckage. A deadline in the future cannot be a run that has finished, so a
+  leftover inside its deadline is not reported *at all* rather than reported
+  and not reaped: a finding that is sometimes false is worse than one that
+  arrives up to a TTL late, and the deadline is already reap's authority over
+  nodes. A zero deadline -- an ember label too old to parse -- counts as past,
+  because the alternative is that it leaks for good.
+- **`AssertLeftoverCapsMatch` checks the claim in both directions.** A
+  provider that implements `LeftoverAPI` and forgets `Caps.Leftovers` is never
+  swept, which is the direction that leaks; the mirror of
+  `AssertStoreCapsMatch`, and the reason both are assertions rather than
+  comments.
+- **`node.Leftover` carries a `Kind string` and that is deliberate.** There is
+  one kind today. A typed enum would be a closed set invented from a single
+  example, which is the mistake a driver interface designed from one server
+  would be; the field is read from the label the provider wrote and is only
+  ever displayed.
 - **A lab seeds state out-of-band, through Docker, not through the code under
   test.** Widening `sshx.Runner` with stdin support so a test could write a
   file would be a production interface shaped by a test's convenience.

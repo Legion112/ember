@@ -112,6 +112,12 @@ func (p *Provider) Caps() provider.Caps {
 		// remove -- is exercised for free here against the same code paths a
 		// rented one uses.
 		Stores: true,
+
+		// A node here is two objects: the container and the bridge network it
+		// sits on. The network is the only thing in ember that can be left
+		// behind by a *successful* destroy, so this is the one provider with
+		// anything to sweep.
+		Leftovers: true,
 	}
 }
 
@@ -324,10 +330,18 @@ func (p *Provider) Inspect(ctx context.Context, h node.Handle) (node.Node, error
 //
 // Idempotent: a missing object is success, because the goal of destroy is that
 // the node is gone and it is.
-func (p *Provider) Destroy(ctx context.Context, h node.Handle) error {
-	var runID string
+func (p *Provider) Destroy(ctx context.Context, h node.Handle, runID node.RunID) error {
+	// The container's own label wins where there is one, and the caller's run
+	// id is the fallback rather than the other way round. The label cannot be
+	// wrong about which run this container belongs to; the argument can, and
+	// the cost of believing a wrong one is removing a *live* run's network.
+	// So the authority is used when it is readable and the argument only fills
+	// the gap it leaves -- which is the gap this whole parameter exists for.
+	found := string(runID)
 	if c, err := p.Engine.ContainerInspect(ctx, h.ID); err == nil {
-		runID = c.Labels[dockerengine.LabelRunID]
+		if lbl := c.Labels[dockerengine.LabelRunID]; lbl != "" {
+			found = lbl
+		}
 	} else if !errors.Is(err, dockerengine.ErrNotFound) {
 		return fmt.Errorf("inspect node %s before destroying it: %w", h, err)
 	}
@@ -336,20 +350,102 @@ func (p *Provider) Destroy(ctx context.Context, h node.Handle) error {
 		return fmt.Errorf("remove node %s: %w", h, err)
 	}
 
-	if runID == "" {
+	if found == "" {
+		// Nothing knows which run this was: no container to read a label off
+		// and no run id from the caller. The node is gone, so this is success
+		// -- but anything created beside it is now unreachable from here, and
+		// LeftoverList is what finds it instead. Reporting an error would be
+		// wrong twice over: Destroy's contract is that a missing machine is
+		// success, and `ember down` on an already-removed container is the
+		// ordinary way to arrive here.
 		return nil
 	}
 	// The network goes second. Removing it first fails while the container is
 	// still attached, and the error would be about the network rather than
 	// about the node the operator asked to destroy.
-	nets, err := p.Engine.NetworkList(ctx, dockerengine.LabelRunID+"="+runID)
+	nets, err := p.Engine.NetworkList(ctx, dockerengine.LabelRunID+"="+found)
 	if err != nil {
-		return fmt.Errorf("list networks for run %s: %w", runID, err)
+		return fmt.Errorf("list networks for run %s: %w", found, err)
 	}
 	for _, n := range nets {
 		if err := p.Engine.NetworkRemove(ctx, n.ID); err != nil && !errors.Is(err, dockerengine.ErrNotFound) {
 			return fmt.Errorf("remove network %s: %w", n.Name, err)
 		}
+	}
+	return nil
+}
+
+// LeftoverList reports every network ember created whose node container is
+// gone.
+//
+// The predicate is "no node container wears this run id", not "the container
+// ember was told about is gone". A run's network and its node are joined by
+// the label and nothing else, which is what lets this answer at all in the
+// case it exists for: both the container and the journal record are already
+// gone, and the label is all that is left.
+func (p *Provider) LeftoverList(ctx context.Context) ([]node.Leftover, error) {
+	nets, err := p.Engine.NetworkList(ctx, LabelKind)
+	if err != nil {
+		return nil, fmt.Errorf("list ember networks: %w", err)
+	}
+	// Short-circuited before asking about containers, so the ordinary case --
+	// a daemon with nothing of ember's on it -- costs one call rather than
+	// two.
+	if len(nets) == 0 {
+		return nil, nil
+	}
+
+	cs, err := p.Engine.ContainerList(ctx, LabelKind+"=node")
+	if err != nil {
+		return nil, fmt.Errorf("list ember containers: %w", err)
+	}
+	liveRuns := make(map[string]bool, len(cs))
+	for _, c := range cs {
+		if id := c.Labels[dockerengine.LabelRunID]; id != "" {
+			liveRuns[id] = true
+		}
+	}
+
+	var out []node.Leftover
+	for _, n := range nets {
+		if n.Labels[LabelKind] != "network" {
+			// Wears a label ember filters on but is not a network ember made.
+			// Skipped rather than reported, same as a foreign volume in
+			// StoreList: `ember reap` removes what this returns.
+			continue
+		}
+		runID := n.Labels[dockerengine.LabelRunID]
+		if runID != "" && liveRuns[runID] {
+			continue
+		}
+		l := node.Leftover{
+			Handle: node.LeftoverHandle{Provider: Name, ID: node.LeftoverID(n.ID)},
+			Kind:   "network",
+			Name:   n.Name,
+		}
+		// Parsed, not guessed. A label this package did not write -- or wrote
+		// in an earlier spelling -- leaves the run id empty and the deadline
+		// zero, which node.Leftover documents as "past": it is still a network
+		// ember labelled and nothing else will ever remove it.
+		if id, deadline, err := provider.ParseLabel(n.Labels[LabelLabel]); err == nil {
+			l.RunID = id
+			l.Deadline = deadline
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
+
+// LeftoverDestroy removes one network. Not found counts as success.
+func (p *Provider) LeftoverDestroy(ctx context.Context, h node.LeftoverHandle) error {
+	if h.ID == "" {
+		return fmt.Errorf("leftover handle names no network")
+	}
+	if err := p.Engine.NetworkRemove(ctx, string(h.ID)); err != nil {
+		if errors.Is(err, dockerengine.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("destroy leftover %s: %w", h, err)
 	}
 	return nil
 }
@@ -599,6 +695,8 @@ func (p *Provider) StoreDestroy(ctx context.Context, h node.StoreHandle) error {
 }
 
 var _ provider.StoreAPI = (*Provider)(nil)
+
+var _ provider.LeftoverAPI = (*Provider)(nil)
 
 // gpusFor is how many devices the container should be handed.
 //

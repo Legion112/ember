@@ -440,7 +440,7 @@ func trustFor(r node.ReadyNode, o Options, minted node.HostKey) (hostkey.Trust, 
 // automatically, because the machine may still be running and only the
 // operator can say otherwise.
 func destroy(ctx context.Context, p provider.Provider, o Options, runID node.RunID, h node.Handle) error {
-	err := p.Destroy(ctx, h)
+	err := p.Destroy(ctx, h, runID)
 	if err != nil && !errors.Is(err, node.ErrNotFound) {
 		o.log().Error("destroy failed; the node may still be running and billing", "handle", h.String(), "err", err)
 		_ = o.Store.Update(runID, func(r *statestore.Record) {

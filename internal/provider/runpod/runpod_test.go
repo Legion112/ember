@@ -488,7 +488,7 @@ func TestDestroy_NotFoundIsSuccess(t *testing.T) {
 	})
 
 	// The goal of destroy is that the pod is gone, and it is.
-	if err := p.Destroy(t.Context(), node.Handle{Provider: Name, ID: "gone"}); err != nil {
+	if err := p.Destroy(t.Context(), node.Handle{Provider: Name, ID: "gone"}, ""); err != nil {
 		t.Fatalf("destroying an absent pod failed: %v", err)
 	}
 	if gotMethod != http.MethodDelete || gotPath != "/v2/pods/gone" {
@@ -503,7 +503,7 @@ func TestDestroy_ReportsARealFailure(t *testing.T) {
 	})
 	// A destroy that failed must be loud: provision writes PhaseDestroyFailed
 	// on it, and that record is never cleared automatically.
-	if err := p.Destroy(t.Context(), node.Handle{Provider: Name, ID: "x"}); err == nil {
+	if err := p.Destroy(t.Context(), node.Handle{Provider: Name, ID: "x"}, ""); err == nil {
 		t.Fatal("a 500 from destroy was reported as success")
 	}
 }
@@ -632,7 +632,7 @@ func TestEveryCallHitsThePathTheSpecDocuments(t *testing.T) {
 			return err
 		}},
 		{"destroy", "/v2/pods/abc123", func(p *Provider) error {
-			return p.Destroy(t.Context(), node.Handle{Provider: Name, ID: "abc123"})
+			return p.Destroy(t.Context(), node.Handle{Provider: Name, ID: "abc123"}, "")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -723,6 +723,15 @@ func TestCaps_BillsPerSecondWithNoMinimum(t *testing.T) {
 
 func TestRunPod_StoreCapsMatchImplementation(t *testing.T) {
 	providertest.AssertStoreCapsMatch(t, New(node.NewSecret([]byte("k"))))
+}
+
+// TestRunPod_LeftoverCapsMatchImplementation checks the other direction of the
+// same claim: a pod is the only object a run creates here, Caps.Leftovers says
+// so, and nothing asks RunPod what a destroyed node left behind. A store is
+// not a leftover -- it outlives every node deliberately -- and that is why the
+// two interfaces are separate.
+func TestRunPod_LeftoverCapsMatchImplementation(t *testing.T) {
+	providertest.AssertLeftoverCapsMatch(t, New(node.NewSecret([]byte("k"))))
 }
 
 // TestCreate_RefusesMinCUDARatherThanSendingAFieldRunPodRejects.

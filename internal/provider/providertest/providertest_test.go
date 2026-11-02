@@ -67,7 +67,7 @@ func TestDryProvider_DestroyIsAnnouncedNotPerformed(t *testing.T) {
 	var out strings.Builder
 	d := DryProvider{Inner: inner, Out: &out}
 
-	if err := d.Destroy(t.Context(), node.Handle{Provider: "test", ID: "n1"}); err != nil {
+	if err := d.Destroy(t.Context(), node.Handle{Provider: "test", ID: "n1"}, "r1"); err != nil {
 		t.Fatal(err)
 	}
 	if len(inner.Recorded()) != 0 {
@@ -83,7 +83,7 @@ func TestDryProvider_SurvivesWithoutAWriter(t *testing.T) {
 	if _, err := d.Create(t.Context(), node.CreateRequest{}); err == nil {
 		t.Fatal("a dry run with no writer still must not create")
 	}
-	if err := d.Destroy(t.Context(), node.Handle{}); err != nil {
+	if err := d.Destroy(t.Context(), node.Handle{}, ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -122,7 +122,7 @@ func TestRecordingProvider_LiveTracksCreatesAndDestroys(t *testing.T) {
 	if len(p.Live()) != 1 {
 		t.Fatal("a created node is not live")
 	}
-	if err := p.Destroy(t.Context(), h); err != nil {
+	if err := p.Destroy(t.Context(), h, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(p.Live()) != 0 {
