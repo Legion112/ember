@@ -546,6 +546,17 @@ that sentence made unrepresentable rather than merely tested.
   a source port against `/proc/net/tcp` -- racy, Linux-only, and wrong through
   a forward, where the connection is made by sshd as the logged-in user and
   would therefore pass. One token answers both threats and widens no seal.
+- **Replacing `subtle.ConstantTimeCompare` with `==` is caught by nothing, and
+  that is written down rather than papered over.** Thirteen of the fourteen
+  defects reinstated for this change went red; that one did not, and no test
+  in this repository could. A timing oracle is a statistical property of a
+  machine under load, and a test that asserted one would either be flaky in CI
+  or be a test of the CI runner. What stands in its place is that the
+  comparison is four lines in one function with the reason written above it,
+  and that `s.tokenDigest` is the only thing the comparison can reach -- the
+  raw token is on `opts` for the printed URL and nothing else. This is the
+  honest answer to "which of your guards has no test", and the kind of guard
+  that gets lost in a refactor nobody reviews closely.
 - **The token is compared as a digest, never as a string.**
   `subtle.ConstantTimeCompare` is constant time in the length of its arguments
   and returns immediately when they differ, so comparing raw values leaks the
