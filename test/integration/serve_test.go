@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -61,8 +62,27 @@ func freePort(t *testing.T) int {
 	return port
 }
 
+// served is a running `ember serve`: where it listens and what it accepts.
+//
+// THE TOKEN IS HERE BECAUSE A LAB IS A CLIENT. `ember serve` authenticates
+// every route, so a lab that only knew the port would be exactly the
+// unauthenticated second process the credential exists to refuse -- which is
+// what TestServe_RefusesEveryRouteWithoutTheToken asserts on purpose.
+type served struct {
+	Port int
+
+	// Token is read out of the announcement rather than injected.
+	//
+	// NOT FROM EMBER_SERVE_TOKEN, deliberately: the minted path is the one
+	// every operator gets by default, so it is the one worth exercising. A
+	// lab that set the environment variable would never run the code that
+	// mints, prints and parses a credential -- which is three of the four
+	// things that can be wrong here.
+	Token string
+}
+
 // startServe runs `ember serve` and waits until it has announced its URL.
-func startServe(t *testing.T, l *harness.Lab, extra ...string) (*exec.Cmd, int, func() string) {
+func startServe(t *testing.T, l *harness.Lab, extra ...string) (*exec.Cmd, served, func() string) {
 	t.Helper()
 	port := freePort(t)
 	args := append([]string{"serve", "--port", fmt.Sprint(port)}, extra...)
@@ -73,7 +93,16 @@ func startServe(t *testing.T, l *harness.Lab, extra ...string) (*exec.Cmd, int, 
 	// The printed URL is the signal that both halves are up. Waiting on a
 	// dial instead would race the listener.
 	l.WaitForLine(ctx, "Ctrl-C to stop")
-	return cmd, port, wait
+
+	// And the credential, off the one line that carries it. The announcement
+	// is already printed by the time the line above returns, so this does not
+	// wait again.
+	line := l.WaitForLine(ctx, "http://127.0.0.1:")
+	_, tok, ok := strings.Cut(strings.TrimSpace(line), "?t=")
+	if !ok || tok == "" {
+		t.Fatalf("ember serve announced no token: %q", line)
+	}
+	return cmd, served{Port: port, Token: tok}, wait
 }
 
 // answer is a finished response: read, closed, and still inspectable.
@@ -89,20 +118,26 @@ type answer struct {
 	Header http.Header
 }
 
-// ask makes a request that looks like the UI's own: this server's Host, and
-// this server's Origin.
-func ask(t *testing.T, method string, port int, path, body string) answer {
+// ask makes a request that looks like the UI's own: this server's Host, this
+// server's Origin, and the credential it announced.
+//
+// The header carrier and not the cookie, because a Go client is not a
+// browser. The cookie half is the chromedp lab's job -- whether Chrome
+// attaches a SameSite=Strict cookie to a websocket handshake and to an <img>
+// is a question for Chrome.
+func ask(t *testing.T, method string, s served, path, body string) answer {
 	t.Helper()
 	var r io.Reader
 	if body != "" {
 		r = strings.NewReader(body)
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", s.Port, path)
 	req, err := http.NewRequestWithContext(t.Context(), method, url, r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Origin", fmt.Sprintf("http://127.0.0.1:%d", port))
+	req.Header.Set("Origin", fmt.Sprintf("http://127.0.0.1:%d", s.Port))
+	req.Header.Set("Authorization", "Bearer "+s.Token)
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -136,14 +171,14 @@ func ask(t *testing.T, method string, port int, path, body string) answer {
 func TestServe_IsReachableFromNowhereElse(t *testing.T) {
 	l := harness.New(t)
 	l.AppendConfig(serveConfig)
-	_, port, _ := startServe(t, l)
+	_, srv, _ := startServe(t, l)
 
 	// Both loopback families answer. A v4-only listener is invisible to a
 	// browser that resolves localhost to ::1 first, and the operator reads
 	// connection-refused on a working server as a bug in ember.
 	for _, host := range []string{
-		fmt.Sprintf("127.0.0.1:%d", port),
-		fmt.Sprintf("[::1]:%d", port),
+		fmt.Sprintf("127.0.0.1:%d", srv.Port),
+		fmt.Sprintf("[::1]:%d", srv.Port),
 	} {
 		c, err := net.DialTimeout("tcp", host, 2*time.Second)
 		if err != nil {
@@ -164,7 +199,7 @@ func TestServe_IsReachableFromNowhereElse(t *testing.T) {
 			continue
 		}
 		probed++
-		target := net.JoinHostPort(ipnet.IP.String(), fmt.Sprint(port))
+		target := net.JoinHostPort(ipnet.IP.String(), fmt.Sprint(srv.Port))
 		c, derr := net.DialTimeout("tcp", target, 2*time.Second)
 		if derr == nil {
 			_ = c.Close()
@@ -180,14 +215,18 @@ func TestServe_IsReachableFromNowhereElse(t *testing.T) {
 
 // TestServe_RefusesAPageFromSomewhereElse.
 //
-// There is no authentication, so this is what stands in for it. The threat is
-// not an attacker on the network -- nothing is listening off this machine --
-// it is any page the operator has open, which can POST to a loopback port
-// while the browser hides only the response.
+// The browser threat, which the credential does not replace: any page the
+// operator has open can POST to a loopback port while the browser hides only
+// the response. All three checks or nothing, so this one has to keep holding
+// on its own -- which is why the requests below CARRY THE TOKEN. A refusal
+// test that could pass because the credential was missing proves nothing
+// about the Origin and Host checks it is named after, and this is exactly how
+// a seal gets quietly weakened: the test stays green while the thing it
+// guards stops working.
 func TestServe_RefusesAPageFromSomewhereElse(t *testing.T) {
 	l := harness.New(t)
 	l.AppendConfig(serveConfig)
-	_, port, _ := startServe(t, l)
+	_, srv, _ := startServe(t, l)
 
 	body := `{"provider":"local","jobs":[{"prompt":"a cat"}]}`
 
@@ -199,19 +238,20 @@ func TestServe_RefusesAPageFromSomewhereElse(t *testing.T) {
 		{"a name that resolves here", "", "evil.example"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			url := fmt.Sprintf("http://127.0.0.1:%d/api/requests", port)
+			url := fmt.Sprintf("http://127.0.0.1:%d/api/requests", srv.Port)
 			req, err := http.NewRequestWithContext(t.Context(), "POST", url, strings.NewReader(body))
 			if err != nil {
 				t.Fatal(err)
 			}
 			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+srv.Token)
 			if c.origin != "" {
 				req.Header.Set("Origin", c.origin)
 			}
 			if c.host != "" {
 				// The DNS rebinding case: the attacker's page is same-origin
 				// with their own name, so Origin passes and Host does not.
-				req.Host = fmt.Sprintf("%s:%d", c.host, port)
+				req.Host = fmt.Sprintf("%s:%d", c.host, srv.Port)
 			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -226,7 +266,7 @@ func TestServe_RefusesAPageFromSomewhereElse(t *testing.T) {
 	}
 
 	// And nothing was queued by any of it.
-	resp := ask(t, "GET", port, "/api/requests", "")
+	resp := ask(t, "GET", srv, "/api/requests", "")
 	var list struct {
 		Requests []json.RawMessage `json:"requests"`
 	}
@@ -246,9 +286,9 @@ func TestServe_RefusesAPageFromSomewhereElse(t *testing.T) {
 func TestServe_RefusesAPaidProviderWithoutTheFlag(t *testing.T) {
 	l := harness.New(t)
 	l.AppendConfig(serveConfig)
-	_, port, _ := startServe(t, l)
+	_, srv, _ := startServe(t, l)
 
-	resp := ask(t, "POST", port, "/api/requests",
+	resp := ask(t, "POST", srv, "/api/requests",
 		`{"provider":"runpod","jobs":[{"prompt":"a cat"}]}`)
 	// 403 either way: without a credential RunPod is not registered at all,
 	// and with one it is refused for being paid. Both are the right answer to
@@ -274,9 +314,9 @@ func TestServe_RefusesAPaidProviderWithoutTheFlag(t *testing.T) {
 func TestServe_DestroysItsRentalOnSigint(t *testing.T) {
 	l := harness.New(t)
 	l.AppendConfig(serveConfig)
-	cmd, port, wait := startServe(t, l)
+	cmd, srv, wait := startServe(t, l)
 
-	resp := ask(t, "POST", port, "/api/requests",
+	resp := ask(t, "POST", srv, "/api/requests",
 		`{"provider":"local","jobs":[{"prompt":"a cat","steps":1}]}`)
 	if resp.Status != http.StatusAccepted {
 		t.Fatalf("queueing failed: %d %s", resp.Status, resp.Body)
@@ -328,9 +368,9 @@ func TestServe_DestroysItsRentalOnSigint(t *testing.T) {
 func TestServe_SigkillLeavesExactlyOneFinding(t *testing.T) {
 	l := harness.New(t)
 	l.AppendConfig(serveConfig)
-	cmd, port, _ := startServe(t, l)
+	cmd, srv, _ := startServe(t, l)
 
-	resp := ask(t, "POST", port, "/api/requests",
+	resp := ask(t, "POST", srv, "/api/requests",
 		`{"provider":"local","jobs":[{"prompt":"a cat","steps":1}]}`)
 	if resp.Status != http.StatusAccepted {
 		t.Fatalf("queueing failed: %d %s", resp.Status, resp.Body)
@@ -357,4 +397,208 @@ func TestServe_SigkillLeavesExactlyOneFinding(t *testing.T) {
 	// behind, and reaping it here keeps the stray check unconditional for
 	// every lab that leaks by mistake.
 	l.Reap()
+}
+
+// TestServe_RefusesEveryRouteWithoutTheToken.
+//
+// THE THREAT THE TOKEN IS FOR, reproduced exactly: a client on this machine
+// that is not the operator's page. It addresses the server by its real Host,
+// sends no Origin -- which is what curl does and what checkOrigin
+// deliberately allows -- and so passes every check in guard.go. Before the
+// credential it would have queued a generation; on `ember serve --allow-paid`
+// it would have rented a GPU on somebody else's card.
+//
+// A LAB AND NOT ONLY A UNIT TEST, because the thing being asserted is that a
+// real process on a real loopback socket refuses a real client. The unit
+// tests in internal/webapi assert the same refusal against a handler, which
+// cannot tell you whether the route table a listening ember built is the one
+// that was tested.
+//
+// Every route, /ws included: a guard that covers the JSON routes and not the
+// socket guards nothing, since the socket is how a watcher reads every event
+// of every generation.
+func TestServe_RefusesEveryRouteWithoutTheToken(t *testing.T) {
+	l := harness.New(t)
+	l.AppendConfig(serveConfig)
+	_, srv, _ := startServe(t, l)
+
+	body := `{"provider":"local","jobs":[{"prompt":"a cat"}]}`
+
+	for _, c := range []struct {
+		method, path, body string
+	}{
+		{"GET", "/", ""},
+		{"GET", "/api/config", ""},
+		{"GET", "/api/offers", ""},
+		{"GET", "/api/nodes", ""},
+		{"GET", "/api/requests", ""},
+		{"POST", "/api/requests", body},
+		{"POST", "/api/requests/abc/cancel", ""},
+		{"GET", "/api/requests/abc/events", ""},
+		{"GET", "/api/requests/abc/images/0/0", ""},
+		{"GET", "/ws?id=abc", ""},
+	} {
+		// Three credentials that must all be refused, and a token of the
+		// wrong length is not among them on purpose: the compare is over
+		// SHA-256 digests, so a short token, a long one and a correct prefix
+		// are all simply wrong rather than three cases.
+		for _, cred := range []struct{ name, header string }{
+			{"nothing at all", ""},
+			{"another token", "Bearer " + strings.Repeat("A", 26)},
+			{"the right token truncated", "Bearer " + srv.Token[:len(srv.Token)-1]},
+		} {
+			t.Run(c.method+" "+c.path+" with "+cred.name, func(t *testing.T) {
+				var r io.Reader
+				if c.body != "" {
+					r = strings.NewReader(c.body)
+				}
+				url := fmt.Sprintf("http://127.0.0.1:%d%s", srv.Port, c.path)
+				req, err := http.NewRequestWithContext(t.Context(), c.method, url, r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// No Origin, exactly as a shell on this machine sends none.
+				if c.body != "" {
+					req.Header.Set("Content-Type", "application/json")
+				}
+				if cred.header != "" {
+					req.Header.Set("Authorization", cred.header)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = resp.Body.Close() }()
+				b, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if resp.StatusCode != http.StatusForbidden {
+					t.Errorf("status = %d, want 403: %s", resp.StatusCode, b)
+				}
+				// And the response does not leak the credential it was
+				// comparing against, which is what a helpful error message
+				// does by accident.
+				if strings.Contains(string(b), srv.Token) {
+					t.Errorf("the refusal echoes the server's token:\n%s", b)
+				}
+			})
+		}
+	}
+
+	// And nothing was queued by any of it. The browser hides the response of
+	// a cross-origin fetch and a non-browser client does not even need that
+	// hiding, so the side effect is the only thing worth asserting.
+	resp := ask(t, "GET", srv, "/api/requests", "")
+	var list struct {
+		Requests []json.RawMessage `json:"requests"`
+	}
+	if err := json.Unmarshal(resp.Body, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Requests) != 0 {
+		t.Errorf("%d request(s) were queued by a request with no credential", len(list.Requests))
+	}
+}
+
+// TestServe_ExchangesTheOneTimeURLForACookie.
+//
+// The browser's half of the credential, over a real listener, without a
+// browser: the token in the query string comes back as a Set-Cookie and a
+// redirect to a URL that no longer carries it. What a BROWSER then does with
+// that cookie -- attaches it to a websocket handshake, to an <img src>, and
+// not to a cross-site request -- is TestServe_UI's job, because those are
+// claims about Chrome.
+func TestServe_ExchangesTheOneTimeURLForACookie(t *testing.T) {
+	l := harness.New(t)
+	l.AppendConfig(serveConfig)
+	_, srv, _ := startServe(t, l)
+
+	// No redirect following: the 303 itself is what is being asserted.
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	url := fmt.Sprintf("http://127.0.0.1:%d/?t=%s", srv.Port, srv.Token)
+	req, err := http.NewRequestWithContext(t.Context(), "GET", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); strings.Contains(loc, srv.Token) {
+		t.Errorf("the redirect keeps the token: %s", loc)
+	}
+	var jar *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "ember_serve" {
+			jar = c
+		}
+	}
+	if jar == nil {
+		t.Fatalf("no credential cookie was set: %v", resp.Header.Values("Set-Cookie"))
+	}
+	if jar.Value != srv.Token {
+		t.Errorf("cookie value = %q", jar.Value)
+	}
+	if !jar.HttpOnly || jar.SameSite != http.SameSiteStrictMode || jar.Path != "/" {
+		t.Errorf("cookie attributes are wrong: %v", resp.Header.Values("Set-Cookie"))
+	}
+
+	// And the cookie alone is enough afterwards, with no header.
+	req, err = http.NewRequestWithContext(t.Context(), "GET",
+		fmt.Sprintf("http://127.0.0.1:%d/api/config", srv.Port), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(jar)
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("status = %d with the cookie alone, want 200", resp2.StatusCode)
+	}
+}
+
+// TestServe_TheTokenIsNotInArgv.
+//
+// THE RULE THAT CHOSE WHERE THE CREDENTIAL LIVES, asserted against the thing
+// it is a rule about: /proc/<pid>/cmdline is world-readable, so a token
+// passed as a flag value is readable by every uid on this box for the life of
+// the process -- which is precisely the uid the token exists to keep out. A
+// credential in argv would be a control that publishes its own secret.
+//
+// Only a real process can answer this, which is why it is a lab. It is also
+// why `ember serve` has no --token flag at all: the token comes from
+// credentials.yaml, the environment, or crypto/rand.
+func TestServe_TheTokenIsNotInArgv(t *testing.T) {
+	l := harness.New(t)
+	l.AppendConfig(serveConfig)
+	cmd, srv, _ := startServe(t, l)
+
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", cmd.Process.Pid))
+	if err != nil {
+		t.Fatalf("reading the command line of the server under test: %v", err)
+	}
+	argv := strings.ReplaceAll(string(raw), "\x00", " ")
+	if strings.Contains(argv, srv.Token) {
+		t.Errorf("the token is in argv, where every uid on this machine can read it: %s", argv)
+	}
+	// The assertion is only worth anything if the token was findable at all,
+	// so say what was looked for: a search for an empty string finds nothing
+	// and would pass against a server with no credential.
+	if srv.Token == "" {
+		t.Fatal("no token was parsed out of the announcement, so this proved nothing")
+	}
+	if !strings.Contains(argv, "serve") {
+		t.Errorf("that was not ember serve's command line: %s", argv)
+	}
 }

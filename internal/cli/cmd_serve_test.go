@@ -14,6 +14,7 @@ import (
 
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/webapi"
 )
@@ -102,7 +103,16 @@ func TestServe_ReportsAMalformedConfig(t *testing.T) {
 	}
 }
 
-func TestServe_HelpSaysThereIsNoAuthentication(t *testing.T) {
+// TestServe_HelpSaysWhatTheTokenDoesAndDoesNot.
+//
+// IT USED TO ASSERT "NO AUTHENTICATION", which was a true sentence about this
+// program and is now a false one. The replacement is not merely the opposite
+// claim: the help has to name the threat the token answers (another uid on a
+// loopback port), say where the credential comes from, say why there is no
+// flag for it, and say that it does not replace --allow-paid. An operator who
+// reads "authenticated" and stops has learned the one thing that could make
+// them turn the ceiling off.
+func TestServe_HelpSaysWhatTheTokenDoesAndDoesNot(t *testing.T) {
 	var out bytes.Buffer
 	// -h is flag.ErrHelp, which this package reports as a usage error. What
 	// is being asserted is the text, as every other help test here does.
@@ -110,9 +120,16 @@ func TestServe_HelpSaysThereIsNoAuthentication(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		// The one thing a person has to decide here is whether to leave this
-		// running, so the help says what is not guarded as plainly as what
-		// is.
-		"NO AUTHENTICATION",
+		// running, so the help says what is guarded and what is not as
+		// plainly as it can.
+		"EVERY REQUEST NEEDS A TOKEN",
+		"every uid on",
+		"serve_token",
+		"EMBER_SERVE_TOKEN",
+		// No --token flag, and the reason, because the reason is what stops
+		// somebody adding one back.
+		"world-readable",
+		"not a substitute for --allow-paid",
 		"--allow-paid",
 		"loopback only",
 		"narrow the ceilings",
@@ -129,20 +146,29 @@ func TestServe_HelpSaysThereIsNoAuthentication(t *testing.T) {
 // from the process, so it has to say that any page in their browser can reach
 // the port, and whether this server is allowed to spend money.
 func TestAnnounce_SaysWhatIsNotGuarded(t *testing.T) {
-	srv, err := webapi.New(webapi.Options{Store: genstore.NewRecordingStore(), Port: 7777})
+	srv, err := webapi.New(webapi.Options{Store: genstore.NewRecordingStore(), Port: 7777, Token: webapi.NewToken()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Config{TTL: 30 * time.Minute, MaxHourlyUSD: "2.49", MaxRunUSD: "3.00"}
 
 	var refused bytes.Buffer
-	announce(&refused, srv, cfg, false, "", "/tmp/out", periodStanding{})
+	announce(&refused, srv, cfg, false, "", "/tmp/out", periodStanding{}, true)
 	got := refused.String()
 	for _, want := range []string{
 		"http://127.0.0.1:7777/",
 		"Paid providers are refused",
 		"--allow-paid",
-		"no authentication",
+		// WHAT THE TOKEN DOES NOT COVER, which is the half an operator can
+		// act on: it holds against the account next door and against a
+		// forwarded port, and not against their own uid, and it does not
+		// expire. The line this replaced said there was no authentication at
+		// all.
+		"Every request needs the token",
+		"another account on this machine",
+		"forwarded port",
+		"does not keep out your own uid",
+		"never expires",
 		"/tmp/out",
 		"destroyed before this exits",
 	} {
@@ -163,7 +189,7 @@ func TestAnnounce_SaysWhatIsNotGuarded(t *testing.T) {
 	}
 
 	var allowed bytes.Buffer
-	announce(&allowed, srv, cfg, true, "", "/tmp/out", periodStanding{})
+	announce(&allowed, srv, cfg, true, "", "/tmp/out", periodStanding{}, true)
 	got = allowed.String()
 	for _, want := range []string{
 		"PAID PROVIDERS ARE ENABLED",
@@ -305,7 +331,7 @@ func (b *syncBuf) String() string {
 // they find out about after queueing thirty of them. This is the one place
 // `ember serve` can tell them their headroom before they type anything.
 func TestAnnounce_SaysWhereThePeriodCeilingsStand(t *testing.T) {
-	srv, err := webapi.New(webapi.Options{Store: genstore.NewRecordingStore(), Port: 7777})
+	srv, err := webapi.New(webapi.Options{Store: genstore.NewRecordingStore(), Port: 7777, Token: webapi.NewToken()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +343,7 @@ func TestAnnounce_SaysWhereThePeriodCeilingsStand(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	announce(&out, srv, cfg, true, "", "/tmp/out", st)
+	announce(&out, srv, cfg, true, "", "/tmp/out", st, true)
 	got := out.String()
 	t.Logf("ember serve with period ceilings:\n%s", got)
 
@@ -334,7 +360,7 @@ func TestAnnounce_SaysWhereThePeriodCeilingsStand(t *testing.T) {
 	// Without --allow-paid there is nothing to bound: a free rental is never
 	// refused by a money ceiling, so naming one would be noise.
 	var free bytes.Buffer
-	announce(&free, srv, cfg, false, "", "/tmp/out", st)
+	announce(&free, srv, cfg, false, "", "/tmp/out", st, true)
 	if strings.Contains(free.String(), "max_month_usd") {
 		t.Errorf("a period ceiling is announced where no provider may cost money:\n%s", free.String())
 	}
@@ -344,7 +370,7 @@ func TestAnnounce_SaysWhereThePeriodCeilingsStand(t *testing.T) {
 // rental, so the announcement has to say so rather than printing a figure it
 // does not have.
 func TestAnnounce_SaysWhenAPeriodCeilingCannotBeRead(t *testing.T) {
-	srv, err := webapi.New(webapi.Options{Store: genstore.NewRecordingStore(), Port: 7777})
+	srv, err := webapi.New(webapi.Options{Store: genstore.NewRecordingStore(), Port: 7777, Token: webapi.NewToken()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +380,7 @@ func TestAnnounce_SaysWhenAPeriodCeilingCannotBeRead(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	announce(&out, srv, config.Config{TTL: time.Hour}, true, "", "/tmp/out", st)
+	announce(&out, srv, config.Config{TTL: time.Hour}, true, "", "/tmp/out", st, true)
 	got := out.String()
 	for _, want := range []string{"could not read what has been spent", "database is locked", "refused"} {
 		if !strings.Contains(got, want) {
@@ -379,5 +405,84 @@ func TestStanding_ReadsBothPeriods(t *testing.T) {
 	bad := standing(t.Context(), genstore.NewRecordingStore(), config.Config{MaxDayUSD: "~~"})
 	if bad.Err == nil {
 		t.Error("a malformed max_day_usd was announced as no ceiling")
+	}
+}
+
+// TestServeToken_PrefersTheOperatorsOwnAndMintsOtherwise.
+//
+// A STABLE CREDENTIAL IS A LINE IN credentials.yaml and nothing else, which
+// is what a bookmark and a script against the local API both need. With
+// neither, ember mints one rather than refusing to start: there is no
+// unauthenticated mode to fall back to -- webapi.New refuses a zero token --
+// so refusing to come up would buy nothing and would be a server somebody
+// runs an older binary to avoid.
+func TestServeToken_PrefersTheOperatorsOwnAndMintsOtherwise(t *testing.T) {
+	configured := node.NewSecret([]byte("the-operators-own"))
+	got, minted := serveToken(config.Credentials{ServeToken: configured})
+	if minted {
+		t.Error("a configured token was replaced by a minted one")
+	}
+	if string(got.Bytes()) != "the-operators-own" {
+		t.Errorf("token = %q", got.Bytes())
+	}
+
+	got, minted = serveToken(config.Credentials{})
+	if !minted {
+		t.Error("no token was configured and none was minted")
+	}
+	if got.IsZero() {
+		t.Error("the minted token is empty, which webapi.New refuses")
+	}
+	// Fresh each time, so a process restart revokes the previous one.
+	again, _ := serveToken(config.Credentials{})
+	if string(again.Bytes()) == string(got.Bytes()) {
+		t.Error("two runs minted the same token")
+	}
+}
+
+// TestAnnounce_PrintsAMintedTokenAndNeverAConfiguredOne.
+//
+// A minted credential has to be printed or nobody can use it. A CONFIGURED
+// one does not: the operator already has it, and a second copy on a stdout
+// that a systemd unit may be writing to a world-readable journal is a copy
+// they did not ask for. The fingerprint goes there instead, which is
+// node.Secret's own discipline and enough to tell two credentials apart.
+func TestAnnounce_PrintsAMintedTokenAndNeverAConfiguredOne(t *testing.T) {
+	tok := node.NewSecret([]byte("THE-SECRET-VALUE"))
+	srv, err := webapi.New(webapi.Options{
+		Store: genstore.NewRecordingStore(), Port: 7777, Token: tok,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{TTL: time.Hour}
+
+	var mintedOut bytes.Buffer
+	announce(&mintedOut, srv, cfg, false, "", "/tmp/out", periodStanding{}, true)
+	got := mintedOut.String()
+	t.Logf("ember serve with a minted token:\n%s", got)
+	if !strings.Contains(got, "?t=THE-SECRET-VALUE") {
+		t.Errorf("the announcement does not print the one-time URL:\n%s", got)
+	}
+	// And says it is not durable, because an operator who bookmarks it finds
+	// out otherwise after a restart.
+	for _, want := range []string{"changes when ember restarts", "serve_token in credentials.yaml"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the announcement does not mention %q:\n%s", want, got)
+		}
+	}
+
+	var configuredOut bytes.Buffer
+	announce(&configuredOut, srv, cfg, false, "", "/tmp/out", periodStanding{}, false)
+	got = configuredOut.String()
+	t.Logf("ember serve with a configured token:\n%s", got)
+	if strings.Contains(got, "THE-SECRET-VALUE") {
+		t.Errorf("a configured token was printed back at the operator:\n%s", got)
+	}
+	if !strings.Contains(got, tok.Fingerprint()) {
+		t.Errorf("the announcement does not name which credential it is using:\n%s", got)
+	}
+	if !strings.Contains(got, "?t=<token>") {
+		t.Errorf("the announcement does not say how to authorise a browser:\n%s", got)
 	}
 }

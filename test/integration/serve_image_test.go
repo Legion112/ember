@@ -80,9 +80,9 @@ func servableLab(t *testing.T) *harness.Lab {
 }
 
 // queueJobs posts a batch and returns its id.
-func queueJobs(t *testing.T, port int, body string) string {
+func queueJobs(t *testing.T, srv served, body string) string {
 	t.Helper()
-	resp := ask(t, "POST", port, "/api/requests", body)
+	resp := ask(t, "POST", srv, "/api/requests", body)
 	if resp.Status != http.StatusAccepted {
 		t.Fatalf("queueing failed: %d %s", resp.Status, resp.Body)
 	}
@@ -104,9 +104,9 @@ type requestState struct {
 	} `json:"images"`
 }
 
-func getRequest(t *testing.T, port int, id string) requestState {
+func getRequest(t *testing.T, srv served, id string) requestState {
 	t.Helper()
-	resp := ask(t, "GET", port, "/api/requests/"+id, "")
+	resp := ask(t, "GET", srv, "/api/requests/"+id, "")
 	var r requestState
 	if err := json.Unmarshal(resp.Body, &r); err != nil {
 		t.Fatal(err)
@@ -114,11 +114,11 @@ func getRequest(t *testing.T, port int, id string) requestState {
 	return r
 }
 
-func waitForStatus(t *testing.T, port int, id string, want string, within time.Duration) requestState {
+func waitForStatus(t *testing.T, srv served, id string, want string, within time.Duration) requestState {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for {
-		r := getRequest(t, port, id)
+		r := getRequest(t, srv, id)
 		if r.Status == want {
 			return r
 		}
@@ -147,10 +147,10 @@ func waitForStatus(t *testing.T, port int, id string, want string, within time.D
 // only number that cannot be argued with: two of them is two machines.
 func TestServe_DrainsTheQueueOntoOneRental(t *testing.T) {
 	l := servableLab(t)
-	cmd, port, wait := startServe(t, l)
+	cmd, srv, wait := startServe(t, l)
 
 	// A long first batch, so there is time to queue a second while it runs.
-	first := queueJobs(t, port, `{"provider":"local","jobs":[
+	first := queueJobs(t, srv, `{"provider":"local","jobs":[
 		{"prompt":"a paper boat","width":192,"height":192,"steps":4,"seed":1,"output":"boat"},
 		{"prompt":"a lighthouse","width":192,"height":192,"steps":4,"seed":2,"output":"light"},
 		{"prompt":"a railway station","width":192,"height":192,"steps":4,"seed":3,"output":"station"}
@@ -159,14 +159,14 @@ func TestServe_DrainsTheQueueOntoOneRental(t *testing.T) {
 	// Not "a container exists": the rental has to be generating before the
 	// second request can join it, and a container exists before sd-server
 	// has even been started.
-	waitForStatus(t, port, first, "running", 4*time.Minute)
+	waitForStatus(t, srv, first, "running", 4*time.Minute)
 
-	second := queueJobs(t, port, `{"provider":"local","jobs":[
+	second := queueJobs(t, srv, `{"provider":"local","jobs":[
 		{"prompt":"a slow river","width":192,"height":192,"steps":4,"seed":4,"output":"river"}
 	]}`)
 
-	firstDone := waitForStatus(t, port, first, "done", 10*time.Minute)
-	secondDone := waitForStatus(t, port, second, "done", 10*time.Minute)
+	firstDone := waitForStatus(t, srv, first, "done", 10*time.Minute)
+	secondDone := waitForStatus(t, srv, second, "done", 10*time.Minute)
 
 	// EVERYTHING THAT NEEDS THE SERVER HAPPENS FIRST. Signalling and then
 	// fetching an image is a connection refused, which the first version of
@@ -183,7 +183,7 @@ func TestServe_DrainsTheQueueOntoOneRental(t *testing.T) {
 			if im.Preview {
 				continue
 			}
-			assertDecodablePNG(t, port, im.Path)
+			assertDecodablePNG(t, srv, im.Path)
 		}
 	}
 
@@ -221,9 +221,9 @@ func TestServe_DrainsTheQueueOntoOneRental(t *testing.T) {
 // Decoded and not merely counted: a zero-byte file, a JSON error page and a
 // truncated write all have a length, and only decoding tells them from an
 // image. The preview lab makes the same check for the same reason.
-func assertDecodablePNG(t *testing.T, port int, path string) {
+func assertDecodablePNG(t *testing.T, srv served, path string) {
 	t.Helper()
-	resp := ask(t, "GET", port, path, "")
+	resp := ask(t, "GET", srv, path, "")
 	if resp.Status != http.StatusOK {
 		t.Errorf("%s: status %d", path, resp.Status)
 		return
@@ -269,13 +269,32 @@ func assertDecodablePNG(t *testing.T, port int, path string) {
 // visible the moment a browser loaded the page. That is what this lab is
 // for: it is the only thing in the repository that can see them.
 //
+// AND NOW THE CREDENTIAL, which is the fourth thing of that kind. `ember
+// serve` authenticates every route, and the carrier a browser uses is a
+// SameSite=Strict HttpOnly cookie the server hands back in exchange for the
+// token in the printed URL. Every claim in that sentence is a claim about
+// Chrome and not about ember: whether a 303 with a Set-Cookie leaves the
+// token out of the address bar, whether the cookie reaches an <img src> in
+// the gallery, and -- the one with no Go test that could ever stand in for it
+// -- whether Chrome attaches a Strict cookie to a websocket handshake, which
+// is how the progress row learns anything at all. A unit test asserting that
+// ember accepts a cookie it was handed proves ember agrees with itself.
+//
+// It drives BOTH DIRECTIONS in one lab: the page is loaded without the
+// credential first and has to be refused, then the one-time URL is opened and
+// the whole flow has to work. The refusal half is here rather than in a
+// separate lab because a guard with no test for its refusal is the
+// AssertNoStray failure -- an assertion that cannot fail, passing for the
+// life of the suite -- and the two halves next to each other are what make it
+// impossible to weaken one without the other going red.
+//
 // It needs a Chrome or Chromium binary, which GitHub runners have. A missing
 // one is a hard failure naming what to install, never a skip.
 func TestServe_UI(t *testing.T) {
 	requireChrome(t)
 	l := servableLab(t)
-	cmd, port, wait := startServe(t, l)
-	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	cmd, srv, wait := startServe(t, l)
+	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
 
 	// STOPPED WITH SIGINT, not left to the context.
 	//
@@ -315,10 +334,41 @@ func TestServe_UI(t *testing.T) {
 	// (.posture, .jobs li, .gallery figure) rather than attributes added for
 	// a test: if the markup changes this should change with it.
 	//
-	// THE FLOW A PERSON FOLLOWS: load, see the offers, type a prompt,
-	// generate, watch the steps, get an image.
-	if err := chromedp.Do(ctx, chromedp.Navigate(url)); err != nil {
-		t.Fatalf("navigating to %s: %v", url, err)
+	// FIRST, WITHOUT THE CREDENTIAL. A browser that has never seen the token
+	// -- an operator typing the port from memory, or any other page on this
+	// machine navigating here -- gets the refusal and not the app.
+	if err := chromedp.Do(ctx, chromedp.Navigate(pageURL)); err != nil {
+		t.Fatalf("navigating to %s: %v", pageURL, err)
+	}
+	refused, rerr := chromedp.Run(ctx, chromedp.Text(`body`))
+	if rerr != nil {
+		t.Fatalf("reading the refusal: %v", rerr)
+	}
+	if !strings.Contains(refused, "?t=") {
+		t.Errorf("an unauthenticated page load was not refused; the page says:\n%s", refused)
+	}
+	// Not the app. This is the half that would pass against a server which
+	// served the UI anyway, so it is asserted separately: the wasm mounts an
+	// <h1>, and the refusal is plain text with no elements in it at all.
+	mounted, merr := chromedp.Run(ctx,
+		chromedp.Evaluate[bool](`document.querySelector('h1') !== null`))
+	if merr != nil {
+		t.Fatalf("asking whether the app mounted: %v", merr)
+	}
+	if mounted {
+		t.Error("the app mounted for a browser with no credential")
+	}
+
+	// THE FLOW A PERSON FOLLOWS: open the line ember printed, see the offers,
+	// type a prompt, generate, watch the steps, get an image.
+	//
+	// The one-time URL carries the token in a query parameter, which the
+	// server exchanges for the cookie and redirects away -- so everything
+	// after this navigation is the cookie doing the work, including the
+	// websocket and the gallery's <img>.
+	tokenURL := fmt.Sprintf("%s?t=%s", pageURL, srv.Token)
+	if err := chromedp.Do(ctx, chromedp.Navigate(tokenURL)); err != nil {
+		t.Fatalf("navigating to the one-time URL: %v", err)
 	}
 
 	// THE CONSOLE WATCHER STARTS AFTER THE FIRST NAVIGATION, and the order
@@ -332,6 +382,19 @@ func TestServe_UI(t *testing.T) {
 	// stops, which looks exactly like a server that is not answering, and
 	// which every assertion below could still pass against.
 	console := watchConsole(t, ctx)
+
+	// THE TOKEN IS OUT OF THE ADDRESS BAR, which is what the 303 buys: a
+	// fragment would never have reached the server, and a query parameter
+	// that stayed would sit in the history entry and in every Referer the
+	// page sends. Asserted here because only a browser knows what its own
+	// location ended up being.
+	where, lerr := chromedp.Run(ctx, chromedp.Location())
+	if lerr != nil {
+		t.Fatalf("reading the location: %v", lerr)
+	}
+	if strings.Contains(where, srv.Token) || strings.Contains(where, "?t=") {
+		t.Errorf("the browser is still on a URL carrying the token: %s", where)
+	}
 
 	if err := chromedp.Do(ctx,
 		// The app mounted at all, which is the wasm having started.
@@ -396,7 +459,7 @@ func TestServe_UI(t *testing.T) {
 	if !src.Exists || src.Value == "" {
 		t.Fatal("the gallery has an image with no source")
 	}
-	assertDecodablePNG(t, port, strings.TrimPrefix(src.Value, url[:len(url)-1]))
+	assertDecodablePNG(t, srv, strings.TrimPrefix(src.Value, pageURL[:len(pageURL)-1]))
 
 	// The row says it finished, which is the other half of the frozen-row
 	// bug: it froze at "starting" while the image was already on screen.

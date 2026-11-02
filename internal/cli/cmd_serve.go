@@ -42,7 +42,8 @@ func runServe(args []string, out io.Writer, d deps) error {
 	fs.Usage = func() {
 		outf(out, "ember serve runs the web UI and a queue that drains onto one rental.\n\n")
 		outf(out, "It listens on loopback only. Nothing ember serves is reachable from\nanother machine.\n\n")
-		outf(out, "THERE IS NO AUTHENTICATION. Any page open in your browser can reach a\nloopback port, so a site you visit could queue a generation. What bounds\nthat is --allow-paid, which is off by default: without it this server\nrefuses every provider that costs money.\n\n")
+		outf(out, "EVERY REQUEST NEEDS A TOKEN. A loopback port is reachable by every uid on\nthis machine, and a request with no Origin -- which is what curl sends -- is\nindistinguishable from your own tooling, so the second account over could\notherwise queue a paid rental. ember serve mints a token for each run and\nprints a URL ending in ?t=<token>; open that and the browser is authorised\nfor as long as the process lives. Set serve_token in credentials.yaml, or\nEMBER_SERVE_TOKEN, for one that survives a restart. There is no --token\nflag: /proc/<pid>/cmdline is world-readable, which is the same uid the\ntoken exists to keep out.\n\n")
+		outf(out, "The token is not a substitute for --allow-paid, which stays off by default:\nauthentication answers who is asking and --allow-paid is a ceiling on what\nthe answer permits.\n\n")
 		outf(out, "A request may narrow the ceilings in your config and never widen them.\nThe image, the store, the ports and the sd.serve argv are read from the\nfile and cannot be chosen over HTTP.\n\n")
 		fs.PrintDefaults()
 	}
@@ -154,9 +155,15 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		Log:     logger,
 	}
 
+	// THE CREDENTIAL, RESOLVED BEFORE THE SERVER EXISTS. webapi.New refuses a
+	// zero token, so there is no ordering in which an unauthenticated server
+	// gets built and then has one attached.
+	token, minted := serveToken(creds)
+
 	srv, err := webapi.New(webapi.Options{
 		Config: cfg, Registry: reg, Store: store, Blobs: blobs, Queue: q,
 		AllowPaid: o.AllowPaid, Port: o.Port, Dist: o.Dist, Log: logger,
+		Token: token,
 	})
 	if err != nil {
 		return err
@@ -171,7 +178,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		return err
 	}
 
-	announce(out, srv, cfg, o.AllowPaid, o.Dist, ps.Outputs, standing(ctx, store, cfg))
+	announce(out, srv, cfg, o.AllowPaid, o.Dist, ps.Outputs, standing(ctx, store, cfg), minted)
 
 	// SHUTDOWN ORDER IS THE WHOLE POINT OF WHAT FOLLOWS.
 	//
@@ -203,6 +210,27 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 
 	outf(out, "\nevery rental has been destroyed.\n")
 	return errors.Join(serveErr, runErr)
+}
+
+// serveToken decides which credential this server will accept, and reports
+// whether ember had to mint one.
+//
+// THE OPERATOR'S OWN TOKEN WINS, so a stable credential is a line in
+// credentials.yaml or one environment variable and nothing else -- which is
+// what a bookmark and a script against the local API both need. With neither,
+// ember mints one rather than refusing to start: a server that will not come
+// up until the operator has invented a secret is a server somebody runs an
+// older binary to avoid, and there is no honest default that is weaker,
+// because `ember serve` has no unauthenticated mode to fall back to.
+//
+// The minted one lives in this process and is never written anywhere. That is
+// deliberate: it means a URL from yesterday's run does not work, and it means
+// nothing on disk has to be cleaned up. The announcement says both.
+func serveToken(creds config.Credentials) (tok node.Secret, minted bool) {
+	if !creds.ServeToken.IsZero() {
+		return creds.ServeToken, false
+	}
+	return webapi.NewToken(), true
 }
 
 // announce is what an operator reads when the server comes up.
@@ -247,9 +275,21 @@ func standing(ctx context.Context, s queue.Spender, cfg config.Config) periodSta
 	return st
 }
 
-func announce(out io.Writer, srv *webapi.Server, cfg config.Config, allowPaid bool, dist, outputs string, st periodStanding) {
+func announce(out io.Writer, srv *webapi.Server, cfg config.Config, allowPaid bool, dist, outputs string, st periodStanding, minted bool) {
 	outf(out, "ember serve\n\n")
-	outf(out, "  %s\n", srv.URL())
+	// THE URL WITH THE TOKEN IN IT ONLY WHEN EMBER MINTED ONE.
+	//
+	// It is the only way an operator can get at a credential they did not
+	// choose, so it has to be printed. A CONFIGURED token is not reprinted:
+	// they already have it, and a second copy on a stdout that a systemd unit
+	// may be writing to a world-readable journal is a copy they did not ask
+	// for. The fingerprint goes there instead, which is node.Secret's own
+	// discipline and enough to tell two credentials apart.
+	if minted {
+		outf(out, "  %s\n", srv.TokenURL())
+	} else {
+		outf(out, "  %s\n", srv.URL())
+	}
 	if !srv.Built() {
 		where := "make web"
 		if dist != "" {
@@ -274,10 +314,31 @@ func announce(out io.Writer, srv *webapi.Server, cfg config.Config, allowPaid bo
 	} else {
 		outf(out, "  Paid providers are refused. Start with --allow-paid to let the UI spend money.\n")
 	}
-	outf(out, "  There is no authentication: any page in your browser can reach this port.\n")
+	announceToken(out, srv, minted)
 
 	outf(out, "  Images land in %s\n", outputs)
 	outf(out, "\nCtrl-C to stop. Any rental is destroyed before this exits.\n\n")
+}
+
+// announceToken is the paragraph that replaced "there is no authentication".
+//
+// IT SAYS WHAT IS STILL NOT GUARDED, which is the half an operator has to act
+// on. The token holds against another uid on this machine and against
+// everything reaching a forwarded port; it holds against nothing that this
+// uid can already read, and it does not expire. A control whose limits are
+// not printed is a control that gets believed past them.
+func announceToken(out io.Writer, srv *webapi.Server, minted bool) {
+	if minted {
+		outf(out, "  Every request needs the token in the URL above. It was minted for this run\n"+
+			"  and is not written anywhere, so it changes when ember restarts; set\n"+
+			"  serve_token in credentials.yaml for one that does not.\n")
+	} else {
+		outf(out, "  Every request needs your configured serve_token (%s). Open\n"+
+			"  %s?t=<token> once to authorise a browser.\n", srv.TokenFingerprint(), srv.URL())
+	}
+	outf(out, "  That keeps out another account on this machine and anything reaching a\n"+
+		"  forwarded port. It does not keep out your own uid or root, which can read\n"+
+		"  the token, and it never expires -- restart ember to revoke it.\n")
 }
 
 // announcePeriods says where the period ceilings stand.

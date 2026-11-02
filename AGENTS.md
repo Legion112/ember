@@ -505,8 +505,8 @@ that sentence made unrepresentable rather than merely tested.
   a key or token passed as a flag is readable by every user on the box for the
   life of the process. Secrets live in `~/.config/ember/credentials.yaml`
   (0600) or the environment, and reach providers in the API's JSON body.
-- **`ember serve` has no authentication, and the flag is what bounds the
-  damage.** Nothing it serves is reachable off the machine, so the threat is
+- **`ember serve`'s `Origin` and `Host` checks bound a browser and nothing
+  else.** Nothing it serves is reachable off the machine, so the threat is
   not an attacker on the network -- it is any page the operator has open, which
   can `fetch` a loopback port and queue a generation. The browser hides the
   *response* cross-origin and the side effect has already happened, so CORS is
@@ -516,8 +516,104 @@ that sentence made unrepresentable rather than merely tested.
   `Origin` and `Host` checks on every route are not authentication; the second
   is the DNS rebinding case, where an attacker's domain resolving to 127.0.0.1
   makes their page same-origin with its own name -- passing the first check and
-  failing the second. The token seam is one middleware and one header when it
-  is wanted.
+  failing the second.
+- **A loopback port is reachable by every uid, and a request with no `Origin`
+  is allowed on purpose, so those two checks closed nothing against a client
+  that is not a browser.** `curl` sends no `Origin` and neither does any script
+  an operator writes, so refusing a request without one would break the command
+  line without stopping a page -- and that allowance is indistinguishable from
+  the account next door. On `ember serve --allow-paid` a second uid was one
+  `POST /api/requests` from renting an H100 on somebody else's card, and `ssh -L
+  7777:localhost:7777` -- the deployment ember is otherwise exactly the tool for
+  -- puts the same port on a laptop's loopback with the same property. So there
+  is a credential, it is **mandatory**, and `webapi.New` refuses a zero token:
+  an unauthenticated `ember serve` is not a configuration this program can be
+  in rather than one the documentation warns about, because the operator who
+  did not read the documentation is the one with another account on the box.
+  It is **additive** -- the credential runs after `checkHost` and
+  `checkOrigin`, all three or nothing -- and `--allow-paid` is untouched and
+  still off by default, because authentication answers who is asking and the
+  flag is a ceiling on what the answer permits.
+- **`internal/loopback` was NOT widened, and that was the alternative worth
+  taking seriously.** A unix socket at 0600 answers the every-uid case with no
+  secret at all and would be the stronger mechanism -- and it needs
+  `nolisten_test.go` to stop banning `ListenUnix` by name, which is the one
+  seal every other guard here rests on. It also answers nothing about the
+  forward: the client end of `ssh -L` is a TCP port on loopback again, so the
+  second uid reappears one hop away, and a browser cannot speak to a unix
+  socket without a forwarder in front of it that would have the same problem.
+  `SO_PEERCRED` is a unix-socket mechanism and its TCP equivalent is matching
+  a source port against `/proc/net/tcp` -- racy, Linux-only, and wrong through
+  a forward, where the connection is made by sshd as the logged-in user and
+  would therefore pass. One token answers both threats and widens no seal.
+- **The token is compared as a digest, never as a string.**
+  `subtle.ConstantTimeCompare` is constant time in the length of its arguments
+  and returns immediately when they differ, so comparing raw values leaks the
+  token's length; `==` leaks the matching prefix one byte at a time. Hashing
+  both sides first makes every comparison the same thirty-two bytes, which is
+  also why "a token of the wrong length" is not a case in the code -- it cannot
+  be reached as one.
+- **The browser's carrier is a cookie, and that is what let the frontend stay
+  unchanged.** A header is the obvious answer and it fails in three places at
+  once: `coder/websocket` cannot set a request header from a browser, so the
+  socket would need the token in its query string; the gallery's `<img src>`
+  cannot set one either, so the image route would need it in a URL too; and
+  `sessionStorage` is per-tab, so a second tab is unauthenticated. An
+  `HttpOnly; SameSite=Strict; Path=/` cookie is carried on `fetch`, on the
+  handshake and on an `<img>` alike, cannot be read back out by a wasm panic or
+  a stray console, and `Strict` closes the one browser hole `checkOrigin`
+  deliberately leaves open -- a no-`Origin` GET, which is what a top-level
+  navigation and an `<img src>` are. Not one line of `web/` changed.
+- **`?t=` is honoured on the app's own route and nowhere else.** The token has
+  to reach the browser somehow, and a URL fragment -- the candidate the issue
+  described -- never reaches the server, which is its one advantage and is paid
+  for by having to serve the page unauthenticated so a script can read the
+  fragment: the one route a browser navigates to would be the one route with no
+  check on it. So the server consumes a query parameter instead, on the app
+  route only, answers with the `Set-Cookie` and a **303 to the same path
+  without it**, and the whole surface stays gated. The address bar, the session
+  history and every `Referer` the page sends carry nothing afterwards. It is an
+  online guessing oracle in principle, which is why a minted token is
+  `crypto/rand.Text` and not something an operator chose.
+- **No `--token` flag, and a lab reads `/proc/<pid>/cmdline` to prove it.** The
+  rule is already written down for provider tokens; this is the first
+  credential where the uid that could read argv is the same uid the credential
+  exists to exclude, so the assertion is against the running server rather than
+  against the source. `EMBER_SERVE_TOKEN`, `serve_token` in
+  `credentials.yaml` (0600, `node.Secret`), or `crypto/rand`.
+- **A minted token is printed and a configured one is not.** A credential the
+  operator did not choose has to be printed or it is unusable; one they put in
+  a file does not, and a second copy on a stdout that a systemd unit may be
+  writing to a world-readable journal is a copy they did not ask for. The
+  fingerprint goes there instead. Nothing else prints either: the refusal log
+  records the path and which carrier was present, and **not a digest of what
+  was presented** -- an operator who pasted the wrong password would otherwise
+  have it hashed into the journal permanently, which is the thing `node.Secret`
+  exists to prevent rather than an application of it.
+- **One refusal message for no credential, a wrong one and a stale cookie.** A
+  caller learning which of the three it was learns something about the secret.
+  The page load's refusal is **plain text** rather than the API's JSON, because
+  that response is what an operator sees when they type the port from memory or
+  open a bookmark from before a restart -- and a raw JSON object rendered in a
+  browser reads as "ember is broken", which is the failure mode that gets a
+  control worked around instead of used.
+- **The browser lab drives both directions, because every claim about the
+  cookie is a claim about Chrome.** `TestServe_UI` loads the page with no
+  credential and asserts the app did *not* mount, then opens the one-time URL
+  and asserts the token left the address bar, the offers load, the progress row
+  advances and the image decodes. The third of those is the one no Go test can
+  stand in for: whether Chrome attaches a `SameSite=Strict` cookie to a
+  websocket handshake. A unit test asserting that ember accepts a cookie it was
+  handed proves ember agrees with itself, which is the closed loop
+  `capabilities.model` and the unrecorded preview frame both sat in. The
+  refusal half lives in the same lab rather than a second one so that
+  weakening either is impossible without the other going red.
+- **The cross-origin labs now carry the token.** Three of them asserted a 403
+  and would have gone on passing with the `Origin` and `Host` checks removed,
+  because a request with no credential is refused anyway. A refusal test that
+  can pass for either reason proves neither, and that is how a working seal
+  gets quietly weakened while the suite stays green -- the `AssertNoStray`
+  failure, reached from a third direction.
 - **A request may narrow the config's ceilings and never widen them.** `ember
   up`'s `applyFlags` *replaces*: `--max-hourly-usd 999` raises the ceiling,
   because the person typing it is the person who set it. A request is not that

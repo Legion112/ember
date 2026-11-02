@@ -62,6 +62,21 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusForbidden, err)
 		return
 	}
+	// AND THE CREDENTIAL, because a guard that covers the JSON routes and not
+	// the socket guards nothing: this is how a watcher reads every event of
+	// every generation, including the prompts.
+	//
+	// The cookie is what carries it, with nothing in the URL. That is the
+	// reason the carrier is a cookie at all -- coder/websocket cannot set a
+	// request header from a browser, so a header scheme would have had to put
+	// the token in this query string, where it is the one secret in the
+	// program living in a URL. A browser sends cookies on a same-origin
+	// handshake, so the page needed no plumbing and the socket needs no
+	// exception.
+	if err := s.authenticate(r); err != nil {
+		s.refuseCredential(w, r)
+		return
+	}
 
 	id := genstore.ReqID(r.URL.Query().Get("id"))
 	if id == "" {

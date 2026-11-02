@@ -14,6 +14,11 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv(EnvRunPod, "")
 	t.Setenv(EnvVast, "")
+	// AND THE SERVE TOKEN. Left to read the environment, a developer who has
+	// EMBER_SERVE_TOKEN exported for their own `ember serve` makes every test
+	// here behave differently from one machine to the next -- which is the
+	// reason this helper exists at all.
+	t.Setenv(EnvServeToken, "")
 }
 
 func writeCreds(t *testing.T, body string, mode os.FileMode) string {
@@ -241,5 +246,58 @@ func TestLoadCredentials_S3FromTheEnvironment(t *testing.T) {
 	}
 	if string(fromEnv.S3.Secret.Bytes()) != "env_secret" {
 		t.Error("the secret came from the file while the access key came from the environment")
+	}
+}
+
+// TestLoadCredentials_TheServeTokenComesFromTheFileOrTheEnvironment.
+//
+// NEVER FROM ARGV, which is the rule that chose this file as the place for
+// it: /proc/<pid>/cmdline is world-readable, so a token passed as a flag
+// value is readable by every uid on the box for the life of the process --
+// and another uid on the box is exactly the threat `ember serve`'s credential
+// exists to answer. /proc/<pid>/environ is readable only by the owner, and
+// this file is refused unless it is 0600.
+func TestLoadCredentials_TheServeTokenComesFromTheFileOrTheEnvironment(t *testing.T) {
+	clearEnv(t)
+	dir := writeCreds(t, "serve_token: from-file\n", 0o600)
+
+	c, err := LoadCredentials(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(c.ServeToken.Bytes()) != "from-file" {
+		t.Errorf("serve token = %q", c.ServeToken.Bytes())
+	}
+	// Redacted when printed, like every other credential here: this one is
+	// compared on every request `ember serve` refuses.
+	if strings.Contains(c.ServeToken.String(), "from-file") {
+		t.Errorf("the serve token printed itself: %q", c.ServeToken.String())
+	}
+
+	// The environment wins, so a one-off run can use a different credential
+	// without editing a file.
+	t.Setenv(EnvServeToken, " from-env ")
+	c, err = LoadCredentials(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(c.ServeToken.Bytes()) != "from-env" {
+		t.Errorf("serve token = %q, want the trimmed environment value", c.ServeToken.Bytes())
+	}
+}
+
+// TestLoadCredentials_NoServeTokenIsNotAnError.
+//
+// `ember serve` mints one when this is empty, so an absent token is the
+// ordinary case rather than a misconfiguration -- and there is still no
+// unauthenticated server to reach, because webapi.New refuses a zero one.
+func TestLoadCredentials_NoServeTokenIsNotAnError(t *testing.T) {
+	clearEnv(t)
+	c, err := LoadCredentials(writeCreds(t, "runpod_api_key: rp\n", 0o600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.ServeToken.IsZero() {
+		t.Errorf("a serve token appeared out of nowhere: %q", c.ServeToken)
 	}
 }
