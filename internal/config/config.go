@@ -247,8 +247,14 @@ type Config struct {
 	//
 	//   status 422: additional properties 'allowedCudaVersions' not allowed
 	//
-	// Filtering offers is not available either: the v2 schema puts
-	// cudaVersions on GpuType and the live catalogue does not return it.
+	// Filtering offers is not available either, for a different reason than
+	// this comment used to give. It said the live catalogue does not return
+	// cudaVersions; it does, and the capture proving it was already committed
+	// when that was written. What the field tracks is whether the card has
+	// capacity, not what a host can run: an RTX 4090 that is rentable in
+	// US-IL-1 reports every one of its eight CUDA versions unavailable, so a
+	// floor built on it would refuse a card for every value of min_cuda --
+	// including values the card satisfies.
 	//
 	// So the runpod provider refuses a non-empty value rather than dropping
 	// it, because a constraint an operator believes is in force and is not

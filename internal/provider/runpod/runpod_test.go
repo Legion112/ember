@@ -845,9 +845,12 @@ func TestRunPod_LeftoverCapsMatchImplementation(t *testing.T) {
 //
 //	status 422: additional properties 'allowedCudaVersions' not allowed
 //
-// found by setting it on a real run. Filtering offers instead is not available
-// either: the v2 schema puts cudaVersions on GpuType and the live catalogue
-// does not return it.
+// found by setting it on a real run. Filtering offers instead is not
+// available either -- and NOT because the catalogue is silent, which is what
+// this comment used to say and what the captured gpus.json disproves. The
+// field is there and it tracks capacity rather than capability, which
+// TestCatalogue_ReportsCudaVersionsAndTheyAreNotAFloorForMinCUDA measures off
+// the capture.
 //
 // So a refusal, and before anything is rented. A constraint an operator
 // believes is in force and is not would be worse than none -- which is what

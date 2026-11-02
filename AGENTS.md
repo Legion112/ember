@@ -2625,6 +2625,38 @@ A leaked node bills by the hour in silence. These are not style preferences.
   else. `min_cuda` was built from the published schema and made every create
   fail. The lesson did not stick the first time because the field was read from
   a *schema* rather than from a *response*.
+- **And it did not stick the second time either, in the other direction:
+  `cudaVersions` IS in the captured catalogue, and three comments said it was
+  not.** `runpod.go`, `config.go`'s `min_cuda` doc and `README.md` all read
+  "the live catalogue does not return it", all written on 2026-10-31, while
+  `internal/provider/runpod/testdata/gpus.json` -- a live capture committed on
+  2026-10-29, four directories away -- carries the field on three of its four
+  entries. The schema was consulted where the response was already in the
+  tree. **`min_cuda` still cannot be enforced, and now for a measured reason
+  rather than a wrong one.** `available` tracks the card's top-level
+  availability summary on every captured row, so the RTX 4090 that reads
+  `NONE` overall and `LOW` in US-IL-1 -- the row this repository already
+  records as rentable while its summary says otherwise -- reports **all eight**
+  of its CUDA versions unavailable: a floor built on the flag refuses a card
+  you could have rented, for *every* value of `min_cuda`, including values the
+  card satisfies, which is the bug `hasCapacity` and `regionOffers` exist to
+  prevent reached through a different field. Read without the flag the versions
+  describe the catalogue and not the host the pod lands on, and upstream
+  describes them as suitable for `gpu.allowedCudaVersions`, the one create
+  property that answers 422; the field is on `GpuType` rather than on
+  `dataCenters[]`, so it cannot be re-read through a store's site either. So
+  the finding is an **assertion over the capture** and not a reworded sentence
+  -- a comment that justifies the entry somebody remembered cannot catch the
+  entry somebody forgets -- and it fails if a later capture breaks the
+  correlation, which reopens the question on evidence. `node.CUDAAtLeast`, the
+  config key and RunPod's refusal are all untouched: removing a documented key
+  is operator-visible and belongs to whoever reads this, not to the change that
+  found the comment was wrong. **What is still unobserved** is what `available`
+  means, and whether any host anywhere reports a CUDA *runtime* version ember
+  could compare against: `nvidia-smi --query-gpu=compute_cap` is a compute
+  capability, which is `node.ComputeCap` and a different number, and
+  `pod_running.json`'s `"cudaVersion": "12.4"` is schema-derived and not
+  decoded.
 - **Nothing is compiled on a rented machine.** The program that runs on a node
   was compiled before the rental began. `CUDA_ARCHS` is gone and
   `CMAKE_CUDA_ARCHITECTURES` is `NN-real`, so the binary carries machine code
