@@ -31,11 +31,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	dockerimage "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
@@ -49,6 +49,7 @@ import (
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provider/local"
 	"github.com/Legion112/ember/internal/statestore"
+	"github.com/Legion112/ember/test/integration/harness/labdaemon"
 )
 
 // LabImage is what ember's local provider starts as a node.
@@ -106,7 +107,156 @@ func Require(t *testing.T) {
 	if _, err := cli.ImageInspect(ctx, LabImage); err != nil {
 		t.Fatalf("the lab image %s is missing: %v\nBuild it with:\n  make docker-build", LabImage, err)
 	}
+
+	exclusive(t, cli)
 }
+
+// suite is this test binary's hold on the daemon and what was already on it.
+//
+// Both are process-wide and taken once, because the thing being protected is
+// process-wide: a lab's cleanup removes every ember-labelled object the suite
+// run produced, which is the breadth that catches the leaked bridge network
+// nobody thought to look for, and which deleted another worktree's live nodes
+// mid-test the first time two agents ran the suite at once.
+//
+// suiteLock also has to stay referenced for the life of the process. An
+// *os.File that becomes unreachable is closed by the runtime's finalizer, and
+// closing the descriptor releases the flock -- so a lock held in a local
+// variable would be dropped at an unpredictable moment, mid-suite, with
+// nothing to show what happened.
+var (
+	suiteOnce sync.Once
+	suiteLock *labdaemon.Lock
+	suiteErr  error
+
+	// foreignObjects are the ember-labelled objects that were on the daemon
+	// when this suite took the lock: a container somebody started by hand, a
+	// leak from a lab that was SIGKILLed yesterday, anything at all. Every
+	// listing below subtracts them, so they are not counted, not reported and
+	// -- the point -- not removed. What is NOT in here is the kinds ember's
+	// own listings report: those are refused up front by takeDaemon, because
+	// the labs assert on that output and cannot pass while one is there.
+	// Everything that is in here, a developer keeps: `make reap-labs` removes
+	// them when they ask, which is a tool somebody runs on purpose rather than
+	// an assertion that deletes what no lab created.
+	foreignObjects labdaemon.Objects
+)
+
+// exclusive makes this test binary the only one acting on this daemon.
+//
+// THE DEFECT: Lab.Nodes matched containers on the presence of ember's run-id
+// label with no value, and Reap force-removed everything it returned, so a
+// lab's cleanup was daemon-wide. One checkout made that safe; agent worktrees
+// put several on one machine against the one daemon, and two suites then
+// deleted each other's live nodes -- "No such container" for a container that
+// existed a moment earlier, 170s of wall clock against the usual 85, and every
+// failing test passing when run alone.
+//
+// A lock rather than a per-run label, because a label can only scope what the
+// *harness* looks at. ember's own leftover sweep is daemon-wide by design and
+// the labs assert on its output -- TestLeftover_ReapRemovesANetworkNothingElseWould
+// wants "removed 1 of 1 leftover" -- so a second suite's deliberately-expired
+// network would still be swept by this one's `ember reap`, and the labelled
+// listings would both have been right about nothing. Exclusivity is the only
+// thing that makes those assertions true.
+//
+// Waiting, not refusing: "another run is in progress" is a reason to queue,
+// and failing a suite because the daemon is busy would be the `--- SKIP`
+// mistake in red. The loud failures are the two where waiting cannot help --
+// a holder that never finishes, and an object already on the daemon that
+// ember's own listings will report whatever this harness filters on.
+func exclusive(t *testing.T, cli *client.Client) {
+	t.Helper()
+
+	// t.Fatalf inside a sync.Once would mark the Once done from a goroutine
+	// that is being unwound, and every later lab would then sail past a gate
+	// that never closed. The once only computes; the failing is out here.
+	suiteOnce.Do(func() { suiteLock, foreignObjects, suiteErr = takeDaemon(t, cli) })
+
+	if suiteErr != nil {
+		t.Fatalf("%v", suiteErr)
+	}
+	if suiteLock == nil {
+		t.Fatal("the lab lock was not taken and nothing says why; a lab must not run a daemon-wide cleanup unlocked")
+	}
+}
+
+func takeDaemon(t *testing.T, cli *client.Client) (*labdaemon.Lock, labdaemon.Objects, error) {
+	t.Helper()
+
+	idCtx, cancelID := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelID()
+
+	id, err := labdaemon.DaemonID(idCtx, cli)
+	if err != nil {
+		return nil, labdaemon.Objects{}, err
+	}
+
+	lock, err := labdaemon.Acquire(id, labdaemon.LockWait, func(waited time.Duration, holder string) {
+		// Logged rather than silent: a suite that is queued behind another
+		// agent's run must not look hung, because "it hangs sometimes" is how
+		// a harness loses the trust these labs exist to have.
+		t.Logf("waiting %v for the lab lock on this daemon, held by %s", waited.Round(time.Second), holder)
+	})
+	if err != nil {
+		return nil, labdaemon.Objects{}, err
+	}
+
+	// The snapshot is taken AFTER the lock, and that ordering is the whole
+	// meaning of it: with no other run allowed to touch the daemon, what is
+	// here now is what was here before this suite run, so everything that
+	// appears from this moment on belongs to it.
+	//
+	// On a context of its own, because the wait above can be minutes long and
+	// a deadline started before it would already be spent -- which would read
+	// as a daemon that stopped answering, in the one place where the message
+	// has to be about the daemon's contents.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	foreign, err := labdaemon.List(ctx, cli)
+	if err != nil {
+		return nil, labdaemon.Objects{}, err
+	}
+	// What ember itself would report is a refusal, and the rest is tolerated.
+	//
+	// The split is measured. A stale `ember.kind=node` container on the daemon
+	// makes `ember ls` report it `untracked` -- correctly, that is the whole
+	// point of the command -- so TestLeftover_ReapRemovesANetworkNothingElseWould
+	// fails ninety seconds in with "ls still reports findings after reap",
+	// which says nothing about why. Deleting it was the old behaviour and is
+	// the defect. Refusing here is the only answer left, and it is not the
+	// hostile one it looks like: the labs cannot pass while the object is
+	// there, so the choice is between one sentence now and a confusing red
+	// suite later.
+	//
+	// "Another run is in progress" is NOT this failure. That one waits, above.
+	if bad := foreign.Reported(); !bad.Empty() {
+		return nil, labdaemon.Objects{}, fmt.Errorf(
+			"%d ember-labelled object(s) on this daemon are not from this suite run:\n  %s\n"+
+				"`ember ls` and `ember reap` look at the whole daemon by design, so the labs that assert on their output cannot pass while these are here -- and nothing here will remove them, because a leftover from a run that died and a live node somebody is using look exactly the same from outside. Clear them with:\n  make reap-labs",
+			len(bad.Containers)+len(bad.Networks)+len(bad.Volumes), strings.Join(bad.Lines(), "\n  "))
+	}
+	if !foreign.Empty() {
+		// Tolerated and named. These wear ember's run-id and nothing else, so
+		// no ember listing looks at them and no lab can trip over them; every
+		// listing in this file subtracts them, so none is reported or removed.
+		t.Logf("%d ember-labelled object(s) were already on this daemon and will be left alone:\n  %s\n"+
+			"Nothing here created them, so no lab reports or removes them. Clear them with:\n  make reap-labs",
+			len(foreign.Containers)+len(foreign.Networks)+len(foreign.Volumes),
+			strings.Join(foreign.Lines(), "\n  "))
+	}
+	return lock, foreign, nil
+}
+
+// scoped drops whatever was on the daemon before this suite run.
+//
+// Every listing in this file goes through it, so a cleanup cannot act on
+// something this run did not produce -- and nothing in the lab code spells an
+// unscoped listing of its own, which is the arrangement that makes the bug
+// unrepresentable rather than tested for. labdaemon holds the one unscoped
+// listing, and the one caller of it that removes anything is `make reap-labs`.
+func scoped(o labdaemon.Objects) labdaemon.Objects { return o.Except(foreignObjects) }
 
 // New returns a lab with its own config, state and operator key.
 //
@@ -402,27 +552,36 @@ func (l *Lab) WaitForLine(ctx context.Context, sub string) string {
 	}
 }
 
-// Nodes lists the containers wearing ember's run-id label.
+// Nodes lists the containers wearing ember's run-id label that this suite run
+// produced.
 //
 // It asks Docker directly rather than running `ember ls`, because a lab that
 // used ember to check ember would pass whenever both sides were wrong in the
 // same direction -- which is exactly what a label-matching bug looks like.
+//
+// The match is still on the presence of the label and never on its value: a
+// listing that only found what the harness remembered creating is how the
+// leaked bridge network stayed invisible. What it no longer includes is
+// anything that was on the daemon before the suite took the lock, which is the
+// difference between "nothing ember left behind in this run" and "nothing
+// ember-labelled anywhere, whoever it belongs to".
 func (l *Lab) Nodes(ctx context.Context) []container.Summary {
 	l.t.Helper()
-	cs, err := l.cli.ContainerList(ctx, container.ListOptions{
-		All:     true,
-		Filters: filters.NewArgs(filters.Arg("label", dockerengine.LabelRunID)),
-	})
+	cs, err := labdaemon.Containers(ctx, l.cli)
 	if err != nil {
-		l.t.Fatalf("list containers: %v", err)
+		l.t.Fatalf("%v", err)
 	}
-	return cs
+	return scoped(labdaemon.Objects{Containers: cs}).Containers
 }
 
-// AssertNoStray fails if anything wearing ember's label is still there.
-// AssertNoStray fails the lab if anything wearing ember's label is still
-// there. It is also run from the lab's own cleanup, which snapshots first so
-// that reaping cannot empty the daemon before this looks.
+// AssertNoStray fails the lab if anything this suite run put on the daemon is
+// still there.
+//
+// It is also run from the lab's own cleanup, which snapshots first so that
+// reaping cannot empty the daemon before this looks -- and the snapshot it
+// reports is over this run's objects rather than the daemon's, so it cannot
+// accuse another checkout's live node of being a leak. Those are the two ways
+// this assertion has been wrong, in opposite directions.
 func (l *Lab) AssertNoStray() {
 	l.t.Helper()
 	l.reportStray(l.strayNow())
@@ -485,7 +644,7 @@ func (l *Lab) reportStray(s stray) {
 		"\nOn a rented GPU each of these would still be billing.", len(cs), b.String())
 }
 
-// Reap removes anything this lab left behind.
+// Reap removes everything this suite run left on the daemon.
 //
 // It is called from the lab's own cleanup so that one failing lab does not
 // cascade into every later one, and a lab that leaves something behind *on
@@ -493,27 +652,32 @@ func (l *Lab) reportStray(s stray) {
 // labs do exactly that. The cleanup snapshots the daemon before reaping, so
 // calling this at the end of a test body is also how a deliberate leak is
 // declared: anything still there when the snapshot is taken is reported.
+//
+// It still removes what no lab remembered creating -- networks and volumes
+// beside the containers, found by the label rather than by a list the harness
+// kept. Leaving them out leaked one network per SIGKILL lab: invisible,
+// because nothing bills for a bridge network and nothing asserted on them,
+// until Docker had subnetted its whole address pool and every later run failed
+// with "all predefined address pools have been fully subnetted".
+//
+// What it no longer removes is another run's live node. The listings above
+// subtract the objects that were on the daemon before this suite took the
+// lock, and the lock is why there is no concurrent run to find: this function
+// force-removed every ember-labelled container on the daemon, which was a
+// whole-daemon delete executed by whichever worktree happened to finish a lab
+// first.
 func (l *Lab) Reap() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	for _, c := range l.Nodes(ctx) {
-		_ = l.cli.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true})
-	}
-	// Networks too. Leaving them out leaked one per SIGKILL lab -- invisible,
-	// because nothing bills for a bridge network and nothing asserted on
-	// them, until Docker had subnetted its whole address pool and every
-	// later run failed with "all predefined address pools have been fully
-	// subnetted". A cleanup that only removes what it thought to look for is
-	// how a developer's daemon quietly stops working.
-	for _, n := range l.Networks(ctx) {
-		_ = l.cli.NetworkRemove(ctx, n.ID)
-	}
-	// Volumes last, because a volume still mounted by a container cannot be
-	// removed -- the containers above have to go first.
-	for _, v := range l.Volumes(ctx) {
-		_ = l.cli.VolumeRemove(ctx, v.Name, true)
-	}
+	// Errors are deliberately dropped. This runs after the assertions have
+	// been recorded, and the stray report -- not this -- is what says a lab
+	// leaked; `make reap-labs` is the caller that needs to be told.
+	_ = labdaemon.Remove(ctx, l.cli, labdaemon.Objects{
+		Containers: l.Nodes(ctx),
+		Networks:   l.Networks(ctx),
+		Volumes:    l.Volumes(ctx),
+	})
 }
 
 // CreateVolume makes a store volume out-of-band, through Docker.
@@ -650,34 +814,25 @@ func (l *Lab) SeedVolume(ctx context.Context, vol, name, content string) string 
 	return hex.EncodeToString(sum[:])
 }
 
-// Volumes lists the volumes wearing ember's kind label.
+// Volumes lists the store volumes this suite run produced.
 func (l *Lab) Volumes(ctx context.Context) []*volume.Volume {
 	l.t.Helper()
-	resp, err := l.cli.VolumeList(ctx, volume.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("label", local.LabelKind)),
-	})
+	vs, err := labdaemon.Volumes(ctx, l.cli)
 	if err != nil {
-		l.t.Fatalf("list volumes: %v", err)
+		l.t.Fatalf("%v", err)
 	}
-	var out []*volume.Volume
-	for _, v := range resp.Volumes {
-		if v != nil && v.Labels[local.LabelKind] == "store" {
-			out = append(out, v)
-		}
-	}
-	return out
+	return scoped(labdaemon.Objects{Volumes: vs}).Volumes
 }
 
-// Networks lists the networks wearing ember's run-id label.
+// Networks lists the networks wearing ember's run-id label that this suite run
+// produced.
 func (l *Lab) Networks(ctx context.Context) []network.Summary {
 	l.t.Helper()
-	ns, err := l.cli.NetworkList(ctx, network.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("label", dockerengine.LabelRunID)),
-	})
+	ns, err := labdaemon.Networks(ctx, l.cli)
 	if err != nil {
-		l.t.Fatalf("list networks: %v", err)
+		l.t.Fatalf("%v", err)
 	}
-	return ns
+	return scoped(labdaemon.Objects{Networks: ns}).Networks
 }
 
 // StateDir is where the journal lives.
