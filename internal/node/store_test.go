@@ -252,3 +252,54 @@ func TestMountAt_RefusesEveryListedPath(t *testing.T) {
 		}
 	}
 }
+
+// TestStorePrice_MonthlyBytesNeverPricesALeakAtNothing.
+//
+// Monthly takes whole gibibytes, so an incomplete multipart upload holding
+// 500 MiB would price at zero through it — and a leak that reports as free is
+// a leak nobody removes, which is the whole failure the store listings exist
+// to end.
+func TestStorePrice_MonthlyBytesNeverPricesALeakAtNothing(t *testing.T) {
+	const p = StorePrice(70000) // $0.07/GiB/month, RunPod's standard tier
+
+	for _, n := range []int64{1, 1 << 10, 1 << 20, 500 << 20, (1 << 30) - 1} {
+		if got := p.MonthlyBytes(n); got <= 0 {
+			t.Errorf("MonthlyBytes(%d) = %s; a leak that prices as free is a leak nobody removes", n, got)
+		}
+	}
+
+	// A whole gibibyte is exactly the per-gibibyte price, and agrees with
+	// Monthly: two ways to ask the same question must not give two answers.
+	if got, want := p.MonthlyBytes(1<<30), p.Monthly(1); got != want {
+		t.Errorf("MonthlyBytes(1 GiB) = %s, Monthly(1) = %s", got, want)
+	}
+	if got, want := p.MonthlyBytes(40<<30), p.Monthly(40); got != want {
+		t.Errorf("MonthlyBytes(40 GiB) = %s, Monthly(40) = %s", got, want)
+	}
+
+	// Rounded up, never down: a cost that rounds down is a bill that arrives
+	// larger than the estimate.
+	if got := p.MonthlyBytes((1 << 30) + 1); got != p.Monthly(1)+1 {
+		t.Errorf("MonthlyBytes(1 GiB + 1 B) = %s, want one microdollar more than a gibibyte", got)
+	}
+
+	// Nothing is free, and a free provider charges nothing for anything.
+	if got := p.MonthlyBytes(0); got != 0 {
+		t.Errorf("MonthlyBytes(0) = %s", got)
+	}
+	if got := StorePrice(0).MonthlyBytes(40 << 30); got != 0 {
+		t.Errorf("a free store priced 40 GiB at %s", got)
+	}
+	if got := StorePrice(-1).MonthlyBytes(1 << 30); got != 0 {
+		t.Errorf("a negative price returned %s", got)
+	}
+}
+
+// TestStorePrice_MonthlyBytesSaturates rather than wrapping, for the reason
+// Monthly does: a negative cost compares as under budget and reads as a
+// credit.
+func TestStorePrice_MonthlyBytesSaturates(t *testing.T) {
+	if got := StorePrice(MaxMicroUSD).MonthlyBytes(1 << 40); got != MaxMicroUSD {
+		t.Errorf("MonthlyBytes at an absurd price = %s, want saturation", got)
+	}
+}
