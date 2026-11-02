@@ -38,6 +38,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -125,7 +127,7 @@ func TestPreview_AServerStreamsFramesEmberCanDecode(t *testing.T) {
 		t.Fatal("submit returned an empty job id")
 	}
 
-	obs := pollToCompletion(t, srv, id)
+	obs := pollToCompletion(t, srv, id, "job")
 
 	// 1. Frames arrived at all. Everything below is a detail of something
 	//    that has to have happened first.
@@ -224,7 +226,7 @@ func TestPreview_TheSameFrameComesBackBetweenIntervals(t *testing.T) {
 		t.Fatalf("submit: %v", err)
 	}
 
-	obs := pollToCompletion(t, srv, id)
+	obs := pollToCompletion(t, srv, id, "job")
 	if len(obs.previews) < 2 {
 		t.Fatalf("saw %d frames, need at least 2 to say anything about repeats", len(obs.previews))
 	}
@@ -832,7 +834,7 @@ func TestPreview_AFailedJobCarriesTheObjectFormOfError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	obs := pollToCompletion(t, srv, id)
+	obs := pollToCompletion(t, srv, id, "job")
 
 	// 1. It failed, and it is not a cancel. The two carry the same-shaped
 	//    error object and differ only in the status, so a client reading the
@@ -1104,6 +1106,407 @@ func TestPreview_ALoraPathIsAnIdFromAPublishedListAndNotAPath(t *testing.T) {
 	}
 }
 
+// The two paths the unloadable-LoRA lab needs: a directory sd-server scans,
+// and one file inside it whose extension the scan accepts and whose contents
+// the loader cannot read.
+//
+// `.safetensors` is one of the four extensions is_supported_model_ext takes,
+// so the scan publishes the name as an id and `get_lora_full_path` resolves
+// it -- which is exactly the state #78's lab left unexamined. The contents
+// are a line of text, so `ModelLoader::add_file` answers
+// `unknown format` and the registration fails at generation time, after the
+// request has already been accepted. A truncated download, a quantisation the
+// build cannot read and a half-finished copy all land here.
+const (
+	labDeadLoraDir  = "/tmp/ember-lab-deadlora"
+	labDeadLoraName = "unloadable.safetensors"
+)
+
+// TestPreview_ALoraThatDidNotLoadIsNowhereInTheResponse answers #79's first
+// done-when, which decides whether the rest of #79 can be built at all.
+//
+// WHAT WAS OPEN. #78 found, as a side effect, that a published LoRA id whose
+// file will not load is a *warning* rather than a refusal: the generation runs
+// and the image comes back. #79 asked ember to fail such a job -- the
+// `EnsureAssets` discipline, where "the bytes are not the ones this run asked
+// for" stops the run -- and said, correctly, that it depends on one fact
+// nobody had checked: is the warning machine-readable, or is it only in the
+// server's stderr?
+//
+// THE ANSWER IS THE SECOND, and it is worse than silence. A completed job
+// carries `status: "completed"`, `error: null` and one image; the only
+// mention of a LoRA anywhere in the response is
+// `result.images[].generation_info.loras[]`, which `generation_info.cpp:121`
+// builds from `sd_img_gen_params_t`'s own array -- the *request*, echoed back
+// before the generation starts. So the one field that names the LoRA asserts
+// it was applied, in a response about a generation that did not apply it.
+//
+// AND IT CANNOT BE ASKED FOR DIFFERENTLY. `ModelManager::LoraSpec` has a
+// `required` flag and `model_manager.cpp:120` honours it -- a required LoRA
+// that will not register fails the whole call rather than warning. Nothing on
+// the wire can set it: `parse_lora_json_field` at
+// `examples/common/common.cpp:2088` reads `path`, `multiplier` and
+// `is_high_noise` and no fourth key, and `apply_loras` at
+// `diffusion_engine.cpp:1814` builds every spec from a request with `required`
+// left at its default false. Only a generation extension ember cannot reach
+// sets it. There is no stricter mode to opt into.
+//
+// WHY THIS IS A LAB AND NOT A FEATURE. AGENTS.md records that the status is
+// read and the log is not, deliberately: the same server writes
+// `[E] Diffusion model sampling failed` to stderr for a job it reports as
+// `cancelled`, so a client that took its outcome from the log would call a
+// cancel a crash. Scraping `cannot register LoRA source` out of the same
+// stream would be that coupling, bought for a warning that is not even
+// attributable to a job id -- sd-server's stderr is one stream for the whole
+// rental, and ember passes it through as KindLog to the operator's terminal
+// without recording it. So what this file can honestly do is pin the answer,
+// and go red the day it changes.
+//
+// IT IS THEREFORE A REGRESSION TEST FOR AN ABSENCE, which is the shape this
+// repository already uses for a limitation nobody can read out of the code:
+// TestConformance_CannotCatchARederivedRunID. Assertion 5 enumerates every
+// mention of a LoRA in the response, so a future sd-server that adds a
+// `loras_loaded`, a `warnings` array or a per-LoRA status fails this lab --
+// and #79's option 1 becomes available at the moment it does.
+func TestPreview_ALoraThatDidNotLoadIsNowhereInTheResponse(t *testing.T) {
+	l := harness.New(t)
+	n, client := labNodeAndDialer(t, l, "deadlora")
+
+	// Seeded through Docker for the reason #78's lab seeds its directory that
+	// way: widening a production interface so a test can write a file is a
+	// production interface shaped by a test's convenience.
+	l.Exec(t.Context(), n.ID, "mkdir", "-p", labDeadLoraDir)
+	l.Exec(t.Context(), n.ID, "sh", "-c",
+		"printf 'not a lora\\n' > "+path.Join(labDeadLoraDir, labDeadLoraName))
+
+	srv := startServerOn(t, n, client,
+		[]string{"sd-server", "--model", labModel, "--lora-model-dir", labDeadLoraDir}, true)
+	capture := captureDir(t)
+
+	// 1. THE ID IS PUBLISHED, which is what makes this the narrow case rather
+	//    than #78's. A name the server has not published is refused with a 400
+	//    before anything is sampled, and a `Capabilities.Loras` allow-list
+	//    would refuse it before a card is rented. This id survives both
+	//    checks: it is in the list, and the list is what the allow-list would
+	//    be built from.
+	status, body, err := labRequest(t, srv, http.MethodGet, "/sdcpp/v1/capabilities", nil)
+	if err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("capabilities answered %d: %s", status, body)
+	}
+	var caps struct {
+		Loras []struct {
+			Path string `json:"path"`
+		} `json:"loras"`
+	}
+	if err := json.Unmarshal(body, &caps); err != nil {
+		t.Fatalf("decoding capabilities: %v", err)
+	}
+	var published []string
+	for _, lr := range caps.Loras {
+		published = append(published, lr.Path)
+	}
+	if !contains(published, labDeadLoraName) {
+		t.Fatalf("the published LoRA ids are %v, which does not include %q. The scan accepts a "+
+			"file by extension and not by content, so a file this unreadable must still be "+
+			"published -- if it is not, this lab is measuring a refusal and not a warning",
+			published, labDeadLoraName)
+	}
+
+	// 2. THE CONTROL FIRST: the same body with no `lora` key at all. It runs
+	//    before the LoRA generation so that an unexplained difference cannot
+	//    be blamed on warm caches in the one direction that would matter.
+	control := generateOne(t, srv, loraBody(t, ""), "")
+
+	// 3. THE SAME REQUEST NAMING THE LORA. It is accepted and it completes.
+	//    `error` is nil and an image comes back: on a rented card this is a
+	//    bill paid in full for a generation the operator cannot use, and
+	//    nothing in the exchange says so.
+	dead := generateOne(t, srv, loraBody(t, labDeadLoraName), "job_lora_not_loaded")
+	if dead.state.Status != sdserver.StatusCompleted {
+		t.Fatalf("a job naming an unloadable LoRA ended %v, not completed. #79's option 1 may "+
+			"now be free: a server that fails the job needs nothing from ember but to stop "+
+			"treating this as a success", dead.state.Status)
+	}
+	if dead.state.Err != nil {
+		t.Errorf("the job carries an error object (%v), so the failure IS machine-readable "+
+			"and #79's option 1 is buildable: ember should refuse this generation rather "+
+			"than report it", dead.state.Err)
+	}
+	if len(dead.state.Images) != 1 {
+		t.Fatalf("%d images came back, want 1", len(dead.state.Images))
+	}
+
+	// 4. AND THE PIXELS ARE THE CONTROL'S, EXACTLY. This is the half that
+	//    proves the lab is exercising the real case without reading the
+	//    server's log for it: a LoRA at multiplier 1.0 that had loaded would
+	//    change the image, so pixel identity with a generation that asked for
+	//    no LoRA at all is the response-side proof that nothing was applied.
+	//
+	//    It is also #79's own claim, measured rather than assumed. The issue
+	//    says the result is "indistinguishable from a LoRA that did nothing",
+	//    and it is: 0 of 4096 pixels differ. An operator comparing with-LoRA
+	//    against without-LoRA gets two identical pictures and concludes the
+	//    LoRA has no effect -- the wrong conclusion drawn from correct
+	//    observations.
+	if diff := pixelDiff(t, control.state.Images[0].Data, dead.state.Images[0].Data); diff > 0 {
+		t.Errorf("%d pixels differ between the control and the unloadable-LoRA generation. "+
+			"Either the LoRA partly applied -- in which case this lab is not measuring the "+
+			"state it claims -- or the server has stopped being reproducible for one seed, "+
+			"which every comparison in this file rests on", diff)
+	}
+
+	// 5. AND THE FILE ITSELF CLAIMS THE LORA, which is the copy of the lie
+	//    that outlives the run. The two PNGs are not byte-identical -- 10,261
+	//    against 10,156 -- and the difference is a `tEXt` chunk the encoder
+	//    writes under the key `parameters`, in the A1111 spelling that every
+	//    gallery and metadata viewer reads. The LoRA appears there as the
+	//    prompt tag `<lora:unloadable:1.0>`, on an image generated without it.
+	//
+	//    So this is the one asymmetry a reader could mistake for a signal: the
+	//    bytes differ, and what differs is a transcript of the request. A
+	//    comparison done on bytes rather than on pixels would report that the
+	//    LoRA had changed something. The control is asserted beside it because
+	//    a tag the server writes for every generation would prove nothing.
+	deadTag := fmt.Sprintf("<lora:%s:1.0>", strings.TrimSuffix(labDeadLoraName, ".safetensors"))
+	if params := pngParameters(t, dead.state.Images[0].Data); !strings.Contains(params, deadTag) {
+		t.Errorf("the PNG's `parameters` chunk does not name the LoRA as %s, so the metadata "+
+			"may have stopped claiming a LoRA that did not load -- which is the on-disk half "+
+			"of #79. Chunk:\n%s", deadTag, params)
+	}
+	if params := pngParameters(t, control.state.Images[0].Data); strings.Contains(params, "lora") {
+		t.Errorf("the control's PNG mentions a LoRA although its request named none, so the "+
+			"assertion above matches a tag the encoder writes either way:\n%s", params)
+	}
+
+	// 6. NOTHING IN THE RESPONSE SAYS SO, and this is the assertion #79 turns
+	//    on. Every mention of a LoRA in the whole job envelope is enumerated
+	//    by path, and the expected set is the request's own echo and nothing
+	//    else. A `loras_loaded`, a `warnings` array, a `status` beside each
+	//    entry or a code in `error` all land here as an unexpected path and
+	//    fail the lab, which is how ember learns that option 1 became
+	//    possible.
+	//
+	//    The image bytes are excluded by name rather than scanned: `b64_json`
+	//    is base64 of a PNG that embeds the parameters, so a substring search
+	//    through it would be asserting on base64 alignment. The PNG is checked
+	//    by decoding it in 4 and 5 instead.
+	found := loraMentions(t, dead.raw)
+	want := []string{
+		"result.images[0].generation_info.loras[0].is_high_noise",
+		"result.images[0].generation_info.loras[0].multiplier",
+		"result.images[0].generation_info.loras[0].path",
+	}
+	if strings.Join(found, "\n") != strings.Join(want, "\n") {
+		t.Errorf("the response mentions a LoRA at:\n  %s\nand the only mentions a completed "+
+			"job is known to carry are:\n  %s\nIf the extra one reports whether the LoRA "+
+			"loaded, #79's option 1 is now buildable and AGENTS.md's entry on this is out "+
+			"of date. Full response:\n%s",
+			strings.Join(found, "\n  "), strings.Join(want, "\n  "), dead.raw)
+	}
+
+	// 7. AND THE ONE FIELD THAT NAMES IT IS A TRANSCRIPT OF THE REQUEST.
+	//    generation_info is built from the request's params before sampling
+	//    begins, so it reports what was asked for. Asserting the value is the
+	//    point: the response positively states the LoRA that the pixels in 4
+	//    prove was never applied.
+	var env struct {
+		Error  json.RawMessage `json:"error"`
+		Result struct {
+			Images []struct {
+				GenerationInfo struct {
+					Loras []struct {
+						Path       string  `json:"path"`
+						Multiplier float64 `json:"multiplier"`
+					} `json:"loras"`
+				} `json:"generation_info"`
+			} `json:"images"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(dead.raw, &env); err != nil {
+		t.Fatalf("decoding the completed job: %v", err)
+	}
+	if got := string(env.Error); got != "null" {
+		t.Errorf("`error` is %s on a job whose LoRA never loaded, where it had been null; "+
+			"if it now carries the registration failure, #79's option 1 is buildable", got)
+	}
+	echoed := env.Result.Images[0].GenerationInfo.Loras
+	if len(echoed) != 1 || echoed[0].Path != labDeadLoraName || echoed[0].Multiplier != 1 {
+		t.Fatalf("generation_info.loras is %+v, want the request's own entry echoed back. "+
+			"If it now lists only the LoRAs that loaded, it is the report #79 wanted and the "+
+			"empty list is the signal to read", echoed)
+	}
+	t.Logf("a LoRA that could not be registered is reported as %q at multiplier %v on a "+
+		"completed job with error: null and 1 image, whose pixels are the no-LoRA "+
+		"image's exactly", echoed[0].Path, echoed[0].Multiplier)
+
+	if capture != "" {
+		t.Logf("captured the completed job under job_lora_not_loaded_completed.json")
+	}
+}
+
+// generated is one finished generation, decoded and raw.
+//
+// The raw bytes are fetched separately rather than teed out of Poll, for the
+// reason captureRaw does it that way: widening the production client to hand
+// back bytes would be a signature shaped by a test's convenience.
+type generated struct {
+	state sdserver.State
+	raw   []byte
+}
+
+// generateOne submits one body, waits for it and brings back both views.
+//
+// `fixture` is the stem its captures are written under, or "" for a generation
+// that is a control and not evidence.
+func generateOne(t *testing.T, srv labServer, body []byte, fixture string) generated {
+	t.Helper()
+
+	status, raw, err := labRequest(t, srv, http.MethodPost, "/sdcpp/v1/img_gen", body)
+	if err != nil {
+		t.Fatalf("submitting: %v", err)
+	}
+	if status != http.StatusAccepted {
+		t.Fatalf("the server refused the body with %d: %s\n%s", status, raw, body)
+	}
+	var accepted struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &accepted); err != nil {
+		t.Fatalf("decoding the acceptance: %v", err)
+	}
+
+	obs := pollToCompletion(t, srv, accepted.ID, fixture)
+	_, job, err := labRequest(t, srv, http.MethodGet, "/sdcpp/v1/jobs/"+accepted.ID, nil)
+	if err != nil {
+		t.Fatalf("re-reading job %s: %v", accepted.ID, err)
+	}
+	return generated{state: obs.final, raw: job}
+}
+
+// loraMentions lists every place in a job response that mentions a LoRA, by
+// JSON path, sorted.
+//
+// A walk rather than a substring search, because the assertion it serves is
+// "and nothing else": a grep can say a sentence is absent and cannot say that
+// no new field has appeared. A key is a mention when its name contains "lora";
+// a string value is a mention when it does, which catches a message naming the
+// file without a key that does. `b64_json` is skipped -- it is base64 of a PNG
+// that embeds the request's parameters, so matching inside it would be a
+// claim about base64 alignment rather than about the API.
+func loraMentions(t *testing.T, raw []byte) []string {
+	t.Helper()
+
+	var root any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatalf("decoding the response for the LoRA scan: %v", err)
+	}
+	var found []string
+	var walk func(node any, at string, keyed bool)
+	walk = func(node any, at string, keyed bool) {
+		switch v := node.(type) {
+		case map[string]any:
+			for k, child := range v {
+				next := k
+				if at != "" {
+					next = at + "." + k
+				}
+				if k == "b64_json" {
+					continue
+				}
+				walk(child, next, keyed || strings.Contains(strings.ToLower(k), "lora"))
+			}
+		case []any:
+			for i, child := range v {
+				walk(child, fmt.Sprintf("%s[%d]", at, i), keyed)
+			}
+		default:
+			s, isString := v.(string)
+			if keyed || (isString && strings.Contains(strings.ToLower(s), "lora")) {
+				found = append(found, at)
+			}
+		}
+	}
+	walk(root, "", false)
+	sort.Strings(found)
+	return found
+}
+
+// pngParameters returns the value of the PNG's `parameters` tEXt chunk, which
+// is where sd-server writes the generation's own settings.
+//
+// Hand-walked rather than decoded through image/png, because the standard
+// library's decoder discards ancillary chunks: the picture is not the claim
+// here, the metadata beside it is. A missing chunk is a failure rather than an
+// empty string -- the assertion it serves is about what the file says, and
+// "it says nothing" read as "it does not say that" would pass for the wrong
+// reason.
+func pngParameters(t *testing.T, data []byte) string {
+	t.Helper()
+
+	const sig = "\x89PNG\r\n\x1a\n"
+	if len(data) < len(sig) || string(data[:len(sig)]) != sig {
+		t.Fatalf("not a PNG (%d bytes)", len(data))
+	}
+	for off := len(sig); off+12 <= len(data); {
+		size := int(binary.BigEndian.Uint32(data[off : off+4]))
+		kind := string(data[off+4 : off+8])
+		if off+12+size > len(data) {
+			t.Fatalf("chunk %q at %d runs past the end of %d bytes", kind, off, len(data))
+		}
+		body := data[off+8 : off+8+size]
+		// tEXt is keyword, NUL, Latin-1 text. Only the keyword this server
+		// writes is wanted; iTXt and zTXt are not produced by it and a reader
+		// for them would be code for a case nothing has sent.
+		if kind == "tEXt" {
+			if key, text, ok := bytes.Cut(body, []byte{0}); ok && string(key) == "parameters" {
+				return string(text)
+			}
+		}
+		off += 12 + size
+	}
+	t.Fatalf("the PNG carries no `parameters` tEXt chunk, so this lab cannot say what the "+
+		"file claims about the LoRA; %d bytes", len(data))
+	return ""
+}
+
+// pixelDiff counts the pixels in which two encoded images differ.
+//
+// The decoded pixels and not the bytes, and the difference between the two is
+// the finding: the PNG encoder writes the generation parameters into the file,
+// so the container differs by ninety-three bytes while every pixel is the
+// same. A byte comparison here would have reported a difference and let
+// somebody conclude the LoRA had done something.
+func pixelDiff(t *testing.T, a, b []byte) int {
+	t.Helper()
+
+	ia, _, err := image.Decode(bytes.NewReader(a))
+	if err != nil {
+		t.Fatalf("decoding the first image: %v", err)
+	}
+	ib, _, err := image.Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("decoding the second image: %v", err)
+	}
+	if ia.Bounds() != ib.Bounds() {
+		t.Fatalf("the two images are %v and %v", ia.Bounds().Size(), ib.Bounds().Size())
+	}
+	var differ int
+	bnds := ia.Bounds()
+	for y := bnds.Min.Y; y < bnds.Max.Y; y++ {
+		for x := bnds.Min.X; x < bnds.Max.X; x++ {
+			r1, g1, b1, a1 := ia.At(x, y).RGBA()
+			r2, g2, b2, a2 := ib.At(x, y).RGBA()
+			if r1 != r2 || g1 != g2 || b1 != b2 || a1 != a2 {
+				differ++
+			}
+		}
+	}
+	return differ
+}
+
 // ptr is for the Params fields that are pointers because zero is a value.
 //
 // clip_skip's server default is -1 and eta's is null, so 0 cannot stand for
@@ -1117,9 +1520,14 @@ func ptr[T any](v T) *T { return &v }
 // an escape hatch, which this package decided once already for the RunPod
 // mapper's sealed branch. The geometry and step count are the lab's smallest,
 // so an accepted job costs as little CPU as possible before it is cancelled.
+//
+// An empty loraPath omits the field entirely, which is the control the
+// unloadable-LoRA lab needs: the same prompt and the same seed with nothing
+// asked of the LoRA machinery at all. It has to be the same body minus one
+// key, or the comparison would be between two different requests.
 func loraBody(t *testing.T, loraPath string) []byte {
 	t.Helper()
-	body, err := json.Marshal(map[string]any{
+	body := map[string]any{
 		"prompt": "a paper boat",
 		"width":  labWidth,
 		"height": labHeight,
@@ -1129,12 +1537,15 @@ func loraBody(t *testing.T, loraPath string) []byte {
 		},
 		"seed":    1234,
 		"preview": sdserver.PreviewNone,
-		"lora":    []any{map[string]any{"path": loraPath, "multiplier": 1.0}},
-	})
+	}
+	if loraPath != "" {
+		body["lora"] = []any{map[string]any{"path": loraPath, "multiplier": 1.0}}
+	}
+	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return body
+	return raw
 }
 
 // labServer is a started sd-server and the ways to reach it.
@@ -1266,7 +1677,14 @@ type observed struct {
 // measuring what the server emits, and a backoff would be measuring ember's
 // patience. The cap is wall-clock rather than a poll count, because a CPU
 // sampling step is seconds and a count would be a guess about the machine.
-func pollToCompletion(t *testing.T, srv labServer, id string) observed {
+//
+// `fixture` is the stem the captures are written under, and "" means capture
+// nothing. Every generation in this file is a completed job, so a shared stem
+// would mean the last lab to run owns `job_completed.json` -- and the LoRA lab
+// below completes a job whose `generation_info` names a LoRA that never
+// loaded, which is the one thing the canonical fixture must not be. A caller
+// that wants its own evidence names its own file.
+func pollToCompletion(t *testing.T, srv labServer, id, fixture string) observed {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
@@ -1274,6 +1692,9 @@ func pollToCompletion(t *testing.T, srv labServer, id string) observed {
 
 	var obs observed
 	capture := captureDir(t)
+	if fixture == "" {
+		capture = ""
+	}
 	for {
 		st, err := srv.client.Poll(ctx, id)
 		if err != nil {
@@ -1286,13 +1707,13 @@ func pollToCompletion(t *testing.T, srv labServer, id string) observed {
 			// what the server sent, and a struct is evidence about what ember
 			// made of it.
 			if capture != "" && len(obs.previews) == 2 {
-				captureRaw(t, srv, id, filepath.Join(capture, "job_generating.json"))
+				captureRaw(t, srv, id, filepath.Join(capture, fixture+"_generating.json"))
 			}
 		}
 		switch st.Status {
 		case sdserver.StatusCompleted, sdserver.StatusFailed, sdserver.StatusCancelled:
 			if capture != "" {
-				captureRaw(t, srv, id, filepath.Join(capture, "job_"+st.Status.String()+".json"))
+				captureRaw(t, srv, id, filepath.Join(capture, fixture+"_"+st.Status.String()+".json"))
 			}
 			obs.final = st
 			return obs

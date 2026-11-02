@@ -52,6 +52,50 @@ client code exists. That is the habit
 `internal/provider/runpod/testdata/README.md` set and the reason the volume
 API's two disagreeing field names were known before anything called them.
 
+**`job_lora_not_loaded_completed.json` is the fixture that says nothing, and
+that is what it is evidence of.** It is a completed `img_gen` job whose
+request named a LoRA the server published and could not read -- a
+`.safetensors` file whose contents are the line `not a lora`, which
+`is_supported_model_ext` accepts and `ModelLoader::add_file` then answers
+`unknown format` for. Captured by
+`TestPreview_ALoraThatDidNotLoadIsNowhereInTheResponse` in the preview lab
+(`make test-preview-lab`, `EMBER_CAPTURE_DIR` set), from the CPU image serving
+sd15 Q4_0 at 64x64 in six steps.
+
+Read it beside `job_completed.json` and nothing distinguishes them:
+`"status": "completed"`, `"error": null`, one image, `cancel_requested` false.
+The only mention of a LoRA anywhere in it is
+`result.images[0].generation_info.loras[0]`, which carries
+`{"is_high_noise":false,"multiplier":1,"path":"unloadable.safetensors"}` --
+and `generation_info.cpp:121` builds that array from the request's own
+`sd_img_gen_params_t`, before sampling starts. So the one field that names the
+LoRA asserts it was applied, on a response about a generation that did not
+apply it. The server's own account of what happened exists only on its stderr,
+as two lines ember passes through as `KindLog` and records nowhere:
+
+```
+[W] unknown format /tmp/ember-lab-deadlora/unloadable.safetensors --- model_loader.cpp:232
+[W] cannot register LoRA source '/tmp/ember-lab-deadlora/unloadable.safetensors' --- model_manager.cpp:122
+```
+
+**The image is the no-LoRA image, measured.** The same lab generates the same
+prompt and seed with no `lora` key at all and compares the decoded pixels: 0
+of 4096 differ. The PNGs are *not* byte-identical -- 10,261 against 10,156 --
+and the difference is a `tEXt` chunk under the key `parameters` in which the
+encoder writes `a paper boat <lora:unloadable:1.0>`, the A1111 spelling every
+gallery reads. So the artifact on disk outlives the run carrying the same
+claim the response made. A comparison done on bytes rather than on pixels
+would have reported that the LoRA changed something.
+
+**There is no stricter mode to ask for**, which is why this is a fixture and
+not a feature. `ModelManager::LoraSpec` has a `required` flag and
+`model_manager.cpp:120` honours it -- a required source that will not register
+fails the whole call instead of warning. Nothing on the wire sets it:
+`parse_lora_json_field` at `examples/common/common.cpp:2088` reads `path`,
+`multiplier` and `is_high_noise` and no fourth key, and `apply_loras` at
+`diffusion_engine.cpp:1814` builds every spec from a request with `required`
+left at its default `false`.
+
 **`error_lora_not_found.json` is a third spelling of `error`.** A `lora[].path`
 the server has not published is refused with
 `{"error":"invalid generation parameters"}` — a string, like the
@@ -199,6 +243,7 @@ two upscale bounds ember does not read.
 | `job_generating.json` | `GET /sdcpp/v1/jobs/{id}` | **captured** — preview lab, six steps at `preview_interval` 1 | a preview frame, its pass and its step |
 | `job_completed.json` | same | **captured** — same run | the finished image |
 | `job_cancelled.json` | same | **captured** — cancel lab, a sixty-step job stopped at step 2 | an error object beside a status that is **not** a failure |
+| `job_lora_not_loaded_completed.json` | same | **captured** — the unloadable-LoRA lab, a published id whose file is not a model | a clean success carrying no account of a LoRA that never loaded, and the request echoed back as though it had |
 | `job_failed.json` | same | **captured** — failure lab, vae tiling with a one-pixel tile | the **object** form of `error`, beside `result: null` |
 | `job_queued.json` | same | **guessed** | `queue_position` while queued |
 | `error_model_not_loaded.json` | any request the server refuses | **captured** — failure lab, `POST /img_gen` with no weights (503) | the **string** form of `error`, beside a separate `code` |
