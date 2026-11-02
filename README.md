@@ -925,6 +925,71 @@ download into it, so the datacentre is worth choosing deliberately — see
 [docs/gpu-availability-history.md](docs/gpu-availability-history.md) for what
 else that choice decides.
 
+### Reading one back
+
+`ember store` could write to a store and not read from it, which had two
+costs. The smaller one: a store's contents were knowable only from a rented
+node, because assets are verified over the SSH connection the workload uses —
+so the cheapest moment to learn that a 14 GB expert was never uploaded came
+after provisioning, the image pull and the mount had all been paid for.
+
+```bash
+ember store verify
+```
+
+One `HEAD` per asset over the store's own endpoint. Nothing is rented and
+nothing is downloaded, and exit 2 means at least one asset is missing or
+sitting there at zero bytes — which is what a `PUT` that failed after creating
+the key leaves behind, and what `verify: present` on a node would load as a
+model. It does **not** check digests: that would mean reading every object
+back through this process to re-derive a number the node derives anyway, at
+datacentre bandwidth, before the workload starts. It says so rather than
+letting the output imply otherwise.
+
+The larger cost is a leak. **An interrupted multipart upload keeps every part
+that arrived and bills for them by the gigabyte-month** — and it is not an
+object, so it appears in no object listing and `ember ls` cannot see it
+either. The abort that exists runs from a defer on a context Ctrl-C cannot
+cancel, which covers Ctrl-C and covers neither SIGKILL, nor a panic, nor a
+laptop closing, nor an OOM kill. Until these commands existed nothing in ember
+could find one: it was the only money leak here with no detection path at all.
+
+```
+$ ember store ls
+models (runpod/vol_abc, 40 GiB, EU-RO-1) at $2.8
+
+objects
+     2.0 GiB  2026-11-01T09:00:00Z  sd15.gguf
+    16.0 GiB  2026-11-01T09:00:00Z  wan22-high.gguf
+    18.0 GiB in 2 object(s)
+
+incomplete uploads
+   384.0 MiB    3 part(s)  2026-10-31T13:48:09Z  abandoned   flux2.gguf
+   384.0 MiB in 1 upload(s), costing $0.02625/month on top of the store itself
+These are not objects: they are in no object listing and `ember ls` cannot
+see them either. They bill until something removes them.
+1 has been there longer than 24h0m0s. Remove it with:
+  ember store abort models
+```
+
+```bash
+ember store abort
+```
+
+Both are bounded by `--older-than`, a day by default, and that bound is the
+whole safety of the command: an upload in progress and an abandoned one are
+the same thing to S3 — both are started and not completed. Without it,
+`abort` would kill the push running in another terminal, and `ls` would exit 2
+over a healthy one, which teaches an operator to ignore exit 2. `ls` lists
+every incomplete upload either way and marks which ones it is calling
+abandoned, because somebody checking on their own push wants to see it. The
+same reasoning bounds the leftover-network sweep by a node's deadline.
+
+Nothing is lost by waiting out the bound: the parts bill by the month, so a
+day costs about a thousandth of what they cost unnoticed. The cost is priced
+from bytes rather than whole gibibytes, because a 384 MiB orphan rounds to
+zero gibibytes and **a leak that reports as free is a leak nobody removes.**
+
 `mount` is refused if it would shadow `/root` or `/etc`, which hold the
 authorized_keys and host key `embernode` writes at startup — a store there
 leaves sshd with neither and a handshake failure that reads exactly like an

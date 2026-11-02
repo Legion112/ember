@@ -17,6 +17,7 @@ import (
 	"github.com/Legion112/ember/internal/awssig"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/s3"
 )
 
@@ -42,6 +43,12 @@ func runStore(args []string, out io.Writer, d deps) error {
 		return runStorePush(args[1:], out, d)
 	case "sync":
 		return runStoreSync(args[1:], out, d)
+	case "ls":
+		return runStoreLs(args[1:], out, d)
+	case "abort":
+		return runStoreAbort(args[1:], out, d)
+	case "verify":
+		return runStoreVerify(args[1:], out, d)
 	case "-h", "--help", "help":
 		storeUsage(out)
 		return nil
@@ -55,10 +62,13 @@ func storeUsage(out io.Writer) {
 	outf(out, "ember store manages persistent storage that outlives a node.\n\n")
 	outf(out, "A store is the one thing ember creates that no deadline, no reaper and\nno Ctrl-C ever ends. It bills by the month whether or not anything is\nattached to it, which is why nothing creates one as a side effect.\n\n")
 	outf(out, "  create   create the store named in ember.yaml\n")
+	outf(out, "  ls       list what is on a store, and any upload still billing\n")
+	outf(out, "  verify   check that every configured asset is there, before renting\n")
 	outf(out, "  push     upload a local file to the store, without renting anything\n")
 	outf(out, "  sync     rent a cheap CPU machine to fetch the configured assets onto it\n")
+	outf(out, "  abort    remove incomplete uploads that are billing for nothing\n")
 	outf(out, "  rm       destroy a store and everything on it\n\n")
-	outf(out, "`ember ls` reports every store and what it costs.\n")
+	outf(out, "`ember ls` reports every store and what it costs. It cannot see an\ninterrupted multipart upload, which is not an object and bills by the\nmonth anyway -- `ember store ls` is what finds those.\n")
 }
 
 // runStoreCreate creates the store this configuration names.
@@ -247,21 +257,10 @@ func runStorePush(args []string, out io.Writer, d deps) error {
 		return fmt.Errorf("%s is a directory; push takes one file", local)
 	}
 
-	sp, p, err := app.StoreProvider(reg, node.ProviderID(cfg.Provider))
-	if err != nil {
-		return err
-	}
 	ctx := context.Background()
-	store, found, err := app.FindStore(ctx, sp, cfg.Store.Name)
+	c, store, err := storeOverS3(ctx, reg, cfg, cfg.Store.Name, "push to", d)
 	if err != nil {
 		return err
-	}
-	if !found {
-		return fmt.Errorf("no store named %q at %s. Create it with:\n  ember store create", cfg.Store.Name, p.Name())
-	}
-	if store.Region == "" {
-		return fmt.Errorf("provider %s does not expose its stores over S3, so there is nothing to push to. "+
-			"Put the file on the volume directly", p.Name())
 	}
 
 	// Hashed last, because it reads the whole file: a missing credential or
@@ -274,27 +273,6 @@ func runStorePush(args []string, out io.Writer, d deps) error {
 		return err
 	}
 
-	creds, err := d.Credentials(app.ConfigDir(cfg, d))
-	if err != nil {
-		return err
-	}
-
-	endpoint := s3.EndpointFor(store.Region)
-	if d.S3BaseURL != "" {
-		endpoint = d.S3BaseURL
-	}
-	c := &s3.Client{
-		Endpoint: endpoint,
-		Region:   store.Region,
-		Creds:    creds.S3,
-	}
-	if c.Creds.IsZero() {
-		return fmt.Errorf("no S3 credentials. RunPod issues these separately from the API key, "+
-			"on the Credentials page under \"S3 API keys\", and shows the secret once. "+
-			"Put them in credentials.yaml as runpod_s3_access_key and runpod_s3_secret, or set %s and %s",
-			awssig.EnvAccessKey, awssig.EnvSecret)
-	}
-
 	outf(out, "pushing %s to %s in %s\n", local, store.Name, store.Region)
 	if err := c.Upload(ctx, string(store.Handle.ID), name, f, fi.Size(), out); err != nil {
 		return err
@@ -303,6 +281,63 @@ func runStorePush(args []string, out io.Writer, d deps) error {
 	outf(out, "\nuploaded. Add it to %s:\n\nassets:\n  - url: <where a node can fetch it>\n    sha256: %s\n    as: %s\n",
 		*cfgPath, sum, name)
 	return nil
+}
+
+// storeOverS3 resolves one store and returns a client for its endpoint.
+//
+// Factored out of push once three more commands needed the same six steps.
+// The ordering is the point and is why it is one function rather than four
+// copies: resolve the provider, find the store, refuse a provider with no S3
+// endpoint, then check the credentials -- every refusal before anything is
+// read, uploaded or billed. A copy that got the order wrong would hash forty
+// gigabytes before discovering there is nowhere to put them.
+//
+// verb goes into the refusals so each one reads as the command the operator
+// typed: "nothing to push to" and "nothing to list" are the same fact and
+// different sentences.
+func storeOverS3(
+	ctx context.Context,
+	reg *provider.Registry,
+	cfg config.Config,
+	name, verb string,
+	d deps,
+) (*s3.Client, node.Store, error) {
+	sp, p, err := app.StoreProvider(reg, node.ProviderID(cfg.Provider))
+	if err != nil {
+		return nil, node.Store{}, err
+	}
+	store, found, err := app.FindStore(ctx, sp, name)
+	if err != nil {
+		return nil, node.Store{}, err
+	}
+	if !found {
+		return nil, node.Store{}, fmt.Errorf("no store named %q at %s. Create it with:\n  ember store create", name, p.Name())
+	}
+	if store.Region == "" {
+		// The local provider reports no region for its volumes, because a
+		// Docker volume is not in a datacentre. Reported rather than
+		// attempted against a hostname that does not exist.
+		return nil, node.Store{}, fmt.Errorf("provider %s does not expose its stores over S3, so there is nothing to %s. "+
+			"The volume is on this machine's docker daemon", p.Name(), verb)
+	}
+
+	creds, err := d.Credentials(app.ConfigDir(cfg, d))
+	if err != nil {
+		return nil, node.Store{}, err
+	}
+
+	endpoint := s3.EndpointFor(store.Region)
+	if d.S3BaseURL != "" {
+		endpoint = d.S3BaseURL
+	}
+	c := &s3.Client{Endpoint: endpoint, Region: store.Region, Creds: creds.S3}
+	if c.Creds.IsZero() {
+		return nil, node.Store{}, fmt.Errorf("no S3 credentials. RunPod issues these separately from the API key, "+
+			"on the Credentials page under \"S3 API keys\", and shows the secret once. "+
+			"Put them in credentials.yaml as runpod_s3_access_key and runpod_s3_secret, or set %s and %s",
+			awssig.EnvAccessKey, awssig.EnvSecret)
+	}
+	return c, store, nil
 }
 
 // digestOf hashes the whole file and rewinds it for the upload.

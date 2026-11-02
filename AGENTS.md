@@ -746,6 +746,70 @@ A leaked node bills by the hour in silence. These are not style preferences.
 - **S3 answers 200 and then reports the failure in the body.** The connection
   is held open while the object is assembled, so a client that trusted the
   status reports success for an upload that did not complete.
+- **A store that can be written to and not read back hides the one leak
+  nothing else can see.** `internal/s3` had `Upload`, `put`, `multipart`,
+  `create`, `complete` and `abort` -- no `ListObjectsV2`, no `HeadObject`, no
+  `ListMultipartUploads` -- and `ember store` had four verbs, none of which
+  read. So the abort above could not run when it was most needed (SIGKILL, a
+  panic, a closed laptop, an OOM kill all skip a defer) and *nothing in ember
+  could find what it left*: an incomplete upload is not an object, so it is in
+  no object listing, and `ember ls` prices stores rather than their contents.
+  `ember store ls` and `ember store abort` close it, both over GETs and a
+  DELETE that cannot spend money.
+- **An orphan is priced from bytes, never from whole gibibytes.**
+  `StorePrice.Monthly` takes an `int` of GiB, so a 384 MiB abandoned upload
+  prices at exactly nothing through it -- and a leak that reports as free is a
+  leak nobody removes, which is the entire failure the listing exists to end.
+  `MonthlyBytes` rounds up for the reason `Hourly` does, and the rounding is
+  what guarantees the property that matters: non-zero bytes at a non-zero
+  price never price as zero.
+- **An upload in progress and an abandoned one are the same thing to S3.**
+  Both are "started, not completed", so anything acting on them is bounded by
+  age: `ember store abort` touches nothing newer than `--older-than` (a day),
+  and `ember store ls` lists every one but only exits 2 over the older ones.
+  Without the bound, `abort` kills the push running in another terminal and
+  `ls` exits 2 over a healthy one -- the second being the same false-finding
+  mistake the leftover-network sweep avoids by waiting for a node's deadline.
+  A negative bound is refused rather than clamped, because it reads as "no
+  bound" and would abort an upload that is still running.
+- **A paginated S3 listing is followed to the end, and both halves checked.**
+  The rule `ScanStores` already follows against RunPod's own pagination,
+  applied to `ListObjectsV2`, `ListMultipartUploads` and `ListParts`:
+  `IsTruncated` with no cursor is a page ember cannot ask for, so the tail
+  would be dropped while the result read as complete; a cursor on a page that
+  says it is final is *not* an error and is simply not followed, because real
+  implementations send one and following it re-reads that page forever. The
+  loop is bounded and hitting the bound is an error naming what would be
+  missing. A listing silently short is exactly the leak these calls exist to
+  find.
+- **The size on a HEAD is the one Go already parsed, and a missing one is an
+  error.** `resp.ContentLength` is -1 when the header was absent, and the
+  transport validates the header before a caller sees it -- so re-parsing it
+  out of `Header` would be a branch no server could reach, and an httptest
+  server will not even send an invalid value. Zero reported as fact reads as a
+  file that uploaded as nothing, which is one of the states `store verify`
+  exists to detect, so it must not also be what a missing header looks like.
+- **"I could not ask" and "it is not there" are different answers, on a
+  404.** `Head` returns found=false only for a 404; every other status is an
+  error. A 403 means the credentials cannot see the store, and reporting that
+  as absence sends an operator to re-upload forty gigabytes over a permissions
+  problem. `store verify` returns the error rather than counting a finding for
+  the same reason `ember ls --all` exits non-zero on a provider it could not
+  reach.
+- **`store verify` checks presence and says plainly that it does not check
+  digests.** A digest means reading the object back: forty gigabytes through
+  this process, over a home link, to re-derive a number the node derives
+  anyway at datacentre bandwidth before the workload starts. `do` reads whole
+  bodies into a 1 MiB bound, so a streaming GET would be a different code
+  shape for a check that already exists one layer down. What it does add is
+  the zero-byte case, which is what a PUT that failed after creating the key
+  leaves and what `verify: present` would load as a model.
+- **`do` refuses a reply larger than it will read.** It used to
+  `io.LimitReader(body, maxBody)`, which truncates silently -- fine while
+  every reply was a few hundred bytes of XML, and wrong the moment a listing
+  page became one: a cut-off page parses as XML right up to where it does
+  not, surfacing as a malformed-document error naming neither the size nor the
+  cause. It reads one byte past the bound so the two can be told apart.
 - **A signature's only other feedback is a 403 with no detail**, which is why
   every step of SigV4 is a pure function checked against AWS's own published
   values rather than against a server. `SignatureDoesNotMatch` and

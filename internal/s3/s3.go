@@ -1,10 +1,12 @@
-// Package s3 uploads a file to an S3-compatible endpoint.
+// Package s3 puts files on an S3-compatible store and says what is on it.
 //
-// Enough of S3 to put weights on a store and no more: one PUT for a small
-// object, multipart for a large one, and an abort that runs when anything
-// goes wrong. There is no download here -- a node fetches its own assets over
-// plain HTTP, verified by digest -- and no listing, because what is on a
-// store is a question for the node that mounts it.
+// Enough of S3 to fill a store and audit it, and no more: one PUT for a small
+// object, multipart for a large one, an abort when anything goes wrong, and
+// the listings in read.go that say what arrived and what is left billing
+// after an upload died. There is still no download -- a node fetches its own
+// assets over plain HTTP, verified by digest, and a digest check from here
+// would mean reading forty gigabytes back through this process. read.go
+// explains what the read half is for and what it deliberately cannot prove.
 //
 // It does not go through internal/httpx, which sets a bearer token and JSON
 // headers on every request. S3 authenticates per request with a signature
@@ -275,10 +277,23 @@ func (c *Client) abort(ctx context.Context, bucket, key, uploadID string) error 
 type response struct {
 	Header http.Header
 	Body   []byte
+
+	// ContentLength is what Go parsed from the header, which is -1 when
+	// there was none.
+	//
+	// Taken from the response rather than re-parsed out of Header, because
+	// the transport has already validated it: a malformed Content-Length
+	// never reaches a caller, so a second strconv here would be a branch no
+	// server could reach. It is the only way to learn a HEAD's size, since a
+	// HEAD has no body to measure.
+	ContentLength int64
 }
 
-// maxBody bounds what a reply may be. The largest real one is a few hundred
-// bytes of XML; anything near this is a server that has stopped making sense.
+// maxBody bounds what a reply may be.
+//
+// The largest real one is a page of a listing: a thousand entries of a few
+// hundred bytes each, which is well inside this. Anything above it is a
+// server that has stopped making sense.
 const maxBody = 1 << 20
 
 // do signs and sends one request, reading and closing the reply.
@@ -315,7 +330,13 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, body
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	// One byte past the limit, so a body that reached it can be told from one
+	// that was cut off there. LimitReader alone truncates silently, and a
+	// truncated listing page parses as XML right up to the point where it
+	// does not -- which would surface as a malformed-document error naming
+	// neither the size nor the cause. Reading the extra byte is what turns
+	// that into a sentence.
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return response{}, &StatusError{Method: method, URL: redact(u), Code: resp.StatusCode,
 			Body: strings.TrimSpace(string(raw))}
@@ -323,7 +344,11 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, body
 	if readErr != nil {
 		return response{}, fmt.Errorf("%s %s: %w", method, redact(u), readErr)
 	}
-	return response{Header: resp.Header, Body: raw}, nil
+	if int64(len(raw)) > maxBody {
+		return response{}, fmt.Errorf("%s %s: the reply is larger than %s, which no reply from this API should be",
+			method, redact(u), human(maxBody))
+	}
+	return response{Header: resp.Header, Body: raw, ContentLength: resp.ContentLength}, nil
 }
 
 // StatusError is a non-2xx answer, carrying the endpoint's own explanation.

@@ -122,6 +122,32 @@ func (p StorePrice) Monthly(sizeGiB int) MicroUSD {
 	return MicroUSD(total)
 }
 
+// MonthlyBytes is what n bytes cost for one month.
+//
+// It exists because an incomplete multipart upload is measured in bytes and
+// not in whole gibibytes, and Monthly(int(n>>30)) prices a 500 MiB orphan at
+// nothing. A leak that reports as free is a leak nobody removes, which is the
+// entire failure these listings were added to end.
+//
+// Rounded up, never truncated, for the reason Hourly is: a cost that rounds
+// down is a bill that arrives larger than the estimate. The rounding is also
+// what guarantees the property that matters -- a non-zero number of bytes at a
+// non-zero price never prices as zero.
+func (p StorePrice) MonthlyBytes(n int64) MicroUSD {
+	if p <= 0 || n <= 0 {
+		return 0
+	}
+	const perGiB = int64(1) << 30
+	// Checked before multiplying rather than after. The inputs are small
+	// enough in practice that this needs an absurd price, which is exactly
+	// the case where a wrapped negative would be worst: a negative cost reads
+	// as a credit.
+	if n > (int64(1)<<62)/int64(p) {
+		return MaxMicroUSD
+	}
+	return MicroUSD((int64(p)*n + perGiB - 1) / perGiB)
+}
+
 // Hourly is what a store of this size costs for one hour, as a Rate, so it can
 // be added to a node's rate and read in the same units.
 //
