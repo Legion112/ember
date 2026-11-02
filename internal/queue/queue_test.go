@@ -729,17 +729,166 @@ func TestOnce_SurvivesAStoreThatCannotRecordProgress(t *testing.T) {
 	}
 }
 
-func TestCost_IsTheLastRunningTotal(t *testing.T) {
-	es := []report.Event{
-		{Kind: report.KindUnitCost, Cost: 10, Spent: 10},
-		{Kind: report.KindJobProgress},
-		{Kind: report.KindUnitCost, Cost: 15, Spent: 25},
+// TestRecorder_WritesWhatEachJobDidThroughToItsRow.
+//
+// This replaces TestCost_IsTheLastRunningTotal, which tested a function
+// nothing but itself had ever called: queue.Cost summed one request's card
+// time by scanning its whole event stream, and the coverage floor was all
+// that kept it alive. The facts are columns now, so the thing worth asserting
+// is that they are written -- a schema, a query layer and a command over
+// figures nothing records is the "built end to end and never connected"
+// failure this repository has already paid for twice.
+func TestRecorder_WritesWhatEachJobDidThroughToItsRow(t *testing.T) {
+	q, st := newQueue(t, nil)
+	id := enqueue(t, st, "rtx2080ti", "first", "second")
+
+	snk := q.sinkFor(id)
+	// One job, start to finish, as app.served emits it: started, two
+	// sampling passes, the images, then the cost.
+	snk.Emit(report.Event{Kind: report.KindUnitStarted, Unit: report.UnitJob, Index: 1, Total: 2})
+	snk.Emit(report.Event{Kind: report.KindJobProgress, Index: 1, Pass: 1, Step: 4, TotalSteps: 20})
+	snk.Emit(report.Event{Kind: report.KindJobProgress, Index: 1, Pass: 1, Step: 20, TotalSteps: 20})
+	snk.Emit(report.Event{Kind: report.KindJobProgress, Index: 1, Pass: 2, Step: 6, TotalSteps: 8})
+	snk.Emit(report.Event{
+		Kind: report.KindJobImages, Unit: report.UnitJob, Index: 1, Total: 2,
+		Files: 1, Bytes: 4096,
+		Wrote: []report.File{{Name: "001.png", Bytes: 4096}},
+	})
+	snk.Emit(report.Event{
+		Kind: report.KindUnitCost, Unit: report.UnitJob, Index: 1, Total: 2,
+		Cost: 31_000, Spent: 31_000,
+	})
+
+	runs, err := st.JobRuns(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := Cost(es); got != 25 {
-		t.Errorf("Cost = %v, want the last running total, 25", got)
+	if len(runs) != 2 {
+		t.Fatalf("JobRuns = %+v, want one row per job", runs)
 	}
-	if got := Cost(nil); got != 0 {
-		t.Errorf("Cost(nil) = %v, want 0", got)
+	got := runs[0]
+	if got.Cost != 31_000 {
+		t.Errorf("cost = %v, want 31000", got.Cost)
+	}
+	if got.Images != 1 || got.Bytes != 4096 {
+		t.Errorf("images/bytes = %d/%d, want 1/4096", got.Images, got.Bytes)
+	}
+	if got.Started.IsZero() || got.Ended.IsZero() {
+		t.Errorf("span = %s..%s, want both ends", got.Started, got.Ended)
+	}
+
+	// Two passes of 20 and 8, so 28 steps -- not 20, which is what one pass
+	// reported, and not 3, which is how many frames arrived. A pass restarts
+	// for each batch item and each highres pass, and ember dedupes progress
+	// on the step, so neither of those is the iteration count.
+	if got.Passes != 2 || got.Steps != 28 {
+		t.Errorf("passes/steps = %d/%d, want 2/28", got.Passes, got.Steps)
+	}
+
+	// The second job was never touched, and reads as a job that did nothing
+	// rather than being absent: a half-finished request must not look like a
+	// shorter one.
+	if runs[1].Idx != 2 || runs[1].Cost != 0 || !runs[1].Started.IsZero() {
+		t.Errorf("the untouched job = %+v", runs[1])
+	}
+}
+
+// TestRecorder_RecordsAnInterruptedJobsImagesAndSteps.
+//
+// A request whose process died mid-batch keeps whatever images it produced --
+// they were paid for, which is why StatusInterrupted leaves them listed. The
+// figures behind them have to survive too, or the one request whose cost an
+// operator most wants to understand is the one with no numbers.
+func TestRecorder_RecordsAnInterruptedJobsImagesAndSteps(t *testing.T) {
+	q, st := newQueue(t, nil)
+	id := enqueue(t, st, "rtx2080ti", "only")
+
+	snk := q.sinkFor(id)
+	snk.Emit(report.Event{Kind: report.KindUnitStarted, Unit: report.UnitJob, Index: 1, Total: 1})
+	snk.Emit(report.Event{Kind: report.KindJobProgress, Index: 1, Pass: 1, Step: 9, TotalSteps: 12})
+	snk.Emit(report.Event{
+		Kind: report.KindJobImages, Unit: report.UnitJob, Index: 1, Total: 1,
+		Files: 1, Bytes: 2048, Wrote: []report.File{{Name: "001.png", Bytes: 2048}},
+	})
+	// And then nothing: no unit_cost, because the process went away.
+
+	runs, err := st.JobRuns(t.Context(), id)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("JobRuns = %+v, %v", runs, err)
+	}
+	if runs[0].Images != 1 || runs[0].Bytes != 2048 {
+		t.Errorf("the images it produced were not recorded: %+v", runs[0])
+	}
+	if runs[0].Passes != 1 || runs[0].Steps != 12 {
+		t.Errorf("passes/steps = %d/%d, want 1/12", runs[0].Passes, runs[0].Steps)
+	}
+	// No cost and no end, which is honest: the job started and never
+	// finished, and inventing either would be a figure nothing measured.
+	if runs[0].Cost != 0 || !runs[0].Ended.IsZero() {
+		t.Errorf("an unfinished job reported a cost or an end: %+v", runs[0])
+	}
+	if runs[0].Sampling() != 0 {
+		t.Errorf("Sampling = %s, want zero for a job with one end missing", runs[0].Sampling())
+	}
+}
+
+// TestRecorder_AJobIndexNothingWroteIsLoggedNotFatal. The events carry a
+// 1-based job number and the table is keyed on it, so an off-by-one writes
+// nothing -- and it must not also take the generation down.
+func TestRecorder_AJobIndexNothingWroteIsLoggedNotFatal(t *testing.T) {
+	q, st := newQueue(t, nil)
+	id := enqueue(t, st, "rtx2080ti", "only")
+
+	snk := q.sinkFor(id)
+	// Index 4 of a one-job request, and index 0, which is what an event with
+	// no index set carries.
+	snk.Emit(report.Event{Kind: report.KindUnitStarted, Unit: report.UnitJob, Index: 4})
+	snk.Emit(report.Event{Kind: report.KindUnitCost, Unit: report.UnitJob, Index: 0, Cost: 5})
+
+	runs, err := st.JobRuns(t.Context(), id)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("JobRuns = %+v, %v", runs, err)
+	}
+	if runs[0].Cost != 0 || !runs[0].Started.IsZero() {
+		t.Errorf("an out-of-range index wrote to the real job: %+v", runs[0])
+	}
+}
+
+// TestLifecycle_WritesTheRentalsOwnFactsThrough.
+//
+// The cost was already written through; the rate, the elapsed and billable
+// spans and the model-load pair were not, and they are what an overhead or a
+// resident-model figure is computed from.
+func TestLifecycle_WritesTheRentalsOwnFactsThrough(t *testing.T) {
+	q, st := newQueue(t, nil)
+	id := enqueue(t, st, "rtx2080ti", "only")
+
+	snk := q.lifecycle(id)
+	snk.Emit(report.Event{
+		Kind:     report.KindModelResident,
+		Measured: 94 * time.Second, Reported: 551 * time.Millisecond, Total: 8,
+	})
+	snk.Emit(report.Event{
+		Kind: report.KindRunCost, Node: "runpod/abc", Cost: 1_200_000,
+		Rate: 2_490_000, Elapsed: 30 * time.Minute, Billable: 31 * time.Minute,
+	})
+
+	got, err := st.Get(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Cost != 1_200_000 || got.Rate != 2_490_000 {
+		t.Errorf("cost/rate = %v/%v", got.Cost, got.Rate)
+	}
+	if got.Elapsed != 30*time.Minute || got.Billable != 31*time.Minute {
+		t.Errorf("elapsed/billable = %s/%s; a provider minimum makes these differ and both are kept",
+			got.Elapsed, got.Billable)
+	}
+	// Both load figures, because the only measurement anybody has made had
+	// them disagreeing by two orders of magnitude.
+	if got.LoadMeasured != 94*time.Second || got.LoadReported != 551*time.Millisecond {
+		t.Errorf("load measured/reported = %s/%s, want both as emitted",
+			got.LoadMeasured, got.LoadReported)
 	}
 }
 

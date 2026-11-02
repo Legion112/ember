@@ -43,6 +43,7 @@ type RecordingStore struct {
 	order  []ReqID // insertion order, so "oldest queued" is decidable
 	events map[ReqID][]report.Event
 	images map[ReqID][]Image
+	runs   map[ReqID]map[int]*JobRun
 	caps   *sdserver.Capabilities
 	nextID int
 }
@@ -362,3 +363,168 @@ var (
 	_ Store = (*RecordingStore)(nil)
 	_ Store = (*SQLite)(nil)
 )
+
+// runs is what each request's jobs did, by request and 1-based job index.
+//
+// A second map rather than fields on the stored Request, because the fake
+// has to be able to disagree with itself the way the real store can: a job
+// index nothing wrote is absent here and reads as ErrNotFound, which is how
+// the off-by-one that writes every figure to nowhere shows up in a test
+// rather than in a database.
+func (s *RecordingStore) runsOf(id ReqID) map[int]*JobRun {
+	if s.runs == nil {
+		s.runs = map[ReqID]map[int]*JobRun{}
+	}
+	if s.runs[id] == nil {
+		s.runs[id] = map[int]*JobRun{}
+	}
+	return s.runs[id]
+}
+
+func (s *RecordingStore) UpdateJob(_ context.Context, id ReqID, idx int, fn func(*JobRun)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("UpdateJob", fmt.Sprintf("%s/%d", id, idx)); err != nil {
+		return err
+	}
+	r, ok := s.reqs[id]
+	if !ok {
+		return fmt.Errorf("%s: %w", id, ErrNotFound)
+	}
+	// The index is checked against the jobs that exist, exactly as the real
+	// store's WHERE clause does. A fake that accepted any index would accept
+	// the off-by-one this is most likely to be given.
+	if idx < 1 || idx > len(r.Jobs) {
+		return fmt.Errorf("job %d of %s: %w", idx, id, ErrNotFound)
+	}
+
+	runs := s.runsOf(id)
+	j := runs[idx]
+	if j == nil {
+		j = &JobRun{Req: id, Idx: idx}
+		runs[idx] = j
+	}
+	fn(j)
+	j.Req, j.Idx = id, idx
+	return nil
+}
+
+func (s *RecordingStore) JobRuns(_ context.Context, id ReqID) ([]JobRun, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("JobRuns", string(id)); err != nil {
+		return nil, err
+	}
+	r, ok := s.reqs[id]
+	if !ok {
+		// Nothing, and no error, because that is what the real store does
+		// and what Images and Events already do for an absent request: these
+		// are "list the children of" reads, and SQLite answers one with zero
+		// rows. A fake that returned ErrNotFound here would be STRICTER than
+		// the thing it stands in for, which is the usual danger inverted and
+		// just as bad -- a caller would grow a branch for an error the real
+		// store never returns. Found by the conformance test, which is what
+		// it is for.
+		return nil, nil
+	}
+	runs := s.runsOf(id)
+	out := make([]JobRun, 0, len(r.Jobs))
+	for i := 1; i <= len(r.Jobs); i++ {
+		if j := runs[i]; j != nil {
+			out = append(out, *j)
+			continue
+		}
+		// A job nothing has reported on is still a job. Omitting it would
+		// make a half-finished request look like a shorter one.
+		out = append(out, JobRun{Req: id, Idx: i})
+	}
+	return out, nil
+}
+
+// Spend aggregates in Go what SQLite aggregates in SQL.
+//
+// A second implementation of the arithmetic, which is normally the thing to
+// avoid -- and here it is the point: the SQL is the part most likely to be
+// subtly wrong (the job-side subquery exists because a plain join multiplies
+// each rental's cost by its job count), and a fake that delegated to it could
+// not disagree. The two are checked against each other by the store's own
+// conformance test, so a change to one that the other does not make is a
+// failure rather than a divergence nobody notices.
+func (s *RecordingStore) Spend(_ context.Context, q SpendQuery) ([]Bucket, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("Spend", string(q.By)); err != nil {
+		return nil, err
+	}
+	if !q.By.Valid() {
+		return nil, fmt.Errorf("cannot group spend by %q; ember groups by %v or not at all",
+			q.By, GroupBys())
+	}
+
+	byKey := map[string]*Bucket{}
+	for _, id := range s.order {
+		r, ok := s.reqs[id]
+		if !ok {
+			continue
+		}
+		// Half-open, as spendWhere is: Since inclusive, Until exclusive, so
+		// consecutive periods tile without a request landing in both.
+		if !q.Since.IsZero() && r.Created.Before(q.Since) {
+			continue
+		}
+		if !q.Until.IsZero() && !r.Created.Before(q.Until) {
+			continue
+		}
+
+		k := ""
+		switch q.By {
+		case ByProvider:
+			k = r.Provider
+		case ByGPU:
+			k = r.GPU
+		case ByDay:
+			k = r.Created.UTC().Format("2006-01-02")
+		}
+		b := byKey[k]
+		if b == nil {
+			b = &Bucket{Key: k}
+			byKey[k] = b
+		}
+
+		b.Requests++
+		b.RunCost += r.Cost
+		b.Billable += r.Billable
+
+		runs := s.runsOf(id)
+		recorded := 0
+		for i := 1; i <= len(r.Jobs); i++ {
+			b.Jobs++
+			j := runs[i]
+			if j == nil {
+				continue
+			}
+			b.Images += j.Images
+			b.Bytes += j.Bytes
+			b.JobCost += j.Cost
+			b.Steps += j.Steps
+			b.Sampling += j.Sampling()
+			if !j.Ended.IsZero() {
+				recorded++
+			}
+		}
+		if recorded == 0 {
+			b.Unrecorded++
+		}
+	}
+
+	keys := make([]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]Bucket, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, *byKey[k])
+	}
+	return out, nil
+}

@@ -552,6 +552,106 @@ that sentence made unrepresentable rather than merely tested.
   the generation call, which is what `events.body` already is -- and a column
   per field would mean a migration every time upstream adds a knob, to a
   table whose only reader selects a request's rows by id.
+- **Emitted is not recorded, and recorded is not queryable.** Every figure a
+  performance question is about -- per-job cost, the span it took, the steps
+  it sampled, the rental's rate and its billable against elapsed time, the
+  model load as measured against as reported -- was already on
+  `report.Event` and already persisted, as one opaque JSON blob per event.
+  The `jobs` table, the row a job *is*, had **no execution columns at all**,
+  so "what did an image cost on this card" meant JSON-parsing every row of
+  the table that grows per step per job per rental.
+  `grep -rn 'SUM(\|GROUP BY' internal/genstore/` returned nothing. They are
+  columns now, written through from the same events, on the precedent
+  `requests.node` and `requests.cost` set one line at a time: *"written
+  through to the row as well, so `ember ls`'s node and this request can be
+  joined without reading the event stream"*.
+- **The event stream stays the truth and the columns are a derived index.** A
+  disagreement between them is resolved in the stream's favour and is a bug
+  in the writer, not a fact about the run. That is what makes the duplication
+  acceptable rather than two sources of truth.
+- **Nothing derived is stored.** Cost per image, steps per second and the
+  sampling share of the bill are methods on `genstore.Bucket`, computed on
+  the way out. A stored quotient is a number that can be wrong while the
+  terms it came from are right -- the same reason money is kept as integer
+  microdollars and formatted late.
+- **`queue.Cost` is gone, and it had never been called.** It summed one
+  request's card time by scanning that request's whole event stream in Go,
+  and for the life of the function nothing but its own test invoked it -- the
+  coverage floor was all that kept it. `genstore.Spend` answers the same
+  question with a `SUM` over columns. Two cost-summing paths would have been
+  the "two sources of truth for one number" mistake `Offer.VCPU` exists to
+  avoid, so there is one. It is the third thing found in this repository that
+  was written, covered and connected to nothing.
+- **A query layer with no reader is the same failure as a feature built end to
+  end and never connected.** Columns, a migration and an aggregate that
+  nothing calls would have agreed with themselves and proved nothing, which
+  is the closed loop `capabilities.model` and the unrecorded preview frame
+  both sat in. `ember spend` is the reader, deliberately thin: #27's ledger
+  builds on it rather than growing a second way to sum the same money.
+- **A rental is counted once, on the request that opened it.** Only the opener
+  carries `requests.cost`, because the rental's per-rental costs are paid once
+  for everything it served. So the period total is a `SUM` over openers, and
+  the job-side figures come from a **subquery keyed on the request** rather
+  than a plain join -- joining `requests` to `jobs` and summing `requests.cost`
+  multiplies each rental's cost by its job count, which is the kind of wrong
+  that looks plausible in a figure nobody has a second copy of to check.
+- **The spend period is half-open and the day is UTC.** `--since` includes and
+  `--until` excludes, so consecutive periods tile without a request landing in
+  both; a day boundary in local time would put the same spend in different
+  buckets depending on where the operator was sitting. A period typed
+  backwards is refused rather than answered with nothing, because an empty
+  report reads as "ember spent nothing" -- the one answer a spend report must
+  not give wrongly.
+- **A grouping reaches a `GROUP BY`, so the set is closed and checked twice.**
+  `GroupBy.Valid` refuses anything else and `groupExpr` switches over the
+  constants rather than interpolating the string. It is the one place in
+  `genstore` where a caller's value could have become part of a statement.
+- **Grouping by model is not offered, because nothing records the model.**
+  `sd.serve` is config rather than request, and the only stored copy is a
+  single cached `caps` row the next rental overwrites -- so a historical
+  request's model is not knowable from the database. Offering it would be the
+  `allowedCudaVersions` mistake again: a value read from the wrong place and
+  believed. Recording it is a column written at claim time, which is a
+  follow-up and not a guess.
+- **A total that is missing part of its history says so, every time.** A
+  request from before these columns existed contributes its rental cost and no
+  per-job figures, so `Bucket.Unrecorded` counts it and `ember spend` prints
+  how many it had to leave out -- and names cost-per-image as an upper bound
+  when there are any, because the division is over a smaller denominator than
+  the money paid for. Found by reading the real output, not by a test. A
+  figure wrong in the expensive direction that does not say so is worse than
+  one that is missing, which is why `ember ls --all` exits non-zero on a
+  provider it could not ask.
+- **Nothing backfills, and that is a decision.** The facts are in the event
+  bodies of requests that already ran, so a backfill is possible -- and it
+  would have to re-derive the step counts from progress frames whose poll
+  interval is unknown for those runs, which is the one number this schema is
+  careful not to infer.
+- **Steps are summed from each pass's declared total, never counted from the
+  frames.** ember deduplicates progress on the step, so at a poll slower than
+  the card samples it *observes* fewer frames than there were steps -- a count
+  of frames would be a measurement of the poll interval. A pass restarts for
+  each batch item, each high/low-noise stage and each highres pass, so
+  `jobs.steps` is one pass and an it/s built from it understates every batched
+  job; `passes` and `steps_done` are two columns because one would lie. The
+  pass count is observed, so a pass shorter than one poll could in principle
+  be missed, and that limit is written down rather than hidden.
+- **`JobRun` is separate from `Job`, and that is structural.** `Job` is the
+  wire type a browser posts, so every field on it is something a request may
+  set -- putting `Cost` there would make the figure an operator is billed
+  against settable by the thing being billed, which is the refusal that keeps
+  `Extra` off `Job`. They share the table because they are the ask and the
+  outcome of one job; the write path can touch only the outcome columns, as
+  `Update` cannot touch `Jobs`.
+- **The fake aggregates in Go and the conformance table checks the two
+  agree.** Normally a second implementation of the same arithmetic is the
+  thing to avoid; here the SQL is the half most likely to be subtly wrong, and
+  a fake that delegated to it could not disagree. It caught a real divergence
+  on the first run, in the unusual direction: the fake returned `ErrNotFound`
+  from `JobRuns` for an absent request where the real store returns no rows
+  and no error, as `Images` and `Events` do. A fake *stricter* than the thing
+  it stands in for is the usual danger inverted and grows callers a branch
+  for an error nothing returns.
 - **A caption that is true of one mode is wrong for the others.** The preview
   figure said "the latent, not the output" unconditionally. That is right for
   `proj`, which projects the latent and previews a 512x512 generation as a

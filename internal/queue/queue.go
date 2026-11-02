@@ -40,7 +40,6 @@ import (
 
 	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/genstore"
-	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 )
@@ -386,7 +385,19 @@ func (q *Queue) lifecycle(opener genstore.ReqID) report.Sink {
 		case report.KindNodeReady:
 			q.set(opener, func(r *genstore.Request) { r.Node = e.Node })
 		case report.KindRunCost:
-			q.set(opener, func(r *genstore.Request) { r.Cost = e.Cost })
+			q.set(opener, func(r *genstore.Request) {
+				r.Cost = e.Cost
+				// The rest of the rental's own facts, promoted out of the
+				// event body for the reason Cost was: billable is what the
+				// invoice charges and elapsed is what the clock said, and an
+				// overhead figure computed against the wrong one credits
+				// ember with a saving that is not there.
+				r.Rate, r.Elapsed, r.Billable = e.Rate, e.Elapsed, e.Billable
+			})
+		case report.KindModelResident:
+			q.set(opener, func(r *genstore.Request) {
+				r.LoadMeasured, r.LoadReported = e.Measured, e.Reported
+			})
 		}
 		// Flushed at once: these arrive from a deferred teardown, and a
 		// buffered destroy_failed is a buffer nobody will drain.
@@ -462,6 +473,49 @@ type recorder struct {
 	mu   sync.Mutex
 	buf  []report.Event
 	last time.Time
+
+	// passes is each job's sampling passes and the step total each one
+	// declared: job index -> pass -> that pass's total_steps.
+	//
+	// ACCUMULATED HERE RATHER THAN COUNTED FROM THE FRAMES, because ember
+	// deduplicates progress on the step -- so at a poll slower than the card
+	// samples, it sees fewer frames than there were steps and a count of
+	// frames would measure the poll interval instead of the work. Each pass
+	// declares its own total, which is a fact about the generation, so the
+	// steps of a pass are read off one frame of it rather than tallied.
+	//
+	// In memory and written through at the points a job is already causing a
+	// write: progress arrives once per step, and FLUX.2 at 2048x2048 measured
+	// 140 seconds per step, so a write per frame would be a transaction on
+	// the path that exists to report progress rather than to cause it.
+	passes map[int]map[int]int
+}
+
+// sawPass notes a pass and what it says its length is.
+func (r *recorder) sawPass(job, pass, total int) {
+	if r.passes == nil {
+		r.passes = map[int]map[int]int{}
+	}
+	if r.passes[job] == nil {
+		r.passes[job] = map[int]int{}
+	}
+	// The largest total seen for a pass wins. A pass reports the same total on
+	// every frame of it, so this is normally an assignment; taking the max
+	// means a frame that arrived with a smaller figure -- a highres pass whose
+	// total grows as it is set up -- cannot shorten a pass that already
+	// reported more.
+	if total > r.passes[job][pass] {
+		r.passes[job][pass] = total
+	}
+}
+
+// sampled is how many passes a job ran and how many steps across all of them.
+func (r *recorder) sampled(job int) (passes int, steps int64) {
+	for _, total := range r.passes[job] {
+		passes++
+		steps += int64(total)
+	}
+	return passes, steps
 }
 
 // flushEvery and flushAfter bound how far behind a watching client can be.
@@ -486,6 +540,9 @@ func (r *recorder) Emit(e report.Event) {
 	r.mu.Lock()
 	r.buf = append(r.buf, e)
 	due := len(r.buf) >= flushEvery || r.q.at().Sub(r.last) >= flushAfter
+	if e.Kind == report.KindJobProgress && e.TotalSteps > 0 {
+		r.sawPass(e.Index, e.Pass, e.TotalSteps)
+	}
 	// An image is written through whatever the clock says: it is the thing
 	// the operator is waiting for, and a gallery that lags behind the file on
 	// disk looks broken.
@@ -509,8 +566,65 @@ func (r *recorder) Emit(e report.Event) {
 	if e.Kind == report.KindJobProgress && len(e.Wrote) > 0 {
 		r.q.recordImages(r.id, e, true)
 	}
+
+	// AND THE JOB'S ROW, which is the half #32 is about. Every figure here
+	// was already in the event body and queryable from nowhere: the jobs
+	// table had no execution columns at all, so "what did an image cost on
+	// this card" meant JSON-parsing every row of the table that grows per
+	// step per job per rental.
+	//
+	// Written at the three moments a job already causes a write rather than
+	// on every event, and the middle one matters for a run that is
+	// interrupted: the images are recorded as they are produced, because they
+	// were paid for, and the steps behind them are recorded with them.
+	switch {
+	case e.Kind == report.KindUnitStarted && e.Unit == report.UnitJob:
+		r.recordJob(e.Index, func(j *genstore.JobRun) { j.Started = e.At })
+
+	case e.Kind == report.KindJobImages:
+		passes, steps := r.sampledLocked(e.Index)
+		r.recordJob(e.Index, func(j *genstore.JobRun) {
+			j.Images, j.Bytes = e.Files, e.Bytes
+			j.Passes, j.Steps = passes, steps
+		})
+
+	case e.Kind == report.KindUnitCost && e.Unit == report.UnitJob:
+		passes, steps := r.sampledLocked(e.Index)
+		r.recordJob(e.Index, func(j *genstore.JobRun) {
+			j.Ended, j.Cost = e.At, e.Cost
+			j.Passes, j.Steps = passes, steps
+		})
+	}
+
 	if due || urgent {
 		r.flush(context.Background())
+	}
+}
+
+// sampledLocked reads the pass tally under the lock.
+func (r *recorder) sampledLocked(job int) (int, int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sampled(job)
+}
+
+// recordJob writes one job's execution facts through to its row.
+//
+// Off the event stream's own hot path in the sense that matters: a failure is
+// logged and not returned, for the reason flush does it -- losing a figure is
+// not a reason to abandon a generation that is already paid for. The log line
+// names the index, because an off-by-one between the 1-based job number the
+// events carry and the key the table uses would write every figure to nowhere
+// and leave the columns at zero with nothing saying so.
+func (r *recorder) recordJob(idx int, fn func(*genstore.JobRun)) {
+	if idx <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 10*time.Second)
+	defer cancel()
+	if err := r.q.Store.UpdateJob(ctx, r.id, idx, fn); err != nil {
+		r.q.log().Warn("could not record what a job did",
+			"request", r.id, "job", idx, "err", err)
 	}
 }
 
@@ -561,18 +675,17 @@ func (q *Queue) recordImages(id genstore.ReqID, e report.Event, preview bool) {
 	}
 }
 
-// Cost is a request's own card time, summed from its jobs.
+// Cost is gone, and what replaced it is the point of the change that removed
+// it.
 //
-// Separate from the rental's total for the reason lifecycle explains: this is
-// what generating these images cost, and the rental also paid for
-// provisioning, the image pull and the asset verify once for everything it
-// served.
-func Cost(es []report.Event) node.MicroUSD {
-	var last node.MicroUSD
-	for _, e := range es {
-		if e.Kind == report.KindUnitCost {
-			last = e.Spent
-		}
-	}
-	return last
-}
+// It summed a request's card time by scanning that request's entire event
+// stream in Go, and it was the only aggregate anywhere in ember -- against a
+// table whose facts live inside one opaque JSON blob per event, growing per
+// step per job per rental. It was also called by nothing but its own test for
+// the whole of its life, so the coverage floor was the only thing keeping it.
+//
+// genstore.Spend answers the same question with a SUM over columns, and the
+// questions it can additionally answer -- per card, per day, cost per image,
+// the sampling share of the bill -- are the ones an event loop could never
+// have reached. Two cost-summing paths would have been the "two sources of
+// truth for one number" mistake Offer.VCPU exists to avoid, so there is one.
