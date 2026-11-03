@@ -843,11 +843,38 @@ that sentence made unrepresentable rather than merely tested.
   a suite and then remove what it has just finished producing.
 - **A lab log is read back, so two checkouts cannot share its path.** The four
   lab targets `tee`d into fixed `/tmp` names and then grepped them for `---
-  SKIP`. A second worktree's run truncates that file as it starts, so the first
-  run's gate greps a log belonging to somebody else -- an assertion reading the
-  wrong file, which is how the journal's "nodes" subdirectory went unchecked,
-  applied to the gate that exists because a skipped lab reports success for
-  something that never ran. `LAB_LOG_DIR` is keyed to the checkout.
+  SKIP`. A second worktree's run truncates that file as it starts -- before
+  `labdaemon.Acquire` has taken the daemon lock, so the lock cannot serialise
+  it -- and the first run's gate then greps a log belonging to somebody else,
+  over a hole where its own output was: an assertion reading the wrong file,
+  which is how the journal's "nodes" subdirectory went unchecked, applied to
+  the gate that exists because a skipped lab reports success for something that
+  never ran.
+
+  **The first fix for it keyed `LAB_LOG_DIR` to `$(notdir $(CURDIR))`, which is
+  `ember` for every clone there is.** Measured: `~/github/ember` and two copies
+  under different parents all printed `/tmp/ember-labs-ember`, so the collision
+  survived in full for the one naming `git clone` gives by default -- while the
+  comment above the line said "keyed to this checkout". Nothing had bitten only
+  because the agent worktrees that motivated the fix are named `wt-…` and
+  `agent-…` and happen to differ. It is a sha256 of the whole path now, and
+  **not** `$(subst /,-,$(CURDIR))`: that substitution is not injective over a
+  `-`, and `/w/ember-wt/ember` and `/w/ember/wt/ember` both become
+  `-w-ember-wt-ember`, which is this defect again one character further down. A
+  digest also cannot contain a space, which matters because `LAB_CHECK`'s
+  `grep -q -- '--- SKIP' $(1)` is unquoted and would be handed two filenames.
+  `TestLabLogDirIsKeyedToTheWholeCheckoutPath` is the exit code the comment was
+  standing in for: it asks make for the value from two directories of the same
+  name and from one whose name holds a space. It **evaluates** the Makefile
+  rather than parsing it, which is the opposite of the other guards in
+  `cmd/check-coverage`, because the defect was in an evaluation -- banning
+  `$(notdir` by name would fire on a correct use of it, which is
+  `TestNoListenOutsideLoopback`'s own first version flagging `loopback.Listen`.
+  Both halves were reinstated: the basename, and an empty digest, which is what
+  a missing `sha256sum` leaves behind under pipefail and which the Makefile now
+  refuses with `$(error)` rather than quietly sharing one path again. And the
+  guard was deleted with the basename still in place, because `go test ./...`
+  is entirely green over that defect -- nothing else in the tree reports it.
 - **A test that asserts on a port number is asserting about the whole
   machine.** `TestForwarder_CancelReleasesEveryPort` checks the real property
   -- after `Run` returns, the same ports must be bindable again -- and

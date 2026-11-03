@@ -240,15 +240,45 @@ LAB_IMAGE := ember:lab
 
 # Where a lab target's output is kept, so the `--- SKIP` gate can read it back.
 #
-# Keyed to this checkout, because it used to be four fixed paths under /tmp and
-# two worktrees of this repository on one machine share those. `tee` truncates
-# the file as the second run starts, so the first run's
-# `grep -- '--- SKIP'` then greps a log belonging to somebody else -- and what
-# it is asserting is that no lab reported success for something that never ran.
-# Same shape as AssertNoStray reading a daemon another run had emptied, and the
-# same reason the lab lock exists: several checkouts on one machine is now the
-# normal way this is developed.
-LAB_LOG_DIR := /tmp/ember-labs-$(notdir $(CURDIR))
+# Keyed to the WHOLE of this checkout's path, because it used to be four fixed
+# paths under /tmp and two worktrees of this repository on one machine share
+# those. `tee` truncates the file as the second run starts -- which is before
+# `labdaemon.Acquire` has taken the daemon lock, so the lock cannot serialise
+# it -- and the first run's `grep -- '--- SKIP'` then greps a log belonging to
+# somebody else, over a hole where its own output was. What it is asserting is
+# that no lab reported success for something that never ran. Same shape as
+# AssertNoStray reading a daemon another run had emptied, and the same reason
+# the lab lock exists: several checkouts on one machine is now the normal way
+# this is developed.
+#
+# `$(notdir $(CURDIR))` was the first attempt at that and keyed it to a string
+# that is `ember` for every clone of this repository. Measured: `~/github/ember`
+# and two copies under different parents all printed `/tmp/ember-labs-ember`,
+# so the collision the paragraph above describes survived in full for the name
+# `git clone` gives by default -- the comment claimed the checkout and the code
+# named its last component (#112). A sentence in a comment asserting a property
+# is worth exactly what its exit code is, so
+# `TestLabLogDirIsKeyedToTheWholeCheckoutPath` asks make for this value from two
+# directories of the same name and fails when they agree.
+#
+# A digest and not `$(subst /,-,$(CURDIR))`: the substitution is not injective
+# over a `-`, and `-` is in the directory names this is actually developed in --
+# `/w/ember-wt/ember` and `/w/ember/wt/ember` both become `-w-ember-wt-ember`,
+# which is this defect again one character further down. A digest also cannot
+# contain a space, which the basename could: `LAB_CHECK`'s
+# `grep -q -- '--- SKIP' $(1)` is unquoted, so a space in the path makes the
+# gate read two filenames and the one that explains it is neither. Nothing
+# readable is lost that `make print-LAB_LOG_DIR` does not answer, which is how
+# README.md tells a developer to find their log.
+#
+# Guarded, and recursive (=) so the guard fires where it matters: under
+# .SHELLFLAGS' pipefail a missing sha256sum makes that pipeline produce
+# NOTHING, and an empty key is one fixed path shared by every checkout again --
+# the defect rather than an error. `=` keeps the refusal inside the targets that
+# write a log and inside `print-LAB_LOG_DIR`; `make build` has no business
+# failing over a lab log path.
+LAB_LOG_KEY := $(shell printf %s '$(CURDIR)' | sha256sum | cut -c1-12)
+LAB_LOG_DIR = /tmp/ember-labs-$(if $(LAB_LOG_KEY),$(LAB_LOG_KEY),$(error could not derive a lab log directory for $(CURDIR): sha256sum printed nothing, and an empty key is one log path shared by every checkout))
 
 # One name per log, not one per call site. Each of these was spelled twice --
 # once in the `tee` and once in the grep that reads it back -- which is the
