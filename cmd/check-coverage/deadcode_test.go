@@ -283,6 +283,7 @@ var testSupport = []struct{ path, why string }{
 	{"internal/sshx/recording.go", "the sshx.Runner fake"},
 	{"internal/tunnel/dialer_fake.go", "the tunnel dialer fake"},
 	{"internal/provider/providertest/", "the provider conformance harness, imported by provider tests and by the labs"},
+	{"internal/repotree/repotree.go", "the nested-checkout prune for the guards that walk this tree; a package rather than three copies because nothing can assert that three copies agree, and not a _test.go file because the callers are in internal/cli, internal/hostkey and cmd/check-coverage"},
 }
 
 // deadExcluded is the baseline this guard landed on top of, and it is a

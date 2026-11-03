@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Legion112/ember/internal/repotree"
 )
 
 // TestComments_CiteNoFlagThatNoFlagSetDeclares is the third direction of the
@@ -91,6 +93,18 @@ func TestComments_CiteNoFlagThatNoFlagSetDeclares(t *testing.T) {
 		}
 		if d.IsDir() {
 			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			// A SECOND CHECKOUT'S COMMENTS ARE NOT THIS TREE'S. Agent
+			// worktrees live at `.claude/worktrees/<name>/`, inside the
+			// checkout they were cut from, and this walk read their source as
+			// ours: on master at 927ef78 it reported 457 findings, every one
+			// a correct complaint about a file in somebody else's worktree,
+			// because those checkouts predate #100's sweep of `--all`. The
+			// guard was working; it was reading the wrong tree. See
+			// internal/repotree for why the test is "does it have its own
+			// .git" rather than the name `.claude`.
+			if repotree.Nested(root, path) {
 				return filepath.SkipDir
 			}
 			return nil

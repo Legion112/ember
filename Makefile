@@ -176,7 +176,13 @@ GO_LDFLAGS := -X github.com/Legion112/ember/internal/cli.Version=$(VERSION)
 # every package after the break *and* -overall and -strict with it. The gate
 # reported success while checking almost nothing. check-coverage now refuses
 # stray arguments so this cannot happen quietly again.
-COVER_PKGS := internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99,internal/logx=100
+#
+# internal/repotree is at 100 and is one function: it answers "is this
+# directory a checkout of its own" for the guards that walk this tree, and
+# both the answer and its negation decide whether a seal reads the right
+# source. A floor below 100 on four lines would mean one of those four was
+# never run.
+COVER_PKGS := internal/repotree=100,internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99,internal/logx=100
 # cmd/reap-labs joins the other cmd mains here for their reason and one of its
 # own: every statement in it is a Docker call or a line of output, the decisions
 # it could get wrong live in test/integration/harness/labdaemon, and a unit test
@@ -396,15 +402,35 @@ vet:
 	# `ember:lab is missing` reached a publish once.
 	$(GO) vet -tags='$(LAB_TAGS)' ./test/...
 
+# Every directory in this checkout that holds Go source, in one place, because
+# gofmt is pointed at these and never at `.`.
+#
+# `.` is the whole DIRECTORY, and an agent worktree is a second checkout of
+# this repository at `.claude/worktrees/<name>/` -- inside the one it was cut
+# from. So `gofmt -l .` reported another developer's files as this commit's,
+# and `make fmt`, which is the same walk with `-w`, REWROTE them: the #143
+# defect at its fourth site and the only one of the four that writes.
+# Measured: with one nested checkout holding an unformatted file,
+# `gofmt -l .` named it and nothing else did.
+#
+# A list and not a prune, because gofmt has no exclusion flag and no notion of
+# a module -- so the derivation has to happen somewhere that can do it, and a
+# list checked against nothing is what LAB_TAGS and PUBLISH_LABS both exist
+# not to be. cmd/check-coverage's TestGofmtReachesEveryGoFileInThisCheckout is
+# the check: it walks this tree, skips nested checkouts through
+# internal/repotree, and fails both on a .go file under none of these paths
+# and on a path here that holds no .go file.
+GOFMT_PATHS := cmd internal test
+
 # gofmt directly, and not `go fmt ./...`.
 #
 # `go fmt` resolves packages through the build context, so it never sees a
 # file behind a build tag -- the integration labs, every one of them. CI
-# checks with `gofmt -l .`, which walks the tree and does, so `make fmt` left
-# exactly the files CI would fail on. Same gap the vet target above documents,
-# found the same way: by CI disagreeing with a laptop.
+# checks with gofmt over the same paths, which does, so `make fmt` used to
+# leave exactly the files CI would fail on. Same gap the vet target above
+# documents, found the same way: by CI disagreeing with a laptop.
 fmt:
-	gofmt -l -w .
+	gofmt -l -w $(GOFMT_PATHS)
 
 # A missing linter is a hard failure, not a skip. The earlier spelling put the
 # guard and the run on separate recipe lines, where `exit 0` only leaves that
