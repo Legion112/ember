@@ -146,6 +146,36 @@ func TestBudgets_RefuseMalformedAmounts(t *testing.T) {
 	}
 }
 
+// TestBudgets_NameTheKeyAndWhatToWrite. ParseUSD's refusal cannot name the key
+// -- it is shared by four -- so each caller wraps it with its own, and an
+// operator reading `ember: config: max_month_usd: malformed price ...` needs
+// both halves. One case per key, because a wrapper that forgot its prefix
+// would be right for the other three.
+func TestBudgets_NameTheKeyAndWhatToWrite(t *testing.T) {
+	for _, tc := range []struct {
+		key string
+		cfg Config
+		run func(Config) error
+	}{
+		{"max_hourly_usd", Config{MaxHourlyUSD: "$1,000"}, func(c Config) error { _, _, err := c.Budgets(); return err }},
+		{"max_hourly_usd", Config{MaxHourlyUSD: "$1,000"}, func(c Config) error { _, err := c.Filter(); return err }},
+		{"max_run_usd", Config{MaxRunUSD: "$1,000"}, func(c Config) error { _, _, err := c.Budgets(); return err }},
+		{"max_day_usd", Config{MaxDayUSD: "$1,000"}, func(c Config) error { _, _, err := c.PeriodCeilings(); return err }},
+		{"max_month_usd", Config{MaxMonthUSD: "$1,000"}, func(c Config) error { _, _, err := c.PeriodCeilings(); return err }},
+	} {
+		err := tc.run(tc.cfg)
+		if err == nil {
+			t.Errorf("%s: accepted", tc.key)
+			continue
+		}
+		for _, want := range []string{tc.key + ": malformed price \"$1,000\"", "plain decimal number of dollars", "thousands separator"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: error %q does not carry %q", tc.key, err, want)
+			}
+		}
+	}
+}
+
 func TestParsePort(t *testing.T) {
 	got, err := ParsePort("comfyui:8188")
 	if err != nil {

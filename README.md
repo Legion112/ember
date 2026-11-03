@@ -2026,6 +2026,14 @@ exponent (`"1e3"`), a thousands separator (`"1,000"`), a sign (`"+1"`), a
 trailing point (`"5."`), anything that is not an ASCII digit, and a space
 inside the number.
 
+A refusal names the key it came from and quotes the value exactly as you typed
+it, and for every spelling refused for its shape the message carries the
+accepted form rather than only the word "malformed":
+`max_hourly_usd: malformed price "$1,000": write a plain decimal number of
+dollars, optionally after a $ -- 1.79, 0.429, $2.49 -- with no thousands
+separator, sign, exponent, …`. An amount too large to hold as integer
+microdollars says what the limit is.
+
 It also refuses a **positive amount below one microdollar** — `"0.0000001"`
 and anything smaller. Those used to truncate to zero and parse successfully,
 and zero means *no ceiling* everywhere in ember, so a ceiling written in the
