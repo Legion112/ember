@@ -29,7 +29,7 @@ func cmdImages(args []string, out io.Writer) error { return runImages(args, out)
 // runs until the day it matters, and a snippet in a YAML file cannot be
 // tested at all. "Published nothing" and "never reported" are different
 // answers, and the exit status is how the difference is said out loud -- the
-// same reason `ember ls --all` exits non-zero when a provider could not be
+// same reason `ember ls` exits non-zero when a provider could not be
 // reached.
 func runImages(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("images", flag.ContinueOnError)

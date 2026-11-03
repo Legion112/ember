@@ -145,7 +145,7 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 // A ceiling with no ledger to read is a REFUSAL and not a pass. An operator
 // who wrote max_month_usd into their config has said that unattended spending
 // must stop somewhere, and the one answer a spend ceiling must never give is
-// "probably fine" -- the same rule that makes `ember ls --all` exit non-zero
+// "probably fine" -- the same rule that makes `ember ls` exit non-zero
 // over a provider it could not ask. It cannot happen through `ember serve`,
 // which always wires the store; it is here because a ceiling that silently
 // does nothing is worse than one that is not configured.

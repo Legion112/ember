@@ -219,7 +219,7 @@ func printSpend(out io.Writer, rows []genstore.Bucket, group genstore.GroupBy) {
 	}
 	if skipped > 0 {
 		// Said out loud, every time. A total missing part of its history and
-		// not saying so is the clean-bill-of-health failure `ember ls --all`
+		// not saying so is the clean-bill-of-health failure `ember ls`
 		// exits non-zero to avoid, in a column of money.
 		//
 		// And the per-image figure is named as an upper bound, which was

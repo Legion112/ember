@@ -45,7 +45,7 @@ type CatalogueTaken struct {
 //
 // Reported rather than swallowed. An hour that is missing from the series is
 // a gap nothing can fill in later, so "I could not ask RunPod" must not read
-// the same as "RunPod had nothing" -- the rule `ember ls --all` exits
+// the same as "RunPod had nothing" -- the rule `ember ls` exits
 // non-zero for, applied to the one dataset that cannot be re-derived.
 type CatalogueFailure struct {
 	Provider node.ProviderID

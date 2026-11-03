@@ -417,7 +417,7 @@ func (f fullPageStore) List(_ context.Context, q genstore.Filter) ([]genstore.Re
 }
 
 // TestSweep_ReportsAStoreItCouldNotAsk, because "I could not check" and
-// "nothing is needed" are different answers -- the rule `ember ls --all`
+// "nothing is needed" are different answers -- the rule `ember ls`
 // exits non-zero for.
 func TestSweep_ReportsAStoreItCouldNotAsk(t *testing.T) {
 	h := newHarness(t)

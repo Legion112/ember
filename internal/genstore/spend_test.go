@@ -258,7 +258,7 @@ func TestSpend_PeriodIsHalfOpen(t *testing.T) {
 //
 // A request that ran before these columns existed has no job rows to sum, and
 // a total that silently omits it is the clean-bill-of-health failure
-// `ember ls --all` exits non-zero to avoid, in a column of money. Nothing
+// `ember ls` exits non-zero to avoid, in a column of money. Nothing
 // backfills, so saying how many were skipped is the honest alternative.
 func TestSpend_CountsWhatItHadToLeaveOut(t *testing.T) {
 	each(t, func(t *testing.T, s Store) {

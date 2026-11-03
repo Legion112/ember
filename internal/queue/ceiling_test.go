@@ -193,7 +193,7 @@ func TestCeilings_NoCeilingReadsNothing(t *testing.T) {
 }
 
 // "I could not read what has been spent" is not "it is allowed". The same
-// rule that makes `ember ls --all` exit non-zero over a provider it could not
+// rule that makes `ember ls` exit non-zero over a provider it could not
 // ask.
 func TestCeilings_RefuseWhenTheSpendCannotBeRead(t *testing.T) {
 	s := genstore.NewRecordingStore()

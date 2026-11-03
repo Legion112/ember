@@ -441,6 +441,47 @@ moment it imports a sibling, the sibling's dependencies become its own.
   enumerate out of the tree, so a guard for it would either be a marked table
   of claims maintained by hand -- the thing all three of these exist not to be
   -- or a grep whose only honest answer is "something changed somewhere".
+- **That sweep corrected the two documents and left eighteen Go comments
+  citing the flag, because the guard looks at documents.** `ember ls --all`
+  survived in `internal/app`, `internal/cli`, `internal/genstore`,
+  `internal/provision`, `internal/queue`, `internal/reconcile` and
+  `internal/webapi`, every one of them as the authority for a decision that
+  is otherwise correct -- which is the worst combination for a reader: the
+  argument persuades and the command does not exist, so an operator who tries
+  it gets a usage error from the tool the comment told them to trust. Same
+  shape as `node-image.yml` publishing a moving tag for the life of the image
+  *underneath* a comment arguing against one, and as the config comment that
+  justified the build tag somebody remembered.
+  **The guard was expected not to be worth building, and the measurement said
+  otherwise.** The prior was that comments are a worse input than `README.md`:
+  a much larger and less curated surface that legitimately names
+  `docker run --memory`, `sd-cli --list-devices`, `nvidia-smi --query-gpu` and
+  `git describe --tags`, so the honest answer looked like "no guard, and the
+  reason written down" -- the call taken for a rule that could not be
+  expressed cheaply. What makes it cheap is that the rule is **not new**:
+  `emberFlags` is the window already settled on after three attempts, and
+  `declaredFlags` is already the authority. Run over every comment in the tree
+  as it stood it reports **48 flags cited at ember, 30 of them declared, and
+  18 misses -- every miss `--all`**, with not one false positive; after the
+  sweep it is 30, 30 and none. It reaches none of those four other programs'
+  flags -- none has the word `ember` between the start of its line and its own
+  backticked span. So
+  it is a high-precision, low-recall guard: what it gives up is a flag the
+  word `ember` does not reach on its own line, which is the same backtick
+  bound that buys the precision. **One direction only**, unlike the two guards
+  above it, because a comment is not documentation and "a flag no comment
+  mentions" would be a test demanding prose.
+  **The one citation left spelled out is the one in the guard's own file, and
+  it was re-worded rather than exempted.** `readme_test.go` records what the
+  README guard found on its first run, and both documents already write that
+  record as two spans -- "a `--all` on an `ember ls`" -- so the comment now
+  matches them. An exemption would have been an escape hatch for a seal, which
+  is refused here even for a test.
+  **The decision not taken, written down so it is not re-litigated:** nothing
+  checks that a comment's *reasoning* is sound, only that the command it cites
+  exists. Each of the eighteen was correct about the behaviour -- a provider
+  that could not be reached is a finding and `ember ls` exits non-zero over
+  one -- and no guard can tell that from an argument that is wrong.
 - **The first round of a reinstatement pass is reliably incomplete, and a
   flawless one is a finding about the harness rather than about the change.**
   Measured across one session of eleven changes here: every pass that reported

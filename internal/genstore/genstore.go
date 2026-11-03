@@ -556,7 +556,7 @@ type Bucket struct {
 	//
 	// Counted and reported rather than quietly excluded. A total that is
 	// missing a month of history and does not say so is the clean-bill-of-
-	// health failure `ember ls --all` exits non-zero to avoid, in a column of
+	// health failure `ember ls` exits non-zero to avoid, in a column of
 	// money.
 	//
 	// Finished is load-bearing and was missing from the first version: a

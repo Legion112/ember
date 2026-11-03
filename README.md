@@ -593,6 +593,15 @@ at ember that no `flag.FlagSet` declares, because a stale line waives nothing
 and hides the next real one: its first run found a `--all` on an `ember ls`
 here that has never been a flag.
 
+That sweep corrected this document and `AGENTS.md`, and left **eighteen Go
+comments** citing the same invocation as a design precedent, because a guard
+that reads documents does not read comments.
+`TestComments_CiteNoFlagThatNoFlagSetDeclares` runs the same window over every
+comment in the tree against the same declared set: on the tree as it stood it
+found 48 flags cited at ember, 30 of them real and all 18 misses that one. It
+has one direction only — a comment is not documentation, and nothing obliges
+one to name a flag.
+
 ### Placement, disk and where ember keeps things
 
 These keys were implemented and documented nowhere, which is the half of
