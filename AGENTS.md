@@ -4744,11 +4744,20 @@ A leaked node bills by the hour in silence. These are not style preferences.
   any event a sync emits, so that command's output is byte-for-byte what it
   was.
 
-  **A planner that cannot record refuses to rent**, which is
-  `refuseOverPeriod`'s nil-`Ledger` rule applied to a write: an unrecorded
-  rental is the defect being fixed, so a nil recorder would reopen it
-  silently. It also removes the panic that a nil interface would have taken
-  inside the drain goroutine, which is `AppPlanner.out()`'s own argument.
+  **A planner that cannot record refuses to rent, and the governing rule is
+  `out()`'s rather than `refuseOverPeriod`'s.** The first wording of this entry
+  cited the ceiling, which is the weaker of the two available: that one refuses
+  a nil ledger only when a ceiling is **configured**, because what it honours
+  is an operator who wrote `max_month_usd`, while this keys on wiring. What
+  licenses keying on wiring is `AppPlanner.out()`'s argument -- a nil interface
+  here is a crash, and `recordSync`'s first call is `Adopt`, so the panic lands
+  in the drain goroutine **before** the sync's node exists: it takes `ember
+  serve` down rather than leaving a machine running, and a panic unwinds
+  `provision.WithNode`'s deferred destroy on the way out in any case. So
+  answering the nil is cheap and the useful answer is a refusal, because an
+  unrecorded rental is the defect being fixed and a nil recorder would reopen
+  it silently. Nothing an operator can type reaches it: `cmd_serve.go` is the
+  one production construction and always wires `Runs`, so it guards the shape.
   `AppPlanner` therefore holds a `RunStore` BESIDE its `Spender` rather than
   one `genstore.Store` -- five methods that can record a run and cannot
   `Enqueue` or `ClaimNext`, because a queued row is what a drain loop takes
@@ -4774,9 +4783,15 @@ A leaked node bills by the hour in silence. These are not style preferences.
   reachable from a unit test at all, and the create failure is the rental most
   worth recording, because the row goes down before the call.
 
-  **Nine defects reinstated plus that historical measurement, each judged on
-  an exit code, with a negative control at both ends.** Eight went red where
-  expected; the ninth is an asymmetry worth writing down rather than a miss.
+  **Eight defects reinstated, each judged on an exit code, beside a negative
+  control (a reworded comment, reported as not caught), that historical
+  measurement, and a control at both ends.** Seven of the eight went red where
+  expected and the eighth is an asymmetry worth writing down rather than a
+  miss. The first wording here said nine and eight -- in this file, which
+  records that "a running total in prose is the thing this file has been wrong
+  about before" -- while the table it describes lists eight defects, a control
+  and a measurement. So the count was wrong about itself on the first run,
+  which is one more instance of the thing rather than an exception to it.
   The sink wired and the lifecycle hooks not -- `p.Options` in place of
   `p.lifecycle(sink)`, which is the original defect's own shape -- is **GREEN
   in the unit suite and RED in the lab**, because the unit row's create fails
