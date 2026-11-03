@@ -1632,9 +1632,9 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// that retries for ever can never print the sentence telling an operator
 	// to reload. Six seconds is longer than the backoff's own cap, so a
 	// socket still re-opening on a timer would show up as another handshake.
-	opens := len(resumedCursors(t, l))
+	opens := openedSockets(l)
 	time.Sleep(6 * time.Second)
-	if again := len(resumedCursors(t, l)); again != opens {
+	if again := openedSockets(l); again != opens {
 		t.Errorf("the watcher opened %d socket(s) and then %d: a stream that is up is "+
 			"still being re-opened on a timer", opens, again)
 	}
@@ -1665,24 +1665,37 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	if !strings.Contains(note, "reconnecting") {
 		t.Errorf("the note does not say ember is trying again: %q", note)
 	}
-	// AND NOT THE OTHER SENTENCE, which is this lab's own limitation asserted
-	// rather than left to be noticed -- the arrangement
-	// TestConformance_CannotCatchARederivedRunID uses.
+	// AND NOT THE OTHER SENTENCE, which says less than it looks like it says
+	// and is written down that way rather than left to be credited wrongly.
 	//
 	// `Stream::Lost` -- the retry bound spent, "it did not come back: reload
-	// this page" -- is unreachable from HERE, and the reason is structural
-	// rather than a matter of effort: it needs a request the page still
-	// believes is live whose server never returns, and that is the one case
-	// which cannot be followed by the reconnect this lab exists for. A page
-	// that has learned its request ended stops retrying by design, and after a
-	// restart `queue.Run`'s sweep has ended it. So that state is
-	// `cargo test`'s alone (`the_retry_is_bounded_and_backs_off`), and what
-	// this assertion buys is the day somebody shortens the bound past a
-	// restart typed by hand: the sentence changes, this goes red, and the
-	// reader arrives at RETRY_ATTEMPTS, which is set against exactly that.
+	// this page" -- is unreachable from HERE, and structurally rather than for
+	// want of effort: it needs a request the page still believes is live whose
+	// server never returns, which is the one case that cannot be followed by
+	// the reconnect this lab exists for. A page that has learned its request
+	// ended stops retrying by design, and after a restart `queue.Run`'s sweep
+	// has ended it.
+	//
+	// WHAT THIS LINE IS NOT is a guard on the bound. The obvious claim --
+	// "it goes red the day somebody shortens the bound past a hand restart" --
+	// was MEASURED AND IS FALSE: at `RETRY_ATTEMPTS = 1`, which is 250ms and
+	// fits no restart at all, this lab is GREEN, because the first
+	// `streamNote()` lands a fraction of a millisecond after the close and so
+	// always reads the reconnecting sentence, and `startServeOn` brings the
+	// second server up inside that one attempt anyway. At 0 the lab does go
+	// red, and at the browser drop's "the step never moved" assertion rather
+	// than here. The bound is sealed by `cargo test`
+	// (`the_retry_is_bounded_and_backs_off`, RED at exit 101 with
+	// `RETRY_ATTEMPTS = 1`), and that is the gate to credit.
+	//
+	// So this stays for what it does prove -- which of the two sentences a
+	// browser is shown over a restart, the pair being the thing a page that
+	// printed one state for both would fail -- and claims nothing further. A
+	// sentence asserting that a test goes red is worth exactly the exit code
+	// nobody checked.
 	if strings.Contains(note, "did not come back") {
-		t.Errorf("the retry bound was spent before the restart finished, so the page is "+
-			"showing the sentence for a stream that is gone: %q", note)
+		t.Errorf("the page is showing the sentence for a stream that is gone over a "+
+			"restart it reconnected to: %q", note)
 	}
 
 	second, _, secondWait := startServeOn(t, l, port, token, "--log-level", "debug")
@@ -1953,31 +1966,53 @@ func waitForNoStreamNote(t *testing.T, ctx context.Context, within time.Duration
 	}
 }
 
+// socketOpened is the marker the handler writes once per handshake.
+const socketOpened = "progress socket opened"
+
+// openedSockets counts the handshakes, and counts the MARKER rather than the
+// cursors it can parse.
+//
+// THE COUNT AND THE VALUES ARE TWO READS FOR A REASON. This reads a buffer
+// `ember serve` is still writing into: there is no data race -- `syncBuffer`
+// is mutex-guarded and `slog` emits each record in one sub-4KiB write -- but
+// the measured logs already show the server's own stdout and the relayed
+// container output landing on one line, so interleaving is real. In logfmt the
+// message comes before `after=`, so a read that lands mid-record can see the
+// marker without the cursor: counting parsed cursors would then report a
+// handshake on the second pass that was already there on the first, and the
+// "a stream that is up is not re-opened on a timer" assertion would fail over
+// a log line. Counting the marker is stable the moment it exists.
+func openedSockets(l *harness.Lab) int {
+	return strings.Count(l.Printed(), socketOpened)
+}
+
 // resumedCursors reads the cursor each progress socket resumed from out of the
 // server's own debug log.
 //
-// A FATAL ON A LINE IT CANNOT PARSE, never a skip of it: a parser that
-// silently ignores the line it is looking for reports "no reconnect" for a
-// log format that changed, which is a gate that cannot fail.
+// A LINE IT CANNOT PARSE IS SKIPPED AND NOT FATAL, which is the opposite of
+// the first version and is this suite's own rule that a lab failing for
+// reasons unrelated to the code teaches people to re-run rather than to read.
+// Its one caller is a bounded poll, so a record that was half-written on one
+// pass is whole on the next; what a format change costs is `waitForResume`'s
+// timeout, which prints the whole log and names what it was looking for.
 func resumedCursors(t *testing.T, l *harness.Lab) []int64 {
 	t.Helper()
 	var out []int64
 	for _, line := range strings.Split(l.Printed(), "\n") {
-		if !strings.Contains(line, "progress socket opened") {
+		if !strings.Contains(line, socketOpened) {
 			continue
 		}
 		_, rest, ok := strings.Cut(line, "after=")
 		if !ok {
-			t.Fatalf("a progress socket line records no cursor: %q", line)
+			continue
 		}
 		fields := strings.Fields(rest)
 		if len(fields) == 0 {
-			t.Fatalf("a progress socket line records an empty cursor: %q", line)
+			continue
 		}
 		n, err := strconv.ParseInt(fields[0], 10, 64)
 		if err != nil {
-			t.Fatalf("a progress socket line records %q, which is not a cursor: %q",
-				fields[0], line)
+			continue
 		}
 		out = append(out, n)
 	}
@@ -2005,8 +2040,9 @@ func waitForResume(t *testing.T, l *harness.Lab, within time.Duration) int64 {
 			return best
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no progress socket resumed from a cursor within %v. "+
-				"What the server printed:\n%s", within, l.Printed())
+			t.Fatalf("no %q line recorded a cursor above zero within %v, over %d "+
+				"handshake(s). What the server printed:\n%s",
+				socketOpened, within, openedSockets(l), l.Printed())
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
