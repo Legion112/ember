@@ -2103,6 +2103,21 @@ and renting a second card for work the operator may no longer want is not a
 decision ember makes on their behalf. Whatever images it produced stay listed,
 because they were paid for.
 
+A request whose **rental** failed is marked **failed**, with the reason, as
+soon as the rental unwinds. That covers everything between the machine being
+created and the first image being asked for — waiting for sshd, the GPU probe,
+the asset verify, the model load — all of which happen after the card is
+already being paid for. It used to read `running` until `ember serve` was
+restarted, which was its own trap: restarting is what destroys any *other*
+rental in flight, and the cancel button meanwhile answered with the
+provisioning-window message saying the rental was coming up, which by then was
+false.
+
+A request that finished normally keeps the status its own generation wrote,
+even when the rental then failed to tear down. The teardown error is still
+reported — a node that may still be billing is the one thing an operator must
+hear about — but it does not turn a completed request into a failed one.
+
 ### Checking it works
 
 ```bash

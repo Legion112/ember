@@ -80,7 +80,13 @@ type fakeRental struct {
 	rentals   *int
 	destroyed *int
 	rentErr   error
-	mu        *sync.Mutex
+	// teardownErr is returned AFTER fn has run and succeeded, which is what
+	// a destroy that failed looks like from here. It is the case that
+	// separates "the rental broke before drain could record anything" from
+	// "the rental broke after drain already had", and the two must leave
+	// different rows.
+	teardownErr error
+	mu          *sync.Mutex
 	// block is closed by a test that wants to observe a rental in flight.
 	block chan struct{}
 }
@@ -121,18 +127,22 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 		}
 	}
 	sink.Emit(report.Event{Kind: report.KindRunCost, Node: "local/n1", Cost: 11333})
+	if err == nil {
+		return r.teardownErr
+	}
 	return err
 }
 
 type fakePlanner struct {
-	served    *fakeServed
-	mu        sync.Mutex
-	rentals   int
-	destroyed int
-	planErr   error
-	rentErr   error
-	block     chan struct{}
-	planned   []genstore.Request
+	served      *fakeServed
+	mu          sync.Mutex
+	rentals     int
+	destroyed   int
+	planErr     error
+	rentErr     error
+	teardownErr error
+	block       chan struct{}
+	planned     []genstore.Request
 }
 
 func (p *fakePlanner) Plan(_ context.Context, r genstore.Request) (Rental, error) {
@@ -145,7 +155,7 @@ func (p *fakePlanner) Plan(_ context.Context, r genstore.Request) (Rental, error
 	}
 	return fakeRental{
 		served: p.served, rentals: &p.rentals, destroyed: &p.destroyed,
-		rentErr: p.rentErr, mu: &p.mu, block: p.block,
+		rentErr: p.rentErr, teardownErr: p.teardownErr, mu: &p.mu, block: p.block,
 	}, nil
 }
 

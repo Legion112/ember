@@ -4035,6 +4035,65 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `TestCancel_SaysTheRentalIsComingUpRatherThanAskingForARestart` holds both
   apart. A lab that checked only for a 409, or only that an error element
   appeared, would pass against the destructive wording going straight back in.
+- **A rental that failed after the node existed left the request reading
+  `running` for the life of the process, and `rentErr` was the fake that
+  could have shown it.** `ClaimNext` writes `running`; the terminal status is
+  written by `drain`, inside `WithServed`'s closure; and `once` called `fail`
+  on exactly one path, `Planner.Plan` returning an error. So every failure
+  between those two points -- the create call, waiting for sshd, the GPU
+  probe, the asset verify, the model load -- returned with the row unchanged.
+  Nothing corrected it afterwards, because `Interrupt` sweeps only at startup.
+
+  **Every one of those failures happens after money has been committed**,
+  which is what makes it the expensive kind of wrong: `requests.err` was never
+  written either, so #103's failure reason -- built so an operator can see why
+  a request died -- was blind precisely where the diagnosis costs most. A live
+  instance sat in this machine's own database for three hours: status
+  `running`, cost $0.626623, `err` empty, `ended_unix` 0.
+
+  **The remedy was destructive and the UI pointed away from it.** A phantom
+  row clears only on a restart, and restarting `ember serve` destroys any
+  other rental in flight. Meanwhile the cancel button answered with the
+  provisioning-window 409 from #119 -- "the rental is coming up" -- because
+  `Queue.held` is cleared when `once` returns, so the gentler of the two
+  messages was selected for the one state where the restart advice was
+  correct. The two were exactly swapped by a path neither was written
+  against.
+
+  **The fix is conditional, and that is the whole care in it.** `drain` calls
+  `finish` for every request it generates, so an unconditional write on the
+  way out would replace a real outcome with whatever the rental returned --
+  the two-writers rule recorded one entry below, where the loser overwrites
+  the one that knew. A teardown that fails after a successful batch is the
+  ordinary way to reach it, and a done request must not become a failed one.
+  `endIfUnfinished` therefore no-ops on a terminal row, and the check is
+  **inside the mutator** rather than a read before it, because `Store.Update`
+  runs SELECT, the mutator and UPDATE in one transaction: asking first and
+  writing after is the same decision with a window in it. `classify` is one
+  function because two copies of "what does Ctrl-C mean" is two answers.
+
+  **`fakeRental.rentErr` already existed and no test had ever set it.** The
+  field was declared on the fake, plumbed through `fakePlanner`, reached the
+  rental -- and `grep` found no assignment anywhere in the package, so the
+  entire span this entry is about could not be produced by the suite although
+  the fake was already able to produce it. Not a missing assertion but an
+  unused capability, which is the "written, covered, connected to nothing"
+  shape reached inside a test fake rather than in production.
+
+  **A lab, because a unit test cannot rent.** `TestServe_ARentalThatFails...`
+  drives a real container with a `gpu_probe` that exits 1: the node is
+  created, sshd is up, the host key is pinned, and only then does `prepare`
+  refuse. `gpu_probe_timeout` is five seconds and that is load-bearing rather
+  than a shortcut -- `gpucheck.Wait` RETRIES until the timeout, because a card
+  that is not up yet and one that never will be look identical on the first
+  attempt, and the probe's own output is buffered and printed only when it
+  finally gives up. The first version of the lab waited thirty seconds for a
+  line that is not emitted until then.
+
+  Checked by reinstating four defects: the missing call (unit and lab both
+  red), an unconditional write (the negative-control test red, the lab green,
+  which is the correct asymmetry), Ctrl-C classified as a failure (red), and a
+  reworded comment that stayed green.
 - **The queue records how a cancelled generation ended; the handler does
   not.** A queued request has no rental and nothing to tell, so the handler
   makes it terminal. A running one is still generating when the handler
