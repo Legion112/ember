@@ -80,14 +80,37 @@ func TestGofmtReachesEveryGoFileInThisCheckout(t *testing.T) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			// gofmt skips a directory whose name begins with a dot or an
-			// underscore, and `bin` holds built binaries rather than source.
-			// `testdata` is NOT skipped here, unlike in treeBuildTags: gofmt
-			// does descend into it, so a .go file there is a file CI checks
-			// and `make fmt` must reach.
+			// `bin` holds built binaries rather than source. `testdata` is
+			// NOT skipped here, unlike in treeBuildTags: gofmt descends into
+			// it, so a .go file there is a file CI checks and `make fmt` must
+			// reach.
 			case ".git", "bin":
 				return fs.SkipDir
 			}
+			// THE REASON THIS SKIP IS HERE IS "do not claim coverage of what
+			// gofmt is not handed", and NOT "gofmt skips these" -- which is
+			// what this comment used to say and is false. Measured:
+			// `gofmt -l ./internal` NAMES `internal/.hid/x.go` and
+			// `internal/_us/x.go` planted unformatted, and does not name
+			// `internal/cli/.hidden.go`, so gofmt's own rule is about a
+			// FILE's name and not a directory's. A comment that is wrong
+			// about why a seal holds is how the seal gets removed by somebody
+			// being helpful, which is the `AssertNoStray` entry in AGENTS.md.
+			//
+			// The skip changes nothing UNDER a listed path, because the
+			// component this guard compares is the first one: a file in
+			// `internal/.hid/` would be counted against `internal`, which is
+			// listed. It is reachable only at the TOP level, and there it is
+			// a stated blind spot rather than a mistake -- a `.tools/gen.go`
+			// is handed to gofmt by nothing and reported by nothing, measured
+			// at exit 0 through this guard, `go test ./...` and
+			// `golangci-lint run` alike, where the old `gofmt -l .` would
+			// have named it. Accepted because `go build ./...` and
+			// `go list ./...` cannot see it either -- a top-level dot
+			// directory is not module source -- and the one that exists here
+			// is `.claude`, whose nested checkouts must not be formatted. The
+			// underscore case has no such hole and is not skipped: a
+			// top-level `_tools/gen.go` turns this guard red, measured.
 			if strings.HasPrefix(d.Name(), ".") && rel != "." {
 				return fs.SkipDir
 			}
@@ -113,7 +136,7 @@ func TestGofmtReachesEveryGoFileInThisCheckout(t *testing.T) {
 		t.Fatalf("walk the checkout: %v", err)
 	}
 	// The floor every walk here carries: one that visited nothing reports
-	// that the list is complete. There are about four hundred.
+	// that the list is complete. There are 313, so the floor is well under it.
 	if files < 200 {
 		t.Fatalf("found only %d Go files in this checkout; the walk is broken, not the Makefile", files)
 	}

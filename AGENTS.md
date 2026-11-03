@@ -621,6 +621,43 @@ moment it imports a sibling, the sibling's dependencies become its own.
   green. And the gofmt guard was deleted with its defect still in place, which
   leaves `go test ./...` at exit 0 -- nothing else in the tree reports it.
 
+  **One stated blind spot, and the comment that used to justify it was wrong
+  about `gofmt` rather than about the skip.** The gofmt guard does not descend
+  into a dot-named directory, and the reason written beside it was "gofmt
+  skips a directory whose name begins with a dot or an underscore" -- false,
+  measured: `gofmt -l ./internal` NAMES `internal/.hid/x.go` and
+  `internal/_us/x.go` planted unformatted and does not name
+  `internal/cli/.hidden.go`, so gofmt's rule is about a FILE's name and not a
+  directory's. The skip is sound for a different reason -- it is "do not claim
+  coverage of what gofmt is not handed" -- and it changes nothing *under* a
+  listed path, because the component the guard compares is the first one. At
+  the TOP level it is a real hole: a `.tools/gen.go` is handed to gofmt by
+  nothing and reported by nothing, measured at exit 0 through the guard,
+  `go test ./...` and `golangci-lint run` alike, where the old `gofmt -l .`
+  would have named it. Accepted rather than closed, because `go build ./...`
+  and `go list ./...` cannot see it either -- a top-level dot directory is not
+  module source -- and the one that exists here is `.claude`, whose nested
+  checkouts must not be formatted. The underscore case has no hole and is not
+  skipped: a top-level `_tools/gen.go` turns the guard red. Recorded at this
+  length because the next reader will otherwise re-derive the wrong reason the
+  same way, and this file's own rule is that a comment wrong about why a seal
+  holds is how the seal gets removed by somebody being helpful.
+
+  **`internal/logx`'s `walkModule` is the fifth walk and got no floor, which
+  is a measurement rather than a shrug.** It looked like the one place the
+  warning above has no exit code behind it. It is not: all three of its
+  callers already count the files the callback saw and fail on zero, so a
+  narrowed or broken allow-list is loud -- measured, with the prefix list
+  pointed at a directory that does not exist, all three go red at "inspected
+  no files". A floor inside `walkModule` would be a second mechanism for a
+  property its callers already hold, which is `queue.Cost`'s mistake and the
+  same reason `repotree.Nested` is not added there. And the *widening*
+  direction the warning is actually about does not produce a dead gate at all:
+  with `.claude` added to that allow-list and a `slog.NewTextHandler` planted
+  in a nested checkout, `TestNoHandlerOutsideLogx` goes red naming the nested
+  path -- so what a future widener needs is the prune, which is what the
+  warning should be read as asking for.
+
 ## Threat model
 
 ember's posture is one sentence: **the only thing on the internet that can
