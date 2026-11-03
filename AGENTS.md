@@ -2669,6 +2669,57 @@ A leaked node bills by the hour in silence. These are not style preferences.
 - **A provider that could not be reached is a finding, not a silence.**
   `ember ls` exits non-zero when any provider failed to answer: "I could
   not check RunPod" must never render as a clean bill of health.
+- **The same rule met a third time, in a CACHE rather than on a status code: a
+  failed probe is not an answer to memoise.** `local.DetectGPU` returned the
+  same zero `GPU` for "there is no card" and "I could not ask", and
+  `gpuNow` memoised it behind a `sync.Once` under a comment that justified the
+  cache correctly and about the wrong thing -- *"a card does not appear or
+  vanish inside one ember invocation"* is true of a card, and what was cached
+  is a probe's **answer**. The premise also expired without anybody noticing:
+  it was written when every invocation was one `ember up`, and `ember serve`
+  builds **one** registry at startup, so that `Once` lives for the life of the
+  process and `getOffers` runs the probe on the **HTTP request's** context.
+  One browser reload during the first `/api/offers` -- a Docker ping plus an
+  `nvidia-smi`, and the page has no AbortController -- therefore removed the
+  operator's own card from the listing they pick hardware from, permanently,
+  with `--gpu rtx4090` reading as "sold out everywhere". **And it silenced the
+  one message written against exactly that**: the
+  `nvidia-container-toolkit` diagnosis is guarded on `!g.IsZero()`, so a
+  poisoned cache made the explanation unreachable and left silence with a
+  working card in the machine. Paid rentals were never at risk, because every
+  other caller builds a fresh registry per rental -- the blast radius is one
+  command's listing, for as long as it runs.
+  **Three states and not a bool flipped on error**, the `([]Exposed, bool)`
+  shape `node.Exposure` already uses for "published nothing" against "never
+  reported": a card, no card, and nobody could ask. A probe that **answered**
+  is cached, including when the answer is "none", because the cost the cache
+  exists to avoid is an `nvidia-smi` per listing on a machine that has never
+  had a card; only the third state re-runs. The classification is `ctx.Err()`
+  and not the error's own shape, because a cancelled `exec.Cmd` surfaces as a
+  kill signal, a `Start` failure or a context error depending on where the
+  cancel landed -- three spellings of one question -- and it is asked only on
+  the error path, since an `Output` that succeeded is an answer whatever the
+  context did next.
+  **NOT `context.WithoutCancel`, which was the other candidate and is the
+  entry three above.** That precedent is an *action* whose absence costs money,
+  so the caller's Ctrl-C must not decide it; this is a **read**, and detaching
+  it would need a bound of its own -- a clock nobody here has measured, and an
+  unbounded one turns a wedged `nvidia-smi` into a listing that never answers,
+  which is `runServed`'s bare `wait()` in another package. It also fixes one
+  *cause* rather than the class: a probe killed by anything else, or a binary
+  missing for one listing, would still be memoised. Re-running needs no new
+  clock.
+  **The seam carries the second result all the way up**, through
+  `local.Provider.Detect` and `app.Deps.DetectGPU`, because a fake that could
+  only say "no card" cannot reproduce the behaviour that cost this -- the
+  fake-tidier-than-the-thing rule, applied to a seam before it has a defect of
+  its own -- and a seam that collapsed the two at the `app` boundary would put
+  the bug one layer up. `TestProvider_DetectsOnceWithTheRealDetectorByDefault`
+  could not see any of it: **detecting exactly once is precisely what the
+  defect does**, so the new assertion is that the probe count is *two* over a
+  cancelled listing and a healthy one, with the acceptance and the cardless
+  machine's single probe beside it -- without the count, "never cache
+  anything" would pass.
 - **Images are pinned to a tag or a digest; `:latest` is refused.** The point
   of ember is to measure what a model costs and how long it takes, and two runs
   a week apart that both say `:latest` may not have run the same software.

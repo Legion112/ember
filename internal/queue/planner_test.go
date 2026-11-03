@@ -301,7 +301,7 @@ func TestAppPlanner_ResolvesWithoutRenting(t *testing.T) {
 			// every test here picks up the developer's own RUNPOD_API_KEY and
 			// registers the real provider.
 			Creds:     &config.Credentials{},
-			DetectGPU: func(context.Context) local.GPU { return local.GPU{} },
+			DetectGPU: func(context.Context) (local.GPU, bool) { return local.GPU{}, true },
 		},
 	}
 
@@ -336,7 +336,7 @@ func TestAppPlanner_RefusesAJobTheServerCouldNotHaveRun(t *testing.T) {
 		Deps: app.Deps{
 			Engine: engine, HomeDir: t.TempDir(),
 			Creds:     &config.Credentials{},
-			DetectGPU: func(context.Context) local.GPU { return local.GPU{} },
+			DetectGPU: func(context.Context) (local.GPU, bool) { return local.GPU{}, true },
 		},
 	}
 
@@ -393,7 +393,7 @@ func TestAppPlanner_CarriesTheLogLevelIntoARental(t *testing.T) {
 	deps := app.Deps{
 		Engine: engine, HomeDir: t.TempDir(),
 		Creds:     &config.Credentials{},
-		DetectGPU: func(context.Context) local.GPU { return local.GPU{} },
+		DetectGPU: func(context.Context) (local.GPU, bool) { return local.GPU{}, true },
 	}
 	req := genstore.Request{
 		Provider: "local", TTL: 30 * time.Minute,

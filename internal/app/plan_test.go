@@ -30,7 +30,7 @@ func planDeps(t *testing.T) Deps {
 		Engine:    e,
 		HomeDir:   t.TempDir(),
 		Creds:     &config.Credentials{},
-		DetectGPU: func(context.Context) local.GPU { return local.GPU{} },
+		DetectGPU: func(context.Context) (local.GPU, bool) { return local.GPU{}, true },
 	}
 }
 

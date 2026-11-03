@@ -1096,6 +1096,19 @@ offers` and `min_vram_gib` work the way they do against a cloud provider.
 Without one it reports no GPU, exactly as before, which is what keeps the labs
 working on machines that have never had one.
 
+The `nvidia-smi` probe behind that runs once per process and its answer is
+remembered, because `ember offers` and every rental ask for the listing again
+and the card does not come and go. What is remembered is only an answer:
+"there is no card" is one, and "the probe could not run" is not. That
+distinction is `ember serve`'s, where the listing is served on a browser
+request's own context — before it, one reload that abandoned the first
+`/api/offers` poll cached "this machine has no GPU" for the life of the
+server, so the card disappeared from the listing an operator picks hardware
+from, `--gpu` read as sold out everywhere, and the
+`nvidia-container-toolkit` explanation could not be printed because it is
+only offered for a card that was found. A listing nobody waited for now
+re-probes on the next one instead.
+
 ### Checking the card before trusting it
 
 A GPU that cannot initialize does not fail. It silently becomes a slow CPU, at

@@ -2,7 +2,9 @@ package local
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Legion112/ember/internal/node"
 )
@@ -113,12 +115,40 @@ func TestParseSMI_NamesACardTheWayEveryProviderDoes(t *testing.T) {
 func TestDetectGPU_IsQuietWhenThereIsNoCard(t *testing.T) {
 	// Not asserting the result: this test runs on machines with a card and
 	// machines without. What must hold either way is that it answers at all.
-	g := DetectGPU(t.Context())
+	g, answered := DetectGPU(t.Context())
+	if !answered {
+		t.Error("DetectGPU could not answer on a live context")
+	}
 	if !g.IsZero() && g.Model == "" {
 		t.Error("DetectGPU reported a present card with no model")
 	}
 	if !g.IsZero() && g.VRAM == 0 {
 		t.Error("DetectGPU reported a present card with no VRAM")
+	}
+}
+
+// TestDetectGPU_SaysWhenItCouldNotAskRatherThanThatThereIsNoCard.
+//
+// The second result is the whole point: `exec.CommandContext` kills the child
+// when the context ends, so Output fails for a reason that says nothing about
+// the hardware -- and the old signature returned the same zero GPU for that as
+// for a machine with no card, which `Provider.gpuNow` then memoised for the
+// life of an `ember serve`.
+//
+// Asserted on a real `nvidia-smi` lookup rather than through a fake, because
+// what has to hold is that THIS function tells the two apart; and the
+// acceptance above is beside it on purpose, since a `false` here is also what
+// a function that could never answer would return.
+func TestDetectGPU_SaysWhenItCouldNotAskRatherThanThatThereIsNoCard(t *testing.T) {
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	g, answered := DetectGPU(dead)
+	if answered {
+		t.Error("a cancelled probe reported an answer about this machine's hardware")
+	}
+	if !g.IsZero() {
+		t.Errorf("a probe that could not run reported a card: %+v", g)
 	}
 }
 
@@ -136,14 +166,122 @@ func TestProvider_DetectsOnceWithTheRealDetectorByDefault(t *testing.T) {
 	}
 
 	calls := 0
-	q := &Provider{Detect: func(context.Context) GPU {
+	q := &Provider{Detect: func(context.Context) (GPU, bool) {
 		calls++
-		return testGPU
+		return testGPU, true
 	}}
 	q.gpuNow(t.Context())
 	q.gpuNow(t.Context())
 	q.gpuNow(t.Context())
 	if calls != 1 {
 		t.Errorf("detected %d times, want once", calls)
+	}
+}
+
+// TestProvider_ACancelledProbeIsNotCachedAsNoCard.
+//
+// `ember serve` builds ONE registry at startup and `getOffers` calls the
+// provider on the HTTP request's own context, so a browser reload that
+// abandons the first `/api/offers` poll ran this probe against a dying
+// context. With `sync.Once` and a detector that answered zero to every
+// failure, that one cancelled listing was memoised as "this machine has no
+// GPU" for the life of the process: the operator's card vanished from the
+// listing they pick hardware from, `--gpu` read as sold out everywhere, and
+// the "docker cannot hand it to a container" diagnosis could not fire because
+// it is guarded on the probe having found something.
+//
+// THE CHEAP-WHEN-IT-ANSWERED PROPERTY IS ASSERTED BESIDE THE RECOVERY, and
+// both halves are needed. Without the recovery this is the defect; without the
+// probe count, the "fix" of never caching at all would pass -- and that costs
+// an nvidia-smi on every listing on every machine that has no card, which is
+// the cost the cache exists to avoid.
+//
+// TestProvider_DetectsOnceWithTheRealDetectorByDefault cannot see any of
+// this: detecting exactly once is precisely what the defect does.
+func TestProvider_ACancelledProbeIsNotCachedAsNoCard(t *testing.T) {
+	calls := 0
+	p := &Provider{Detect: func(ctx context.Context) (GPU, bool) {
+		calls++
+		// DetectGPU's own shape, which is what makes this a stand-in for it
+		// rather than a fake arranged to fail.
+		if ctx.Err() != nil {
+			return GPU{}, false
+		}
+		return testGPU, true
+	}}
+
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	if g := p.gpuNow(dead); !g.IsZero() {
+		t.Fatalf("a cancelled probe reported a card: %+v", g)
+	}
+
+	// Every later listing, on a healthy context, has to find the card.
+	for i := range 3 {
+		if g := p.gpuNow(t.Context()); g != testGPU {
+			t.Fatalf("listing %d after the cancelled one reported %+v, want %+v",
+				i+1, g, testGPU)
+		}
+	}
+	// One probe for the cancelled listing, one that answered, and nothing
+	// after that: the answer is cached, the failure is not.
+	if calls != 2 {
+		t.Errorf("nvidia-smi ran %d times, want 2 -- one abandoned probe and one answer", calls)
+	}
+
+	// And a probe that answered "no card at all" is an answer, so it is
+	// cached too. A machine with no nvidia-smi must not re-exec per listing.
+	none := 0
+	q := &Provider{Detect: func(context.Context) (GPU, bool) {
+		none++
+		return GPU{}, true
+	}}
+	for range 3 {
+		if g := q.gpuNow(t.Context()); !g.IsZero() {
+			t.Fatalf("a machine with no card reported %+v", g)
+		}
+	}
+	if none != 1 {
+		t.Errorf("a cardless machine probed %d times, want once", none)
+	}
+}
+
+// TestProvider_ConcurrentListingsStillProbeOnce.
+//
+// sync.Once gave this for free and a mutex has to be held across the probe to
+// keep it: `ember serve` answers `/api/offers` from the HTTP server's
+// goroutines, so two polls really can arrive together. Written because the
+// obvious tidy-up -- probe first, lock only to store the answer -- is correct
+// under the race detector and execs once per concurrent caller, which is the
+// cost the cache exists to avoid.
+func TestProvider_ConcurrentListingsStillProbeOnce(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	p := &Provider{Detect: func(context.Context) (GPU, bool) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		// Long enough that a second caller is certainly inside gpuNow while
+		// this one is still probing.
+		time.Sleep(20 * time.Millisecond)
+		return testGPU, true
+	}}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if g := p.gpuNow(t.Context()); g != testGPU {
+				t.Errorf("gpuNow = %+v, want %+v", g, testGPU)
+			}
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("eight concurrent listings ran nvidia-smi %d times, want once", calls)
 	}
 }
