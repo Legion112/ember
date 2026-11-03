@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/test/integration/harness"
 )
 
@@ -103,6 +104,40 @@ func startServe(t *testing.T, l *harness.Lab, extra ...string) (*exec.Cmd, serve
 		t.Fatalf("ember serve announced no token: %q", line)
 	}
 	return cmd, served{Port: port, Token: tok}, wait
+}
+
+// startServeOn runs `ember serve` on a port and with a token the caller chose.
+//
+// FOR THE ONE LAB THAT RESTARTS THE SERVER, and both halves of the signature
+// are that lab's requirement rather than a convenience. The port has to be the
+// same one the browser is already on, because a reconnect to a different port
+// is not a reconnect. And the token has to survive, because a MINTED one does
+// not: `ember serve` mints per run, so a restart leaves the browser holding a
+// cookie for a credential that no longer exists and the resumed handshake is
+// refused -- which is a real property of the program and the reason the
+// announcement says "set serve_token in credentials.yaml for one that does not
+// change". A lab about the reconnect must not be a lab about that.
+//
+// It reads the token from nowhere, because with a configured one there is
+// nothing to read: a credential the operator chose is deliberately not
+// printed, so `startServe`'s parse of `?t=` would come back with the
+// announcement's own `<token>` placeholder.
+func startServeOn(
+	t *testing.T, l *harness.Lab, port int, token string, extra ...string,
+) (*exec.Cmd, served, func() string) {
+	t.Helper()
+	// Inherited by the subprocess: harness.StartRaw builds its environment
+	// from os.Environ(), and t.Setenv puts it back afterwards. The rule this
+	// does not break is the one that matters -- no secret in argv -- which is
+	// why there is no --token flag to pass instead.
+	t.Setenv(config.EnvServeToken, token)
+
+	args := append([]string{"serve", "--port", fmt.Sprint(port)}, extra...)
+	cmd, wait := l.Start(t.Context(), args...)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	l.WaitForLine(ctx, "Ctrl-C to stop")
+	return cmd, served{Port: port, Token: token}, wait
 }
 
 // answer is a finished response: read, closed, and still inspectable.

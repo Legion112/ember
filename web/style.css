@@ -144,6 +144,14 @@ label.denied input, label.denied select { cursor: not-allowed }
    the cell is one column wide. */
 .why { display: block; color: var(--bad); font-size: .78rem; font-weight: 400 }
 p.why { font-size: .85rem }
+/* `.stream` is the watcher's progress socket having stopped. A FOURTH class
+   and dim rather than red, for the reason the money row beside it says "not
+   priced yet" in words: nothing has gone wrong that ember knows of -- a
+   dropped socket, a restarted `ember serve`, a slept laptop and a blipped
+   `ssh -L` forward all look the same from here, and the generation may well
+   still be running. Red would say ember refused something, which is `.error`,
+   or that a node may be billing with nobody watching, which is `.fatal`. */
+.stream { color: var(--dim); font-size: .85rem; margin: .4rem 0 }
 .fatal {
   color: var(--bad);
   border: 1px solid var(--bad);

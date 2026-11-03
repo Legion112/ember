@@ -106,6 +106,23 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = conn.CloseNow() }()
 
+	// THE CURSOR, AT DEBUG, BECAUSE IT IS THE ONE THING ABOUT A WATCHER THAT
+	// IS OTHERWISE INVISIBLE.
+	//
+	// A client that resumes from the wrong number is silent in both
+	// directions: too high and it never learns what it missed, which presents
+	// as a progress row that froze; too low and the server replays rows the
+	// client already folded, which `Progress::apply` discards, so the page
+	// looks right while the socket re-sends a whole generation on every blip.
+	// The page cannot report either, and this is the only place that knows.
+	//
+	// The same argument AGENTS.md makes for `took=` on a debug line rather
+	// than a span exporter: the measurement that answers the question costs
+	// one line, no bytes and no new module, and `--log-level debug` already
+	// exists. Nothing is printed at info, because an open per watched request
+	// per reconnect is noise on the stdout a systemd unit is writing.
+	s.log().Debug("progress socket opened", "request", id, "after", after)
+
 	// Nothing is read from the client -- the cursor arrives in the query and
 	// the only control is to disconnect -- so a reader goroutine exists
 	// solely to notice a close and to answer a ping. Without it, a browser

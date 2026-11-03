@@ -16,7 +16,7 @@ use leptos::task::spawn_local;
 use crate::api;
 use crate::model::{
     Answer, Cancelled, Config, Envelope, Hires, Input, Job, Listing, NewRequest, Offers, Progress,
-    Rental, Request, RequestList, Stopping, VaeTiling,
+    Rental, Request, RequestList, Stopping, Stream, VaeTiling,
 };
 
 /// App is the whole page.
@@ -1382,55 +1382,171 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
     }
 }
 
+/// Watcher is everything one request's progress stream writes into.
+///
+/// A STRUCT AND NOT A LIST OF ARGUMENTS, because a re-open is the same code as
+/// the first open and a Rust closure cannot name itself: `connect` and `retry`
+/// are therefore free functions that call each other, and a free function
+/// taking seven Copy handles is a signature nobody can read. Everything in it
+/// is `Copy`, which is what lets the close handler hold one.
+#[derive(Clone, Copy)]
+struct Watcher {
+    watching: RwSignal<String>,
+    progress: RwSignal<Progress>,
+    request: RwSignal<Option<Request>>,
+    stream: RwSignal<Stream>,
+
+    /// How many re-opens have been made since the last one that succeeded.
+    ///
+    /// RESET BY THE SOCKET'S `onopen` AND NOT BY `Socket::open` RETURNING OK,
+    /// which is the difference between a bounded retry and a loop: the
+    /// constructor succeeds for a server that is not there, because the
+    /// handshake is asynchronous.
+    attempt: StoredValue<u32>,
+
+    /// Which open the page is waiting for.
+    ///
+    /// A GUARD AND NOT A CLEARED TIMEOUT HANDLE. Clearing a handle on the way
+    /// out still races a callback the browser has already queued, and the
+    /// question has one honest answer -- is this the open the page is still
+    /// waiting for -- so a counter bumped on every new watch answers it for
+    /// the scheduled re-open AND for an old socket's handlers at once.
+    epoch: StoredValue<u64>,
+
+    /// Held in a LOCAL store, because a web_sys::WebSocket is neither Send nor
+    /// Sync -- nothing in a browser is -- and Leptos's ordinary signals
+    /// require both so that the same component can run on a server. This one
+    /// never will.
+    socket: StoredValue<Option<api::Socket>, LocalStorage>,
+}
+
+/// connect opens the stream, from the cursor the watcher has reached.
+///
+/// `progress.cursor` AND NOT ZERO, which is the defect. `Socket::open` has
+/// taken an `after` since it was written and its one caller passed the literal
+/// `0`, so a reconnect -- had there been one -- would have replayed the whole
+/// generation, and a page reload and a dropped connection were not the same
+/// thing to this page at all: the first re-opened from zero and the second did
+/// nothing. Resuming is safe to overlap either way, because `Progress::apply`
+/// is idempotent per sequence number; what the cursor buys is that it does not
+/// have to.
+fn connect(w: Watcher, id: String, epoch: u64) {
+    if w.epoch.get_value() != epoch || w.watching.get_untracked() != id {
+        return;
+    }
+    let after = w.progress.get_untracked().cursor;
+
+    let on_open = move || {
+        if w.epoch.get_value() != epoch {
+            return;
+        }
+        w.attempt.set_value(0);
+        w.stream.set(Stream::Live);
+    };
+
+    let on_envelope = move |env: Envelope| {
+        if w.epoch.get_value() != epoch {
+            return;
+        }
+        w.progress.update(|p| p.fold(&env));
+        if let Some(r) = env.request {
+            w.request.set(Some(r));
+        }
+    };
+
+    let closed_id = id.clone();
+    let on_closed = move || retry(w, closed_id.clone(), epoch);
+
+    match api::Socket::open(&id, after, on_open, on_envelope, on_closed) {
+        // The previous socket is dropped here, which closes it: a connection
+        // to a generation nobody is watching holds a goroutine on the other
+        // end polling for it. Its handlers are cleared first, so its close
+        // cannot report a stop over this one's state -- see Socket::drop.
+        Ok(s) => w.socket.set_value(Some(s)),
+        // The constructor itself refused. There is no socket, so no `onclose`
+        // is coming and this is the only place the retry can be scheduled
+        // from.
+        Err(_) => retry(w, id, epoch),
+    }
+}
+
+/// retry schedules the next open, or says the stream is gone.
+fn retry(w: Watcher, id: String, epoch: u64) {
+    if w.epoch.get_value() != epoch {
+        return;
+    }
+    let terminal = w
+        .request
+        .get_untracked()
+        .map(|r| r.is_terminal())
+        .unwrap_or(false);
+    let attempt = w.attempt.get_value();
+
+    match crate::model::reopen_after(terminal, attempt) {
+        Some(wait) => {
+            w.attempt.set_value(attempt + 1);
+            w.stream.set(Stream::Reconnecting);
+            let again = id.clone();
+            set_timeout(move || connect(w, again, epoch), wait);
+        }
+        // THE STATE IS LEFT ALONE FOR A TERMINAL REQUEST, which is the one
+        // case where a stream that ended has still said everything there was:
+        // the final status and the files are on screen, nothing is stale, and
+        // a line reporting the stop would be noise over a finished
+        // generation. A spent bound is the opposite -- the step on screen is
+        // the last one that arrived and the generation may still be running.
+        None if terminal => {}
+        None => w.stream.set(Stream::Lost),
+    }
+}
+
 /// Watch is the live progress of one request.
 #[component]
 fn Watch(watching: RwSignal<String>) -> impl IntoView {
     let progress = RwSignal::new(Progress::default());
     let request: RwSignal<Option<Request>> = RwSignal::new(None);
-    let connected = RwSignal::new(false);
-
-    // One socket, re-opened whenever the watched request changes. The cursor
-    // starts at zero for a new one, so the backlog arrives before anything
-    // live -- a request that finished a minute ago is as watchable as one
-    // generating now.
-    //
-    // Held in a LOCAL store, because a web_sys::WebSocket is neither Send nor
-    // Sync -- nothing in a browser is -- and Leptos's ordinary signals
-    // require both so that the same component can run on a server. This one
-    // never will.
+    // WHAT THE SOCKET IS DOING, AND NOW WITH A READER. This was an
+    // `RwSignal<bool>` with three writers and no reader at all, so a stream
+    // that ended mid-generation left the last step on screen for ever under a
+    // panel captioned as though the card were sampling -- while the
+    // generation carried on and was billed.
+    let stream = RwSignal::new(Stream::Live);
     let socket: StoredValue<Option<api::Socket>, LocalStorage> = StoredValue::new_local(None);
+    let attempt = StoredValue::new(0u32);
+    let epoch = StoredValue::new(0u64);
 
+    let w = Watcher {
+        watching,
+        progress,
+        request,
+        stream,
+        attempt,
+        epoch,
+        socket,
+    };
+
+    // One socket, re-opened whenever the watched request changes AND whenever
+    // the stream ends under it. The cursor starts at zero for a new request,
+    // so the backlog arrives before anything live -- a request that finished a
+    // minute ago is as watchable as one generating now.
     Effect::new(move |_| {
         let id = watching.get();
+        // BUMPED BEFORE ANYTHING ELSE, so a re-open already scheduled for the
+        // request being left -- and the handlers of the socket about to be
+        // dropped -- are stale from here on.
+        epoch.update_value(|e| *e += 1);
+        let now = epoch.get_value();
+
         if id.is_empty() {
             socket.set_value(None);
             return;
         }
         progress.set(Progress::default());
         request.set(None);
+        stream.set(Stream::Live);
+        attempt.set_value(0);
 
-        let on_envelope = move |env: Envelope| {
-            progress.update(|p| {
-                for e in &env.events {
-                    p.apply(e);
-                }
-            });
-            if let Some(r) = env.request {
-                request.set(Some(r));
-            }
-        };
-        let on_closed = move || connected.set(false);
-
-        match api::Socket::open(&id, 0, on_envelope, on_closed) {
-            Ok(s) => {
-                connected.set(true);
-                // The previous socket is dropped here, which closes it: a
-                // connection to a generation nobody is watching holds a
-                // goroutine on the other end polling for it.
-                socket.set_value(Some(s));
-            }
-            Err(_) => connected.set(false),
-        }
+        connect(w, id, now);
     });
 
     view! {
@@ -1442,6 +1558,25 @@ fn Watch(watching: RwSignal<String>) -> impl IntoView {
             </Show>
 
             <Show when=move || !watching.get().is_empty()>
+                // THE STREAM STOPPED, which the page could not say at all.
+                //
+                // In the register the money row beside it already uses for a
+                // fact ember cannot do anything about -- "not priced yet",
+                // "—" -- because that is what this is: a dropped socket, a
+                // restarted `ember serve`, a laptop that slept or a forwarded
+                // port that blipped all look the same from here, and the
+                // generation may well still be running and billing. So the
+                // sentence says the one thing that is true, which is that the
+                // step on screen is the last one that arrived.
+                //
+                // ABSENT WHILE THE SOCKET IS OPEN, which is half the point: a
+                // line that is always there is not a signal. Stream::note is
+                // what decides, in `model`, where cargo test reaches it.
+                {move || match stream.get().note() {
+                    None => ().into_any(),
+                    Some(note) => view! { <p class="stream">{note}</p> }.into_any(),
+                }}
+
                 <dl class="rental">
                     <Show when=move || !progress.get().node.is_empty()>
                         <dt>"node"</dt>

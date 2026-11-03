@@ -153,21 +153,36 @@ fn describe(v: JsValue) -> Error {
 ///
 /// It resumes from a cursor, which is what makes a reconnect lossless: the
 /// server replays from the rows, so a page reload and a dropped connection are
-/// the same thing to it.
+/// the same thing to it. For the life of this type that sentence was a claim
+/// about a parameter nobody used -- `open` took an `after` and its one caller
+/// passed the literal `0`, and nothing re-opened a stream that ended at all.
+/// `views::Watch` is where the cursor and the re-open live, because the cursor
+/// is `Progress`'s and this type holds no state worth resuming from.
 pub struct Socket {
     ws: web_sys::WebSocket,
     // Kept alive for as long as the socket is: a dropped closure is a
     // callback the browser will never call again, which here is a progress
     // stream that silently stops.
+    _on_open: Closure<dyn FnMut(web_sys::Event)>,
     _on_message: Closure<dyn FnMut(web_sys::MessageEvent)>,
     _on_close: Closure<dyn FnMut(web_sys::CloseEvent)>,
 }
 
 impl Socket {
     /// open starts watching a request from a sequence number.
+    ///
+    /// `on_open` IS NOT DECORATION, and leaving it out is how a bounded retry
+    /// becomes an unbounded one. `WebSocket::new` returns Ok for a server that
+    /// is not there -- the handshake is asynchronous, so the constructor
+    /// succeeds and `onclose` arrives afterwards -- so "the socket opened" is
+    /// a thing only the browser can say. A retry counter reset on the
+    /// constructor's Ok is reset on every attempt, which is a loop that never
+    /// reaches its bound and never prints the sentence that tells an operator
+    /// to reload.
     pub fn open(
         id: &str,
         after: i64,
+        mut on_open: impl FnMut() + 'static,
         mut on_envelope: impl FnMut(crate::model::Envelope) + 'static,
         mut on_closed: impl FnMut() + 'static,
     ) -> Result<Self, Error> {
@@ -177,6 +192,11 @@ impl Socket {
         let url = format!("ws://{host}/ws?id={id}&after={after}");
 
         let ws = web_sys::WebSocket::new(&url).map_err(describe)?;
+
+        let opened = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            on_open();
+        }) as Box<dyn FnMut(_)>);
+        ws.set_onopen(Some(opened.as_ref().unchecked_ref()));
 
         let on_message = Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
             if let Some(text) = e.data().as_string() {
@@ -200,6 +220,7 @@ impl Socket {
 
         Ok(Self {
             ws,
+            _on_open: opened,
             _on_message: on_message,
             _on_close: on_close,
         })
@@ -208,6 +229,25 @@ impl Socket {
 
 impl Drop for Socket {
     fn drop(&mut self) {
+        // THE HANDLERS GO FIRST, and that ordering is the whole of this.
+        //
+        // `close()` makes the browser call `onclose`, and the closure it would
+        // call is about to be freed with this struct -- which throws
+        // `closure invoked recursively or after being dropped` in the console,
+        // observed by clicking a queue row twice. It was harmless only
+        // BECAUSE nothing read the signal that handler wrote: the write that
+        // could not land was one nobody was looking at. Now that the page says
+        // when a stream stopped, that same close would be the OLD socket
+        // reporting a stop over the NEW socket's state -- a watcher that
+        // reads "reconnecting" for a stream that is open, and a retry
+        // scheduled against a request nobody is watching.
+        //
+        // Clearing them makes the two sockets independent rather than
+        // relying on the order in which `views::Watch` happens to store one
+        // and drop the other, which was luck rather than a decision.
+        self.ws.set_onopen(None);
+        self.ws.set_onmessage(None);
+        self.ws.set_onclose(None);
         // Closed explicitly. Letting it fall out of scope leaves the browser
         // holding a connection to a generation nobody is watching, and the
         // server holding a goroutine polling for it.
