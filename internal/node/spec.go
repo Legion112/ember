@@ -112,22 +112,6 @@ type Spec struct {
 	// existed asks for.
 	Serve        []string
 	ServeTimeout time.Duration
-
-	// MinCUDA is the oldest CUDA runtime this image can run against, as
-	// "major.minor" -- for example "12.6". Empty asks for no constraint.
-	//
-	// A property of the run rather than of the account, which is why it is
-	// here: the image carries a CUDA runtime, and a host whose driver
-	// predates it cannot run that image at all. ember sent nothing at all
-	// until this existed, so every pod it created accepted any CUDA version
-	// -- including one too old for the image about to run on it. That
-	// failure does not surface when offers are filtered. It surfaces after
-	// the pod exists and is billing.
-	//
-	// How to express it belongs to the provider. RunPod takes an
-	// allowedCudaVersions list on create, from a fixed enum, so it sends
-	// every version at or above this one.
-	MinCUDA string
 }
 
 // SpecOptions is the input to NewSpec.
@@ -150,7 +134,6 @@ type SpecOptions struct {
 	GPUProbeTimeout time.Duration
 	Serve           []string
 	ServeTimeout    time.Duration
-	MinCUDA         string
 }
 
 // NewSpec validates o and returns the Spec it describes.
@@ -221,11 +204,6 @@ func NewSpec(o SpecOptions) (Spec, error) {
 		}
 		cmds = append(cmds, append([]string(nil), c...))
 	}
-	if o.MinCUDA != "" {
-		if _, _, err := ParseCUDAVersion(o.MinCUDA); err != nil {
-			return Spec{}, err
-		}
-	}
 	// A CPU-only run has no card, so a probe against one could only ever
 	// fail -- and it would fail after the machine was rented, which is the
 	// shape of mistake this whole package exists to catch early.
@@ -259,7 +237,6 @@ func NewSpec(o SpecOptions) (Spec, error) {
 		GPUProbeTimeout: o.GPUProbeTimeout,
 		Serve:           append([]string(nil), o.Serve...),
 		ServeTimeout:    o.ServeTimeout,
-		MinCUDA:         o.MinCUDA,
 	}, nil
 }
 
@@ -370,6 +347,25 @@ func cloneEnv(m map[string]string) map[string]string {
 // it was. Compared as a pair of integers for the same reason: a provider's
 // list of acceptable versions is sorted by what the driver supports, and
 // sorting it as text puts 12.9 above 12.10.
+//
+// NOTHING IN EMBER CALLS EITHER OF THESE ANY MORE, and that is #91's answer
+// rather than an oversight. They existed for `min_cuda`, a config key that was
+// removed because no provider here can honour it: RunPod's create endpoint has
+// no CUDA field and answers 422 to the allowedCudaVersions ember used to send,
+// and the per-GPU cudaVersions its catalogue does report tracks capacity
+// rather than capability -- pinned to the committed capture by
+// runpod.TestCatalogue_ReportsCudaVersionsAndTheyAreNotAFloorForMinCUDA, which
+// is also what reopens the question if a later capture breaks the correlation.
+// `gpu_probe` is the live mechanism and runs on the node.
+//
+// So this pair should go the way node.RateFromFloat went -- its premise was
+// read from a schema, and a second mechanism for the half that matters already
+// exists, which are the two halves of that precedent. It is NOT deleted here
+// only because cmd/check-coverage's deadExcluded names CUDAAtLeast and fails
+// over a waiver it stops reporting, so the function and its waiver have to be
+// removed in one commit and that file was held by another change. Three lines
+// of deletion, and the two judgements worth keeping when they go are the ones
+// above: strings rather than a float, and compared as a pair of integers.
 func ParseCUDAVersion(s string) (major, minor int, err error) {
 	maj, min, ok := strings.Cut(strings.TrimSpace(s), ".")
 	if !ok {

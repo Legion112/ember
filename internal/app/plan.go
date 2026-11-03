@@ -550,7 +550,6 @@ func BuildSpec(cfg config.Config, r Resolved) (node.Spec, error) {
 		GPUProbeTimeout: cfg.GPUProbeTimeout,
 		Serve:           serve,
 		ServeTimeout:    cfg.SD.ReadyTimeout,
-		MinCUDA:         cfg.MinCUDA,
 
 		// Already resolved, and already the one reference this run will use.
 		// NewSpec is still the only way to obtain a validated Spec, and it

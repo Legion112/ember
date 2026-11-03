@@ -4804,6 +4804,84 @@ A leaked node bills by the hour in silence. These are not style preferences.
   carries a real rate and `ember spend`'s period total has to equal both
   rentals -- which is also the first assertion in this repository that the
   aggregate counts a rental ember started on its own initiative.
+- **`min_cuda` is gone, the recorded measurement that decided it was verified
+  rather than trusted, and the one guard it rests on was made to fail.** The
+  entry above refused to enforce the key and left the removal to "whoever reads
+  this" -- this is that reading. Three things were checked before anything was
+  deleted, because three of the last four audits of this file found a rule it
+  states that the code does not. **The measurement HOLDS**, which is the
+  outcome nobody would otherwise write down:
+  `TestCatalogue_ReportsCudaVersionsAndTheyAreNotAFloorForMinCUDA` exits **0**
+  against the committed capture, and `available` still tracks the top-level
+  summary on all four rows -- LOW gives every version true, NONE gives every
+  version false, the AMD card reports none at all, and the RTX 4090 reads NONE
+  overall with `LOW` in US-IL-1 and all eight versions false. It was also made
+  to go **red**: flipping one of those eight to `available: true` is exit 1 at
+  the named Errorf, so the green is an answer rather than a dead assertion. The
+  first attempt at that flip did not apply at all and reported exit 0, which is
+  the harness trap this file records, caught by asserting the marker the patch
+  introduces.
+  **What is removed is the key and its plumbing, not only the documentation.**
+  The defect was never the refusal: RunPod's was loud, correct and named
+  `gpu_probe`. It was that one documented key meant a refusal on one provider
+  and **silence** on the other -- `local` has no CUDA version to compare, so it
+  dropped the value -- and the provider is the wrong layer for an answer that
+  is the same everywhere. So `config.Config.MinCUDA`, `node.SpecOptions.MinCUDA`,
+  `node.Spec.MinCUDA`, the `app.plan` wiring and the RunPod refusal are all
+  gone, and `config.rejectRemovedKeys` carries the one sentence a layer up,
+  before any provider is chosen. **`KnownFields(true)` already made the removal
+  a refusal rather than silence**, which is why this is about the message and
+  not about the check: yaml's is "field min_cuda not found in type
+  config.Config", which names a Go type an operator should never see and no
+  remedy, and the person who hits it is the one who followed `README.md`.
+  **Presence and not emptiness, which a test had to be strengthened to see.**
+  `min_cuda:` with no value decodes as null, so the pointer version of the
+  check reads it as absent -- and it is the spelling an operator reaches for to
+  turn a key off without deleting the line. The first version of
+  `TestLoad_RefusesAMinCUDAWithNoValue` asserted `err != nil`, which
+  `KnownFields` satisfies whatever the check concluded, so it **could not
+  fail** -- "what would this say if the bug were present?" answered with "the
+  same thing", found by thinking the reinstatement through before running it
+  rather than by running it. It asserts the sentence now, and that is what
+  goes red.
+  **Nothing anywhere gives a CUDA runtime version ember can act on for free,
+  and the one new observation is written down rather than built on.**
+  `nvidia-smi` **does** report one -- `--version` and `-q` both print
+  `CUDA Version`, measured here as 13.0 on driver 580.126.09, and `README.md`
+  already records 13.2 on a rented 4090 -- while `--query-gpu` has no such
+  field, only `driver_version` and `compute_cap`, which is `node.ComputeCap`
+  and a different number. So AGENTS.md was right that `compute_cap` is not it
+  and incomplete in implying no host reports one. It is still not a floor ember
+  can enforce: it is read on the node, after the pod is billing, and the
+  comparison is the unmeasured half -- CUDA minor-version compatibility means
+  an image built against 12.6 runs on a 12.x driver older than 12.6, so
+  `CUDAAtLeast` over the driver's figure refuses hosts the image works on,
+  which is `hasCapacity`'s own defect reached a third time. Settling it needs a
+  rental on a host with an old driver and was not made. `pod_running.json`'s
+  `"cudaVersion": "12.4"` is **confirmed** schema-derived and undecoded:
+  `grep -n Cuda internal/provider/runpod/types.go` returns nothing.
+  **One thing is NOT done and it is bookkeeping rather than behaviour.**
+  `node.CUDAAtLeast` and `ParseCUDAVersion` now have no caller at all and
+  should go the way `node.RateFromFloat` went -- premise read from a schema, and
+  a live second mechanism in `gpu_probe`, which are both halves of that
+  precedent. They are still here because `cmd/check-coverage`'s `deadExcluded`
+  names `internal/node.CUDAAtLeast` and fails over an entry it stops reporting,
+  so the function and its waiver have to be deleted in one commit, and that
+  file was held by another change. Three lines of deletion; the waiver's stated
+  reason -- "deleting this would remove the evidence that the key is
+  unenforced" -- is **stale as of this commit**, because the evidence is now the
+  refusal, the capture guard and `TestCreate_SendsNoCudaFieldAtAll`, none of
+  which is that function. The two judgements worth keeping when it goes are at
+  `ParseCUDAVersion`: strings rather than a float, because "12.10" is not 12.1,
+  and compared as a pair of integers for the same reason.
+  **And the comment guard caught this change citing `ember ls --all`.**
+  `rejectRemovedKeys`'s doc comment reached for that flag as its precedent for
+  "a documented thing nobody can use is worse than no documented thing" --
+  which is the eighteen-comment sweep walked into by the change removing a key
+  for exactly that reason. `TestComments_CiteNoFlagThatNoFlagSetDeclares`
+  reported it on the first full run, exit 1, and the citation is gone. A guard
+  whose first catch is the commit that was quoting it is the best evidence it
+  was worth building.
 
 ## Style
 

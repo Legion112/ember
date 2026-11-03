@@ -227,39 +227,6 @@ type Config struct {
 	// possible moment turns a card that needed forty seconds into a refusal.
 	// Empty is gpucheck.DefaultTimeout.
 	GPUProbeTimeout time.Duration `yaml:"gpu_probe_timeout"`
-
-	// MinCUDA is the oldest CUDA runtime the image can run against, as
-	// "major.minor" -- for example "12.6", which is what this repository's
-	// workload-sd-cuda.Dockerfile builds against.
-	//
-	// It restricts placement to hosts new enough to run the image. Empty
-	// asks for no constraint, which is what ember did for its whole life
-	// before this key existed: every pod accepted any CUDA version,
-	// including hosts too old for the image about to run on them -- a
-	// failure that appears only after the pod is created and billing.
-	//
-	// It is now measured, and the measurement is that RunPod refuses it.
-	// ember sent it as allowedCudaVersions, from RunPod's published schema --
-	// the wrong one. rest.runpod.io/v1/pods accepts that field;
-	// api.runpod.io/v2/pods, where ember creates, declares eighteen
-	// properties with unevaluatedProperties: false and no CUDA field, and
-	// answered every create with
-	//
-	//   status 422: additional properties 'allowedCudaVersions' not allowed
-	//
-	// Filtering offers is not available either, for a different reason than
-	// this comment used to give. It said the live catalogue does not return
-	// cudaVersions; it does, and the capture proving it was already committed
-	// when that was written. What the field tracks is whether the card has
-	// capacity, not what a host can run: an RTX 4090 that is rentable in
-	// US-IL-1 reports every one of its eight CUDA versions unavailable, so a
-	// floor built on it would refuse a card for every value of min_cuda --
-	// including values the card satisfies.
-	//
-	// So the runpod provider refuses a non-empty value rather than dropping
-	// it, because a constraint an operator believes is in force and is not
-	// would be worse than none. gpu_probe is what enforces a driver floor.
-	MinCUDA string `yaml:"min_cuda"`
 }
 
 // AssetConfig is one file to put on the store.
@@ -610,6 +577,12 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
 
+	// Before the strict decode, so that a key ember used to accept gets
+	// ember's sentence rather than yaml's. See rejectRemovedKeys.
+	if err := rejectRemovedKeys(raw); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	dec.KnownFields(true) // a misspelled key is a typo, not a comment
 	if err := dec.Decode(&cfg); err != nil {
@@ -619,6 +592,54 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// rejectRemovedKeys answers for a top-level key ember used to accept.
+//
+// KnownFields(true) already refuses an unknown key, so a removal is not
+// silence -- but what it says is "field min_cuda not found in type
+// config.Config", which names a Go type an operator should never see and no
+// remedy at all. `min_cuda` was in README for the life of the key, so the
+// person who hits this is precisely the one who followed the documentation,
+// and the remedy is specific: gpu_probe.
+//
+// (This comment cited a flag that has never existed as its precedent, and
+// TestComments_CiteNoFlagThatNoFlagSetDeclares reported it on the first run of
+// the suite -- the eighteen-comment sweep that guard was built for, walked
+// into by the change that was removing a key for the same reason. The rule it
+// was reaching for needs no citation: a documented thing nobody can use is
+// worse than no documented thing.)
+//
+// Presence and not emptiness, which is why this is a map rather than a struct
+// of pointers: `min_cuda:` with no value decodes as null and leaves a pointer
+// nil, so the one spelling that would be waved through is the one an operator
+// reaches for when they want to turn the key off without deleting the line.
+//
+// One entry, and the list may only shrink. A table of removed keys maintained
+// by hand is the thing this repository refuses -- what makes it earn its place
+// is that it is bounded by what was once documented, so it cannot grow except
+// by a removal, and an entry nobody can still be carrying is a paragraph
+// nobody needs.
+func rejectRemovedKeys(raw []byte) error {
+	var top map[string]yaml.Node
+	if err := yaml.Unmarshal(raw, &top); err != nil {
+		// A file this cannot read is one the strict decode cannot either, and
+		// that is the error worth printing because it names the line. Saying
+		// anything here would describe the wrong problem.
+		return nil //nolint:nilerr // the strict decode below reports it with a line number
+	}
+	if _, ok := top["min_cuda"]; !ok {
+		return nil
+	}
+	return errors.New("min_cuda is no longer a config key, because ember could not honour it " +
+		"anywhere: api.runpod.io/v2/pods, where ember creates, has no CUDA field and answered " +
+		"422 to the allowedCudaVersions ember used to send, and the per-GPU cudaVersions its " +
+		"catalogue does report tracks whether the card has capacity rather than what a host can " +
+		"run -- a card that is rentable in one datacentre reports every CUDA version " +
+		"unavailable -- so narrowing offers by it would refuse a card for every value of " +
+		"min_cuda, including values the card satisfies.\n" +
+		"Delete the line. To refuse a host that cannot run the image, use gpu_probe: it runs on " +
+		"the node and fails before any workload does, costing the probe rather than the run")
 }
 
 // rejectSecrets fails when the file looks like it holds a credential.

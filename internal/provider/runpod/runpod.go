@@ -261,14 +261,15 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 		return node.Handle{}, err
 	}
 
-	// min_cuda cannot be expressed against this API, and saying so is better
-	// than dropping it.
+	// THERE IS NO CUDA FLOOR IN THE CREATE BODY AND THERE IS NO min_cuda TO
+	// PUT IN ONE, which is #91's answer and the reason this is a comment where
+	// a refusal used to be.
 	//
-	// ember used to send it as allowedCudaVersions, which came from RunPod's
-	// published schema. The wrong one: rest.runpod.io/v1/pods accepts that
-	// field, and api.runpod.io/v2/pods -- the endpoint below -- declares 18
-	// properties with unevaluatedProperties: false and no CUDA field at all.
-	// Every create with min_cuda set therefore died at:
+	// ember used to send the floor as allowedCudaVersions, which came from
+	// RunPod's published schema. The wrong one: rest.runpod.io/v1/pods accepts
+	// that field, and api.runpod.io/v2/pods -- the endpoint below -- declares
+	// 18 properties with unevaluatedProperties: false and no CUDA field at
+	// all. Every create with min_cuda set therefore died at:
 	//
 	//   status 422: additional properties 'allowedCudaVersions' not allowed
 	//
@@ -297,26 +298,17 @@ func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Han
 	// pins all of that to the capture so the next person re-decides it on
 	// evidence.
 	//
-	// So this is a refusal rather than a silent drop. A constraint the
-	// operator believes is in force and is not would be worse than none --
-	// the same reason the field was added with a comment admitting nobody had
-	// confirmed it filtered. What does enforce a driver floor is gpu_probe,
-	// which runs on the node and costs the probe rather than the run.
+	// So the key is gone rather than refused here. A per-provider refusal was
+	// the honest answer while the key existed and it was only ever half of
+	// one: the local provider had no CUDA version to compare and dropped the
+	// value in silence, so one documented key meant a refusal on one provider
+	// and nothing on the other. config.rejectRemovedKeys carries the same
+	// sentence a layer up, where it reaches every provider and fires before
+	// anything is created. What enforces a driver floor is gpu_probe, which
+	// runs on the node and costs the probe rather than the run.
 	//
 	// The second time this provider's two APIs have disagreed about a field.
 	// The first was network volumes, dataCenter against dataCenterId.
-	if strings.TrimSpace(req.Spec.MinCUDA) != "" {
-		return node.Handle{}, fmt.Errorf(
-			"min_cuda is set to %q and RunPod's pod API does not accept it: "+
-				"api.runpod.io/v2/pods has no CUDA field, and the per-GPU cudaVersions its "+
-				"catalogue does report tracks whether the card has capacity rather than what a "+
-				"host can run -- a card that is rentable in one datacentre reports every CUDA "+
-				"version unavailable -- so ember cannot narrow placement by CUDA version.\n"+
-				"Remove min_cuda. To refuse a host that cannot run the image, use gpu_probe: it "+
-				"runs on the node and fails before any workload does, costing the probe rather "+
-				"than the run",
-			req.Spec.MinCUDA)
-	}
 
 	body := createPodRequest{
 		// The pod name carries ember's label, because RunPod has no tag API.

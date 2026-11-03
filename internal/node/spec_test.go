@@ -342,26 +342,6 @@ func TestCUDAAtLeast(t *testing.T) {
 	}
 }
 
-func TestNewSpec_RefusesAnUnreadableMinCUDA(t *testing.T) {
-	o := validSpecOptions()
-	o.MinCUDA = "12"
-	if _, err := NewSpec(o); err == nil {
-		t.Error("a malformed min_cuda was accepted; it would reach the provider as a bad request")
-	}
-}
-
-func TestNewSpec_CarriesMinCUDA(t *testing.T) {
-	o := validSpecOptions()
-	o.MinCUDA = "12.6"
-	s, err := NewSpec(o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.MinCUDA != "12.6" {
-		t.Errorf("MinCUDA = %q", s.MinCUDA)
-	}
-}
-
 // TestNewSpec_CmdAndCmdsAreTheSameThing: one command is a batch of one, so
 // everything downstream reads Cmds and nothing has to ask which spelling the
 // operator used.
