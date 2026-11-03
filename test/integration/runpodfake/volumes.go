@@ -51,13 +51,15 @@ import (
 // published documentation discovers on its first create.
 const volumePath = "/v2/network-volumes"
 
-// VolumeDataCenter is the site every volume this fake creates reports, unless
-// the create names another.
+// VolumeDataCenter is the site the labs here put their stores in.
 //
-// It is one of the fifteen datacentres that have an S3 endpoint, because the
-// region is also the signing region: `s3.EndpointFor` and `awssig.Sign` both
-// read it, so a lab whose store is somewhere RunPod does not serve would be
-// testing a hostname rather than a signature.
+// The fake honours whatever `dataCenter` a create names -- the field is
+// required and there is no default, so there is nothing for this to override.
+// It is named here so a lab and the signature check cannot disagree about it:
+// the region is also the SIGNING region, read by `s3.EndpointFor` and
+// `awssig.Sign` alike, and it is EU-RO-1 because that is the site the one live
+// store run actually used, so a lab's scope is a region RunPod serves an S3
+// endpoint for rather than a string nobody has seen.
 const VolumeDataCenter = "EU-RO-1"
 
 // volume is one network volume, plus the directory standing in for its bytes.
@@ -353,7 +355,13 @@ func (v *volume) objectKeys() ([]string, error) {
 // internal/s3's parseS3Time reads.
 func s3Time(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
-// trimKey turns a request path into a bucket and a key.
+// splitBucketKey turns an S3 request path into a bucket and a key.
+//
+// A bucket-level call has an empty key, which is what tells a listing from an
+// object call: `/vol_abc` is "what is on this store" and `/vol_abc/sd15.gguf`
+// is one object. `s3.Client.bucketPath` exists on the client side for the
+// same distinction -- a listing asked for at `/bucket/` is a listing of a
+// store whose name ends in a slash.
 func splitBucketKey(p string) (bucket, key string) {
 	p = strings.TrimPrefix(p, "/")
 	if i := strings.IndexByte(p, '/'); i >= 0 {
