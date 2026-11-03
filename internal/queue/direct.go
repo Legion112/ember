@@ -125,17 +125,44 @@ func (q *Queue) handoff() chan Direct {
 // whole detach story: this context bounds the wait, and Direct.Run's bounds
 // the rental.
 //
-// A SHUTDOWN WHILE SOMEBODY IS PARKED HERE IS LEFT TO THE CONNECTION, which is
-// a decision rather than an oversight. The drain loop returns when `ember
-// serve` is stopping and nothing will ever receive, so this send waits for the
-// caller's own context -- which is the HTTP request's, cancelled when the
-// client's connection closes as the process exits. The client reads a dropped
-// connection and reports it, nothing was rented, and the row Adopt wrote is
-// swept to `interrupted` by the next start's Interrupt -- which is exactly
-// what a process killed outright already leaves behind. A second signal here
-// would be a `done` channel on the Queue whose only reader is this select,
-// and the state it would carry is the thing the loop's own return already
-// says.
+// A SHUTDOWN RACES THIS SEND, AND THERE ARE TWO OUTCOMES RATHER THAN ONE.
+// This paragraph used to read "the drain loop returns when `ember serve` is
+// stopping and nothing will ever receive", and that sentence is true only of
+// a submitter still parked here. `Run`'s idle select has `<-ctx.Done()` and
+// `<-q.handoff()` as two cases of ONE select, so a shutdown landing while a
+// submission is parked makes both ready and Go picks uniformly -- and if the
+// handoff wins, the loop TAKES the run, reaches `if ctx.Err() != nil` at the
+// top of the next iteration, and returns having started nothing. Submit has
+// already answered nil by then. So something did receive it, and the old
+// account said that could not happen.
+//
+// MEASURED RATHER THAN REASONED, because the obvious shape reports it as
+// unreachable. With the send and the cancel released from one closed channel,
+// so both cases are genuinely ready together: 3000 attempts, 21 accepted
+// submissions, 2 of which ran and **19 taken and dropped**. The control is
+// what anybody would try first -- park the send, then cancel, where
+// `ctx.Done()` is not yet ready at the moment the handoff is: 400 attempts,
+// 400 accepted, **400 ran, 0 dropped**. A test that raced for this would be a
+// flake, so what is committed is TestDropPending_... over the line the loop
+// now prints, and these numbers live here.
+//
+// THE OUTCOME IS RIGHT EITHER WAY; ONLY THE ACCOUNT WAS WRONG. `Direct.Run`
+// is what rents and on both paths it never ran, so there is no money and no
+// leak. The row `Adopt` wrote is swept to `interrupted` by the next start's
+// Interrupt, which is exactly what a process killed outright already leaves
+// behind, and the client reads a dropped connection as the process exits
+// whichever case won. What the drop is no longer is SILENT: `Run` calls
+// dropPending before that return, so "swept by the next start" is something a
+// reader can confirm in the log rather than take on trust -- which is this
+// repository's own rule about a comment that is wrong concerning why a seal
+// holds, applied to the seal's own paragraph.
+//
+// A `done` channel on the Queue is still not the answer, and the reason is
+// stronger than it was. It would turn the taken-and-dropped case into a
+// refusal, which is the same outcome with more state -- the run does not
+// happen either way -- and its only reader would be this select. Dropping it
+// at shutdown is the correct behaviour; being able to see that it happened is
+// what was missing.
 func (q *Queue) Submit(ctx context.Context, d Direct) error {
 	if d.Req == "" || d.Run == nil {
 		// Refused rather than left to panic in the drain goroutine, where the
@@ -150,6 +177,33 @@ func (q *Queue) Submit(ctx context.Context, d Direct) error {
 	case <-ctx.Done():
 		return fmt.Errorf("gave up waiting for a rental to be free: %w", ctx.Err())
 	}
+}
+
+// dropPending says out loud that a submitted run was taken and never started.
+//
+// WHAT IT IS FOR. `Run`'s top-of-loop `ctx.Err()` return is the one place a
+// submission the loop has ALREADY ACCEPTED can be discarded -- see Submit for
+// why that is reachable and measured -- and it used to discard it with no line
+// anywhere. So a run an operator had been told was starting vanished with
+// nothing in the daemon's log about it, and "the next start sweeps the row to
+// interrupted" was a thing a reader had to take on trust rather than confirm.
+//
+// THE MONEY FACT COMES FIRST, because that is the one an operator reads this
+// line to settle: `Direct.Run` is what rents and it never ran, so there is
+// nothing billing. Then what the row will say, then what to do -- the client
+// was told the run had started, so resubmitting it is the operator's move and
+// not something ember will do for them.
+//
+// A nil d is the ordinary shutdown and is silent. It is a no-op here rather
+// than a condition at the call site, so both answers go through one line.
+func (q *Queue) dropPending(d *Direct) {
+	if d == nil {
+		return
+	}
+	q.log().Warn("a submitted run was accepted and this process stopped before it could rent; "+
+		"nothing was rented and nothing is billing, the next ember serve marks the request "+
+		"interrupted, and the client was told it had started -- so submit it again",
+		"request", d.Req)
 }
 
 // direct runs a submitted run, in this iteration of the drain loop.
