@@ -3791,9 +3791,13 @@ findings, or 3 on a usage error.
   `t.Errorf` rather than `ember: <err>`; two more are `Cancel` in a queue
   test, and the last is `RunPod`. A further 80 begin with a verb, so the first
   rune belongs to the value: an HTTP method, an `EMBER_*` name, a path, a
-  provider name. The 13 `Error()` methods were read by hand and the only
-  uppercase first runs they can produce are `e.Method` in `httpx.StatusError`
-  and `s3.StatusError`. Run with `go/parser` over **all 164 commits in this
+  provider name. The 13 `Error()` methods were read by hand: eleven open with
+  a lowercase literal, and the two that can open with a capital are
+  `httpx.StatusError` and `s3.StatusError`, whose first word is `e.Method` --
+  an HTTP verb, the identifier exception again. `sdserver.APIError` leads with
+  the server's own `code`, which every captured response spells in lowercase
+  snake case, so that one is the server's manners rather than ember's rule.
+  Run with `go/parser` over **all 164 commits in this
   repository's history**, the same pass finds those nine leading words and no
   others, ever: **the lowercase rule has never once been broken here.**
 - **`%w`: eleven sites print an error with another verb, and none of them is a
