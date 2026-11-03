@@ -484,32 +484,45 @@ const (
 // The two halves that make this `ember up` rather than an enqueue: the row is
 // StatusRunning, which no ClaimNext will take -- an enqueued one would be
 // claimed by this very loop and generate the batch a second time -- and the
-// run reaches the drain goroutine rather than a goroutine of its own.
+// run goes to the drain goroutine rather than starting anywhere else.
+//
+// NO DRAIN LOOP RUNS HERE, AND THAT IS WHAT MAKES IT DETERMINISTIC. The first
+// version started one, which meant the rental could fail against the recording
+// Docker engine and write a terminal status BEFORE the assertion read the row
+// -- an intermittent failure caught by the control of a reinstatement pass
+// rather than by any run of the suite, which is the only reason it was found at
+// all. A flaky assertion is worse than none: it teaches people to re-run
+// rather than to read, which this repository already paid for when two lab
+// suites destroyed each other's nodes.
+//
+// With nobody receiving, Submit parks on the rendezvous and the row stays in
+// exactly the state Adopt wrote it in -- so the parking is asserted too, which
+// is a property the old shape could not see at all. The handoff's other half,
+// that the loop takes it and runs it, is TestSubmit_* and
+// TestAdoptRun_SendsEveryEventToTheExtraSinksAndToTheRow.
 func TestDirectRunner_StartAdoptsTheRowAndHandsTheRunToTheLoop(t *testing.T) {
 	st := genstore.NewRecordingStore()
 	q := &Queue{Store: st, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
 	r := directRunner(t, q, st)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	loop := make(chan error, 1)
-	go func() { loop <- q.Run(ctx) }()
-	defer func() {
-		cancel()
-		<-loop //nolint:errcheck // waiting for the destroy, not for an error
+	defer cancel()
+	started := make(chan error, 1)
+	go func() {
+		_, err := r.Start(ctx, app.RunAsk{Config: writeRunConfig(t, localRunConfig)})
+		started <- err
 	}()
 
-	id, err := r.Start(ctx, app.RunAsk{Config: writeRunConfig(t, localRunConfig)})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if id == "" {
-		t.Fatal("Start returned no request id, so nothing could be streamed")
-	}
+	var row genstore.Request
+	waitFor(t, 15*time.Second, "the run's row to be adopted", func() bool {
+		rows, err := st.List(context.Background(), genstore.Filter{})
+		if err != nil || len(rows) != 1 {
+			return false
+		}
+		row = rows[0]
+		return true
+	})
 
-	row, err := st.Get(ctx, id)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if row.Status != genstore.StatusRunning {
 		t.Errorf("the adopted row is %q, want running: a queued row is exactly what ClaimNext "+
 			"takes, and a second claim of this run is a second card", row.Status)
@@ -526,16 +539,30 @@ func TestDirectRunner_StartAdoptsTheRowAndHandsTheRunToTheLoop(t *testing.T) {
 
 	// AND IT IS NOT CLAIMABLE, which is the assertion the status is a proxy
 	// for: Adopt's whole reason is that a queued row would be taken.
-	if _, ok, cerr := st.ClaimNext(ctx, "lease", genstore.Compat{}); cerr != nil || ok {
+	if _, ok, cerr := st.ClaimNext(context.Background(), "lease", genstore.Compat{}); cerr != nil || ok {
 		t.Errorf("ClaimNext took the adopted row (ok=%v, err=%v)", ok, cerr)
 	}
 
-	// The rental is left in flight on purpose: what this asserts is the row
-	// and the handoff, and waiting for a run to END would mean waiting out
-	// provision's dial against a node with no sshd. The deferred cancel is
-	// what stops it -- and it stops it through the loop, so `<-loop` returning
-	// is the destroy having run, which is the shutdown property `ember serve`
-	// depends on.
+	// AND IT IS STILL PARKED: a Submit that something had taken would have
+	// returned by now, and the row would be whatever the run left.
+	select {
+	case err := <-started:
+		t.Fatalf("Start returned with no drain loop to take the run (%v), so a rental can "+
+			"begin somewhere other than the one place that serialises them", err)
+	default:
+	}
+
+	// AND AN ABANDONED SUBMISSION ENDS THE ROW rather than leaving it reading
+	// `running`. Nothing was rented, and a phantom row that only a restart
+	// clears is a defect this repository has already paid for once.
+	cancel()
+	if err := <-started; err == nil {
+		t.Error("Start reported success after its caller went away")
+	}
+	waitFor(t, 15*time.Second, "the abandoned row to be ended", func() bool {
+		got, err := st.Get(context.Background(), row.ID)
+		return err == nil && got.Status.Terminal()
+	})
 }
 
 // TestDirectRunner_StartReplacesTheConfigsCeilingRatherThanNarrowingIt.
