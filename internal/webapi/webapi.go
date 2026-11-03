@@ -479,8 +479,7 @@ func (s *Server) postRequest(w http.ResponseWriter, r *http.Request) {
 		s.opts.Queue.Kick()
 	}
 
-	w.WriteHeader(http.StatusAccepted)
-	s.write(w, map[string]string{"id": string(id)})
+	s.write(w, http.StatusAccepted, map[string]string{"id": string(id)})
 }
 
 // refusePaid is the --allow-paid gate at the edge.
@@ -805,17 +804,44 @@ func (s *Server) registry() *provider.Registry {
 	return provider.NewRegistry()
 }
 
-func (s *Server) ok(w http.ResponseWriter, v any) {
-	w.WriteHeader(http.StatusOK)
-	s.write(w, v)
-}
+func (s *Server) ok(w http.ResponseWriter, v any) { s.write(w, http.StatusOK, v) }
 
-func (s *Server) write(w http.ResponseWriter, v any) {
+// write declares the response, sends the status, and encodes the body, in
+// that order.
+//
+// THE ORDER IS THE WHOLE FUNCTION, and the reason it is one function rather
+// than a rule four call sites each have to remember. net/http snapshots the
+// header map when WriteHeader runs, so a Content-Type set afterwards is
+// thrown away and the body goes out as http.DetectContentType's guess --
+// which for a JSON object is `text/plain; charset=utf-8`. `ok` wrote the
+// status first and set the type second, so every 200 this server has ever
+// sent was declared text/plain over a JSON body, while every *error* was
+// declared correctly because `fail` happened to do it the other way round:
+// the declaration was exactly inverted from what the code read as.
+// postRequest's 202 and postInput's 201 had the same slip. One name for a
+// path, not one per call site -- the journal's "nodes" subdirectory rule,
+// reached through a header.
+//
+// NOTHING IN THE PROGRAM COULD NOTICE, which is why it survived. web/'s
+// api.rs reads the body as text and parses it unconditionally, with no
+// resp.json() and no content-type check anywhere in the page, so the seam's
+// data half was right and only its declared type was wrong.
+//
+// nosniff for the reason getImage sets it: a declared type a browser is
+// allowed to second-guess is not a declared type. Said once here, where every
+// JSON response goes through, rather than reasoned about per route -- and the
+// route that already had the argument written above it is the one that
+// silently lost the header when the ordering broke.
+func (s *Server) write(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		// The status is already sent, so there is nothing to tell the client.
-		// A dropped connection is the ordinary cause.
-		s.log().Debug("could not write a response", "err", err)
+		// A dropped connection is the ordinary cause. The status is logged
+		// because a 4xx or 5xx that failed to write is the case that matters:
+		// the operator never got the reason.
+		s.log().Debug("could not write a response", "status", code, "err", err)
 	}
 }
 
@@ -826,11 +852,7 @@ func (s *Server) write(w http.ResponseWriter, v any) {
 // alternative is a UI that says "something went wrong" over an error that
 // names the exact config key.
 func (s *Server) fail(w http.ResponseWriter, code int, err error) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	if werr := json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}); werr != nil {
-		s.log().Debug("could not write an error response", "err", werr)
-	}
+	s.write(w, code, map[string]string{"error": err.Error()})
 }
 
 func (s *Server) failStore(w http.ResponseWriter, err error) {

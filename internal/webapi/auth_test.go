@@ -435,18 +435,12 @@ func TestStatic_RefusesAPageLoadReadably(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", w.Code)
 	}
-	if got := w.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
-		t.Errorf("content-type = %q, want text/plain", got)
-	}
-	// nosniff and no-store, as the rest of this handler sets: a browser must
-	// not decide these bytes are HTML, and a cached refusal would outlive the
-	// cookie that fixes it.
-	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
-		t.Errorf("x-content-type-options = %q, want nosniff", got)
-	}
-	if got := w.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("cache-control = %q, want no-store", got)
-	}
+	// THE HEADERS ARE ASSERTED OVER A SOCKET and not here --
+	// TestHeaders_TheRefusedPageLoadIsDeclaredPlainTextOnTheWire. A recorder
+	// reads the live header map rather than the snapshot the status line took,
+	// so it reports a Content-Type, a nosniff and a no-store this handler set
+	// at any point, including after WriteHeader had already thrown them away.
+	// This test keeps the half a recorder can prove: the status and the body.
 	body := w.Body.String()
 	for _, want := range []string{"ember serve", "?" + tokenParam + "=", "serve_token"} {
 		if !strings.Contains(body, want) {
