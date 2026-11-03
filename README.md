@@ -1318,6 +1318,39 @@ A download is written beside its destination and renamed only once the digest
 matches, so a file at the final name is always one that has been verified at
 least once. An interrupted fetch leaves nothing behind.
 
+#### The weights are checked before a card is chosen
+
+An asset that is missing used to be discovered **on the node**, after the
+machine had been created, the image pulled and the store mounted — so the card
+spent its first minutes downloading, billed at the card's rate. Measured on
+2026-11-03: an RTX PRO 6000 at $2.49/hr spent 14m47s of a 15.1-minute rental
+pulling 56.16 GiB at 68 MB/s, GPU at 0% throughout. 97.9% of the bill.
+
+So the question is now asked before anything commits to hardware — one `HEAD`
+per asset over the store's own S3 endpoint, which rents nothing and downloads
+nothing. What happens next depends on who is asking:
+
+- **`ember up` refuses**, naming `ember store sync`. An interactive command
+  should not go and rent a second machine you did not ask for.
+- **`ember serve` fills the store first**, on a machine with no card, and then
+  rents the GPU. A queue drains unattended, which is both the case this is
+  worth money in and the case where nobody is watching to type the command.
+  That rental is gated by `--allow-paid` and projected against `max_day_usd`
+  and `max_month_usd` like any other.
+
+It does not check digests, for the reason `ember store verify` does not: that
+would mean reading every object back through this process to re-derive a number
+the node derives anyway, at datacentre bandwidth, before the workload starts.
+This answers whether the files are there; the node still answers whether they
+are the right bytes, and a mismatch is still a refusal. An object present at
+**zero bytes** counts as missing — that is what a PUT which failed after
+creating the key leaves behind.
+
+The check is skipped, with a line saying so, when it cannot be made: RunPod
+issues S3 keys separately from the API key, so an account with one and not the
+other keeps working exactly as before, and the local provider has no S3
+endpoint at all because a Docker volume is not in a datacentre.
+
 ### Filling a store
 
 ```bash

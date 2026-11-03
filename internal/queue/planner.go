@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/Legion112/ember/internal/app"
@@ -84,6 +85,21 @@ type AppPlanner struct {
 	Log logx.Options
 }
 
+// out is the byte stream, never nil.
+//
+// `ember serve` always sets one, so this is not about the ordinary case: it is
+// that the one writer here is reached from inside the drain goroutine, where a
+// nil would panic with a node running -- and the panic would unwind past
+// provision.WithNode's deferred destroy. A leaked rental is the one failure
+// this package exists to prevent, so the nil is answered rather than
+// documented. The same reason `now` is a method and not a field read.
+func (p AppPlanner) out() io.Writer {
+	if p.Out == nil {
+		return io.Discard
+	}
+	return p.Out
+}
+
 func (p AppPlanner) now() time.Time {
 	if p.Now != nil {
 		return p.Now()
@@ -103,7 +119,7 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 		jobs = append(jobs, j.SD())
 	}
 
-	plan, err := app.NewPlan(ctx, app.Request{
+	req := app.Request{
 		Config:          cfg,
 		Deps:            p.Deps,
 		Jobs:            jobs,
@@ -111,7 +127,39 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 		PreviewInterval: r.PreviewInterval,
 		Log:             p.Log,
 		Budget:          &budget,
-	}, p.Out)
+	}
+
+	plan, err := app.NewPlan(ctx, req, p.out())
+	if missing, ok := app.IsAssetsMissing(err); ok {
+		// THE WHOLE SAVING IS HERE, and it is a second rental rather than a
+		// flag. A card whose weights are not on the store spends its first
+		// minutes downloading them at the card's rate: measured on
+		// 2026-11-03, 14m47s of an RTX PRO 6000 at $2.49/hr, 97.9% of the
+		// rental, GPU at 0% throughout. `ember store sync` already rents a
+		// machine with no card for exactly this work, at $0.06/hr, and
+		// nothing on the rental path had ever called it.
+		//
+		// ONLY FROM THE QUEUE. `ember up` refuses instead, because an
+		// interactive command must not go and rent a second machine the
+		// operator did not ask for. A queue drains unattended, which is the
+		// case this is worth money in and the case nobody is watching to
+		// type the command.
+		if err := p.fillStore(ctx, cfg, missing); err != nil {
+			return nil, err
+		}
+		// Asked again rather than assumed. The sync verified every digest on
+		// the node, so this is not in doubt about the bytes -- what it
+		// confirms is that the store's own endpoint now lists them, which is
+		// the thing this planner acted on and the only claim it has made. A
+		// second miss is reported as what it is rather than fallen through,
+		// because falling through is the rental this exists to prevent.
+		plan, err = app.NewPlan(ctx, req, p.out())
+		if second, ok := app.IsAssetsMissing(err); ok {
+			return nil, fmt.Errorf("filled the store and %d asset(s) are still not listed on it (%w). "+
+				"The node verified their digests, so the bytes are there and the store's endpoint does not show them yet; "+
+				"nothing has been rented", len(second.Missing), err)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +179,55 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 		return nil, err
 	}
 
-	return appRental{plan: plan, out: p.Out}, nil
+	return appRental{plan: plan, out: p.out()}, nil
+}
+
+// fillStore rents a machine with no card and has it fetch this run's weights.
+//
+// IT IS A RENTAL AND IS BOUNDED LIKE ONE. --allow-paid gates it and the
+// calendar ceilings are projected against it, by the same two calls Plan makes
+// for the rental it is standing in front of -- a cheap machine is still money,
+// and a queue that could spend outside the ceilings by calling a different
+// function would be a hole in the one gate `ember serve` has.
+//
+// THE FILTER IS CPUOnly AND THAT IS EXCLUSIVE IN BOTH DIRECTIONS, so this
+// cannot quietly land on a card and reproduce the defect it exists to remove.
+// It is also what stops this recursing: a CPU-only plan is not asked whether
+// the store is full, because filling it is the job.
+//
+// NO FALLBACK. A sync that fails returns its error and the request fails with
+// it. Carrying on would rent the GPU and download on it, which is the $0.61
+// this was written for, arrived at quietly.
+func (p AppPlanner) fillStore(ctx context.Context, cfg config.Config, missing *app.AssetsMissingError) error {
+	names := make([]string, 0, len(missing.Missing))
+	for _, a := range missing.Missing {
+		names = append(names, a.As)
+	}
+	_, _ = fmt.Fprintf(p.out(), "the store %q is missing %d asset(s): %s\n"+
+		"renting a machine with no card to fetch them, so the card is not paid to download\n",
+		missing.Store, len(names), strings.Join(names, ", "))
+
+	// No Budget override. The request's narrowed ceiling bounds the request's
+	// own rental; this one is the config's, which is the operator's.
+	sync, err := app.NewPlan(ctx, app.Request{
+		Config:  cfg,
+		Deps:    p.Deps,
+		CPUOnly: true,
+		Log:     p.Log,
+	}, p.out())
+	if err != nil {
+		return fmt.Errorf("plan a machine to fill the store: %w", err)
+	}
+	if err := refusePaid(p.AllowPaid, sync.Provider, sync.Offer); err != nil {
+		return err
+	}
+	if err := p.refuseOverPeriod(ctx, cfg.TTL, sync.Offer.Price); err != nil {
+		return err
+	}
+	if err := sync.SyncAssets(ctx, p.out()); err != nil {
+		return fmt.Errorf("fill the store %q: %w", missing.Store, err)
+	}
+	return nil
 }
 
 // refuseOverPeriod is the max_day_usd and max_month_usd gate.

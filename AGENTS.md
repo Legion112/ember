@@ -3119,6 +3119,89 @@ A leaked node bills by the hour in silence. These are not style preferences.
   a model. Every path out of the download removes the partial, because a
   partial on a store is a file nothing cleans up and the operator pays by the
   month to keep.
+- **The store is asked whether it holds the weights BEFORE a card is chosen,
+  and the check existed the whole time as a command nobody called.**
+  `EnsureAssets` runs over the SSH connection, which is the right place for a
+  digest and the wrong place to discover an ABSENCE: on 2026-11-03 an
+  `ember serve` rented an RTX PRO 6000 at $2.49/hr onto a `flux2` volume
+  created two minutes earlier and spent **14m47s of a 15.1-minute rental** --
+  **97.9%** -- pulling 56.16 GiB from HuggingFace at 68 MB/s with the GPU at
+  0% utilisation and 0 B of VRAM. $0.61 of a $0.63 rental, and no images: it
+  was stopped one second after `server_starting`. The queue reported
+  `running` throughout, correctly, because **nothing between `node_ready` and
+  `node_memory` emits an event**.
+
+  **All three pieces already existed and none was joined to the rental path.**
+  `runStoreVerify` is one `HEAD` per asset over the store's own endpoint, for
+  nothing, and its own doc comment made the argument -- "Before a card is
+  rented, which is the entire point [...] the cheapest moment to discover that
+  a 14 GB expert was never uploaded is **currently** after provisioning, the
+  image pull and the mount have all been paid for" -- with that "currently"
+  true for the life of the command. `Plan.SyncAssets` rents a machine with no
+  card for exactly this work and `grep -rn SyncAssets` returned **one**
+  non-test caller, `ember store sync`. And verify's missing-asset line already
+  printed the remedy. A capability built end to end and connected to nothing,
+  reached through a CLI verb instead of a column, and this one has a price tag.
+
+  **The two callers want opposite things from one fact, which is why it is a
+  type.** `ember up` refuses with `*AssetsMissingError`, because an
+  interactive command must not rent a second machine nobody asked for;
+  `AppPlanner` catches it and fills the store on a CPU box first, because a
+  queue drains unattended and is where nobody is watching to type the command.
+  A plain error would make the second one a string match. The sync is a rental
+  and is gated like one -- `refusePaid` and the period ceilings, the same two
+  calls the GPU rental gets -- or `--allow-paid` would stop the card and not
+  the thing that fetches fifty-six gigabytes.
+
+  **A CPU-only run is not asked, and that is the seal rather than a flag.**
+  `ember store sync` is the run whose job is to FILL the store, so refusing it
+  for an empty store would refuse the remedy -- and it is also what stops the
+  queue recursing, since the sync it starts is itself a plan built this way.
+
+  **NOT a refusal when the check cannot be made.** RunPod issues S3 keys
+  separately from the API key and an account can have one and not the other,
+  so refusing would break working setups in order to save money on broken
+  ones; the local provider has no endpoint at all. `AssetCheck.Asked` is a
+  second result rather than an empty `Missing`, the `node.Exposure` shape,
+  because a store this build cannot read and a store with everything on it are
+  the same zero slice. It is said out loud at info, since a check that
+  silently does nothing is how the saving is lost again.
+
+  **A zero-byte object counts as missing**, which is what a PUT that failed
+  after creating the key leaves and what `verify: present` would load as a
+  model. And an error from the HEAD is returned rather than counted: "I could
+  not ask" is not "it is not there", and a 403 counted as an absence would
+  send `serve` off to rent a second machine and re-download forty gigabytes
+  over a permissions problem.
+
+  **The ORDER is what the tests assert, and the fake has no catalogue route so
+  that it can be observed.** A refusal naming the weights means the check ran
+  before `PickOffer`; a failure naming `list offers from runpod` means the run
+  got past it. Both directions are live in both packages, which is the test of
+  the split -- the identical config and the identical empty store make `up`
+  refuse and the queue sync. The full-store cases assert the catalogue error
+  **positively**, and that is not cosmetic: written as "not the sync refusal"
+  they passed against reinstatement 4, where removing the no-credentials skip
+  stops the run with an unsigned S3 call instead -- a different sentence and
+  the same stopped run. The weak assertion was found by the reinstatement, not
+  by review.
+
+  **`AppPlanner.Out` was nil-dereferenced into existence by this change and is
+  now `out()`.** Every other write on this path had a non-nil writer from
+  `cmd_serve`; the first one reached from a test found the nil, and the panic
+  would have been in the drain goroutine -- unwinding past
+  `provision.WithNode`'s deferred destroy, with a node running. A leaked
+  rental is what this package exists to prevent, so the nil is answered rather
+  than documented.
+
+  **Four reinstatements, each red, with a negative control that stayed
+  green**, and the harness itself was wrong twice first -- in the shape this
+  file already records. A marker that is a PREFIX of its own replacement
+  survives the patch and reports a landed edit as "did not apply", and a
+  marker matching a second, unpatched line does the same; both read exactly
+  like a clean run. The harness asserts the marker the patch **introduces**
+  now, never one it removes. The two it could not have caught without that:
+  the queue branch and the zero-byte case.
 - **The same argument one layer later, and the answer is that it cannot be
   made there: a LoRA sd-server cannot load is a warning, the image is
   generated and billed without it, and the response says the LoRA was
