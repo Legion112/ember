@@ -826,6 +826,44 @@ impl Rows {
     pub fn nothing_queued(&self) -> bool {
         self.items.is_empty() && self.dropped == 0
     }
+
+    /// What the queue table's price cell says for one request, out of the
+    /// listing this page holds NOW.
+    ///
+    /// BY ID AND NOT FROM A ROW THE CALLER IS HOLDING, which is the whole
+    /// defect. The table's `<For>` is keyed on `(id, status)` -- the status
+    /// is in the key precisely so that a status change rebuilds the row --
+    /// and `requests.cost` is written AFTER the status is terminal: the
+    /// queue's own comment says the rental's cost "arrives from the deferred
+    /// teardown, which runs after the closure below has finished", `finish`
+    /// writes done/failed/cancelled, and `Recorder` writes the cost through
+    /// on `run_cost`. So the key `(id, "done")` is created with a zero cost
+    /// and never changes again, and a cell built from the row it was handed
+    /// showed that zero for the life of the tab while the two-second poll
+    /// re-fetched the right figure hundreds of times.
+    ///
+    /// THE COLUMN IS THE ONLY PLACE A PAID RENTAL APPEARS IN THAT TABLE. A
+    /// rider's zero is blank by design -- the rental is charged to the
+    /// request that opened it and to no other -- so the opener's cell is the
+    /// one cell with money in it, and it was the one that froze. An
+    /// `ember serve` session that rented an H100 for an hour showed a queue
+    /// of finished requests with no money in it at all.
+    ///
+    /// A ROW THAT HAS LEFT THE LISTING SAYS NOTHING rather than keeping what
+    /// it last said: this is called from a cell that is on screen because the
+    /// row is, so the case is the half-step where a listing has been replaced
+    /// and the row has not been dropped yet, and the honest answer there is
+    /// the blank one.
+    pub fn price(&self, id: &str) -> String {
+        match self.items.iter().find(|r| r.id == id) {
+            None => String::new(),
+            // Free is blank, which is the rule the column is built on: the
+            // local provider's rentals really are free, and a rider's zero
+            // is somebody else's bill rather than this request's.
+            Some(r) if r.cost.is_free() => String::new(),
+            Some(r) => r.cost.text().to_string(),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for Rows {

@@ -29,6 +29,7 @@ import (
 
 	"github.com/Legion112/ember/internal/blob"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/test/integration/harness"
 )
@@ -714,6 +715,165 @@ func TestServe_UIShowsTheSecondAnswerAndNotTheFirst(t *testing.T) {
 	if errs := console.errors(); errs != "" {
 		t.Errorf("the page logged errors:\n%s", errs)
 	}
+}
+
+// TestServe_UIShowsACostWrittenAfterTheStatusEnded is #131.
+//
+// WHY A BROWSER. The table's `<For>` is keyed on `(id, status)` and
+// `requests.cost` is written AFTER the status is terminal -- `finish` writes
+// done/failed/cancelled and `Recorder` writes the cost through from
+// `provision.WithNode`'s deferred teardown -- so the key `(id, "done")` is
+// created with a zero and never changes again. Every layer below the renderer
+// was right: the two-second poll re-fetched the correct figure hundreds of
+// times and the row would not take it. `cargo test` drives `price_cell`
+// through the signal, which is the decision; the key itself is invisible to
+// Rust, and this is the only thing that can see it.
+//
+// WHY IT SEEDS INSTEAD OF RENTING, and this is the sharper half. No lab here
+// can produce a non-zero `requests.cost`: every lab rents from the local
+// provider, whose price is zero, which is the same reason `Progress::rental`'s
+// `Accruing` and its non-free `Charged` are unreachable from one. So a lab
+// that rented would assert a blank cell against a blank cell and pass against
+// the defect.
+//
+// WHY THE SEED IS MID-RUN AND NOT BEFORE THE PROCESS STARTS, which is where
+// the capability lab's `PutCaps` goes. What has to be shown is that the
+// figure arrives in a tab that is ALREADY OPEN: a page loaded after the write
+// shows it either way, which is exactly the reload the issue's negative
+// control used to prove the bytes were reaching the browser. So the row is
+// written while the page is on screen and the cost a moment later, in the
+// order the queue writes them. Two writers on one SQLite file is fine and is
+// not an accident of this lab: `genstore.OpenFile` sets `journal_mode(WAL)`
+// and `busy_timeout(5000)` for exactly this, and the caps lab's own comment
+// says so where it closes its handle.
+//
+// NOTHING IS RENTED. The seeded row is `running` for the instant between
+// `Adopt` and the `Update` that ends it, and `ClaimNext` only ever takes a
+// QUEUED row -- so the drain loop cannot touch it, and `queue.Run`'s
+// Interrupt sweep has already run by the time it exists.
+func TestServe_UIShowsACostWrittenAfterTheStatusEnded(t *testing.T) {
+	requireChrome(t)
+	l := harness.New(t)
+	l.WriteConfig(nil)
+	l.AppendConfig(serveConfig)
+
+	cmd, srv, wait := startServe(t, l)
+	defer func() {
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return
+		}
+		_ = wait()
+	}()
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Headless, chromedp.NoSandbox, chromedp.DisableGPU)
+	alloc, cancelAlloc := chromedp.NewExecAllocator(t.Context(), opts...)
+	defer cancelAlloc()
+	ctx, cancel := chromedp.NewContext(alloc)
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancelTimeout()
+
+	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
+	if err := chromedp.Do(ctx,
+		chromedp.Navigate(fmt.Sprintf("%s?t=%s", pageURL, srv.Token))); err != nil {
+		t.Fatalf("navigating to the one-time URL: %v", err)
+	}
+	console := watchConsole(t, ctx)
+	if err := chromedp.Do(ctx, chromedp.WaitVisible(`h1`)); err != nil {
+		t.Fatalf("the app did not mount: %v\n%s", err, console.text())
+	}
+
+	// Out of band, through the store rather than through the code under
+	// test, which is the rule the SIGKILL labs and the caps lab follow.
+	store, err := genstore.Open(filepath.Join(l.Dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if cerr := store.Close(); cerr != nil {
+			t.Errorf("closing the seeded store: %v", cerr)
+		}
+	}()
+
+	id, err := store.Adopt(t.Context(), genstore.Request{
+		Provider: "local",
+		GPU:      "h100-80g",
+		TTL:      20 * time.Minute,
+		Jobs:     []genstore.Job{{Prompt: "a paper boat"}},
+	})
+	if err != nil {
+		t.Fatalf("seeding a request: %v", err)
+	}
+	// Ended, with no cost, which is the state `finish` leaves behind: the
+	// teardown has not written the rental's figure yet and the key
+	// (id, "done") is now fixed for ever.
+	if err := store.Update(t.Context(), id, func(r *genstore.Request) {
+		r.Status = genstore.StatusDone
+		r.Ended = time.Now()
+	}); err != nil {
+		t.Fatalf("ending the seeded request: %v", err)
+	}
+
+	cell := rowOf(string(id)) + `/td[@class="price"]`
+	// The ROW and not the cell: an empty `<td>` has no bounding box, so
+	// WaitVisible on the thing being asserted about would be waiting for the
+	// state the assertion exists to refuse.
+	if err := shortWait(ctx, rowOf(string(id)), 30*time.Second); err != nil {
+		t.Fatalf("the seeded row never reached the table: %v\n%s\n%s",
+			err, panelText(ctx), console.text())
+	}
+	if got := priceOf(t, ctx, cell); got != "" {
+		t.Fatalf("an unpriced rental shows %q rather than nothing", got)
+	}
+
+	// And the teardown's own write, with the status untouched. $1.24 rather
+	// than a round dollar, because `node.MicroUSD.String` is "$%.6g" and a
+	// figure Go rendered is the only one this page may print.
+	if err := store.Update(t.Context(), id, func(r *genstore.Request) {
+		r.Cost = node.MicroUSD(1_240_000)
+	}); err != nil {
+		t.Fatalf("writing the rental's cost: %v", err)
+	}
+	after := getRequest(t, srv, string(id))
+	if after.Status != "done" {
+		t.Fatalf("the seeded request is %q, so the key moved and the lab proves nothing",
+			after.Status)
+	}
+
+	// No reload anywhere in here, which is the whole assertion: the
+	// two-second poll is the only thing that brings the figure over.
+	deadline := time.Now().Add(30 * time.Second)
+	var last string
+	for {
+		last = priceOf(t, ctx, cell)
+		if last == "$1.24" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the price cell still says %q after the cost was written; "+
+				"the row is frozen at its pre-teardown zero\n%s\n%s",
+				last, panelText(ctx), console.text())
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	if errs := console.errors(); errs != "" {
+		t.Errorf("the page logged errors:\n%s", errs)
+	}
+}
+
+// priceOf reads one cell's text under its own deadline.
+func priceOf(t *testing.T, ctx context.Context, sel string) string {
+	t.Helper()
+	c, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	text, err := chromedp.Run(c, chromedp.Text(sel))
+	if err != nil {
+		t.Fatalf("reading %s: %v", sel, err)
+	}
+	return strings.TrimSpace(text)
 }
 
 // TestServe_UIGreysWhatTheServerSaysItCannotDo is the capability gate's only
