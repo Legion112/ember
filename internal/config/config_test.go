@@ -276,8 +276,8 @@ func TestLoad_ReportsAnUnreadableFile(t *testing.T) {
 }
 
 // TestDirDefaults_ReportWhenTheEnvironmentCannotAnswer. Falling back to a
-// relative path would scatter host-key pins into whatever directory ember
-// happened to be started from.
+// relative path would scatter node records and the queue database into
+// whatever directory ember happened to be started from.
 func TestDirDefaults_ReportWhenTheEnvironmentCannotAnswer(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")

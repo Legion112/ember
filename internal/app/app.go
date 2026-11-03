@@ -29,7 +29,6 @@ import (
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
 	"github.com/Legion112/ember/internal/dockerengine/dockerclient"
-	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/keys"
 	"github.com/Legion112/ember/internal/logx"
 	"github.com/Legion112/ember/internal/provider"
@@ -246,12 +245,17 @@ func BuildRegistry(d Deps, creds config.Credentials, cfg config.Config) (*provid
 // BuildOptions assembles the collaborators one provisioning needs.
 //
 // EVERY RETURNED VALUE IS PER PROCESS, NOT PER RUN, and a caller that runs
-// more than one node has to call this once. hostkey.Store loads its file at
-// open and rewrites the whole thing on every change, so two of them are two
-// snapshots and last-writer-wins -- and provision.destroy calls Pins.Forget,
-// so one run's teardown can drop a pin another run just wrote. That matters
-// nowhere for `ember up`, which provisions once per process, and matters a
-// great deal for a server that provisions on request.
+// more than one node has to call this once. The sharpest instance of that was
+// the host key pin store, which loaded its file at open and rewrote the whole
+// thing on every change -- two of them being two snapshots and
+// last-writer-wins, with provision.destroy's Pins.Forget able to drop a pin
+// another run had just written. It is deleted (#120, and the note in
+// internal/hostkey's trust.go), so what is left is statestore.Store and
+// keys.Identity: the journal is keyed per run and holds no in-memory
+// snapshot, so the warning is about the shape rather than about a live hazard
+// -- which is exactly why it stays written down. It mattered nowhere for
+// `ember up`, which provisions once per process, and a great deal for a
+// server that provisions on request.
 //
 // lo is the level and the format, decided by whoever read the flags. Its zero
 // value is info-level text, which is what the literal that used to sit here
@@ -259,10 +263,6 @@ func BuildRegistry(d Deps, creds config.Credentials, cfg config.Config) (*provid
 // behaviour rather than a new default nobody chose.
 func BuildOptions(ps Paths, cfg config.Config, out io.Writer, lo logx.Options) (provision.Options, error) {
 	store, err := OpenStore(ps.State)
-	if err != nil {
-		return provision.Options{}, err
-	}
-	pins, err := hostkey.OpenStore(filepath.Join(ps.State, "known_hosts.json"))
 	if err != nil {
 		return provision.Options{}, err
 	}
@@ -276,7 +276,6 @@ func BuildOptions(ps Paths, cfg config.Config, out io.Writer, lo logx.Options) (
 	}
 	return provision.Options{
 		Store:    store,
-		Pins:     pins,
 		Identity: id,
 		Budget:   provision.Budget{MaxRate: hourly, MaxRun: run},
 		Log:      logx.New(out, lo),

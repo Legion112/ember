@@ -127,13 +127,8 @@ func labOptions(t *testing.T, l *harness.Lab) provision.Options {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pins, err := hostkey.OpenStore(filepath.Join(t.TempDir(), "known_hosts.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	return provision.Options{
 		Store:    store,
-		Pins:     pins,
 		Identity: identity(t, l),
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

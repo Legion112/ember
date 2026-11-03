@@ -626,7 +626,7 @@ allow_interruptible: true          # required by COMMUNITY; see below
 
 # where ember keeps its own files; all three are resolved when empty
 config_dir: ~/.config/ember        # keys and credentials.yaml
-state_dir: ~/.local/state/ember    # node records, host-key pins, the queue
+state_dir: ~/.local/state/ember    # node records, the queue, staged inputs
 output_dir: ~/renders              # fetched outputs, one directory per run
 ```
 
@@ -646,9 +646,17 @@ The three directories default to `$XDG_CONFIG_HOME/ember`, `$XDG_STATE_HOME` or
 `~/.local/state/ember`, and `<state_dir>/outputs`. Outputs live under the state
 directory so a run's results sit beside the journal record of the run that
 produced them, and so one `XDG_STATE_HOME` move takes both. The state directory
-is deliberately *not* the config one: pins and node records are machine-local
-facts about running nodes, and a config directory synced between machines would
-carry pins for nodes the other machine cannot see.
+is deliberately *not* the config one: a node record is a machine-local fact
+about a node that is running now, and a config directory synced between
+machines would carry records for nodes the other machine cannot see.
+
+**Nothing in there is a host key.** ember mints a host key per node and injects
+it through the create call, so the pin is built in memory from a key this
+process generated and is gone when the run is — there is no `known_hosts` file
+to go stale, to be synced to another machine, or to be edited. A
+`<state_dir>/known_hosts.json` used to be written for by a code path nothing
+ever reached; it is gone, and a file of that name left behind by an older
+ember is read by nothing and can be deleted.
 
 `allow_interruptible` bids on hardware the provider can take back mid-run. It
 defaults to false, which refuses it — and **`runpod_cloud: COMMUNITY` needs it

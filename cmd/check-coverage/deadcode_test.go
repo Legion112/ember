@@ -318,24 +318,25 @@ var testSupport = []struct{ path, why string }{
 // evidence that it is live.
 var deadExcluded = []struct{ sym, why string }{
 	// Deliberately unreachable from production, and AGENTS.md says so in
-	// words. These two are the entries that are not a backlog: they are the
-	// answer.
-	// The reason this entry gave was wrong in both halves, which matters
-	// because for a few hours it was the only thing in the repository that
-	// went red over a reinstated TOFU fallback -- a stale-inventory check
-	// whose own message says to delete the entry (#111). It said TOFU is
-	// "unreachable through WithNode, which mints a key for every node":
-	// minting is why the fallback *branch* was unreached, not why it could
-	// not be written, and one line in trustFor reinstated it. And it named a
-	// "trust-on-first-use lab" that does not exist; the callers are this
-	// package's own tests and internal/tunnel/sshdial's. What guards it now
-	// is a type -- provision.trustFor and provision.Session.Trust are
-	// hostkey.Pin -- so the fallback does not compile on that path, and the
-	// mechanism is asserted positively beside it. This entry is bookkeeping
-	// and was never the seal.
-	{"internal/hostkey.(*Store).TrustOnFirstUse", "no production caller: provision.trustFor and provision.Session.Trust are typed hostkey.Pin, so a trust that is not a pin cannot be named on the path that rents nodes. Kept for a provider that genuinely cannot accept an injected key, of which there is none today; reached by this package's tests and internal/tunnel/sshdial's"},
+	// words. This is the entry that is not a backlog: it is the answer.
+	//
+	// TWO hostkey.Store ENTRIES WERE HERE AND ARE NOT ANY MORE, and they are
+	// worth a note because of what the second one said. TrustOnFirstUse's
+	// reason had already been corrected once -- for a few hours it was the
+	// only thing in the repository that went red over a reinstated TOFU
+	// fallback, a stale-inventory check whose own message says to delete the
+	// entry (#111) -- and its corrected form still kept the mechanism "for a
+	// provider that genuinely cannot accept an injected key, of which there
+	// is none today". That is a shape ember cannot represent rather than one
+	// it has not met: node.NewCreateRequest refuses a zero HostKey. Beside
+	// it, Get's reason said in writing that it existed "for a reader that
+	// does not exist yet" -- the admission the guard's own blind spot (#94)
+	// kept from spreading, since an excluded symbol's callees are never
+	// reported and saveLocked, Forget and the whole pin file sat under
+	// TrustOnFirstUse. Both are deleted (#120): no production caller, no
+	// second mechanism being deleted with them, because hostkey.Pin was
+	// always the mechanism and needs no file.
 	{"internal/httpx.(*StatusError).Retryable", "httpx has no retry loop and must not gain one; the classifier sits where somebody would add it"},
-	{"internal/hostkey.(*Store).Get", "a pin is read through Trust, never by id; Get exists for the store's own tests and for a reader that does not exist yet"},
 
 	// Reported, and the fix is a decision about behaviour rather than a
 	// deletion.

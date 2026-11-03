@@ -178,28 +178,14 @@ func TestDial_RefusesAnUnexpectedHostKey(t *testing.T) {
 	}
 }
 
-// TestDial_TOFUPinsThenRefusesRotation walks the fallback path end to end
-// against a real handshake: first connection pins, a rotated key is refused.
-func TestDial_TOFUPinsThenRefusesRotation(t *testing.T) {
-	store, err := hostkey.OpenStore(t.TempDir() + "/pins.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, rotated := newSigner(t), newSigner(t)
-	signers := []ssh.Signer{newSigner(t)}
-
-	d := Dialer{Net: server(t, first)}
-	c, err := d.Dial(t.Context(), target(), store.TrustOnFirstUse("n1"), signers)
-	if err != nil {
-		t.Fatalf("the first connection should pin and succeed: %v", err)
-	}
-	_ = c.Close()
-
-	d = Dialer{Net: server(t, rotated)}
-	if _, err := d.Dial(t.Context(), target(), store.TrustOnFirstUse("n1"), signers); err == nil {
-		t.Fatal("a rotated host key was accepted after the pin")
-	}
-}
+// A trust-on-first-use pair used to sit here -- first connection pins, a
+// rotated key is refused -- walking the fallback path end to end against a
+// real handshake. It is gone with hostkey.Store (#120), and nothing replaces
+// it, because the two tests above already prove the same two things about the
+// mechanism that is live: a key ember pinned is accepted through a real
+// handshake and every other key is refused through one. What the TOFU pair
+// proved in addition was that a first connection pins AT ALL, which is the
+// property being deleted.
 
 func TestDial_RefusesWithoutATrustPolicy(t *testing.T) {
 	d := Dialer{Net: server(t, newSigner(t))}

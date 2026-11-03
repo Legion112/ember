@@ -47,9 +47,16 @@ func (b Budget) Allow(o node.Offer, ttl time.Duration) error {
 }
 
 // Options are the collaborators and knobs for one run.
+// There is no pin store here. hostkey.Store was a field on this struct, set
+// by app.BuildOptions and read by destroy's Pins.Forget alone -- and nothing
+// ever added a pin for a Forget to remove, because only trust-on-first-use
+// did and trustFor cannot name it. The pin now dies with the node because it
+// is a value on the Session below, which exists only inside WithNode's
+// closure: the property is structural rather than a teardown step somebody
+// has to remember. See the note where the store was, in internal/hostkey's
+// trust.go (#120).
 type Options struct {
 	Store    *statestore.Store
-	Pins     *hostkey.Store
 	Identity keys.Identity
 	Budget   Budget
 	Log      *slog.Logger
@@ -155,11 +162,14 @@ type Session struct {
 	Node node.ReadyNode
 
 	// Trust is a hostkey.Pin and not a hostkey.Trust, which is a seal rather
-	// than a tidy-up: the one other Trust in this module is
-	// hostkey.Store.TrustOnFirstUse, and a session carrying it is the exact
-	// defect #111 reinstated -- TOFU against a brand-new IP, which the two
-	// tests named for it could not see because both watched for a log line
-	// nothing emits. The field's type is now what refuses it.
+	// than a tidy-up: the one other Trust this module ever had was
+	// hostkey.Store's trust-on-first-use, and a session carrying it is the
+	// exact defect #111 reinstated -- TOFU against a brand-new IP, which the
+	// two tests named for it could not see because both watched for a log
+	// line nothing emits. The field's type is what refuses it, and it still
+	// has to: the store is deleted (#120), so hostkey.Pin is the only Trust
+	// there is today, and an interface here would be an invitation to the
+	// next one.
 	Trust hostkey.Pin
 
 	RunID node.RunID
@@ -448,10 +458,13 @@ func WaitReady(ctx context.Context, p provider.Provider, h node.Handle, o Option
 // `!strings.Contains(log, "first use")` and ember has never logged that
 // string, so reinstating the bug as a one-line `return
 // o.Pins.TrustOnFirstUse(id), nil` here left the whole suite and every lab
-// green (#111). It does not compile now. That is a seal on this function and
-// not on the module -- hostkey.Store.TrustOnFirstUse still exists, and
-// internal/session's dial still takes the interface -- so the tests below
-// also assert the mechanism positively: the trust this returns must refuse,
+// green (#111). It does not compile now, and there is no longer a
+// TrustOnFirstUse to name it with: #120 deleted the store, having measured
+// that nothing in production ever wrote its pin file. That is still a seal on
+// this function rather than on the module -- internal/session's dial takes
+// the interface, and hostkey.Pin is merely the only thing satisfying it
+// today -- so the tests below also assert the mechanism positively: the trust
+// this returns must refuse,
 // on the first key it is ever offered, a key ember did not mint. TOFU cannot
 // do that, which is what makes the assertion a decision procedure between the
 // two rather than a message to match.
@@ -485,10 +498,11 @@ func trustFor(r node.ReadyNode, o Options, minted node.HostKey) (hostkey.Pin, er
 	// fallback to trust-on-first-use on purpose: TOFU against an address
 	// that has never had a key authenticates nothing, and reaching here
 	// would mean ember had stopped injecting -- which is worth a refusal,
-	// not a warning. hostkey.Store.TrustOnFirstUse remains for a provider
-	// that genuinely cannot accept an injected key; nothing is one today,
-	// and the return type above means it could not be reached from here
-	// even if one arrived without that decision being made deliberately.
+	// not a warning. There is no trust-on-first-use left to fall back TO:
+	// #120 deleted it, and the "provider that genuinely cannot accept an
+	// injected key" it was being kept for is a shape ember cannot represent
+	// -- node.NewCreateRequest refuses a zero HostKey, which is the same
+	// refusal as the sentence this comment opens with, one layer down.
 	return hostkey.Pin{}, fmt.Errorf(
 		"node %s: ember did not mint a host key for this node, so there is nothing to verify it against; "+
 			"it will not connect rather than trust whatever answers", r.Handle())
@@ -515,12 +529,11 @@ func destroy(ctx context.Context, p provider.Provider, o Options, runID node.Run
 		return fmt.Errorf("destroy node %s: %w", h, err)
 	}
 
-	if o.Pins != nil {
-		// The pin dies with the node it identifies.
-		if ferr := o.Pins.Forget(h.ID); ferr != nil {
-			o.log().Warn("could not forget the host key pin", "handle", h.String(), "err", ferr)
-		}
-	}
+	// Nothing forgets a host key pin here, and that is the pin dying with the
+	// node rather than an omission: Session.Trust is a hostkey.Pin value
+	// scoped to WithNode's closure, so it is gone when the run is. The
+	// Pins.Forget that used to sit here was the only production reader of a
+	// store nothing ever wrote to (#120).
 	if uerr := o.Store.Update(runID, func(r *statestore.Record) { r.Phase = statestore.PhaseDestroyed }); uerr != nil {
 		return fmt.Errorf("record the destruction of %s: %w", h, uerr)
 	}
