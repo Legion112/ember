@@ -63,13 +63,30 @@ const (
 	// it. A node in this state was never authenticated on its first
 	// connection.
 	//
-	// NOTHING PRODUCES IT, and nothing can: the only thing that ever did was
-	// hostkey.Store's trust-on-first-use, deleted in #120 having never written
-	// its pin file. HostKeyFromAPI above is honest about being in the same
-	// position and this is the precedent for the wording. It is kept for that
-	// reason rather than deleted -- a member of this enum costs one constant
-	// and removing one is a decision about the enum rather than a consequence
-	// of deleting a store.
+	// NOTHING HAS EVER PRODUCED IT -- not trust-on-first-use, not anything, at
+	// any commit in this repository. It was declared in the initial commit,
+	// named in String() and asserted by its own test, and connected to nothing
+	// for the whole life of the tree. `git log --all -G HostKeyPinned` returns
+	// six commits and at every one of them the only non-test appearances are
+	// this declaration, the String() map entry, and -- from b42130d to
+	// 54393b1 -- a comment in hostkey/store.go reading "so callers record
+	// node.HostKeyPinned", which no caller ever followed. That comment could
+	// not have been followed by the file it sat in: store.go never imported
+	// internal/node, so its trust-on-first-use could not name this constant
+	// even in principle; it wrote a Fingerprint into its own map and never
+	// touched a HostKey.Source. What #120 deleted was therefore the comment
+	// ASKING for this to be recorded, not a writer of it.
+	//
+	// So this is the "written, covered, connected to nothing" shape AGENTS.md
+	// counts, and the first instance of it found in a CONSTANT rather than a
+	// function -- which is exactly why cmd/check-coverage's
+	// TestNoProductionDeadCode cannot see it: that guard reports functions,
+	// and says so.
+	//
+	// HostKeyFromAPI above is honest about being in the same position and this
+	// is the precedent for the wording. It is kept for that reason rather than
+	// deleted -- a member of this enum costs one constant and removing one is a
+	// decision about the enum rather than a consequence of deleting a store.
 	//
 	// This used to end "ember reports it so the operator can see that without
 	// reading logs", which was untrue twice over: no reader renders this enum
