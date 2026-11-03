@@ -232,29 +232,28 @@ func TestStore_ServeFetchesOntoACheapMachineBeforeItRentsTheCard(t *testing.T) {
 		t.Errorf("the run ended over the weights rather than over the missing server:\n%s", out)
 	}
 
-	// 7. THE ROW STILL READS `running`, AND THAT IS A GAP RATHER THAN A
-	// PROPERTY. `Queue.once` calls `fail` when `Planner.Plan` fails and
-	// records nothing at all when the RENTAL fails: the status is written
-	// inside `WithServed`'s closure, by `drain`, so every failure after the
-	// plan -- the create, the wait for sshd, the gpu probe, the asset verify,
-	// the model load -- leaves the row with the `running` that `ClaimNext`
-	// wrote and no rental behind it. The web UI's queue table shows it running
-	// for the life of the process and its cancel button reaches the
-	// provisioning-window 409, whose message says the rental is coming up when
-	// nothing is; `Run`'s `Interrupt` sweep only clears it at the NEXT start.
+	// 7. THE ROW IS TERMINAL AND CARRIES THE REASON, which is what #149
+	// changed and what this step used to assert the absence of.
 	//
-	// Asserted rather than left to be noticed, the way
-	// `TestConformance_CannotCatchARederivedRunID` is: a limitation nobody can
-	// read out of the code is a limitation that will be forgotten. A change
-	// that records a failed rental turns this red, and that is the moment to
-	// read this comment.
+	// It read `running` here for the life of the process: `Queue.once` called
+	// `fail` only when `Planner.Plan` failed, and the terminal status is
+	// written inside `WithServed`'s closure by `drain` -- so every failure
+	// after the plan (the create, the wait for sshd, the gpu probe, the asset
+	// verify, the model load) returned with the `running` that `ClaimNext`
+	// wrote and no rental behind it. This lab asserted that gap deliberately,
+	// with a comment saying a change which recorded a failed rental would turn
+	// it red. One did, so the assertion is inverted rather than deleted: what
+	// it pins now is that the fix reaches THIS path -- a rental that came up,
+	// filled a store on a second machine, and then failed on the server --
+	// and not only the one its own unit tests drive.
 	req := lab.request(t)
-	if req.Status != genstore.StatusRunning {
-		t.Errorf("the request ended %q; a rental that failed after the plan writes no status at all, "+
-			"so this read `running` when the gap was measured", req.Status)
+	if req.Status != genstore.StatusFailed {
+		t.Errorf("the request ended %q, want failed; a row that still says running "+
+			"outlives its rental and only a restart of ember serve clears it", req.Status)
 	}
-	if req.Err != "" {
-		t.Errorf("the request carries the reason %q; nothing writes one on this path", req.Err)
+	if req.Err == "" {
+		t.Error("the request carries no reason, and the failures on this path are the " +
+			"expensive ones: they happen after the card is already paid for")
 	}
 
 	// 8. THE LEDGER SHOWS ONE RENTAL AND TWO WERE PAID FOR, which is a gap

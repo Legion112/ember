@@ -333,7 +333,7 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 	var served []genstore.ReqID
 	defer func() { q.release(served...) }()
 
-	return true, rental.WithServed(ctx, q.lifecycle(first.ID), func(ctx context.Context, s app.Served) error {
+	rentErr := rental.WithServed(ctx, q.lifecycle(first.ID), func(ctx context.Context, s app.Served) error {
 		// Learned once per process and cached, so a mistyped sampler is
 		// refused at the moment it is typed rather than a minute into a
 		// rented card. `sd.serve` is fixed by the config, so every rental in
@@ -344,6 +344,13 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 		}
 		return q.drain(ctx, s, lease, compat, first, &served)
 	})
+	if rentErr != nil {
+		// The rental broke. If drain never reached this request, nothing has
+		// written how it ended and the row still says `running`; if it did,
+		// this leaves what drain wrote alone.
+		q.endIfUnfinished(ctx, first.ID, rentErr)
+	}
+	return true, rentErr
 }
 
 // drain generates each request in turn on one rental.
@@ -500,24 +507,35 @@ func (q *Queue) fail(ctx context.Context, id genstore.ReqID, cause error) {
 	}
 }
 
-// finish records how a request ended.
-func (q *Queue) finish(ctx context.Context, id genstore.ReqID, cause error) {
-	status, msg := genstore.StatusDone, ""
+// classify maps the error a request ended with onto the row it leaves behind.
+//
+// One function because there are two writers of a terminal status -- drain,
+// for a request it generated, and once, for one whose rental broke before
+// drain could reach it -- and two copies of this switch would be two accounts
+// of what Ctrl-C means.
+func classify(cause error) (genstore.Status, string) {
 	switch {
+	case cause == nil:
+		return genstore.StatusDone, ""
 	case errors.Is(cause, app.ErrCancelled):
 		// The operator asked for this one. Recorded with its reason, which
 		// names how far it got and whether the job in flight could be
 		// stopped -- the event stream has the detail, and the row is what
 		// `ember ls` and the queue table read.
-		status, msg = genstore.StatusCancelled, cause.Error()
+		return genstore.StatusCancelled, cause.Error()
 	case errors.Is(cause, context.Canceled), errors.Is(cause, context.DeadlineExceeded):
 		// Not a failure. The operator pressed Ctrl-C, or the node reached its
 		// deadline; calling that a failed generation would send them looking
 		// for a bug that is not there.
-		status, msg = genstore.StatusCancelled, cause.Error()
-	case cause != nil:
-		status, msg = genstore.StatusFailed, cause.Error()
+		return genstore.StatusCancelled, cause.Error()
+	default:
+		return genstore.StatusFailed, cause.Error()
 	}
+}
+
+// finish records how a request ended.
+func (q *Queue) finish(ctx context.Context, id genstore.ReqID, cause error) {
+	status, msg := classify(cause)
 
 	if err := q.Store.Update(ctx, id, func(r *genstore.Request) {
 		r.Status = status
@@ -525,6 +543,47 @@ func (q *Queue) finish(ctx context.Context, id genstore.ReqID, cause error) {
 		r.Ended = q.at()
 	}); err != nil {
 		q.log().Error("could not record how a request ended", "request", id, "status", status, "err", err)
+	}
+}
+
+// endIfUnfinished records how a rental ended for a request drain never
+// reached, and leaves alone one it did.
+//
+// WHAT IT IS FOR. ClaimNext writes `running` and the terminal status is
+// written by drain, inside WithServed's closure -- so every failure between
+// those two points returned with the row still reading `running`: the create
+// call, waiting for sshd, the GPU probe, the asset verify, the model load.
+// Every one of them happens after money has been committed, and nothing
+// corrected the row afterwards, because Interrupt only sweeps at startup. The
+// operator was left with a request that ran for the life of the process
+// against a rental that no longer existed, no reason recorded in
+// requests.err, and a cancel button answering with the provisioning-window
+// 409 -- "the rental is coming up" -- which by then is false.
+//
+// WHY IT IS CONDITIONAL AND NOT A SECOND WRITE. drain calls finish for every
+// request it generates, so by the time an error reaches here the row may
+// already say how it really ended -- done, or cancelled by the operator, or
+// failed with the server's own sentence. An unconditional write would replace
+// that with whatever the rental returned, which is this repository's
+// two-writers rule exactly: the loser overwrites the one that knew. A
+// teardown that failed after a successful batch is the ordinary case, and it
+// must not turn a done request into a failed one.
+//
+// The check is inside the mutator rather than a read before it, because
+// Store.Update runs SELECT, the mutator and UPDATE in one transaction: asking
+// first and writing after would be the same decision with a window in it.
+func (q *Queue) endIfUnfinished(ctx context.Context, id genstore.ReqID, cause error) {
+	status, msg := classify(cause)
+
+	if err := q.Store.Update(ctx, id, func(r *genstore.Request) {
+		if r.Status.Terminal() {
+			return
+		}
+		r.Status = status
+		r.Err = msg
+		r.Ended = q.at()
+	}); err != nil {
+		q.log().Error("could not record a request whose rental failed", "request", id, "err", err)
 	}
 }
 
