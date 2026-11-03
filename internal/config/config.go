@@ -913,11 +913,15 @@ func (c Config) ConfigDirOrDefault() (string, error) {
 	return filepath.Join(base, "ember"), nil
 }
 
-// StateDirOrDefault resolves where node records and host key pins live.
+// StateDirOrDefault resolves where node records, the queue and staged inputs
+// live.
 //
 // Separate from the config directory because these are machine-local facts
 // about running nodes, not settings: a config directory synced between
-// machines would carry pins for nodes the other machine cannot see.
+// machines would carry records for nodes the other machine cannot see. Host
+// key pins used to be the sharpest instance of that and are not here any
+// more -- a pin is built in memory from the key ember minted and dies with
+// the node, so nothing persists one (#120).
 func (c Config) StateDirOrDefault() (string, error) {
 	if c.StateDir != "" {
 		return c.StateDir, nil

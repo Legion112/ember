@@ -43,16 +43,12 @@ func opts(t *testing.T) Options {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pins, err := hostkey.OpenStore(filepath.Join(dir, "pins.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	id, err := keys.EnsureIdentity(filepath.Join(dir, "config"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return Options{
-		Store: store, Pins: pins, Identity: id,
+		Store: store, Identity: id,
 		ReadyTimeout: time.Minute, PollEvery: time.Second,
 	}
 }
@@ -310,10 +306,13 @@ func TestWithNode_PinsTheKeyEmberMintedNotTheOneTheProviderReports(t *testing.T)
 // TestSessionCarriesAPinAndNotAnArbitraryTrust is the seal the test above is
 // the backstop for.
 //
-// hostkey.Store.TrustOnFirstUse is a hostkey.Trust, so while trustFor returned
-// that interface the original defect was one line -- and the two tests named
-// for it both watched a log instead of the mechanism. Typing the return and
-// the field as the concrete hostkey.Pin makes that line a compile error.
+// hostkey.Store's trust-on-first-use was a hostkey.Trust, so while trustFor
+// returned that interface the original defect was one line -- and the two
+// tests named for it both watched a log instead of the mechanism. Typing the
+// return and the field as the concrete hostkey.Pin makes that line a compile
+// error. The store is deleted (#120) and this guard is not: it is about the
+// TYPE, so it holds against the next Trust somebody writes, which is the only
+// thing the deletion cannot do.
 //
 // This asserts the typing itself, in the shape hostkey.TestTrustIsSealed uses:
 // widening either back to the interface is the one edit that reopens the hole
@@ -328,7 +327,7 @@ func TestSessionCarriesAPinAndNotAnArbitraryTrust(t *testing.T) {
 	}
 	if f.Type != want {
 		t.Errorf("Session.Trust is %s, want %s; an interface there can hold "+
-			"hostkey.Store.TrustOnFirstUse, which is the defect #111 reinstated", f.Type, want)
+			"a trust-on-first-use, which is the defect #111 reinstated", f.Type, want)
 	}
 	if out := reflect.TypeOf(trustFor).Out(0); out != want {
 		t.Errorf("trustFor returns %s, want %s; the provision path must not be able to "+

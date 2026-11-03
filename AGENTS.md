@@ -3329,6 +3329,95 @@ that sentence made unrepresentable rather than merely tested.
   suite and the detector read it as a compile failure -- the "cannot tell a
   build failure from a pass" trap inverted, and the reason that detector now
   looks for `error[E...]` and `could not compile` instead.
+- **"Pins die with the node" is structural now, and the pin FILE that
+  contradicted it is deleted.** The entry above says a pin keyed by IP matches
+  whoever gets that address next and that the churn is what talks people into
+  turning host key checking off -- and `hostkey.Store` sat in the same package
+  with an atomic, versioned, 0600 JSON file at
+  `<state_dir>/known_hosts.json`, which is persistence across processes for a
+  thing that is supposed to die with one. Nothing ever wrote it. The disposal
+  is `queue.Cost`'s and not `sdserver.Client.Cancel`'s, and the test is the
+  one those two entries set: **is there a second live mechanism for the thing
+  this would do**.
+  **There was no FIRST mechanism, which is the finding.** The only production
+  dial in the tree is `internal/app`'s `dialNode`, reached only from inside
+  `provision.WithNode`'s closure and handed a `hostkey.Pin` that `trustFor`
+  built in memory from the key `WithNode` minted seconds earlier in the same
+  process. Nothing read a pin by id: `Store.Get` had no caller outside the
+  store's own tests, and its waiver in `cmd/check-coverage` said so in
+  writing -- "for a reader that does not exist yet", which is the admission
+  this file's own rules would have caught had anything been looking at it.
+  **#146 is the case that looks like it needs persistence and does not.**
+  `ember up` is a client of `ember serve` over a unix socket now, so "a
+  long-lived process and a CLI that talks to it" is exactly the shape where a
+  pin surviving a restart would earn its keep -- and `internal/cli`'s
+  `upclient` names neither `hostkey` nor `sshdial` nor `ssh`: it POSTs
+  `/api/runs` and follows a report stream, while the rental, and therefore the
+  dial, happens in the server process inside `queue.Direct.Run`. The process
+  that mints is the process that dials, in every shape ember has.
+  **And the file could only ever have held keys ember never authenticated.**
+  `tofu.check` was the only writer, so every pin in it was a trust-on-first-use
+  pin by construction; persisting one makes a first-sight guess authoritative
+  for every later process, which is worse than having no file. What a future
+  attach-to-a-running-node verb would need is `hostkey.FromNodeKey` plus
+  `Pinned` off what the provider recorded, checked against the minted key --
+  which `trustFor` already does, and on a provider that reports nothing there
+  is nothing to rebuild from, so a remembered TOFU pin would be the wrong
+  answer rather than a missing one.
+  **Measured, not read, because this file has asserted a mechanism it did not
+  have before.** With `saveLocked` made to panic, exactly two packages in the
+  whole unit suite reached it -- `internal/hostkey` and
+  `internal/tunnel/sshdial`, both from their own test files -- and
+  `internal/provision`, `internal/app` and every other package stayed green:
+  nothing in production writes a pin file. And `TrustOnFirstUse`'s waiver kept
+  it "for a provider that genuinely cannot accept an injected key, of which
+  there is none today", which is a shape ember cannot **represent** rather than
+  one it has not met: `node.NewCreateRequest` refuses a zero `HostKey`, and
+  dropping that refusal turns `TestNewCreateRequest_Refuses` red at "no host
+  key: NewCreateRequest accepted it". A waiver that names a case the type
+  system already refuses is a waiver nobody can retire by reading it.
+  **It is a strengthening of the seal and not a loosening, which is the
+  opposite of what deleting a security type usually means.** `internal/hostkey`'s
+  package doc rests the posture on two sentences: Trust's one method is
+  unexported, which `TestTrustIsSealed` holds, **and** "this package contains
+  no permissive implementation" -- which was **not true** for the life of the
+  package, because `tofu` accepted whatever key it was shown first and the only
+  thing keeping it off the renting path was #117's return type. `Pin` is the
+  only implementation now, and
+  `TestTrustHasOneImplementationAndItIsPin` parses the package's own non-test
+  files and fails on a second one, because the count and
+  `TestPinned_AcceptsTheKeyItHoldsAndRefusesEveryOther` are a pair: a count
+  alone is consistent with one permissive implementation. It is a parse because
+  reflection cannot enumerate the types a package declares, only ask a value it
+  already holds, and the subject is a type nothing constructs yet.
+  **Nothing was narrowed that could have been, and the reason is where the
+  compile error should sit.** `sshdial.Dial` and `session.Dial` still take the
+  `Trust` interface although `Pin` is the only thing satisfying it. Narrowing
+  them would move #117's compile error off the provisioning path, where the
+  defect was, and onto the dial -- where a provider that publishes its
+  fingerprint out of band would one day need the signature widened again, and
+  widening a signature is how #111 arrived. `trustFor` and `Session.Trust` stay
+  typed `Pin`, and the guard on that typing stays too: it is about the type, so
+  it holds against the next `Trust` somebody writes, which is the one thing the
+  deletion cannot do.
+  **The three judgements are kept as a note where the code was**, the
+  `node.RateFromFloat` shape, because whoever revives persistence makes them
+  again: keyed by node id and never by host:port; write-then-rename **and**
+  refuse a file from a newer ember, which are one rule because a pin file that
+  will not parse or that quietly lost a pin re-arms trust-on-first-use for
+  every node in it without anybody being told; and the file's mode is a control
+  rather than hygiene -- a fingerprint is public material, so 0600 in a 0700
+  directory is not about secrecy but about who can make their own key
+  authoritative for a node ember will dial, which is the MITM the pin exists to
+  refuse arriving through the filesystem instead of the network.
+  **One thing found and deliberately left alone**: `node.HostKeyPinned`, the
+  `HostKeySource` whose doc says "ember accepted a key it had never seen and
+  recorded it", now has no writer anywhere and cannot get one. It is a member
+  of a printed enum, so removing it is operator-visible and belongs to whoever
+  reads this rather than to the change that found it -- the `min_cuda`
+  precedent -- and `TestNoProductionDeadCode` does not report it either way,
+  because fields and types are out of its scope by the argument already
+  recorded above.
 
 ## Money
 

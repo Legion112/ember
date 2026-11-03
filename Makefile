@@ -182,7 +182,7 @@ GO_LDFLAGS := -X github.com/Legion112/ember/internal/cli.Version=$(VERSION)
 # both the answer and its negation decide whether a seal reads the right
 # source. A floor below 100 on four lines would mean one of those four was
 # never run.
-COVER_PKGS := internal/repotree=100,internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=90,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99,internal/logx=100
+COVER_PKGS := internal/repotree=100,internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=93,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99,internal/logx=100
 # cmd/reap-labs joins the other cmd mains here for their reason and one of its
 # own: every statement in it is a Docker call or a line of output, the decisions
 # it could get wrong live in test/integration/harness/labdaemon, and a unit test
@@ -235,6 +235,19 @@ COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/c
 # fails after the file was created and a close that fails after a successful
 # write. Both need a fake filesystem to provoke, and an interface introduced to
 # raise a coverage number is an interface the production code did not need.
+# internal/hostkey went from 90 to 93 when #120 deleted the pin store, and the
+# raise buys nothing against a deleted test -- which is worth writing down,
+# because that is what it looks like it is for. Measured: disabling
+# TestPinned_AcceptsTheKeyItHoldsAndRefusesEveryOther alone takes the package
+# to 68.9%, so the package is small enough that any real test deletion blows
+# past 90 as well. What the raise buys is that the floor stops describing a
+# package that no longer exists. 90 was slack sized for saveLocked's file
+# operations -- a CreateTemp, a Chmod, a Write, a Close and a Rename that fail
+# on a file this process just made, internal/assets' list -- and with those
+# gone the only uncovered statements in the whole package are Mint's three
+# crypto error returns. So 93 against a measured 93.3 is the measurement
+# rather than a margin, which is the same thing internal/s3=97 is.
+#
 # Overall across the gated set. Below 100 only because internal/keys and
 # internal/hostkey carry the documented stdlib-error gaps above.
 COVER_OVERALL := 94

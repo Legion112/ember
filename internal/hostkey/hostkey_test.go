@@ -3,6 +3,8 @@ package hostkey
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -48,6 +51,80 @@ func TestTrustIsSealed(t *testing.T) {
 	m := typ.Method(0)
 	if m.PkgPath == "" {
 		t.Fatalf("Trust.%s is exported, so anything outside this package can satisfy Trust and the seal is gone", m.Name)
+	}
+}
+
+// TestTrustHasOneImplementationAndItIsPin is the half of the seal nothing
+// checked.
+//
+// The posture rests on two sentences in fingerprint.go: Trust's one method is
+// unexported, which TestTrustIsSealed above holds, AND "this package contains
+// no permissive implementation", which nothing held -- and which was NOT TRUE
+// for the life of the package. The deleted Store's trust-on-first-use
+// accepted whatever key it was shown first; the only thing keeping it off the
+// path that rents machines was provision.trustFor's return type, added by
+// #117 after a one-line reinstatement of the original defect left a hundred
+// labs and the whole unit suite green (#111). So the second sentence is
+// checked here, and the pair is this count plus
+// TestPinned_AcceptsTheKeyItHoldsAndRefusesEveryOther: how many
+// implementations there are, and that the one there is refuses a key it was
+// not given. A count alone is consistent with one permissive implementation.
+//
+// It is a parse and not reflection, because reflection cannot enumerate the
+// types a package declares -- only ask a value it already holds. The subject
+// is every type that *could* be handed to Callback, including one nothing
+// constructs yet.
+//
+// What it gives up: a method named check that is not Trust's at all. That is
+// accepted rather than narrowed, because a second meaning of `check` in a
+// package this small is itself worth a rename, and the alternative -- matching
+// the parameter list as well -- is a guard that reads straight past an
+// implementation whose author spelled net.Addr through an alias.
+//
+// The file count is a floor for TestNoInsecureIgnoreHostKey's reason: a glob
+// that matched nothing would report that nothing is wrong.
+func TestTrustHasOneImplementationAndItIsPin(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	impls := map[string]string{}
+	parsed := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		parsed++
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, name, nil, 0)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != "check" || fn.Recv == nil || len(fn.Recv.List) != 1 {
+				continue
+			}
+			typ := fn.Recv.List[0].Type
+			if star, isPtr := typ.(*ast.StarExpr); isPtr {
+				typ = star.X
+			}
+			id, ok := typ.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			impls[id.Name] = name + ":" + strconv.Itoa(fset.Position(fn.Pos()).Line)
+		}
+	}
+	if parsed < 3 {
+		t.Fatalf("parsed only %d non-test Go files in this package; the walk is broken, not the package", parsed)
+	}
+
+	if len(impls) != 1 || impls["Pin"] == "" {
+		t.Errorf("Trust is implemented by %v, want exactly {Pin}; a second implementation here is a second answer to "+
+			"\"may this host key be used\", and the one this package already had accepted a key it had never seen -- "+
+			"read the note in trust.go before adding one", impls)
 	}
 }
 
@@ -165,12 +242,14 @@ func TestFingerprint(t *testing.T) {
 		t.Errorf("Algo() = %q, want %q", fp.Algo(), k.Type())
 	}
 
-	round, err := ParseFingerprint(fp.String())
-	if err != nil {
-		t.Fatalf("ParseFingerprint rejected what String produced: %v", err)
-	}
-	if !round.Equal(fp) {
-		t.Error("String/ParseFingerprint did not round-trip")
+	// The spelling is asserted against an independent recomputation rather
+	// than through a round trip, because ParseFingerprint went with the pin
+	// file (#120) and this string is what an operator reads out of a
+	// MismatchError and compares against `ssh-keygen -lf`. A String whose
+	// shape nothing checks is a String that drifts.
+	sum := sha256.Sum256(k.Marshal())
+	if got, want := fp.String(), k.Type()+" SHA256:"+base64.RawStdEncoding.EncodeToString(sum[:]); got != want {
+		t.Errorf("String() = %q, want %q", got, want)
 	}
 
 	if fp.Equal(Of(pub(t))) {
@@ -193,21 +272,6 @@ func TestFingerprint_DifferentAlgosNeverMatch(t *testing.T) {
 	b.algo = "ssh-rsa"
 	if a.Equal(b) {
 		t.Error("the same digest under a different algorithm must not match")
-	}
-}
-
-func TestParseFingerprint_Refuses(t *testing.T) {
-	good := Of(pub(t)).String()
-	for name, in := range map[string]string{
-		"empty":         "",
-		"no algo":       "SHA256:abc",
-		"no sha prefix": "ssh-ed25519 MD5:abc",
-		"bad base64":    "ssh-ed25519 SHA256:!!!!",
-		"short digest":  "ssh-ed25519 SHA256:" + strings.TrimPrefix(good[strings.Index(good, "SHA256:"):], "SHA256:")[:10],
-	} {
-		if got, err := ParseFingerprint(in); err == nil {
-			t.Errorf("%s: ParseFingerprint(%q) = %v, want an error", name, in, got)
-		}
 	}
 }
 

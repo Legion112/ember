@@ -22,8 +22,9 @@ import (
 // FileName is what the database is called inside the state directory.
 //
 // Beside internal/statestore's own directory rather than anywhere else, so one
-// XDG_STATE_HOME move takes the journal, the pins and this together. They are
-// all machine-local facts rather than settings.
+// XDG_STATE_HOME move takes the journal and this together. They are both
+// machine-local facts rather than settings. The host key pins used to be named
+// here as a third and are not persisted any more (#120).
 const FileName = "generations.db"
 
 // schemaVersion is the on-disk shape.

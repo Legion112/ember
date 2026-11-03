@@ -6,14 +6,19 @@
 // "temporarily" in a test. Shipping an SSH client with no server
 // authentication is the most common way this goes wrong, and "we grep for it
 // in review" has a hundred per cent failure rate eventually.
+//
+// "No permissive implementation" is checked rather than asserted here, by
+// TestTrustHasOneImplementationAndItIsPin -- because for the life of this
+// package the sentence was not literally true: the deleted Store's
+// trust-on-first-use accepted a key it had never seen, and the only thing
+// keeping it off the path that rents machines was provision.trustFor's return
+// type. See the note where it was, in trust.go.
 package hostkey
 
 import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"fmt"
-	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -36,29 +41,13 @@ func Of(key ssh.PublicKey) Fingerprint {
 	return Fingerprint{algo: key.Type(), sha256: sha256.Sum256(key.Marshal()), set: true}
 }
 
-// ParseFingerprint reads the form String writes: "ssh-ed25519 SHA256:base64".
-func ParseFingerprint(s string) (Fingerprint, error) {
-	algo, rest, ok := strings.Cut(strings.TrimSpace(s), " ")
-	if !ok {
-		return Fingerprint{}, fmt.Errorf("fingerprint %q has no algorithm; write it as \"ssh-ed25519 SHA256:...\"", s)
-	}
-	b64, ok := strings.CutPrefix(rest, "SHA256:")
-	if !ok {
-		return Fingerprint{}, fmt.Errorf("fingerprint %q is not a SHA256 fingerprint", s)
-	}
-	raw, err := base64.RawStdEncoding.DecodeString(b64)
-	if err != nil {
-		return Fingerprint{}, fmt.Errorf("fingerprint %q: %w", s, err)
-	}
-	if len(raw) != sha256.Size {
-		return Fingerprint{}, fmt.Errorf("fingerprint %q is %d bytes, want %d", s, len(raw), sha256.Size)
-	}
-	var f Fingerprint
-	f.algo = algo
-	copy(f.sha256[:], raw)
-	f.set = true
-	return f, nil
-}
+// There is deliberately no parser for the form String writes.
+// ParseFingerprint was one, and its only non-test caller was the deleted
+// Store's OpenStore, reading the pin file back: a fingerprint reaches ember
+// as a key to hash (Of) or as a provider's base64 blob (FromNodeKey), and
+// String exists for messages an operator reads rather than for a round trip.
+// A reviver of the pin file needs it again, and the note in trust.go is where
+// to read first.
 
 // IsZero reports whether f identifies nothing.
 func (f Fingerprint) IsZero() bool { return !f.set }
