@@ -21,7 +21,7 @@ import (
 // three shapes no jobs at all.
 
 // adopted is a store holding one run `ember up` is in the middle of, and a
-// recorder wired to it the way recordUp does.
+// recorder wired to it the way recordRental does.
 func adopted(t *testing.T, jobs ...string) (*genstore.RecordingStore, *Recorder, *report.Stream) {
 	t.Helper()
 	st := genstore.NewRecordingStore()

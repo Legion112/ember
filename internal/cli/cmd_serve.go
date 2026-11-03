@@ -174,8 +174,15 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		// Ledger is the same store, as a reader: the period ceilings are
 		// checked against what the generation history says was spent, which
 		// is the one number that is already recorded, numbered and durable.
+		//
+		// AND Runs IS THE SAME STORE AS A WRITER, narrowed to what recording
+		// a rental needs: the planner fills an empty store on a machine with
+		// no card, and a rental this process chose to make must be in the
+		// ledger the ceiling above reads. The two fields are two types over
+		// one store on purpose -- see queue.RunStore.
 		Planner: queue.AppPlanner{
-			Config: cfg, Deps: d, AllowPaid: o.AllowPaid, Out: out, Ledger: store,
+			Config: cfg, Deps: d, AllowPaid: o.AllowPaid, Out: out,
+			Ledger: store, Runs: store,
 			Log: o.Log,
 		},
 		Outputs: ps.Outputs,

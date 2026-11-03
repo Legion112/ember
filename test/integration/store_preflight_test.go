@@ -256,23 +256,101 @@ func TestStore_ServeFetchesOntoACheapMachineBeforeItRentsTheCard(t *testing.T) {
 			"expensive ones: they happen after the card is already paid for")
 	}
 
-	// 8. THE LEDGER SHOWS ONE RENTAL AND TWO WERE PAID FOR, which is a gap
-	// rather than an assertion about what is right. `fillStore` calls
-	// `SyncAssets` with no sink and writes no row, so `ember history` and
-	// `ember spend` are blind to a rental the queue started on its own
-	// initiative -- small money at $0.06/hr, and the rule it sits against is
-	// this repository's own: "a total that is missing part of its history says
-	// so, every time". Asserted rather than left to be noticed, the way
-	// `TestConformance_CannotCatchARederivedRunID` is: a limitation nobody can
-	// read out of the code is a limitation that will be forgotten. A change
-	// that records the cheap rental turns this red, and that is the moment to
-	// read this comment.
+	// 8. THE LEDGER SHOWS BOTH RENTALS, which is what #148 changed and what
+	// this step used to assert the absence of.
+	//
+	// It read "one row, and two machines were rented" here: `fillStore` called
+	// `SyncAssets` with no sink, so neither of the two moments a caller cannot
+	// otherwise see -- the node becoming ready, and what the rental cost, which
+	// arrives from `WithNode`'s deferred teardown -- reached anybody, and there
+	// was no row to write them to. `ember history` and `ember spend` were blind
+	// to a rental the queue started on its own initiative, against this
+	// repository's own "a total that is missing part of its history says so,
+	// every time". This lab asserted that gap deliberately, with a comment
+	// saying a change which recorded the cheap rental would turn it red. One
+	// did, so the assertion is inverted rather than deleted.
+	//
+	// A ROW OF ITS OWN AND NOT A COST ON THE REQUEST, which is the design call
+	// the issue was filed for -- `queue.recordSync` has the reasons the other
+	// two candidates are wrong. What it means here is two openers: the sync is
+	// a rental nobody queued, so it is the row `genstore.Adopt` already writes
+	// for `ember up`, with no jobs.
+	//
+	// AND THE MONEY IS ASSERTED, because this is the one lab in the tree that
+	// can: every other rents from the local provider, whose price is zero, so a
+	// cost assertion there would compare a blank against a blank and pass
+	// against the defect. `runpodfake` prices a CPU pod at $0.06/hr and a GPU
+	// pod at $0.89/hr, read back off the pod as the bill rather than as a list
+	// price -- so the sync row carries a real rate and a real cost, and
+	// `ember spend`'s period total has to include it.
 	ledger, err := lab.store.History(t.Context(), genstore.Filter{})
 	if err != nil {
 		t.Fatalf("read the ledger: %v", err)
 	}
-	if len(ledger) != 1 {
-		t.Errorf("the ledger holds %d row(s); two machines were rented and only the request's own is recorded", len(ledger))
+	if len(ledger) != 2 {
+		t.Fatalf("the ledger holds %d row(s), want 2: the request's own rental and the machine "+
+			"with no card the queue rented to fill the store. A rental ember chose to pay for and "+
+			"did not record is money an operator reconciling an invoice cannot account for:\n%+v",
+			len(ledger), ledger)
+	}
+
+	var sync genstore.Entry
+	haveSync := false
+	for _, e := range ledger {
+		if e.ID != lab.id {
+			sync, haveSync = e, true
+		}
+	}
+	if !haveSync {
+		t.Fatalf("both ledger rows are the queued request %s: %+v", lab.id, ledger)
+	}
+	// No card: the column `ember spend --by gpu` groups on, and a sync row
+	// claiming one would say the download was paid for at a card's rate.
+	if sync.GPU != "" {
+		t.Errorf("the recorded sync rental names the card %q; it asked for none", sync.GPU)
+	}
+	if sync.Jobs != 0 {
+		t.Errorf("the sync rental recorded %d job(s); it generates nothing", sync.Jobs)
+	}
+	if sync.Status != genstore.StatusDone {
+		t.Errorf("the sync rental ended %q, want done -- the weights did arrive, which "+
+			"assertions 3 and 4 above read off the store itself", sync.Status)
+	}
+	// Its own node, so the join to `ember ls` exists for the cheap machine as
+	// well: a row with no node is a rental nothing could have gone and checked.
+	if sync.Node == "" {
+		t.Error("the sync rental's row names no node, so nothing joins it to `ember ls`")
+	}
+	if sync.Rode {
+		t.Error("the sync rental reads as having ridden somebody else's rental; it opened its own")
+	}
+	if sync.Cost <= 0 {
+		t.Errorf("the sync rental cost %v; runpodfake prices a CPU pod at $0.06/hr and a money "+
+			"column of zeros in a ledger reads as free", sync.Cost)
+	}
+
+	// AND `ember spend` SUMS IT. The period total is a SUM over the requests
+	// that OPENED a rental, so a sync recorded as its own opener is in it and a
+	// cost folded into the request's row would be indistinguishable from the
+	// card's -- which is why the total is compared against both rows rather
+	// than against one number.
+	buckets, err := lab.store.Spend(t.Context(), genstore.SpendQuery{})
+	if err != nil {
+		t.Fatalf("ember spend: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("an ungrouped spend returned %d bucket(s), want 1: %+v", len(buckets), buckets)
+	}
+	total := buckets[0].RunCost
+	if total != sync.Cost+req.Cost {
+		t.Errorf("ember spend reports %v for the period; the two rentals came to %v (%v for the "+
+			"card and %v for the machine that filled the store)",
+			total, sync.Cost+req.Cost, req.Cost, sync.Cost)
+	}
+	if total <= req.Cost {
+		t.Errorf("ember spend's total %v is no larger than the request's own rental %v, so the "+
+			"machine the queue rented for itself is not in the figure an operator reconciles "+
+			"an invoice against", total, req.Cost)
 	}
 
 	// 9. NO POD SURVIVED AND THE STORE DID. A store outliving every node that
@@ -339,6 +417,19 @@ func TestStore_AFullStoreRentsTheCardAndNothingElse(t *testing.T) {
 	// so none of the assertions here passed because the run stopped early.
 	if !strings.Contains(out, "sd-server") {
 		t.Errorf("the one rental did not reach the generation server:\n%s", out)
+	}
+
+	// AND ONE LEDGER ROW, which is the negative control for the money half of
+	// the lab above. Without it, "two rows" there is equally consistent with a
+	// planner that adopts a sync run for every request there is -- a row in the
+	// ledger, and a figure in `ember spend`, for a rental that never happened.
+	ledger, err := lab.store.History(t.Context(), genstore.Filter{})
+	if err != nil {
+		t.Fatalf("read the ledger: %v", err)
+	}
+	if len(ledger) != 1 {
+		t.Errorf("a full store left %d ledger row(s), want 1: the card and nothing else:\n%+v",
+			len(ledger), ledger)
 	}
 }
 
@@ -465,7 +556,12 @@ func newStoreLab(t *testing.T) *storeLab {
 		q: &queue.Queue{
 			Store: gs,
 			Planner: queue.AppPlanner{
-				Config: cfg, Deps: deps, AllowPaid: true, Out: out, Ledger: gs,
+				Config: cfg, Deps: deps, AllowPaid: true, Out: out,
+				// Ledger reads what has been spent and Runs writes what this
+				// planner rents for itself, which is `cmd_serve.go`'s own
+				// wiring: the store fill is a rental, and a rental ember chose
+				// to make has to be in the ledger the ceiling reads.
+				Ledger: gs, Runs: gs,
 			},
 			Outputs: l.OutputDir(),
 			Log:     testLogger(out),

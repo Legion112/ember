@@ -16,6 +16,7 @@ import (
 	"github.com/Legion112/ember/internal/awssig"
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
+	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider/local"
 )
@@ -595,6 +596,56 @@ func TestStoreSync_PicksTheCheapestMachineWithNoGPU(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "nothing was created") {
 		t.Errorf("--dry-run did not say it created nothing:\n%s", out.String())
+	}
+}
+
+// TestStoreSync_RecordsTheRentalItMakes.
+//
+// `ember store sync` RENTS -- the cheapest machine with no card, for as long
+// as fifty-six gigabytes take to arrive -- and it was in no ledger: it called
+// `SyncAssets` with no sink, so neither the node becoming ready nor what the
+// rental cost reached anybody, and there was no row to write them to. That is
+// #148's hole in `ember serve`'s own store fill, reached from the command
+// line, and the fix is the same function `ember up` uses rather than a second
+// recorder.
+//
+// Through a create that FAILS, which is the only way a unit test can see this
+// at all -- `cpuOnlyRunPod` serves a catalogue and no `/v2/pods` -- and is
+// also the sharpest case: the row goes down before the create call, which is
+// the journal's rule, so a rental whose create failed has a row and the
+// window where a rental nothing recorded is born is closed.
+//
+// Every other `store sync` test here is a `--dry-run` or a refusal, so none of
+// them reaches SyncAssets. Without this one the CLI half of #148 would have
+// been covered by nothing.
+func TestStoreSync_RecordsTheRentalItMakes(t *testing.T) {
+	d := labDeps(t)
+	d.CloudBaseURL = cpuOnlyRunPod(t)
+	d.Creds = &config.Credentials{RunPod: node.NewSecret([]byte("rp-token"))}
+
+	cfg := storeConfigFor(t, d, "runpod", storeBlock+"\n"+assetBlock)
+	var out bytes.Buffer
+	if err := runStore([]string{"sync", "-config", cfg}, &out, d); err == nil {
+		t.Fatalf("the create call was supposed to fail:\n%s", out.String())
+	}
+
+	rows := recorded(t, d)
+	if len(rows) != 1 {
+		t.Fatalf("got %d row(s) in the history after a rental, want 1: a machine ember rented "+
+			"and did not record is money an operator cannot account for: %+v", len(rows), rows)
+	}
+	got := rows[0]
+	if got.GPU != "" {
+		t.Errorf("the recorded sync rental names the card %q; it asked for none", got.GPU)
+	}
+	if got.Jobs != 0 {
+		t.Errorf("the sync rental recorded %d job(s); it generates nothing", got.Jobs)
+	}
+	if got.Status != genstore.StatusFailed {
+		t.Errorf("the sync rental ended %q, want failed", got.Status)
+	}
+	if !strings.Contains(got.Err, "create") {
+		t.Errorf("the row carries %q, which does not say the create failed", got.Err)
 	}
 }
 

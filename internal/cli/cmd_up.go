@@ -151,7 +151,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	sink, finish := recordUp(out, plan)
+	sink, finish := recordRental(out, plan)
 
 	runErr := plan.Do(ctx, out, sink)
 
@@ -166,10 +166,17 @@ func runUp(args []string, out io.Writer, d deps) error {
 	return runErr
 }
 
-// recordUp puts this run in the generation history and hands back the sink the
-// run reports to.
+// recordRental puts this run in the generation history and hands back the sink
+// the run reports to.
 //
-// WHY `ember up` RECORDS, AND WHY WITHOUT BEING ASKED. `ember serve` was the
+// IT IS NAMED FOR A RENTAL AND NOT FOR `up`, because `ember store sync` calls
+// it too: a machine with no card rented for as long as fifty-six gigabytes
+// take to arrive is a rental, and it was in no ledger either -- the same hole
+// #148 found in the queue's own store fill, reached from the command line. A
+// name that claimed one caller while two used it is the shape of defect this
+// repository records about `AssertNoStray`.
+//
+// WHY A RENTAL FROM A SHELL RECORDS, AND WHY WITHOUT BEING ASKED. `ember serve` was the
 // only writer to the history, so the command every measurement in README was
 // taken with printed its cost to a terminal and kept nothing: `ember history`,
 // `ember spend --by gpu|day|provider|model` and every per-job cost and timing
@@ -205,7 +212,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 // recorder would be two things to keep in step the first time one gained a
 // column -- which is the reason the recorder moved out of Queue in the first
 // place, met again one layer up.
-func recordUp(out io.Writer, plan app.Plan) (report.Sink, func(error)) {
+func recordRental(out io.Writer, plan app.Plan) (report.Sink, func(error)) {
 	text := report.Text(out)
 	decline := func(err error) (report.Sink, func(error)) {
 		outf(out, "not recording this run in the generation history: %v\n", err)

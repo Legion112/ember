@@ -771,7 +771,7 @@ func paidRunner(t *testing.T, q *Queue, st genstore.Store) DirectRunner {
 // nothing can write through.
 //
 // A store that will not take the row is a diagnostic problem on the shell
-// path -- recordUp says so and runs anyway -- and on this one it has to stop
+// path -- recordRental says so and runs anyway -- and on this one it has to stop
 // the run: the client was promised a request id to stream, and a run with no
 // row is a rental nothing records. So the error travels and Start returns it
 // as a 400 rather than renting against a history it cannot write.

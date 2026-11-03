@@ -70,6 +70,24 @@ type AppPlanner struct {
 	// set.
 	Ledger Spender
 
+	// Runs is where a rental this planner starts ON ITS OWN INITIATIVE is
+	// recorded, and the only rental it starts is the CPU machine that fills an
+	// empty store.
+	//
+	// A SECOND FIELD RATHER THAN WIDENING Ledger, because the two answer
+	// different questions and Ledger's own argument still holds for Ledger: a
+	// Spender decides whether to spend and must not be able to write. This one
+	// is the write that renting forces -- see RunStore, which can record a run
+	// and cannot enqueue or claim one.
+	//
+	// NIL IS A REFUSAL TO FILL THE STORE, not a sync that goes unrecorded.
+	// That is refuseOverPeriod's rule applied to a write: an unrecorded rental
+	// is precisely the defect this field exists to fix, and a ledger that
+	// silently misses one is worse than one that was never wired -- so a
+	// planner that cannot record what it is about to rent does not rent it.
+	// `ember serve` always wires it.
+	Runs RunStore
+
 	// Now is injected because a ceiling is a question about a calendar
 	// period, and a test that could not choose the day could not ask it.
 	Now func() time.Time
@@ -107,7 +125,15 @@ func (p AppPlanner) now() time.Time {
 	return time.Now()
 }
 
-// Plan resolves a request and rents nothing.
+// Plan resolves a request, and rents nothing EXCEPT a machine with no card
+// when the store this run needs is missing its weights.
+//
+// This sentence used to read "and rents nothing", which stopped being true the
+// day fillStore landed below and is the shape of comment this repository keeps
+// finding: an argument that persuades about a mechanism nobody re-read. The
+// exception matters to a reader because it is the one place a plan can cost
+// money before any node the request asked for exists -- and it is why this
+// type holds a Runs as well as a Ledger.
 func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error) {
 	cfg, budget, err := Narrow(p.Config, r)
 	if err != nil {
@@ -173,8 +199,10 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 
 	// And the period ceilings, here for the same reason and in the same
 	// place: this is the last statement before anything is created, and the
-	// projection needs the offer's own price. Plan rents nothing, so a
-	// refusal here costs the offer lookup and not a node.
+	// projection needs the offer's own price. A refusal here costs the offer
+	// lookup and not a node of its own -- although a store fill above may
+	// already have rented and recorded one, which fillStore projects against
+	// these same ceilings before it does.
 	if err := p.refuseOverPeriod(ctx, cfg.TTL, plan.Offer.Price); err != nil {
 		return nil, err
 	}
@@ -198,7 +226,22 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 // NO FALLBACK. A sync that fails returns its error and the request fails with
 // it. Carrying on would rent the GPU and download on it, which is the $0.61
 // this was written for, arrived at quietly.
+//
+// AND IT GETS A LEDGER ROW OF ITS OWN, which is the money half and was missing
+// from the first version of this function. See recordSync.
 func (p AppPlanner) fillStore(ctx context.Context, cfg config.Config, missing *app.AssetsMissingError) error {
+	// FIRST, AND BEFORE THE PLAN, because it is free and because a rental
+	// ember cannot account for is the thing this whole path is bounded by. The
+	// refusals below each cost a catalogue read; this one costs nothing and
+	// answers the same question refuseOverPeriod's nil Ledger does: an
+	// unattended process that cannot write down what it spent must not spend.
+	if p.Runs == nil {
+		return fmt.Errorf("the store %q is missing %d asset(s) and nothing here can record what a "+
+			"machine rented to fetch them would cost, so none is rented: ember serve wires the "+
+			"generation history, and a rental missing from `ember history` and `ember spend` is "+
+			"money an operator cannot account for", missing.Store, len(missing.Missing))
+	}
+
 	names := make([]string, 0, len(missing.Missing))
 	for _, a := range missing.Missing {
 		names = append(names, a.As)
@@ -224,10 +267,81 @@ func (p AppPlanner) fillStore(ctx context.Context, cfg config.Config, missing *a
 	if err := p.refuseOverPeriod(ctx, cfg.TTL, sync.Offer.Price); err != nil {
 		return err
 	}
-	if err := sync.SyncAssets(ctx, p.out()); err != nil {
+	if err := p.recordSync(ctx, sync, missing.Store); err != nil {
 		return fmt.Errorf("fill the store %q: %w", missing.Store, err)
 	}
 	return nil
+}
+
+// recordSync runs the store fill with its own row in the generation history.
+//
+// A ROW OF ITS OWN, AND NOT A COST ON THE REQUEST THAT TRIGGERED IT. This is
+// the design call #148 was filed for, and the two alternatives are both wrong
+// in ways this repository has already paid for.
+//
+// Charging it to the triggering request is the cheap answer: one more figure
+// folded into `requests.cost`. But that column is documented, read and summed
+// as ONE rental's cost -- "a rental is counted once, on the request that
+// opened it" -- so a column holding two rentals makes `ember spend`'s
+// cost-per-image divide a bill nobody can decompose, and it is wrong for every
+// request after the first, which gets the store for free. A figure that looks
+// plausible and cannot be checked against a second copy is exactly the shape
+// of wrong the subquery in Spend exists to avoid.
+//
+// A `rentals` table is the thorough answer and buys nothing today: every
+// rental ember has ever recorded is already a request row, `Entry.Rode`
+// already says which rows carry a rental's cost, and a second thing for
+// `ember spend` to sum is a second place for the total to be wrong. It would
+// also be a migration, a fake method and conformance rows for a shape with one
+// reader.
+//
+// So the sync is what it is: a rental nobody queued, which is precisely what
+// genstore.Adopt and AdoptRun already exist for -- the same row `ember up`
+// writes, with no jobs, which `ember history` already prints with a dash for
+// images and card time and counts in the footnote that says how many rows it
+// left figures out of. No new column, no migration, and the readers needed no
+// teaching.
+//
+// WHAT IS NOT RECORDED is which request caused it: there is no column for a
+// parent and inventing one would be a migration for a field nothing reads.
+// What an operator sees is two rentals, which is what happened.
+//
+// THE ROW GOES DOWN BEFORE THE CREATE CALL, which is why Adopt is here and not
+// after SyncAssets returns: the window between asking a provider for a machine
+// and reading the answer is where a rental nothing recorded is born, so a sync
+// whose create failed and a sync whose node billed without ever becoming ready
+// both have a row. finish is a statement rather than a defer for AdoptRun's
+// callers' reason: provision's destroy is deferred INSIDE SyncAssets, so by the
+// time it returns the run_cost event has been emitted and written through.
+//
+// AND AN ADOPT THAT FAILS STOPS THE RENTAL, which is the opposite of
+// `recordRental`'s "it cannot fail the run" and is deliberate rather than an
+// oversight. That rule is for a command the operator typed: refusing to rent
+// because ember could not take notes would be ember declining to do the thing
+// it is for. This rental nobody asked for, it happens with nobody watching,
+// and its whole justification is that a queue drains unattended -- so the
+// nil-recorder refusal above and this one are the same answer to the same
+// question, and the request fails with the reason rather than quietly paying
+// for a machine no ledger will remember.
+func (p AppPlanner) recordSync(ctx context.Context, sync app.Plan, store string) error {
+	// logx.New over the same two inputs `cmd_serve` builds the queue's logger
+	// from, rather than a third copy carried on this struct: Out is that
+	// terminal and Log is the flag the operator chose, so this is the same
+	// logger the drain loop has. It is only ever used to say that a write to
+	// the history failed, which must not be silent on the one rental nobody is
+	// watching.
+	log := logx.New(p.out(), p.Log)
+
+	id, sink, finish, err := AdoptRun(ctx, p.Runs, sync, log, p.now)
+	if err != nil {
+		return fmt.Errorf("record the machine rented to fill it: %w", err)
+	}
+	log.Info("renting a machine with no card to fill a store, recorded as its own run",
+		"request", id, "store", store, "offer", sync.Offer.Token, "price", sync.Offer.Price.String())
+
+	runErr := sync.SyncAssets(ctx, p.out(), sink)
+	finish(runErr)
+	return runErr
 }
 
 // refuseOverPeriod is the max_day_usd and max_month_usd gate.
