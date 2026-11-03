@@ -5337,6 +5337,116 @@ A leaked node bills by the hour in silence. These are not style preferences.
   judgements are a note on `ParseCUDAVersion`, the `node.RateFromFloat` shape.
   The waiver's reason, "the evidence that the key is unenforced", was stale the
   moment `min_cuda` went, and left with it.
+- **The period ceiling on the store fill could not fail either, and sweeping
+  the class found two more on the two lines above it.** #155's entry is four
+  entries up: the `--allow-paid` gate on the queue's own store-filling rental
+  was green over its own deletion, because the fake served no CPU catalogue
+  and the run stopped at a 404 before the gate was reached. This file's
+  sentence covers **both** calls -- the sync "is a rental and is gated like one
+  -- `refusePaid` and the period ceilings, the same two calls the GPU rental
+  gets" -- and the second half was in the same state for the same reason one
+  line later. Measured, with the call replaced by a marker so the assertion is
+  on text the patch INTRODUCES: deleting
+  `p.refuseOverPeriod(ctx, cfg.TTL, sync.Offer.Price)` from `fillStore` was
+  **exit 0** across `go test ./...`, and **exit 1** with the new assertion.
+  **Nothing anywhere under `test/` configures `max_day_usd` or
+  `max_month_usd`, which is still true** -- so `Ceilings.IsZero()`
+  short-circuits in every lab there is and the deletion changes no answer in
+  any of them. The lab suite is green over the defect for exactly the reason
+  the unit suite was.
+
+  **A UNIT TEST AND NOT A LAB, and the reason is the inverse of #155's step
+  8.** That assertion is the money a rental CAME TO, which only the store lab
+  can make: every other lab rents from the local provider at zero, so a cost
+  assertion elsewhere compares a blank against a blank. This gate fires
+  **before anything is created**, on a projection built from the offer's own
+  price -- so the only thing it needs is a priced offer, and `storeFakes`
+  already serves the provider's committed `cpus.json`, which prices the fill's
+  machine at the $0.06/hr this file quotes. A refusal creates no node, mounts
+  no store and writes no object, so a lab would cross no join the unit test
+  does not and would buy a Docker run for nothing.
+
+  **THREE NUMBERS, CHOSEN SO THAT ONLY THE REAL GATE PASSES THEM**, which is
+  the "what would this assertion say if the bug were present?" question asked
+  of a money figure. $19.99 spent today, a $20 day ceiling, a $0.06
+  projection: a ceiling that **ignored the ledger** compares $0.06 against $20
+  and allows; one that **reported rather than projected** compares $19.99
+  against $20 and allows -- the "ceiling every period breaches by one rental"
+  the entry above refuses to be; the live one adds them, gets $20.05, and
+  refuses. Both wrong readings were reinstated in `Ceilings.Allow` and both
+  are red. So is a projection of `0` and a projection over a zero TTL. The
+  **day** rather than the month because the day is checked first and because
+  nothing on a rental path had ever driven it. A second, independent witness
+  sits beside the message: `recordSync`'s first call is `Adopt`, so a refused
+  fill that had already written a ledger row would mean the ceiling fired
+  after the journal had been told a rental was coming -- no row means it fired
+  before. And the **acceptance is in the same test**, because a refusal alone
+  is consistent with a ceiling that refuses every fill there is, which is what
+  a free rental must never get.
+
+  **The sweep is the finding, because the class was two gates wider than the
+  issue.** Every money gate in the tree was deleted and judged on an exit
+  code. `fillStore`'s `refusePaid` (exit 1, #155's), `Plan`'s own
+  `refuseOverPeriod` (exit 1), `DirectRunner`'s `refusePaid` (exit 1),
+  `webapi`'s `refusePaid` at the enqueue edge (exit 1) and
+  `provision`'s `Budget.Allow`, which is `max_hourly_usd` and `max_run_usd`
+  (exit 1) all hold. **Two did not.** Deleting
+  `refusePaid(p.AllowPaid, plan.Provider, plan.Offer)` from `Plan` -- the
+  `--allow-paid` gate on the **card**, the more expensive of the two rentals
+  and the last statement before the create -- was **exit 0**; and replacing
+  `plan.Offer.Price` with `0` in the ceiling call beside it was **exit 0** as
+  well, as was replacing `cfg.TTL` with `0`. A ceiling that projects nothing
+  refuses nothing.
+
+  **Both were invisible for one structural reason: the two gates read
+  `plan.Offer`, so they are on the far side of a successful `app.NewPlan`, and
+  no fake in `internal/queue` served a GPU catalogue.** `storeFakes`
+  deliberately does not, because a provider that cannot say what cards it has
+  is what makes the pre-flight's order observable, and three tests assert
+  positively on failing at `list offers from runpod`. `ceiling_test.go` reaches
+  the ceiling through the **local** provider, which plans fine and is **free**
+  -- so `refusePaid` returns nil and the projection is zero, and
+  `TestAppPlanner_ChecksThePeriodCeilingBeforeRenting` proves `Plan` arrives at
+  the ceiling through the **nil-ledger** branch, which `refuseOverPeriod`
+  answers before it ever computes a projection. Every route to those two lines
+  went through a provider that either could not choose an offer or could not be
+  charged for one. So the missing piece was one fake: a paid provider that CAN
+  choose an offer, serving the provider's own committed `gpus.json` at
+  `/v2/catalog/gpus` and pricing the RTX 4090 at $0.89/hr. A new helper and not
+  a route added to `storeFakes`, for the reason above. There is still no
+  `/v2/pods` route, so nothing there can create a node even if a gate let it
+  through.
+
+  **And the narrowed TTL is pinned by the ACCEPTANCE arm rather than by the
+  refusal**, which is the one place this is subtle. The config allows two
+  hours and the request asks for one, so the honest projection is $0.89 and
+  the config's own TTL would make it $1.78. With $18.95 spent against a $20
+  day, the narrowed figure is $19.84 and goes ahead while the config's is
+  $20.73 and refuses -- so a ceiling reading `p.Config.TTL` in place of
+  `cfg.TTL` is red there and nowhere else, while the refusal arm is red
+  against both readings and distinguishes neither. A refusal that fires for
+  two different reasons is the thing three refusal tests in this package have
+  already been corrected for.
+
+  **What is deliberately left alone, written down so it is not read as a
+  miss.** `DirectRunner.Start` has `refusePaid` and **no** period ceiling, and
+  that is the design recorded above rather than a hole: the ceilings bound
+  spending with nobody at the keyboard, and a submitted `ember up` is the
+  operator asking -- "the config path travels and the ceilings replace",
+  which is why that path takes the file the operator named. `ember up` and
+  `ember store sync` in a shell are the same case and have no period ceiling
+  either. `internal/webapi` and `internal/provision` were **measured and
+  restored** and nothing in them was edited. Two of the deletions also turned
+  `TestNoProductionDeadCode` red as collateral, because stubbing a gate out
+  leaves the symbol it called with no production caller -- a true report about
+  the patched tree and not a second finding.
+
+  **Opening and closing controls both exit 0, and two no-op patches were
+  reported as not caught.** The pass is eleven reinstatements with the marker
+  each one introduces asserted before any suite result is believed, a build
+  check ahead of every test run, and one backup per path taken once -- the five
+  harness traps this file records, including the rollback that half-patched its
+  own backup.
 
 ## Style
 
