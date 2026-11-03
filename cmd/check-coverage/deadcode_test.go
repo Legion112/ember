@@ -340,7 +340,18 @@ var deadExcluded = []struct{ sym, why string }{
 	// deletion.
 	{"internal/node.CUDAAtLeast", "the comparison min_cuda would be enforced with, and nothing enforces it: RunPod refuses the field outright and no other provider reads the floor, so deleting this would remove the evidence that the key is unenforced"},
 	{"internal/exposure.Tolerated", "written so a caller could log the platform ports it decided to live with, and no caller logs them -- 'an exposure that is waved through silently is one nobody re-examines' is its own doc comment"},
-	{"internal/report.Writer", "the Sink-as-io.WriteCloser adapter; node byte streams reach the operator another way"},
+	// report.Writer WAS HERE AND IS NOT ANY MORE, which is this guard doing
+	// the job it was built for. Its reason read "node byte streams reach the
+	// operator another way", and that was true of both callers that existed:
+	// `ember up` prints them to the terminal it is attached to, and the queue
+	// prints them to `ember serve`'s. A run SUBMITTED over the unix socket has
+	// an operator at neither -- they are on the far side of a socket reading
+	// the event stream -- so the adapter the package comment says exists "so
+	// that the packages which only print need no change to reach a UI" is the
+	// mechanism, and queue.DirectRunner.Start is the caller. Wired up rather
+	// than deleted, which is sdserver.Client.Cancel's precedent and not
+	// queue.Cost's: there is no second way for a node's bytes to reach a
+	// client that is not this process.
 	{"internal/report.Multi", "fan-out over sinks, superseded by the queue wrapping its own sinks"},
 	{"internal/report.Kinds", "the enumeration of event kinds, for a reader that would list them"},
 	{"internal/logx.WithRequest", "the request-id key, beside WithRun which production does attach"},

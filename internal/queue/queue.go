@@ -13,6 +13,17 @@
 // wrong, and being wrong costs two GPUs. A double-clicked button cannot rent
 // twice here because there is nothing for the second click to start.
 //
+// THERE ARE TWO KINDS OF WORK NOW AND STILL ONE PLACE IT RUNS. `ember up`
+// submitted over the unix socket is not a queued request -- see direct.go for
+// the four reasons it cannot be one -- so it does not arrive through
+// ClaimNext. It arrives through Submit, which is a RENDEZVOUS on an
+// unbuffered channel that only this loop receives from: one iteration of the
+// loop does either a direct run or a claim-and-drain, never both, so the
+// invariant above is unchanged rather than re-argued. A submission that
+// arrives while a rental is in flight waits in the channel until the
+// iteration ends, which is the honest expression of "the one goroutine is
+// busy" -- and the client is told it is waiting rather than refused.
+//
 // THAT IS ALSO THE SHUTDOWN STORY. Because the rental is inside the loop,
 // cancelling the loop's context unwinds through provision.WithNode's deferred
 // destroy -- which runs on a context that survives the cancellation -- and Run
@@ -100,6 +111,17 @@ type Queue struct {
 
 	kick     chan struct{}
 	kickOnce sync.Once
+
+	// runs is the second way work reaches this loop, and the only other one.
+	//
+	// UNBUFFERED, which is the whole mechanism: a send succeeds exactly when
+	// this loop is between iterations, so Submit returning means the loop owns
+	// the run. A buffer would turn that into "accepted, and it will start some
+	// time", which is the shape a counter has -- the handler would have to be
+	// told how many were already waiting in order to say anything true. See
+	// Submit and direct.go.
+	runs     chan Direct
+	runsOnce sync.Once
 
 	mu      sync.Mutex
 	current genstore.ReqID
@@ -268,12 +290,45 @@ func (q *Queue) Run(ctx context.Context) error {
 		q.log().Warn("requests were in flight when ember last stopped; their rentals are gone", "count", n)
 	}
 
+	// pending is a submitted run this loop has taken and not yet started.
+	//
+	// IT IS A VALUE AND NOT A QUEUE, for the reason `held` and `stop` are
+	// single values: the channel is unbuffered, so the loop holds at most one
+	// run at a time and every other submitter is still parked on its own
+	// send. A slice here would be a backlog this loop owned, which is the
+	// thing Submit's rendezvous exists not to create -- a submission the
+	// client could not be told the position of.
+	var pending *Direct
+
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 
-		worked, err := q.once(ctx)
+		// A SUBMITTED RUN IS TAKEN BEFORE A CLAIM, and the non-blocking shape
+		// is what makes that true without starving the queue: a submission
+		// already parked on the channel goes first, so it is not overtaken by
+		// a request queued while it was waiting for the last rental to end,
+		// and a loop with nothing parked falls straight through to ClaimNext.
+		if pending == nil {
+			select {
+			case d := <-q.handoff():
+				pending = &d
+			default:
+			}
+		}
+
+		var (
+			worked bool
+			err    error
+		)
+		if pending != nil {
+			d := *pending
+			pending = nil
+			worked, err = true, q.direct(ctx, d)
+		} else {
+			worked, err = q.once(ctx)
+		}
 		if err != nil {
 			// Reported and not returned. A request that could not be planned
 			// is that request's problem; ending the loop would mean one bad
@@ -289,6 +344,15 @@ func (q *Queue) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case d := <-q.handoff():
+			// RECEIVED HERE AND NOT ONLY AT THE TOP, because an idle loop is
+			// parked in this select and a submission must not wait out
+			// idlePoll to be noticed. Kicking instead -- Submit calling Kick
+			// and then parking on the send -- races: the loop can reach the
+			// top, find nothing parked yet, claim nothing, and come back here
+			// having already consumed the kick, so the run would start up to
+			// fifteen seconds later for no reason a reader could see.
+			pending = &d
 		case <-q.kicks():
 		case <-time.After(idlePoll):
 		}

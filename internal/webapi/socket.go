@@ -98,13 +98,21 @@ func (s *Server) ListenSocket(ctx context.Context) (*loopback.SocketListener, er
 // connection, and authenticate reads that mark instead of looking for a
 // token. The Host check is dropped for a request that arrives here and the
 // Origin check is not -- see hostOK.
+//
+// AND IT SERVES A DIFFERENT HANDLER, which is the second line of difference
+// and the one run.go rests on. s.sockMux is s.mux plus the routes only the
+// operator's own account may reach -- `ember up`, which carries a config path
+// and ceilings that replace rather than narrow. The port's server never learns
+// those patterns, so they are ABSENT from it rather than refused on it: there
+// is no condition a later change could move and no header that could claim the
+// channel.
 func (s *Server) ServeSocket(ctx context.Context, ln *loopback.SocketListener) error {
 	if !ln.IsValid() {
 		return errors.New("refusing to serve a socket listener nobody opened: " +
 			"only loopback.ListenSocket produces one whose mode and directory have been checked")
 	}
 	return serveOn(ctx, &http.Server{
-		Handler:           s.mux,
+		Handler:           s.sockMux,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
 			return fromSocket(ctx)
