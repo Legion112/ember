@@ -74,8 +74,9 @@ func TestStore_ANodeLeavesTheStoreBehindWhenItIsDestroyed(t *testing.T) {
 		t.Fatalf("up exited %d: %s", out.ExitCode, out.Combined())
 	}
 
-	// The node is gone -- AssertNoStray in the lab's cleanup covers that --
-	// and the store is not.
+	// The node is gone -- the lab's cleanup covers that, by snapshotting the
+	// daemon before it reaps and reporting the snapshot -- and the store is
+	// not.
 	vols := l.Volumes(ctx)
 	if len(vols) != 1 {
 		t.Fatalf("after a completed run the store is %+v; it must outlive the node", names(vols))

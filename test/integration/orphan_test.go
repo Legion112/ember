@@ -99,6 +99,12 @@ func TestOrphan_SigkillLeavesExactlyOneFindableNode(t *testing.T) {
 	// the whole subject -- and the stray check cannot tell a deliberate
 	// orphan from an accidental one. Reaping here says which this is, and
 	// keeps the check unconditional for every lab that leaks by mistake.
+	//
+	// Nothing is asserted after it, and that is measured rather than assumed:
+	// the cleanup's snapshot is taken once this body returns and before its
+	// own reap, so whatever this call fails to remove is reported against
+	// this lab. An AssertNoStray() here would report the same objects one
+	// line earlier -- see the note where that method was.
 	l.Reap()
 }
 

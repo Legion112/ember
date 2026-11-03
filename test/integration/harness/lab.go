@@ -286,15 +286,23 @@ func New(t *testing.T) *Lab {
 
 	t.Cleanup(func() {
 		// Snapshot first, then clean up, then report. The order matters and
-		// the previous one was wrong: Reap removed everything and
-		// AssertNoStray then looked at an empty daemon, so it could not fail
-		// -- for containers, networks or anything else. Every lab's final
+		// the previous one was wrong: Reap removed everything and the
+		// assertion then looked at an empty daemon, so it could not fail --
+		// for containers, networks or anything else. Every lab's final
 		// assertion was passing because there was nothing left to see.
 		//
 		// Both properties are wanted. Reaping stops one failing lab from
 		// cascading into every later one, and the report is the only thing
 		// that says a lab leaked. Taking the snapshot before the reap is what
 		// lets them coexist.
+		//
+		// These three lines are the whole of the check, which is why the
+		// AssertNoStray that named it is gone rather than wired up: the
+		// snapshot lands after a lab's own Reap -- the way the three labs that
+		// leak on purpose declare it -- and before this one, so it reports
+		// what a declared reap left as well as what a lab forgot. Measured by
+		// reinstating a Reap that keeps its containers; see the note where
+		// AssertNoStray was.
 		stray := l.strayNow()
 		l.Reap()
 		l.reportStray(stray)
@@ -574,18 +582,39 @@ func (l *Lab) Nodes(ctx context.Context) []container.Summary {
 	return scoped(labdaemon.Objects{Containers: cs}).Containers
 }
 
-// AssertNoStray fails the lab if anything this suite run put on the daemon is
-// still there.
+// AssertNoStray is GONE, and this note is where it was, because the labs
+// here, eight comments in internal/ and an AGENTS.md entry all name it (#113).
 //
-// It is also run from the lab's own cleanup, which snapshots first so that
-// reaping cannot empty the daemon before this looks -- and the snapshot it
-// reports is over this run's objects rather than the daemon's, so it cannot
-// accuse another checkout's live node of being a leak. Those are the two ways
-// this assertion has been wrong, in opposite directions.
-func (l *Lab) AssertNoStray() {
-	l.t.Helper()
-	l.reportStray(l.strayNow())
-}
+// It was `l.reportStray(l.strayNow())` -- look now, fail on what is there --
+// and for the life of the suite it had **no caller**: New's cleanup spells
+// snapshot, reap, report itself, because reaping must not be able to empty the
+// daemon before the snapshot is taken and a zero-argument method cannot
+// express that ordering. Its own doc comment said "it is also run from the
+// lab's own cleanup", which was never true. So the property was checked, by
+// reportStray below, and the named mechanism was an orphan -- the
+// written-covered-and-connected-to-nothing shape, in the one tree
+// TestNoProductionDeadCode deliberately does not load.
+//
+// The `sdserver.Client.Cancel` precedent -- wire it up, because deleting the
+// only mechanism deletes the mechanism -- was tried and does not apply, and
+// the thing that decided it is a measurement rather than a reading. The gap it
+// looked like it filled is the three labs that leak on purpose: they call Reap
+// themselves to declare the orphan deliberate, and the cleanup's snapshot is
+// taken afterwards, so it looks as though nothing can then say whether that
+// Reap finished. It can, and it does: the snapshot is taken after the body's
+// Reap and BEFORE the cleanup's own, so whatever the declared reap left is
+// exactly what it sees. Reinstated -- a Reap that leaves its containers behind
+// -- both orphan labs go red at reportStray with the mid-test assertion
+// deleted, so an AssertNoStray() beside their Reap reported the same objects
+// one line earlier and nothing else. That is the `queue.Cost` answer: a second
+// path for one check, where the other path is the live one.
+//
+// Two judgements are kept here because whoever adds the next stray check makes
+// them again: the snapshot is taken before the reap, or a working cleanup
+// empties the daemon the assertion is about -- which is the defect this method
+// was repaired for and could not fail over; and it is taken over this suite
+// run's objects rather than the daemon's, or it accuses another checkout's
+// live node of being a leak.
 
 // stray is what one look at the daemon found.
 type stray struct {
@@ -648,10 +677,16 @@ func (l *Lab) reportStray(s stray) {
 //
 // It is called from the lab's own cleanup so that one failing lab does not
 // cascade into every later one, and a lab that leaves something behind *on
-// purpose* calls it itself once it has finished asserting on it -- SIGKILL
-// labs do exactly that. The cleanup snapshots the daemon before reaping, so
-// calling this at the end of a test body is also how a deliberate leak is
-// declared: anything still there when the snapshot is taken is reported.
+// purpose* calls it itself once it has finished asserting on it -- the three
+// labs that SIGKILL ember do exactly that. The cleanup snapshots the daemon
+// before reaping, so calling this at the end of a test body is also how a
+// deliberate leak is declared: anything still there when the snapshot is taken
+// is reported.
+//
+// Which also means this function's own completeness is asserted: a declared
+// reap runs BEFORE that snapshot, so whatever it leaves behind is reported
+// against the lab that declared it. Measured, by making this one keep its
+// containers.
 //
 // It still removes what no lab remembered creating -- networks and volumes
 // beside the containers, found by the label rather than by a list the harness
@@ -968,10 +1003,10 @@ func (l *Lab) WaitNode(ctx context.Context, within time.Duration) {
 
 // WaitNoNodes blocks until nothing wearing ember's label is left.
 //
-// Separate from AssertNoStray because destroy is allowed to take time: it runs
-// on a context that deliberately outlives an interrupt, with its own two
-// minute budget, and asserting immediately after a signal would be a race the
-// lab loses at random.
+// Separate from the cleanup's stray report because destroy is allowed to take
+// time: it runs on a context that deliberately outlives an interrupt, with its
+// own two minute budget, and asserting immediately after a signal would be a
+// race the lab loses at random.
 func (l *Lab) WaitNoNodes(ctx context.Context, within time.Duration, detail func() string) {
 	l.t.Helper()
 	deadline := time.Now().Add(within)
@@ -1101,9 +1136,10 @@ func (l *Lab) StartNode(ctx context.Context, spec NodeSpec) (id, addr string) {
 		&container.Config{
 			Image: imageOr(spec.Image),
 			Env:   env,
-			// Always labelled with ember's run-id key, so AssertNoStray
-			// covers it and a lab that forgets to clean up fails rather
-			// than leaking a container onto the developer's machine.
+			// Always labelled with ember's run-id key, so the cleanup's
+			// stray report covers it and a lab that forgets to clean up
+			// fails rather than leaking a container onto the developer's
+			// machine.
 			Labels:       labels,
 			ExposedPorts: nat.PortSet{"22/tcp": struct{}{}},
 		},
@@ -1303,11 +1339,11 @@ func (l *Lab) HaveImage(ctx context.Context, name string) bool {
 //
 // The cleanup removes the tag and nothing else. A forced remove would delete
 // the underlying image, which is ember:lab, out from under every lab that runs
-// after this one. It also has to be a cleanup rather than a reap: AssertNoStray
-// polices containers, networks and volumes by label, and a tag inherits its
-// source's labels -- so a stray tag is indistinguishable from ember:lab by
-// label, and ownership is the only mechanism available. A lab helper owns what
-// it creates.
+// after this one. It also has to be a cleanup rather than a reap: the stray
+// report polices containers, networks and volumes by label -- labdaemon has no
+// image kind at all -- and a tag inherits its source's labels, so a stray tag
+// is indistinguishable from ember:lab by label and ownership is the only
+// mechanism available. A lab helper owns what it creates.
 func (l *Lab) TagImage(ctx context.Context, src, dst string) string {
 	l.t.Helper()
 	if _, err := l.cli.ImageInspect(ctx, src); err != nil {
