@@ -28,7 +28,7 @@ func labDeps(t *testing.T) deps {
 		// above: without this, a machine with a GPU registers a local offer
 		// carrying it, and assertions here mean something different from one
 		// developer's desk to the next.
-		DetectGPU: func(context.Context) local.GPU { return local.GPU{} },
+		DetectGPU: func(context.Context) (local.GPU, bool) { return local.GPU{}, true },
 	}
 }
 
@@ -227,7 +227,7 @@ func TestMultiFlag(t *testing.T) {
 func labDepsWithCard(t *testing.T, g local.GPU) deps {
 	t.Helper()
 	d := labDeps(t)
-	d.DetectGPU = func(context.Context) local.GPU { return g }
+	d.DetectGPU = func(context.Context) (local.GPU, bool) { return g, true }
 	d.Engine.(*dockerengine.RecordingEngine).GPURuntime = true
 	return d
 }

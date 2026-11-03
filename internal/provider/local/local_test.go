@@ -31,7 +31,7 @@ func newProvider(t *testing.T) (*Provider, *dockerengine.RecordingEngine) {
 	e.AddImage(DefaultImage)
 	e.AddImage(specImage)
 	p := New(e)
-	p.Detect = func(context.Context) GPU { return GPU{} }
+	p.Detect = func(context.Context) (GPU, bool) { return GPU{}, true }
 	return p, e
 }
 
@@ -47,7 +47,7 @@ var testGPU = GPU{Model: "rtx2080ti", VRAM: 11264, ComputeCap: "7.5"}
 func newGPUProvider(t *testing.T) (*Provider, *dockerengine.RecordingEngine) {
 	t.Helper()
 	p, e := newProvider(t)
-	p.Detect = func(context.Context) GPU { return testGPU }
+	p.Detect = func(context.Context) (GPU, bool) { return testGPU, true }
 	e.GPURuntime = true
 	return p, e
 }
@@ -868,8 +868,8 @@ func TestOffers_CarriesTheCapabilityItMeasured(t *testing.T) {
 	// point -- an rtx2080ti happens to be in it, so assert the measurement is
 	// what answered by naming a card that is not.
 	q, e := newProvider(t)
-	q.Detect = func(context.Context) GPU {
-		return GPU{Model: "acmehypercard9000", VRAM: 24576, ComputeCap: "8.9"}
+	q.Detect = func(context.Context) (GPU, bool) {
+		return GPU{Model: "acmehypercard9000", VRAM: 24576, ComputeCap: "8.9"}, true
 	}
 	e.GPURuntime = true
 	got, err = q.Offers(t.Context(), node.Filter{})
@@ -891,8 +891,8 @@ func TestOffers_CarriesTheCapabilityItMeasured(t *testing.T) {
 // DetectGPU's quiet-failure rule exists to protect.
 func TestOffers_AnUnreadableCapabilityStillOffersTheCard(t *testing.T) {
 	p, e := newProvider(t)
-	p.Detect = func(context.Context) GPU {
-		return GPU{Model: "rtx4090", VRAM: 24564, ComputeCap: "[N/A]"}
+	p.Detect = func(context.Context) (GPU, bool) {
+		return GPU{Model: "rtx4090", VRAM: 24564, ComputeCap: "[N/A]"}, true
 	}
 	e.GPURuntime = true
 
@@ -929,7 +929,7 @@ func TestOffers_ADatacentreCardInThisMachineIsStillFilterable(t *testing.T) {
 	// An A100, named the way the driver names it rather than the way the
 	// filter does. Through parseSMI, so the test exercises the path the real
 	// detector takes instead of asserting about a model it chose itself.
-	p.Detect = func(context.Context) GPU { return parseSMI("NVIDIA A100-SXM4-80GB, 81920, 8.0\n") }
+	p.Detect = func(context.Context) (GPU, bool) { return parseSMI("NVIDIA A100-SXM4-80GB, 81920, 8.0\n"), true }
 	e.GPURuntime = true
 
 	// Every spelling an operator could reasonably write for this card. The
@@ -1145,6 +1145,79 @@ func TestOffers_ExplainsACardDockerCannotReach(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Errorf("got %d offers for a CPU request, want 1", len(got))
+	}
+}
+
+// TestOffers_AnAbandonedListingDoesNotHideTheCardFromTheNextOne.
+//
+// The operator-visible half of the cached-failure defect, driven through
+// Offers rather than through gpuNow, because all three consequences are
+// here: the card missing from the listing an operator picks hardware from,
+// `--gpu` reading as sold out everywhere, and -- the one this repository
+// already has a rule about -- the "docker cannot hand it to a container"
+// diagnosis unable to fire, because it is guarded on the probe having found
+// something. Silence, with a working card in the machine, is precisely what
+// TestOffers_ExplainsACardDockerCannotReach exists to prevent.
+//
+// Reachable only from `ember serve`, which builds one registry at startup and
+// runs this on an HTTP request's own context; every other caller builds a
+// fresh registry per rental. A browser reload during the first `/api/offers`
+// is the whole trigger.
+func TestOffers_AnAbandonedListingDoesNotHideTheCardFromTheNextOne(t *testing.T) {
+	p, e := newProvider(t)
+	p.Detect = func(ctx context.Context) (GPU, bool) {
+		if ctx.Err() != nil {
+			return GPU{}, false
+		}
+		return testGPU, true
+	}
+	e.GPURuntime = true
+
+	// One listing the browser walked away from. Its own answer is a listing
+	// with no card in it, which is correct: nothing could be asked.
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := p.Offers(dead, node.Filter{}); err != nil {
+		t.Fatalf("an abandoned listing failed rather than answering without the card: %v", err)
+	}
+
+	// The next one is a fresh request from a browser that stayed.
+	got, err := p.Offers(t.Context(), node.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cards int
+	for _, o := range got {
+		if o.GPU == testGPU.Model {
+			cards++
+		}
+	}
+	if cards != 1 {
+		t.Fatalf("the listing after an abandoned one offers %d %s, want 1: %+v",
+			cards, testGPU.Model, got)
+	}
+	if _, err := p.Offers(t.Context(), node.Filter{GPU: testGPU.Model}); err != nil {
+		t.Errorf("a request for the card in this machine was refused: %v", err)
+	}
+
+	// And the diagnosis is reachable again on the daemon it is written for.
+	// It is guarded on a card having been found, so a poisoned cache made it
+	// unreachable -- a refusal consistent with there being no card at all.
+	e.GPURuntime = false
+	q, qe := newProvider(t)
+	q.Detect = p.Detect
+	qe.GPURuntime = false
+	dead2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	_, _ = q.Offers(dead2, node.Filter{})
+	_, err = q.Offers(t.Context(), node.Filter{MinVRAM: 8192})
+	if err == nil {
+		t.Fatal("a GPU request on a daemon that cannot pass one through returned no error")
+	}
+	for _, want := range []string{"rtx2080ti", "nvidia-container-toolkit"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("after an abandoned listing the refusal does not mention %q: %v", want, err)
+		}
 	}
 }
 

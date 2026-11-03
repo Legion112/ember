@@ -86,7 +86,12 @@ type Deps struct {
 	// developer's own graphics card, and a test asserting "nothing matches
 	// --gpu h100" would pass on CI and fail on a workstation -- which is
 	// exactly what happened when local GPU support was added.
-	DetectGPU func(ctx context.Context) local.GPU
+	//
+	// The second result is local.DetectGPU's: whether the probe answered at
+	// all. Carried rather than filled in here, because a seam that turned
+	// "I could not ask" into "there is no card" at this boundary would put the
+	// collapse local.gpuNow was fixed for one layer up.
+	DetectGPU func(ctx context.Context) (local.GPU, bool)
 
 	// CloudBaseURL redirects every cloud provider's API.
 	//

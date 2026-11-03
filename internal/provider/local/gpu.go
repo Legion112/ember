@@ -33,24 +33,41 @@ type GPU struct {
 // IsZero reports whether no GPU was found.
 func (g GPU) IsZero() bool { return g.Model == "" || g.VRAM == 0 }
 
-// DetectGPU asks nvidia-smi what this machine has.
+// DetectGPU asks nvidia-smi what this machine has, and says whether it got an
+// answer.
 //
 // A subprocess rather than a library, which is the same bargain ember already
 // makes with the Docker CLI's daemon: the alternative is cgo and NVML, a
 // build dependency on the CUDA toolkit, for one query.
 //
-// Every failure returns a zero GPU and no error. A machine with no card, no
-// driver, or no nvidia-smi is not a broken machine -- it is the normal case
-// for CI and for anyone running the labs -- and a provider that refused to
-// list offers because a GPU query failed would break every existing lab on
-// every machine that never had a card.
-func DetectGPU(ctx context.Context) GPU {
+// A FAILURE IS A FACT ABOUT THE MACHINE OR A FACT ABOUT THE CALL, AND THOSE
+// ARE DIFFERENT ANSWERS. No card, no driver, no nvidia-smi at all, or an
+// nvidia-smi that ran and complained are all facts about the machine: they
+// answer "none", with no error, because that is the normal case for CI and for
+// anyone running the labs, and a provider that refused to list offers over a
+// hardware query would break every existing lab on every machine that never
+// had a card. A context that ended first is a fact about the *caller* --
+// exec.CommandContext kills the child, so Output fails for a reason that says
+// nothing about the hardware -- and that answer is `false`.
+//
+// Two results rather than one, the shape node.Exposure() already uses for
+// "published nothing" against "never reported": the collapse there was the
+// same one, and the defect here was that gpuNow memoised a cancelled probe as
+// "this machine has no GPU" for the life of an `ember serve`. The three
+// reachable states are a card, no card, and nobody could ask.
+func DetectGPU(ctx context.Context) (GPU, bool) {
 	out, err := exec.CommandContext(ctx, "nvidia-smi",
 		"--query-gpu=name,memory.total,compute_cap", "--format=csv,noheader,nounits").Output()
 	if err != nil {
-		return GPU{}
+		// ctx and not the error's own shape. A cancelled exec.Cmd surfaces as
+		// a kill signal, a Start failure or a context error depending on
+		// where it was when the cancel landed, so classifying the error would
+		// be three spellings of one question; the context answers it once.
+		// Checked only here, because an Output that succeeded is an answer
+		// whatever the context did afterwards.
+		return GPU{}, ctx.Err() == nil
 	}
-	return parseSMI(string(out))
+	return parseSMI(string(out)), true
 }
 
 // parseSMI reads the first row of nvidia-smi's CSV.

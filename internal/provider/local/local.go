@@ -63,31 +63,81 @@ type Provider struct {
 	// buys nothing here.
 	User string
 
-	// Detect reports the GPU on this machine, if any. Nil uses DetectGPU,
-	// which shells out to nvidia-smi and answers "none" to every failure.
+	// Detect reports the GPU on this machine, if any, and whether the probe
+	// answered at all. Nil uses DetectGPU, which shells out to nvidia-smi and
+	// answers "none" to every failure that is a fact about the machine.
 	//
 	// A seam because the alternative is a test suite whose result depends on
 	// whether the machine running it has a graphics card. Every lab in this
 	// repository ran on the assumption that this provider has no GPU, and
 	// they have to keep passing on a machine that does.
-	Detect func(ctx context.Context) GPU
+	//
+	// The second result is part of the seam and not a detail of the real
+	// detector: a fake that could only say "no card" could not reproduce the
+	// behaviour that caused the defect below, which is the fake-tidier-than-
+	// the-thing rule applied to a seam before it has a defect of its own.
+	Detect func(ctx context.Context) (GPU, bool)
 
-	gpuOnce sync.Once
-	gpu     GPU
+	gpuMu    sync.Mutex
+	gpu      GPU
+	gpuKnown bool
 }
 
-// gpuNow detects once per provider.
+// gpuNow detects once per provider, and A FAILED PROBE IS NOT AN ANSWER TO
+// MEMOISE.
 //
 // Cached because Offers is called on every run and nvidia-smi costs tens of
-// milliseconds; a card does not appear or vanish inside one ember invocation.
+// milliseconds, and a card does not appear or vanish inside one ember
+// invocation. That sentence was the whole justification and it is about a
+// *card* -- what was being cached is a *probe's answer*, and DetectGPU used to
+// return the same zero GPU for "there is no card" and "I could not ask". So
+// one `/api/offers` poll cancelled by a browser reload -- the window is a
+// Docker ping plus an nvidia-smi, and the page has no AbortController --
+// poisoned the listing for the life of an `ember serve`: no local card on
+// offer, `--gpu rtx4090` reading as sold out everywhere, and the
+// "docker cannot hand it to a container" diagnosis below unable to fire
+// because it is guarded on the probe having found something. Paid rentals were
+// never at risk; every other caller builds a fresh registry.
+//
+// This is "I could not ask" and "it is not there" are different answers, met a
+// third time -- s3.Head's 404, `ember ls` over a provider it could not reach
+// -- and in a cache rather than on a status code. A probe that answered is
+// cached, including when the answer is "no card at all", because a machine
+// with no nvidia-smi must not re-exec on every listing: that is the cost the
+// cache exists to avoid, and it is why this needs three states rather than a
+// bool flipped on error.
+//
+// NOT context.WithoutCancel, which was the other candidate. The destroy
+// precedent is an action whose absence costs money, so the caller's Ctrl-C
+// must not decide it; this is a read, and detaching it would need a bound of
+// its own -- a clock nobody here has measured, and an unbounded one turns a
+// wedged nvidia-smi into a listing that never answers, which is runServed's
+// bare wait() one package over. It also fixes one cause rather than the class:
+// a probe killed by anything but this context, or a binary missing for one
+// listing, would still be memoised. Re-running is what recovers, and it needs
+// no new clock.
+//
+// The lock is held across the probe so two listings cannot exec at once, which
+// is what sync.Once gave for free. A cancelled caller holding it costs the
+// next one nothing: its own exec returns as soon as its context is checked.
 func (p *Provider) gpuNow(ctx context.Context) GPU {
-	p.gpuOnce.Do(func() {
-		detect := p.Detect
-		if detect == nil {
-			detect = DetectGPU
-		}
-		p.gpu = detect(ctx)
-	})
+	p.gpuMu.Lock()
+	defer p.gpuMu.Unlock()
+	if p.gpuKnown {
+		return p.gpu
+	}
+	detect := p.Detect
+	if detect == nil {
+		detect = DetectGPU
+	}
+	g, answered := detect(ctx)
+	if !answered {
+		// Reported to this caller -- whose listing is already being
+		// abandoned, which is why nothing can be asked for -- and not
+		// remembered.
+		return GPU{}
+	}
+	p.gpu, p.gpuKnown = g, true
 	return p.gpu
 }
 

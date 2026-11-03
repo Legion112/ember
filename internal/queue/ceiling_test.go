@@ -394,7 +394,7 @@ func TestAppPlanner_ChecksThePeriodCeilingBeforeRenting(t *testing.T) {
 	deps := app.Deps{
 		Engine: engine, HomeDir: t.TempDir(),
 		Creds:     &config.Credentials{},
-		DetectGPU: func(context.Context) local.GPU { return local.GPU{} },
+		DetectGPU: func(context.Context) (local.GPU, bool) { return local.GPU{}, true },
 	}
 	req := genstore.Request{
 		Provider: "local", TTL: 30 * time.Minute,
