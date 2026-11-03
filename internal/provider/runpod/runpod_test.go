@@ -835,54 +835,21 @@ func TestRunPod_LeftoverCapsMatchImplementation(t *testing.T) {
 	providertest.AssertLeftoverCapsMatch(t, New(node.NewSecret([]byte("k"))))
 }
 
-// TestCreate_RefusesMinCUDARatherThanSendingAFieldRunPodRejects.
+// TestCreate_SendsNoCudaFieldAtAll, because the endpoint rejects any property
+// it does not declare and ember must not reintroduce one.
 //
-// ember used to send min_cuda as allowedCudaVersions, taken from RunPod's
-// published schema. The wrong one: rest.runpod.io/v1/pods accepts that field
-// and api.runpod.io/v2/pods -- the endpoint ember creates on -- declares 18
-// properties with unevaluatedProperties: false and no CUDA field at all. Every
-// create with min_cuda set died at
+// This is now the ONLY assertion in this package on that axis, and the
+// refusal that used to sit above it is gone with the config key (#91): ember
+// sent the floor as allowedCudaVersions, taken from the schema of the OTHER
+// RunPod API, and every create with min_cuda set died at
 //
 //	status 422: additional properties 'allowedCudaVersions' not allowed
 //
-// found by setting it on a real run. Filtering offers instead is not
-// available either -- and NOT because the catalogue is silent, which is what
-// this comment used to say and what the captured gpus.json disproves. The
-// field is there and it tracks capacity rather than capability, which
-// TestCatalogue_ReportsCudaVersionsAndTheyAreNotAFloorForMinCUDA measures off
-// the capture.
-//
-// So a refusal, and before anything is rented. A constraint an operator
-// believes is in force and is not would be worse than none -- which is what
-// the field's own doc comment said when nobody had confirmed it filtered.
-func TestCreate_RefusesMinCUDARatherThanSendingAFieldRunPodRejects(t *testing.T) {
-	called := false
-	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"never","status":"PROVISIONING"}`))
-	})
-
-	req := request(t)
-	req.Spec.MinCUDA = "13.0"
-	_, err := p.Create(t.Context(), req)
-	if err == nil {
-		t.Fatal("min_cuda was accepted; RunPod answers 422 to the only field that could carry it")
-	}
-	// The remediation matters more than the refusal: gpu_probe is the thing
-	// that does enforce a floor, and an operator who set min_cuda wanted that.
-	for _, want := range []string{"min_cuda", "gpu_probe"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal does not mention %q: %v", want, err)
-		}
-	}
-	if called {
-		t.Error("a pod was created anyway; this has to be settled before anything is rented")
-	}
-}
-
-// TestCreate_SendsNoCudaFieldAtAll, because the endpoint rejects any property
-// it does not declare and ember must not reintroduce one.
+// A refusal in Create could only be reached by a spec field nothing sets any
+// more, so what is left to guard is the create body itself. The reason the key
+// could not be honoured by filtering offers instead is measured off the
+// committed capture by
+// TestCatalogue_ReportsCudaVersionsAndTheyAreNotAFloorForMinCUDA.
 func TestCreate_SendsNoCudaFieldAtAll(t *testing.T) {
 	var raw map[string]any
 	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {

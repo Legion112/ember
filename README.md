@@ -1141,8 +1141,11 @@ driver's own words were *not yet*: an SXM board waits for
 `nvidia-fabricmanager` on the host, and probing at the earliest possible moment
 turns a card that needed forty seconds into a refusal.
 
-`min_cuda` exists and **RunPod refuses it**. Setting it is an error naming
-this paragraph, rather than a constraint that silently does nothing.
+### There is no `min_cuda`
+
+**`min_cuda` was a config key and is not one any more.** A config that still
+carries the line is refused by name, with the remedy below, rather than having
+the value quietly dropped. Delete the line.
 
 It was added from RunPod's published schema, as `allowedCudaVersions`. The
 wrong schema: `rest.runpod.io/v1/pods` accepts that field, and
@@ -1154,7 +1157,7 @@ Every create with `min_cuda` set died at
 status 422: additional properties 'allowedCudaVersions' not allowed
 ```
 
-Filtering offers instead is not available either, and this paragraph used to
+Filtering offers instead is not available either, and this section used to
 give the wrong reason: it said the live catalogue does not return
 `cudaVersions`. It does — the captured catalogue in
 `internal/provider/runpod/testdata/gpus.json` carries it on three of its four
@@ -1171,9 +1174,13 @@ and upstream describes them as suitable for the one create property that
 answers 422. The field also sits on the GPU type rather than per datacentre,
 so it cannot be re-read through a store's site the way availability is.
 
-So the constraint cannot be expressed at create time or at selection time, and
-the honest answer is to say so — a constraint an operator believes is in force
-and is not would be worse than none.
+So the constraint cannot be expressed at create time or at selection time.
+What the key did instead was refuse on RunPod and do **nothing at all** on the
+local provider, which has no CUDA version to compare against — one documented
+key, two different meanings, and silence on the one an operator is most likely
+to try first. A key that cannot be honoured anywhere is worse than no key, so
+it is gone and the refusal moved up to where the config is read, which is
+before any provider is chosen.
 
 This is the second time RunPod's two APIs have disagreed about a field; the
 first was `dataCenter` against `dataCenterId` on network volumes.
@@ -1181,7 +1188,13 @@ first was `dataCenter` against `dataCenterId` on network volumes.
 **`gpu_probe` is what enforces a driver floor.** It runs on the node before
 the workload and costs the probe rather than the run. In practice the floor is
 not tight anyway: a rented RTX 4090 reported driver 595.91.07 with
-`CUDA Version: 13.2`, ahead of the 13.0.1 the images are built against.
+`CUDA Version: 13.2`, ahead of the 13.0.1 the images are built against — which
+is also the number a node-side floor would have to be compared against, and
+why one is not built: CUDA minor-version compatibility means an image built
+against 12.6 runs on a 12.x driver older than 12.6, so comparing the two as
+versions refuses hosts the image works on. Settling that needs a rental on a
+host with an old driver, and until somebody has one the probe is the honest
+mechanism: it asks the card to do the thing, rather than asking a number.
 
 ### Choosing the image by the card
 

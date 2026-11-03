@@ -12,12 +12,14 @@ import (
 // markers in a fatbin, CMAKE_CUDA_ARCHITECTURES and ember's `images:` keys all
 // spell 7.5 as 75.
 //
-// Not to be confused with Spec.MinCUDA, which is a CUDA *runtime* version the
-// host must offer and is parsed by ParseCUDAVersion. Both are "a CUDA version"
-// in conversation and they constrain different things -- the card's silicon
-// against the driver's software -- so this type renders itself only as "sm_75"
-// and never as "7.5". nvidia-smi's "7.5" spelling is an input format with no
-// matching output.
+// Not to be confused with a CUDA *runtime* version, the thing a host's driver
+// offers and ParseCUDAVersion reads. Both are "a CUDA version" in conversation
+// and they constrain different things -- the card's silicon against the
+// driver's software -- so this type renders itself only as "sm_75" and never as
+// "7.5". nvidia-smi's "7.5" spelling is an input format with no matching
+// output, and it is `--query-gpu=compute_cap` that answers it: the runtime
+// version is not a `--query-gpu` field at all, which is half of why `min_cuda`
+// was removed rather than enforced from the node.
 type ComputeCap int
 
 // CapKnowledge is how ember knows a card's capability, and it has three

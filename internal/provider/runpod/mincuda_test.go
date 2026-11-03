@@ -36,8 +36,14 @@ type cudaCatalogue struct {
 // justifies the entry somebody remembered cannot catch the entry somebody
 // forgets.
 //
-// What the field cannot do is enforce `min_cuda`, which is #91's question, and
-// the measurement is the capture itself. `available` tracks the card's
+// What the field cannot do is enforce `min_cuda`, which was #91's question,
+// and the measurement below is what answered it: the key is GONE, and this is
+// the evidence it was removed on rather than an open question. It was re-run
+// against the capture before the removal landed and it was also made to fail,
+// by flipping one of the 4090's eight versions to `available: true` -- exit 1
+// at the Errorf below -- because a guard nobody has watched fail is a guard
+// nobody should trust. The measurement is the capture itself. `available`
+// tracks the card's
 // top-level availability summary across all four captured rows -- LOW gives
 // every version true, NONE gives every version false, and the AMD card
 // reports none at all -- so it is a capacity signal and not a per-version
@@ -61,7 +67,23 @@ type cudaCatalogue struct {
 //
 // If a later capture reports `available: true` for a card with site capacity,
 // THIS TEST IS SUPPOSED TO FAIL: the correlation would be broken, and #91's
-// floor question is reopened on evidence rather than closed by a comment.
+// floor question is reopened on evidence rather than closed by a comment. What
+// reopening it would mean now is bringing the config key back, so the thing to
+// read first is config.rejectRemovedKeys, which carries the reason it went.
+//
+// One thing the same investigation turned up and no response settles, recorded
+// here because it is the next person's first idea: `nvidia-smi` DOES report a
+// CUDA runtime version -- `--version` and `-q` both print "CUDA Version", and
+// `--query-gpu` has no such field, only `driver_version` and `compute_cap`
+// (node.ComputeCap, a different number). So a floor could in principle be
+// compared on the node. It is not built, because the comparison is the
+// unmeasured half: CUDA minor-version compatibility means an image built
+// against 12.6 runs on a 12.x driver older than that, so `CUDAAtLeast` over
+// the driver's figure refuses hosts the image works on -- which is this
+// entry's own defect one layer along -- and settling it needs a rental on a
+// host with an old driver. `pod.cudaVersion` is no better: pod_running.json
+// carries it, that file is schema-derived like every other pod_*.json, nothing
+// in types.go decodes it, and it would arrive after the pod was billing.
 func TestCatalogue_ReportsCudaVersionsAndTheyAreNotAFloorForMinCUDA(t *testing.T) {
 	cat := fixture[cudaCatalogue](t, "gpus.json")
 	if len(cat.Gpus) == 0 {

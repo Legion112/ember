@@ -982,3 +982,96 @@ func TestKeepEvents_OffByDefaultAndRefusesANegativeHorizon(t *testing.T) {
 		t.Errorf("err = %v, want it to name the key", err)
 	}
 }
+
+// TestLoad_RefusesMinCUDAByNameRatherThanAsAnUnknownField is #91's
+// operator-facing half.
+//
+// `min_cuda` was a documented config key whose only effect was a refusal on
+// RunPod and SILENCE on the local provider, which is the defect the issue is
+// about. Removing the field answers the silence by itself, because
+// KnownFields(true) refuses a key that is not a field -- but what yaml.v3 then
+// says is "field min_cuda not found in type config.Config", which names a Go
+// type an operator should never see and offers no remedy. The key was in
+// README for its whole life, so the person who hits this is the one who
+// followed the documentation, and `gpu_probe` is what they wanted.
+//
+// So the assertions are the two halves an unknown-field error cannot give: the
+// key by name, and the remedy by name. The negative control beside them is a
+// config with no such line, because a refusal that fired on every file would
+// satisfy both.
+func TestLoad_RefusesMinCUDAByNameRatherThanAsAnUnknownField(t *testing.T) {
+	_, err := Load(write(t, "provider: local\nimage: ember-sd:1\nttl: 10m\nmin_cuda: \"12.6\"\n"))
+	if err == nil {
+		t.Fatal("min_cuda was accepted; no provider here can honour it")
+	}
+	for _, want := range []string{"min_cuda", "gpu_probe"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+	// The thing that distinguishes ember's answer from yaml's. A guard that
+	// only checked for "min_cuda" would pass against the generic message,
+	// which contains the key too.
+	if strings.Contains(err.Error(), "config.Config") {
+		t.Errorf("the refusal is yaml's unknown-field message rather than ember's: %v", err)
+	}
+
+	if _, err := Load(write(t, "provider: local\nimage: ember-sd:1\nttl: 10m\n")); err != nil {
+		t.Fatalf("a config that never named min_cuda was refused: %v", err)
+	}
+}
+
+// TestLoad_RefusesAMinCUDAWithNoValue is the spelling a struct of pointers
+// cannot see.
+//
+// `min_cuda:` with nothing after it decodes as null, so a check written as
+// `*string != nil` reads it as absent -- and it is exactly what an operator
+// reaches for when they want the key off without deleting the line. The
+// question rejectRemovedKeys asks is whether the key was WRITTEN, which is why
+// it decodes into a map and looks for the key rather than for a value.
+//
+// IT ASSERTS THE MESSAGE AND NOT MERELY AN ERROR, and the first version of
+// this test did the second thing and could not fail. KnownFields(true) refuses
+// a key that is not a field whatever rejectRemovedKeys concluded, so `err !=
+// nil` holds against the pointer defect this test exists for as happily as
+// against the fix -- "what would this say if the bug were present?", answered
+// with "the same thing". What tells the two apart is whose sentence it is:
+// ember's names gpu_probe, yaml's names the Go type.
+func TestLoad_RefusesAMinCUDAWithNoValue(t *testing.T) {
+	for _, body := range []string{
+		"provider: local\nimage: ember-sd:1\nttl: 10m\nmin_cuda:\n",
+		"provider: local\nimage: ember-sd:1\nttl: 10m\nmin_cuda: \"\"\n",
+	} {
+		_, err := Load(write(t, body))
+		if err == nil {
+			t.Errorf("a min_cuda line with no value was accepted:\n%s", body)
+			continue
+		}
+		if !strings.Contains(err.Error(), "gpu_probe") {
+			t.Errorf("a min_cuda line with no value got yaml's unknown-field error "+
+				"rather than ember's remedy: %v\n%s", err, body)
+		}
+	}
+}
+
+// TestLoad_AFileItCannotParseReportsTheParseAndNotARemovedKey.
+//
+// rejectRemovedKeys runs before the strict decode so that its sentence wins,
+// and that puts it in front of every malformed file as well. A file it cannot
+// read is one the decode cannot read either, and the decode's message names
+// the line -- so this one must stay silent and let it through rather than
+// describing the wrong problem.
+func TestLoad_AFileItCannotParseReportsTheParseAndNotARemovedKey(t *testing.T) {
+	// A sequence at the root: valid YAML, and not a mapping, so unmarshalling
+	// it into a map fails where the strict decode into Config also fails.
+	_, err := Load(write(t, "- provider: local\n- image: ember-sd:1\n"))
+	if err == nil {
+		t.Fatal("a root-level sequence was accepted as a config")
+	}
+	if !strings.Contains(err.Error(), "parse ") {
+		t.Errorf("err = %v, want the parse error that names the line", err)
+	}
+	if strings.Contains(err.Error(), "min_cuda") {
+		t.Errorf("a malformed file was reported as a removed key: %v", err)
+	}
+}
