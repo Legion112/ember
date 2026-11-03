@@ -352,7 +352,6 @@ var deadExcluded = []struct{ sym, why string }{
 	// seals are the point -- loopback.Bind's field is unexported with no
 	// literal path, exposure.PortRequest's `public` is unexported -- and an
 	// accessor with no reader yet is the cheap half of that. Each is one line.
-	{"internal/app.(Attached).IsZero", "does this run mount a store; the planner branches on the Handle instead"},
 	{"internal/blob.(*Dir).Name", "the rooted directory, for an error message nothing composes"},
 	{"internal/catalogue.(*Store).Path", "the day file a sample belongs to; Append computes it internally"},
 	{"internal/catalogue.(Level).Known", "whether a level is one of the four the schema enumerates"},

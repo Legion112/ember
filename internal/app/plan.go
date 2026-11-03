@@ -227,6 +227,45 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 			"reachable", "the forward only, except on the local provider, where a Docker bridge makes the bind reachable from this machine")
 	}
 
+	// THE WEIGHTS, BEFORE THE CARD.
+	//
+	// Here rather than three statements lower because PickOffer is the first
+	// call that commits to hardware, and the point of this question is that
+	// it is answered while nothing has been chosen: one HEAD per asset over
+	// the store's own endpoint, for nothing. Assets are still verified by
+	// digest on the node, which is where a digest belongs; what this catches
+	// is the absence, which on the node costs the download at the card's
+	// rate -- measured at 97.9% of one RTX PRO 6000 rental.
+	//
+	// A CPU-only run is not asked, and that is the natural seal rather than
+	// a flag: `ember store sync` is the run whose job is to FILL the store,
+	// so refusing it for an empty store would refuse the remedy. It is also
+	// what stops `ember serve` recursing, since the sync it starts on a
+	// missing asset is itself a plan built this way.
+	//
+	// The finding is returned rather than acted on, because the two callers
+	// want opposite things from it. See AssetsMissingError.
+	if !req.CPUOnly {
+		assetList, err := cfg.ParseAssets()
+		if err != nil {
+			return Plan{}, err
+		}
+		check, err := CheckStoreAssets(ctx, cfg, creds, store, assetList, req.Deps)
+		if err != nil {
+			return Plan{}, err
+		}
+		if !check.Asked && len(assetList) > 0 {
+			// Said out loud. A check that silently does nothing leaves the
+			// operator believing the expensive case cannot happen.
+			opts.Log.Info("not checking whether this run's weights are on the store before renting",
+				"why", check.Why,
+				"consequence", "a missing asset is found on the node, after the card is paid for")
+		}
+		if err := MissingAssets(cfg.Store.Name, check); err != nil {
+			return Plan{}, err
+		}
+	}
+
 	// The offer is chosen here, for the same reasons the store is resolved
 	// above: only the provider knows what it has, and the image depends on the
 	// answer. An `images:` map is keyed by the architecture of the card, so
