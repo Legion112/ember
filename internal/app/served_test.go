@@ -563,6 +563,94 @@ func (r *fakeServerRunner) Run(ctx context.Context, cmd sshx.Command) (io.ReadCl
 // about the happy path needs.
 func liveServer() *fakeServerRunner { return &fakeServerRunner{linger: true} }
 
+// wedgedServerRunner is the one behaviour fakeServerRunner cannot express: a
+// wait that never returns at all.
+//
+// A SECOND FAKE AND NOT A FLAG ON THE FIRST. fakeServerRunner's `linger` is
+// `<-ctx.Done()`, which is the tidier behaviour and is correct for every test
+// that uses it -- a process whose exit always arrives once ember stops it. The
+// bug the five-second cap exists for is the opposite: "cancelling the context
+// closes the session, sd-server keeps running, and no exit status ever
+// arrives". So every test that drove the deferred reaper handed it an exit it
+// was always going to get, and the cap was never the thing that released it.
+// A fake tidier than the thing it stands in for tests a program that does not
+// exist, which this repository has now paid for six times -- runpodfake's 200
+// on a deleted pod, the preview fake that never repeated a frame, the queue
+// fake that stamped Seq itself, the cancel fake with no error object, and
+// RecordingProvider echoing the injected host key.
+//
+// `released` is closed by the test's own cleanup rather than being a bare
+// `select{}`: it has to never return for as long as the assertion lasts, and
+// leaving a goroutine parked for the rest of the test binary buys nothing.
+type wedgedServerRunner struct{ released chan struct{} }
+
+func (r wedgedServerRunner) Run(_ context.Context, _ sshx.Command) (io.ReadCloser, func() error, error) {
+	return io.NopCloser(bytes.NewReader(nil)), func() error {
+		// Deliberately not watching the context: that is the whole point.
+		<-r.released
+		return nil
+	}, nil
+}
+
+// TestWithServer_TheDeferredReaperIsBoundedAgainstAWaitThatNeverReturns.
+//
+// AGENTS.md names the bare `wait()` in this defer as the worst concurrency bug
+// this repository has had -- it wedged for twenty-three minutes after SIGTERM,
+// never printing the error it was in the middle of returning, so the run
+// looked like a hang with no diagnosis, and it was found with SIGQUIT and a
+// goroutine dump because nothing else could have found it. The bound is also
+// cited as the precedent for a future OpenTelemetry `Shutdown`. Measured
+// before this test existed: deleting the cap outright left
+// `go test -race ./internal/app/ ./internal/queue/` at exit 0.
+//
+// A WEDGE PRINTS NO `--- FAIL` OF ITS OWN. CI greps the unit log for
+// `--- SKIP` and reads `go test`'s status, and neither sees a hang until the
+// package's own `-timeout` expires -- which prints a goroutine dump rather
+// than a failure naming anything. That is why this carries its own deadline
+// and its own message instead of being left to the package timeout, and it is
+// the rule the browser labs already follow: race the thing you are waiting for
+// against the thing that means it will never happen.
+//
+// About seven seconds as the tree stands -- two for the port wait, five for
+// the cap -- and it does not return at all without it.
+func TestWithServer_TheDeferredReaperIsBoundedAgainstAWaitThatNeverReturns(t *testing.T) {
+	released := make(chan struct{})
+	t.Cleanup(func() { close(released) })
+
+	// Built out here rather than in the goroutine below, because these call
+	// t.Fatal and that belongs to the test's own goroutine.
+	spec := servedSpec(t, []string{"sd-server"})
+	run := testRun(sdserver.Job{Prompt: "a"})
+	dir := filepath.Join(t.TempDir(), "r")
+
+	// A dialer that always refuses plus a short deadline, which is the
+	// cheapest way to reach the defer: ember gives up on the port and
+	// returns, and the reaper is then the only thing left.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		_ = runServed(ctx, io.Discard, report.Discard, &refusingDialer{},
+			wedgedServerRunner{released: released}, spec, run,
+			session.Options{Log: discardLog()}, dir, 0)
+		done <- time.Since(start)
+	}()
+
+	select {
+	case took := <-done:
+		// Generous: what is being distinguished is seconds from never.
+		if took > 30*time.Second {
+			t.Fatalf("runServed returned after %v, want the five-second cap to have released it", took)
+		}
+	case <-time.After(40 * time.Second):
+		t.Fatal("WEDGED: runServed did not return within 40s against a wait() that never arrives, " +
+			"so the deferred reaper has no bound -- which is a hang rather than a failure and is " +
+			"why this assertion carries its own deadline")
+	}
+}
+
 // The backoff exists because a flat two seconds measured slower than no
 // resident model at all: a 0.3s job noticed up to 2s late cost more than the
 // 0.8s of tensor loading being saved.
