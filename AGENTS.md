@@ -3390,6 +3390,41 @@ that sentence made unrepresentable rather than merely tested.
   alone is consistent with one permissive implementation. It is a parse because
   reflection cannot enumerate the types a package declares, only ask a value it
   already holds, and the subject is a type nothing constructs yet.
+  **That sentence was false when it was first written, and the guard was walked
+  around on the first attempt.** A method receiver in Go is `T`, `*T`, `T[P]`
+  or `*T[P]`; the first version unwrapped the star, named the `*ast.Ident` and
+  **skipped** anything else, so a GENERIC receiver -- `*ast.IndexExpr`, or
+  `*ast.IndexListExpr` for two parameters -- took the skip, and a generic type
+  is a live `Trust` the moment it is instantiated. Measured, each patch applied
+  and reverted: a permissive `check` with a value receiver is exit 1, with a
+  pointer receiver in another file exit 1, **with a generic receiver exit 0** --
+  and with an exported constructor for it plus `internal/app`'s `dialNode`
+  handing it to `session.Dial`, `go build`, `go test ./...`, `go vet` and
+  `golangci-lint` are **all exit 0 while ember dials every node it rents with
+  no host key verification at all**, `TestTrustIsSealed`,
+  `TestNoInsecureIgnoreHostKey`, `TestSessionCarriesAPinAndNotAnArbitraryTrust`
+  and `TestNoProductionDeadCode` green beside them, because the types are
+  untouched and the constructor has a caller.
+  **The fix is `TestFlagTablesClassifyEveryFlagSetMethod`'s rule and the three
+  lines are its**: a receiver this guard cannot name is a **fatal** rather than
+  a skip, because "the alternative to failing on a method it cannot classify is
+  reading straight past a flag, which is one more gate that cannot fail in a
+  repository that has already found four." Both generic shapes now exit 1
+  naming the receiver kind, a clean tree exits 0, and with the whole attack
+  wired into the only production dial the one red light in the entire tree is
+  this guard. A guard that can be walked around is worse than none, because it
+  reads as protection -- and this one claimed its own completeness in this file
+  before anybody had tried to get past it, which is the failure the rest of
+  this entry is about, committed by the entry itself.
+  **One gap is stated rather than closed**: a permissive `check` in a
+  `_test.go` file of `internal/hostkey` is not reported, because the walk skips
+  test files -- against this file's own "not behind a flag, not in a test" and
+  "no escape hatch for a seal, not even for a test". It is bounded rather than
+  fixed: production cannot reference a `_test.go` identifier and this package's
+  own tests cannot reach `sshdial`, so such a type can be handed to nothing
+  that dials. Including test files would mean the guard reporting itself the
+  day a test legitimately needs a stand-in `Trust`, which is the shape of a
+  guard people learn to ignore.
   **Nothing was narrowed that could have been, and the reason is where the
   compile error should sit.** `sshdial.Dial` and `session.Dial` still take the
   `Trust` interface although `Pin` is the only thing satisfying it. Narrowing
@@ -3410,14 +3445,29 @@ that sentence made unrepresentable rather than merely tested.
   directory is not about secrecy but about who can make their own key
   authoritative for a node ember will dial, which is the MITM the pin exists to
   refuse arriving through the filesystem instead of the network.
-  **One thing found and deliberately left alone**: `node.HostKeyPinned`, the
-  `HostKeySource` whose doc says "ember accepted a key it had never seen and
-  recorded it", now has no writer anywhere and cannot get one. It is a member
-  of a printed enum, so removing it is operator-visible and belongs to whoever
-  reads this rather than to the change that found it -- the `min_cuda`
-  precedent -- and `TestNoProductionDeadCode` does not report it either way,
-  because fields and types are out of its scope by the argument already
-  recorded above.
+  **One thing found and deliberately left alone, and the first reason given for
+  leaving it was false.** `node.HostKeyPinned`, the `HostKeySource` whose doc
+  said "ember accepted a key it had never seen and recorded it; ember reports
+  it so the operator can see that without reading logs", now has no writer
+  anywhere and cannot get one. Leaving it is right; the reason written here was
+  "a member of a printed enum, so removing it is operator-visible", and
+  **nothing prints it**: measured, `grep -rn 'HostKey' --include='*.go'` over
+  `internal/reconcile/` and `internal/cli/` returns nothing at all, so
+  `ember ls` never reads `node.HostKey`, and the only non-test site that
+  formats a `HostKeySource` is a `providertest` failure message. So the doc
+  comment was untrue twice over and is corrected -- which matters because the
+  comments in `config`, `genstore` and `app` were corrected in the same change
+  and this one was not, which is this file's own "a claim is worth exactly what
+  the code does" applied to a sweep that missed a line. The honest reason to
+  keep the member is one the enum already carries: `HostKeyFromAPI` is a member
+  nothing produces and says so plainly, so that is the precedent rather than
+  `min_cuda`, and a constant costs nothing while removing one is a decision
+  about the enum rather than a consequence of deleting a store.
+  `TestNoProductionDeadCode` does not report it either way, because fields and
+  types are out of its scope by the argument already recorded above. The stale
+  waiver beside it -- `node.(HostKeySource).Authenticated`, excused as "ls
+  reports the source itself" -- is wrong in the same way, is older than this
+  change, and is left for whoever reads this.
 
 ## Money
 

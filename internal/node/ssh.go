@@ -61,8 +61,24 @@ const (
 
 	// HostKeyPinned means ember accepted a key it had never seen and recorded
 	// it. A node in this state was never authenticated on its first
-	// connection; ember reports it so the operator can see that without
-	// reading logs.
+	// connection.
+	//
+	// NOTHING PRODUCES IT, and nothing can: the only thing that ever did was
+	// hostkey.Store's trust-on-first-use, deleted in #120 having never written
+	// its pin file. HostKeyFromAPI above is honest about being in the same
+	// position and this is the precedent for the wording. It is kept for that
+	// reason rather than deleted -- a member of this enum costs one constant
+	// and removing one is a decision about the enum rather than a consequence
+	// of deleting a store.
+	//
+	// This used to end "ember reports it so the operator can see that without
+	// reading logs", which was untrue twice over: no reader renders this enum
+	// to an operator at all. Measured -- `grep -rn HostKey` over
+	// internal/reconcile/ and internal/cli/ returns nothing, so `ember ls`
+	// never reads node.HostKey, and the one non-test site that formats a
+	// HostKeySource is a providertest failure message. The stale waiver for
+	// Authenticated in cmd/check-coverage says "ls reports the source itself"
+	// and is wrong the same way; it is older than this and left alone.
 	HostKeyPinned
 )
 

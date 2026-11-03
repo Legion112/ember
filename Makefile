@@ -239,9 +239,21 @@ COVER_EXCLUDE := internal/sshx/sshexec,cmd/ember,cmd/emberwl,cmd/embernode,cmd/c
 # raise buys nothing against a deleted test -- which is worth writing down,
 # because that is what it looks like it is for. Measured: disabling
 # TestPinned_AcceptsTheKeyItHoldsAndRefusesEveryOther alone takes the package
-# to 68.9%, so the package is small enough that any real test deletion blows
-# past 90 as well. What the raise buys is that the floor stops describing a
-# package that no longer exists. 90 was slack sized for saveLocked's file
+# to 75.6%, so the package is small enough that any real test deletion blows
+# past 90 as well.
+#
+# THAT FIGURE READ 68.9% HERE FIRST, and how it got wrong is the more useful
+# half, in the one comment whose subject is that a stated measurement is worth
+# its exit code. The first pass renamed a second test out of the run and did
+# not put it back before renaming this one, so 68.9% is TWO tests disabled --
+# a patch left in place from the previous step, which is the
+# reinstatement-harness trap this file records, reached inside a measurement
+# rather than inside a defect. Re-measured with t.Skip and under
+# -covermode=set, count and atomic alike: 75.6%, three times. The conclusion
+# never moved, because 75.6 < 90 < 93 either way.
+#
+# What the raise buys is that the floor stops describing a package that no
+# longer exists. 90 was slack sized for saveLocked's file
 # operations -- a CreateTemp, a Chmod, a Write, a Close and a Rename that fail
 # on a file this process just made, internal/assets' list -- and with those
 # gone the only uncovered statements in the whole package are Mint's three
