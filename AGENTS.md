@@ -1219,6 +1219,76 @@ that sentence made unrepresentable rather than merely tested.
   empty answer and a nil answer are the same slice in Go and different values
   in JSON. The server sends `[]`, and the client tolerates `null` anyway,
   because the rule has to hold for a field somebody adds later.
+- **A Go `int` and a Rust `i32` are the same literal in JSON and different
+  types on either side, which is that rule one axis over.** Ten numeric
+  fields cross this seam that way, and the server could always say something
+  the client cannot hear: `POST /api/requests` answered **202** to
+  `width: 3000000000`, because `validateJobs` calls `sdserver.Validate` --
+  the half that reads `limits.max_width` -- only `if haveCaps`, and there are
+  no caps until this process's first rental. The row was then in the store for
+  good, `serde_json::from_str::<RequestList>` failed on it, and because a
+  `Vec<Request>` decodes element by element into **one** result it took every
+  healthy request in the envelope with it. `views::Queue`'s `if let Ok(l)`
+  kept the signal's last value, so the table read "nothing queued" for the
+  life of the tab while a two-second poll re-fetched the same undecodable
+  bytes. No error anywhere, in either language, and no test in the tree took
+  Go's output and asked whether Rust could read it -- `cargo test`'s wire
+  tests are hand-written JSON whose numbers are all small, the Go suite
+  asserts on Go types where the value is fine, and the browser lab cannot
+  enter it because the control is an `<input type=number>` read into that same
+  `i32`. The closed loop `capabilities.model` sat in, with a compiler on the
+  far side instead of an API.
+
+  **Both sides, and the reason is that neither reaches what the other does.**
+  `sdserver.MaxAxis` is the Go half: a static bound of 8192 per axis, which
+  is `limits.max_upscale_width` and `max_upscale_height` in the captured
+  `/capabilities` -- the largest geometry any response here publishes, against
+  generation maxima of 4096 -- so it cannot refuse a size an observed server
+  accepts, and `Validate` still applies the tighter published figure once the
+  caps are cached. Read from a response and not from a schema, which is the
+  `allowedCudaVersions` rule; the limit it accepts in exchange is that a
+  future build publishing a larger upscale maximum would be refused before the
+  caps permitting it were read, and that is written where the constant is.
+  It reaches **four** fields: `steps`, `batch_count`, `hires.steps`,
+  `shifted_timestep`, `slg.layers[]`, the two vae tile sizes and
+  `upscale_tile_size` have no published maximum anywhere, and a ceiling
+  invented for `steps` would be the guess the geometry bound is careful not to
+  be.
+
+  So `model.rs`'s `Rows` is the client half, and it is **tolerance rather than
+  widening**. Widening the ten fields to `i64` makes today's numbers exact and
+  says nothing about the eleventh -- a string where a number was expected, a
+  field somebody adds as a `u64` -- while what cost the operator their queue
+  was not the width but that one row's badness is the whole list's. A row that
+  will not decode is dropped and **counted**, and the count is rendered,
+  because a row that vanished silently is the operator's own request
+  disappearing. "nothing queued" is not printed over dropped rows either: the
+  state that used to print it is exactly the state where every row failed.
+  Containment twice, by two mechanisms, as the tar extractor is.
+
+  **The test is a file one language writes and the other reads.**
+  `internal/webapi/testdata/request_list_unrepresentable.json` is produced by
+  the handler -- `TestRequests_AListingWithARowTheBrowserCannotRead` fails if
+  the handler stops sending what is in it -- and `model.rs` reads that exact
+  path with `include_str!`, so a cargo build cannot miss it. The row is seeded
+  through the store and not the API on purpose: `genstore.Request.Validate`
+  has never looked at a geometry, so it is the row an ember from before the
+  bound wrote, and it is still in the database of anybody who hit this. Its
+  **negative control** is in the Rust test beside the assertion: the
+  oversized element is decoded on its own first and required to fail, because
+  the thing that used to go was the envelope, so "the healthy row survived"
+  proves nothing against a fixture with nothing wrong with it.
+
+  **What is covered by nothing is the render, and that is recorded rather than
+  implied.** `Rows::note`, `Rows::nothing_queued` and the per-row decode have
+  unit tests; the three lines in `views::Queue` that put them on screen do
+  not, because driving a browser into this state means a row in the database
+  that `POST /api/requests` will no longer write -- seedable, as the browser
+  lab already hand-seeds a `caps` row for the feature-deny path, and not
+  seeded here. So this is the `Job::drop_denied` gap one panel over: the
+  decisions are tested where `cargo test` reaches them and the effect is not,
+  and the thing to notice is a queue panel that goes blank again rather than
+  short.
 - **`omitempty` does nothing for a `time.Time`, and the tag read as though it
   worked.** `encoding/json` has no empty value for a struct, so
   `report.Event.Deadline` was on **every** event ember emits as

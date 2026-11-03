@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1315,5 +1316,148 @@ func TestPostRequest_ExtraStillCannotBeSet(t *testing.T) {
 		`{"provider":"local","jobs":[{"prompt":"a","hires":{"enabled":true,"model_path":"/etc/shadow"}}]}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("a nested unknown field was accepted: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// --- the geometry nothing checked before the first rental ---
+
+// TestPostRequest_RefusesAGeometryNoResponseCouldPermit.
+//
+// WITH NO CACHED CAPABILITIES, which is the state this is about: `haveCaps`
+// is false until something has asked a generation server, so `sdserver.Validate`
+// -- the half that reads `limits.max_width` -- is skipped, and a width of
+// 3,000,000,000 was answered 202. The row went to the store for good, a card
+// was rented for a batch sd-server was always going to refuse, and the queue
+// panel could not decode the listing it appeared in.
+//
+// THE ACCEPTANCE IS ASSERTED BESIDE THE REFUSALS, because a bound that
+// refused every geometry would satisfy every refusal here: 8192 is the
+// largest figure any captured `limits` publishes and has to be taken.
+func TestPostRequest_RefusesAGeometryNoResponseCouldPermit(t *testing.T) {
+	cases := map[string]struct {
+		job  string
+		want string
+	}{
+		"a width an i32 cannot hold": {
+			`{"prompt":"a cat","width":3000000000,"height":512}`,
+			"width 3000000000 is above 8192",
+		},
+		"a height an i32 cannot hold": {
+			`{"prompt":"a cat","width":512,"height":3000000000}`,
+			"height 3000000000 is above 8192",
+		},
+		"a hires target past the published upscale maximum": {
+			`{"prompt":"a cat","hires":{"enabled":true,"target_width":99999}}`,
+			"hires target_width 99999 is above 8192",
+		},
+		"a negative width": {
+			`{"prompt":"a cat","width":-512}`,
+			"width -512 is negative",
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			body := fmt.Sprintf(`{"provider":"local","jobs":[%s]}`, c.job)
+			w := h.do(t, "POST", "/api/requests", body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+			}
+			if got := decode[map[string]string](t, w)["error"]; !strings.Contains(got, c.want) {
+				t.Errorf("error = %q, want it to name %q", got, c.want)
+			}
+			if rs, err := h.store.List(t.Context(), genstore.Filter{}); err != nil || len(rs) != 0 {
+				t.Errorf("rows = %d (err %v); a refusal before anything is rented must leave "+
+					"nothing in the store for the browser to choke on", len(rs), err)
+			}
+		})
+	}
+
+	// The largest geometry any captured response publishes, which this bound
+	// is taken from and therefore must accept.
+	h := newHarness(t)
+	ok := `{"provider":"local","jobs":[{"prompt":"a cat","width":8192,"height":8192,
+		"hires":{"enabled":true,"target_width":8192,"target_height":8192}}]}`
+	if w := h.do(t, "POST", "/api/requests", ok); w.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want 202 for limits.max_upscale_width exactly: %s",
+			w.Code, w.Body.String())
+	}
+}
+
+// listFixture is the listing `web/src/model.rs` decodes in its own test.
+//
+// WHY A FILE AND NOT TWO HAND-WRITTEN COPIES. Nothing anywhere took Go's
+// output and asked whether Rust could read it: `cargo test`'s wire tests feed
+// JSON somebody typed, whose numbers are all small, and this package's tests
+// assert on Go types, where a width of three billion is fine. The seam's
+// agreement was verifiable only by hand, which is how an `int` against an
+// `i32` survived -- the same closed loop as `capabilities.model`, in two
+// languages instead of against an API.
+//
+// So the bytes are produced HERE, by the handler, and committed; the Rust
+// test reads this exact path with `include_str!`, so a cargo build cannot
+// miss it. This test is the half that stops the file drifting from what the
+// handler sends.
+const listFixture = "testdata/request_list_unrepresentable.json"
+
+// TestRequests_AListingWithARowTheBrowserCannotRead.
+//
+// THE ROW IS SEEDED THROUGH THE STORE AND NOT THE API, deliberately, and it
+// is not a contrived shape: `genstore.Request.Validate` has never looked at a
+// geometry, so this is exactly the row an ember from before `sdserver.MaxAxis`
+// wrote -- and it is still in the database of anybody who hit this. The
+// refusal above stops new ones; it does nothing for the ones already there,
+// which is why the browser half of the fix is not belt and braces.
+func TestRequests_AListingWithARowTheBrowserCannotRead(t *testing.T) {
+	h := newHarness(t)
+
+	// Fixed ids and fixed stamps, because the bytes are committed. Newest
+	// first, as both stores order a listing, so the oversized row is second.
+	base := time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)
+	for _, r := range []genstore.Request{{
+		ID: "req-healthy", Provider: "local", GPU: "rtx4090", TTL: time.Hour,
+		Created: base.Add(time.Minute), Preview: "proj", PreviewInterval: 5,
+		Jobs: []genstore.Job{{Prompt: "a lighthouse", Width: 512, Height: 512, Steps: 4, Seed: 7}},
+	}, {
+		ID: "req-oversized", Provider: "local", GPU: "rtx4090", TTL: time.Hour,
+		Created: base, Preview: "proj", PreviewInterval: 5,
+		Jobs: []genstore.Job{{Prompt: "a cat", Width: 3000000000, Height: 512, Steps: 4}},
+	}} {
+		if _, err := h.store.Enqueue(t.Context(), r); err != nil {
+			t.Fatalf("seeding %s: %v", r.ID, err)
+		}
+	}
+
+	w := h.do(t, "GET", "/api/requests", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	got := w.Body.String()
+
+	want, err := os.ReadFile(listFixture)
+	if err != nil {
+		t.Fatalf("reading %s: %v\nthe handler produced:\n%s", listFixture, err, got)
+	}
+	if got != string(want) {
+		t.Errorf("the handler no longer sends what %s holds, and web/src/model.rs decodes "+
+			"that file -- update it to:\n%s", listFixture, got)
+	}
+
+	// AND GO IS HAPPY WITH IT, which is the whole point of the file: the
+	// value is representable here and is not there, so neither language's
+	// own tests could have found this.
+	var list struct {
+		Requests []requestView `json:"requests"`
+	}
+	if err := json.Unmarshal([]byte(got), &list); err != nil {
+		t.Fatalf("Go cannot read its own listing: %v", err)
+	}
+	if len(list.Requests) != 2 {
+		t.Fatalf("requests = %d, want both rows", len(list.Requests))
+	}
+	if list.Requests[1].Jobs[0].Width != 3000000000 {
+		t.Errorf("width = %d; the fixture has to carry the value Rust cannot hold, or the "+
+			"test over there passes against a listing with nothing wrong with it",
+			list.Requests[1].Jobs[0].Width)
 	}
 }

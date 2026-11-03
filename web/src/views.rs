@@ -1026,6 +1026,17 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
     // click that never registered, over a card that may still be billing.
     let error = RwSignal::new(String::new());
 
+    // WHEN THE TABLE IS NOT THE WHOLE QUEUE. Two faults say that, and both
+    // used to say it by saying nothing: a row this page cannot decode, and a
+    // listing it could not read at all. The second is the `if let Ok(l)`
+    // below, which keeps the signal's last value -- so one undecodable
+    // request left the table reading "nothing queued" for the life of the tab
+    // while the two-second poll re-fetched the same bytes. One signal and one
+    // line, because both mean the same thing to whoever is reading it: what
+    // is on screen is less than what ember has. The first sentence is written
+    // by `Rows::note`, in `model`, where cargo test reaches it.
+    let unreadable = RwSignal::new(String::new());
+
     // The cancels this page has asked for and the rows have not caught up
     // with, holding the server's own answer about each.
     //
@@ -1043,17 +1054,32 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
     // second socket is not worth it.
     let reload = move || {
         spawn_local(async move {
-            if let Ok(l) = api::get::<RequestList>("/api/requests?limit=50").await {
-                // FORGOTTEN WHEN THE ROW ITSELF SAYS SO, and never before: a
-                // request gone from the listing or ended is one whose cancel
-                // button `is_cancellable` has already taken away, so there is
-                // nothing left for this to guard -- and dropping an entry any
-                // earlier would put the button back under a stop that is
-                // still travelling.
-                stopping.update(|s| {
-                    s.retain(|c| l.requests.iter().any(|r| r.id == c.id && !r.is_terminal()))
-                });
-                list.set(l);
+            match api::get::<RequestList>("/api/requests?limit=50").await {
+                Ok(l) => {
+                    unreadable.set(l.requests.note());
+                    // FORGOTTEN WHEN THE ROW ITSELF SAYS SO, and never
+                    // before: a request gone from the listing or ended is one
+                    // whose cancel button `is_cancellable` has already taken
+                    // away, so there is nothing left for this to guard -- and
+                    // dropping an entry any earlier would put the button back
+                    // under a stop that is still travelling.
+                    stopping.update(|s| {
+                        s.retain(|c| {
+                            l.requests
+                                .items
+                                .iter()
+                                .any(|r| r.id == c.id && !r.is_terminal())
+                        })
+                    });
+                    list.set(l);
+                }
+                // THE TABLE IS LEFT AS IT WAS, which is the only honest thing
+                // to do with a listing that did not arrive -- and it is why
+                // this says so out loud. A stale table nobody is told about
+                // is the state this panel sat in.
+                Err(e) => unreadable.set(format!(
+                    "the queue could not be read, so this table is whatever it last showed: {e}"
+                )),
             }
         });
     };
@@ -1068,12 +1094,18 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
     view! {
         <section class="panel">
             <h2>"the queue"</h2>
-            <Show when=move || list.get().requests.is_empty()>
+            // "NOTHING QUEUED" IS A CLAIM AND NOT AN EMPTY TABLE, so it is
+            // not said over rows that were dropped: a listing whose every row
+            // this page could not read is exactly the state that used to
+            // print it, and it is the wrong answer in the one direction that
+            // matters -- the operator's requests are queued and about to rent
+            // a card.
+            <Show when=move || list.get().requests.nothing_queued()>
                 <p class="hint">"nothing queued"</p>
             </Show>
             <table class="queue">
                 <tbody>
-                    <For each=move || list.get().requests key=|r| (r.id.clone(), r.status.clone()) let:r>
+                    <For each=move || list.get().requests.items key=|r| (r.id.clone(), r.status.clone()) let:r>
                         {
                             let id = r.id.clone();
                             let running = list.get().running == r.id;
@@ -1215,6 +1247,14 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
             // the server's own sentence from -- and the alternative is a UI
             // saying nothing at all over an error that names the command that
             // fixes it.
+            // A SEPARATE CLASS FROM `error`, because these are different
+            // facts and the cancel lab counts `p.error` under this table to
+            // assert a refusal is gone. A listing short of a row is not a
+            // refusal of anything.
+            <Show when=move || !unreadable.get().is_empty()>
+                <p class="unreadable">{move || unreadable.get()}</p>
+            </Show>
+
             <Show when=move || !error.get().is_empty()>
                 <p class="error">"the cancel was refused: " {move || error.get()}</p>
             </Show>

@@ -511,7 +511,18 @@ func (s *Server) refusePaid(name string) error {
 // batch from a browser and one from a file are held to the same rules. The
 // other half needs the server's own capability list, which exists only after
 // a rental; it is read from the cache when there is one, and skipped before
-// this process's first rental, where app.NewPlan will catch it instead.
+// this process's first rental.
+//
+// WHAT THE SKIPPED HALF COSTS, because this comment used to wave at it. The
+// caps half is caught on the node, by app.Served.Generate, after the card is
+// rented and the weights are in -- not by app.NewPlan, which calls only the
+// static half. So every refusal `haveCaps` guards is a refusal an operator
+// pays a rental for on the first request of a process, and a geometry is the
+// one case where that was also a defect the browser could see: a width Go's
+// `int` holds and the page's `i32` does not took the whole request listing
+// with it. sdserver.MaxAxis is the static bound that closes it; the samplers,
+// the schedulers and the format lists have no static answer, because a list
+// ember has not been told is not a list it can check against.
 func (s *Server) validateJobs(ctx context.Context, req genstore.Request) error {
 	preview, err := sdserver.ParsePreview(req.Preview)
 	if err != nil {

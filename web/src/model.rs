@@ -652,10 +652,112 @@ impl Request {
     }
 }
 
+/// Rows is a listing that survives a row it cannot read.
+///
+/// ONE UNDECODABLE ROW USED TO TAKE THE WHOLE ENVELOPE, and with it every
+/// healthy request beside it. `Vec<Request>` decodes element by element into
+/// ONE result, so a `width` of 3,000,000,000 -- which Go's `int` holds, which
+/// this `i32` cannot, and which `POST /api/requests` answered 202 to whenever
+/// there were no cached capabilities -- failed the whole `RequestList`.
+/// `views::Queue`'s `if let Ok(l)` then kept the signal's last value, so the
+/// table read "nothing queued" for the life of the tab and the two-second
+/// poll re-fetched the same undecodable bytes forever. No error anywhere: the
+/// row is in the store for good, and the page cannot say what it cannot
+/// decode.
+///
+/// WIDENING THE TEN FIELDS TO i64 WAS THE OTHER CANDIDATE AND IS THE NARROWER
+/// FIX. It makes the numbers that cross this seam today exact and says nothing
+/// about the eleventh -- a string where a number was expected, a field
+/// somebody adds as a `u64`, a shape this page has not been taught. What cost
+/// the operator their queue was not the width: it was that one row's badness
+/// is the whole list's. So a row that will not decode is dropped and COUNTED,
+/// and `note` is what puts it on screen -- a row that vanished silently would
+/// be the "reads as working" defect, with the operator's own request as the
+/// thing that disappeared.
+///
+/// THE SERVER ALSO STOPS SENDING IT: `sdserver.MaxAxis` refuses that width
+/// before the request is queued. Containment twice, by two mechanisms, as the
+/// tar extractor is -- the bound stops the bad row existing, this stops one
+/// bad row destroying the view of every good one -- and neither alone is
+/// enough. The bound reaches the four geometry fields that have a published
+/// maximum and none of the other six, which is written out at MaxAxis; and
+/// the rule has to hold for a field somebody adds later, which is the same
+/// sentence `nullable` above is here for.
+///
+/// `requests` ONLY, and not every list on this seam. `Offers` carries a
+/// per-provider `error` already and the watcher's events are folded one at a
+/// time, so this is the one envelope where a row nobody can read costs the
+/// view of the rest -- and the one with somewhere to say so. A `dropped`
+/// count nothing rendered would be the feature built end to end and never
+/// connected.
+#[derive(Clone, Debug, Default)]
+pub struct Rows {
+    pub items: Vec<Request>,
+
+    /// How many rows the server sent that this page could not read.
+    pub dropped: usize,
+
+    /// Why the first of them did not decode, for the operator to paste.
+    pub trouble: String,
+}
+
+impl Rows {
+    /// What to say about the rows that did not decode; empty when there are
+    /// none.
+    ///
+    /// THE SENTENCE IS DECIDED HERE and rendered in `views`, which is this
+    /// module's own rule: a decision about data belongs where `cargo test`
+    /// can reach it with no browser.
+    pub fn note(&self) -> String {
+        if self.dropped == 0 {
+            return String::new();
+        }
+        format!(
+            "{} request(s) the server listed are missing from this table: \
+             this page could not read them ({})",
+            self.dropped, self.trouble
+        )
+    }
+
+    /// Whether "nothing queued" is true, which is not the same as the table
+    /// being empty.
+    ///
+    /// A LISTING WHOSE EVERY ROW WAS DROPPED IS EXACTLY THE STATE THAT USED
+    /// TO PRINT IT, and it is wrong in the one direction that matters: those
+    /// requests are queued and about to rent a card. The decision is here
+    /// rather than in the `<Show>` because this module is where cargo test
+    /// reaches it; `views` only renders it.
+    pub fn nothing_queued(&self) -> bool {
+        self.items.is_empty() && self.dropped == 0
+    }
+}
+
+impl<'de> Deserialize<'de> for Rows {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Into values first, so the failure is per element. A
+        // `Vec<Request>` would make the whole sequence one decode, which is
+        // the defect.
+        let raw = Vec::<serde_json::Value>::deserialize(d)?;
+        let mut out = Rows::default();
+        for v in raw {
+            match serde_json::from_value::<Request>(v) {
+                Ok(r) => out.items.push(r),
+                Err(e) => {
+                    out.dropped += 1;
+                    if out.trouble.is_empty() {
+                        out.trouble = e.to_string();
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RequestList {
     #[serde(default, deserialize_with = "nullable")]
-    pub requests: Vec<Request>,
+    pub requests: Rows,
     #[serde(default)]
     pub running: String,
 }
@@ -1939,6 +2041,80 @@ mod tests {
 
         let l: Listing = serde_json::from_str(r#"{"provider":"local","offers":null}"#).unwrap();
         assert!(l.offers.is_empty());
+    }
+
+    /// The bytes Go sends, not bytes somebody typed here.
+    ///
+    /// NOTHING ANYWHERE TOOK GO'S OUTPUT AND ASKED WHETHER RUST COULD READ
+    /// IT. The wire tests in this module feed JSON written by hand, whose
+    /// numbers are all small; the Go suite marshals and asserts on Go types,
+    /// where a width of three billion is fine; and `TestServe_UI` drives the
+    /// page, where that value cannot be entered, because the control is an
+    /// `<input type=number>` read into this same `i32`. So a Go `int` against
+    /// a Rust `i32` -- the same literal in JSON and different types on either
+    /// side -- survived every test in two languages, which is the closed loop
+    /// `capabilities.model` sat in with an API on the other end instead of a
+    /// compiler.
+    ///
+    /// This file is produced by
+    /// `TestRequests_AListingWithARowTheBrowserCannotRead` in
+    /// `internal/webapi`, from the handler, and that test fails if the
+    /// handler stops sending what is in it. `include_str!` is the other half:
+    /// a cargo build cannot miss the file.
+    #[test]
+    fn a_row_go_sent_and_this_page_cannot_read_does_not_take_the_list_with_it() {
+        const LIST: &str =
+            include_str!("../../internal/webapi/testdata/request_list_unrepresentable.json");
+
+        // THE NEGATIVE CONTROL FIRST: the whole envelope is what used to go,
+        // so an assertion that the healthy row survived means nothing unless
+        // the oversized one really is unreadable.
+        let one: Result<Request, _> = serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(LIST).unwrap()["requests"][1].clone(),
+        );
+        assert!(
+            one.is_err(),
+            "the fixture no longer carries a value this page cannot hold, so every \
+             assertion below would pass against a listing with nothing wrong with it"
+        );
+
+        let l: RequestList = serde_json::from_str(LIST).expect("the envelope still decodes");
+        assert_eq!(
+            l.requests.items.len(),
+            1,
+            "the healthy request was dropped too"
+        );
+        assert_eq!(l.requests.items[0].id, "req-healthy");
+        assert_eq!(l.requests.dropped, 1);
+
+        // AND IT IS SAID RATHER THAN SWALLOWED. A row that vanished silently
+        // is the operator's own request disappearing out of the queue, which
+        // is worse than the table being short.
+        let note = l.requests.note();
+        assert!(note.contains('1'), "note = {note:?}");
+        assert!(!note.is_empty());
+        assert!(
+            Rows::default().note().is_empty(),
+            "a clean listing says nothing"
+        );
+
+        // AND "nothing queued" IS NOT SAID OVER IT. A listing whose every
+        // row was dropped is the state that used to print it, and those
+        // requests are queued and about to rent a card.
+        assert!(!l.requests.nothing_queued());
+        let all_bad = Rows {
+            items: Vec::new(),
+            dropped: 1,
+            trouble: "x".into(),
+        };
+        assert!(
+            !all_bad.nothing_queued(),
+            "every row dropped is not an empty queue"
+        );
+        assert!(
+            Rows::default().nothing_queued(),
+            "an empty listing is an empty queue"
+        );
     }
 
     #[test]
