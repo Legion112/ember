@@ -129,15 +129,57 @@ func TestImageSelect_ARefusedRunRentsNothing(t *testing.T) {
 // TestImageSelect_AStandInTagSurvivesNothingAndLeaksNothing.
 //
 // TagImage's cleanup removes a name and not an image. A forced remove would
-// delete ember:lab out from under every lab that runs after this one, and
-// AssertNoStray cannot catch that: a tag inherits its source's labels, so a
-// stray tag is indistinguishable from ember:lab by label and ownership is the
-// only mechanism there is.
+// delete ember:lab out from under every lab that runs after this one, and the
+// stray check cannot catch either half: labdaemon has three kinds -- container,
+// network, volume -- and no image kind, `make reap-labs` goes through the same
+// listing, and CI's stray step is `docker ps -aq`. A tag also inherits its
+// source's labels, so a stray one is indistinguishable from ember:lab by label.
+// Ownership is the only mechanism there is, which is why this lab is the thing
+// holding it.
+//
+// BOTH halves of that are properties of the cleanup, and until #114 this lab
+// asserted neither: it checked that the tag existed and that ember:lab had not
+// been removed, both DURING the body, which is `docker tag` and not the cleanup
+// at all. A TagImage whose cleanup stopped working would have leaked
+// ember:lab-sm75, -sm80 and -sm90 onto the developer's daemon on every suite
+// run, for good, and the lab written to prevent exactly that would have stayed
+// green -- the name claiming more than the code, which is the defect rather
+// than the leak. The leak itself is three image NAMES sharing every layer with
+// ember:lab: no bytes, no money, nothing a later run trips over, which is why
+// the answer is an assertion here and not an image kind in labdaemon.
 func TestImageSelect_AStandInTagSurvivesNothingAndLeaksNothing(t *testing.T) {
 	l := harness.New(t)
 	ctx := t.Context()
 
-	tag := l.TagImage(ctx, harness.LabImage, "ember:lab-sm75")
+	const standIn = "ember:lab-sm75"
+
+	// Registered BEFORE TagImage, so it runs AFTER TagImage's own: cleanups
+	// run last-registered-first, which is the ordering CreateVolume already
+	// relies on to go before the stray check. context.WithoutCancel because
+	// t.Context() is cancelled before any cleanup runs, which is the same
+	// reason TagImage's own cleanup takes it.
+	t.Cleanup(func() {
+		cctx := context.WithoutCancel(ctx)
+		if l.HaveImage(cctx, standIn) {
+			t.Errorf("%s outlived the lab. TagImage's cleanup is the only thing that removes it: "+
+				"labdaemon has no image kind, `make reap-labs` goes through that same listing, and a "+
+				"tag inherits ember:lab's labels -- so nothing else in this suite or in CI can see it, "+
+				"and it is on this daemon for good", standIn)
+		}
+		// The other direction, and the expensive one: a cleanup that removed
+		// the image rather than the name takes ember:lab with it, and every
+		// lab after this one fails with "the source is not on this daemon".
+		if !l.HaveImage(cctx, harness.LabImage) {
+			t.Errorf("removing %s took %s with it; every lab after this one needs it, and the next run "+
+				"would have to rebuild it with `make docker-build`", standIn, harness.LabImage)
+		}
+	})
+
+	tag := l.TagImage(ctx, harness.LabImage, standIn)
+	// Asserted beside the cleanup on purpose. Without this the two checks
+	// above would pass against a tag that was never created at all, which is
+	// a refusal consistent with refusing everything -- the acceptance has to
+	// be asserted next to it, as the LoRA path lab does.
 	if !l.HaveImage(ctx, tag) {
 		t.Fatalf("%s was not tagged", tag)
 	}

@@ -938,6 +938,33 @@ that sentence made unrepresentable rather than merely tested.
   while a volume ember itself left behind is still reported. The first lab
   that forgot would otherwise have turned a working check into a failing
   suite, which is how a working check gets weakened instead of obeyed.
+
+  **`TagImage` is the same rule where the stray check cannot reach at all, and
+  the lab holding it asserted neither half of its own name.** A stand-in tag --
+  `ember:lab-sm75` and the two beside it, for the labs about which image ember
+  *chose* -- is removed by name and never by force, because a forced remove
+  takes `ember:lab` out from under every lab after it. Nothing else can see
+  either outcome: `labdaemon.Objects` has containers, networks and volumes and
+  **no image kind**, `make reap-labs` goes through that same listing, CI's
+  stray step is `docker ps -aq`, and a tag inherits its source's labels, so a
+  stray one is indistinguishable from `ember:lab` by label. The harness comment
+  saying "ownership is the only mechanism there is" was right, and
+  `TestImageSelect_AStandInTagSurvivesNothingAndLeaksNothing` -- the lab holding
+  that ownership -- checked that the tag existed and that `ember:lab` had not
+  been removed **inside its own body** (#114), which are properties of
+  `docker tag` and not of the cleanup it is named for. A `TagImage` whose
+  cleanup stopped working would have leaked three names onto the developer's
+  daemon on every suite run, for good, and that lab would have stayed green.
+  It is a cleanup registered *before* `TagImage` now, so it runs after that
+  one -- `CreateVolume`'s ordering -- and the in-body checks stay, because
+  without them both post-conditions would pass against a tag that was never
+  created at all, which is a refusal consistent with refusing everything. **The
+  leak is three image NAMES sharing every layer with `ember:lab`: no bytes, no
+  money, nothing a later run trips over**, so the answer is an assertion in one
+  lab rather than a fourth kind in `labdaemon`, and what was being fixed is a
+  name that claimed more than the code. Checked by stopping `TagImage`'s
+  cleanup from removing the name it created: red with the assertions, green
+  without them.
 - **A lab that leaks on purpose says so.** The SIGKILL labs exist to leave a
   node behind, and the first run of the repaired stray check reported them.
   They call `Reap()` themselves once they have finished asserting, which
