@@ -340,7 +340,6 @@ var deadExcluded = []struct{ sym, why string }{
 
 	// Reported, and the fix is a decision about behaviour rather than a
 	// deletion.
-	{"internal/node.CUDAAtLeast", "the comparison min_cuda would be enforced with, and nothing enforces it: RunPod refuses the field outright and no other provider reads the floor, so deleting this would remove the evidence that the key is unenforced"},
 	{"internal/exposure.Tolerated", "written so a caller could log the platform ports it decided to live with, and no caller logs them -- 'an exposure that is waved through silently is one nobody re-examines' is its own doc comment"},
 	// report.Writer WAS HERE AND IS NOT ANY MORE, which is this guard doing
 	// the job it was built for. Its reason read "node byte streams reach the

@@ -78,7 +78,7 @@ type cudaCatalogue struct {
 // (node.ComputeCap, a different number). So a floor could in principle be
 // compared on the node. It is not built, because the comparison is the
 // unmeasured half: CUDA minor-version compatibility means an image built
-// against 12.6 runs on a 12.x driver older than that, so `CUDAAtLeast` over
+// against 12.6 runs on a 12.x driver older than that, so a floor over
 // the driver's figure refuses hosts the image works on -- which is this
 // entry's own defect one layer along -- and settling it needs a rental on a
 // host with an old driver. `pod.cudaVersion` is no better: pod_running.json

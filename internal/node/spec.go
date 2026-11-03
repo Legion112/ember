@@ -343,42 +343,21 @@ func cloneEnv(m map[string]string) map[string]string {
 
 // ParseCUDAVersion reads a "major.minor" CUDA version.
 //
-// Strings and not a number, because "12.10" is not 12.1 and a float would say
-// it was. Compared as a pair of integers for the same reason: a provider's
-// list of acceptable versions is sorted by what the driver supports, and
-// sorting it as text puts 12.9 above 12.10.
+// Two judgements live here, and whoever writes the next version comparison in
+// this repository has to make both again, which is why they are written down
+// rather than left to be rediscovered:
 //
-// THIS FUNCTION IS LIVE AND CUDAAtLeast BELOW IS NOT, which is a distinction
-// an earlier draft of this comment got wrong in the direction that costs a
-// reader their afternoon. It claimed both were callerless and that deleting
-// them was "three lines"; deleting this one does not compile, because
-// ParseComputeCap calls it at compute.go:234 and local.Provider.Offers calls
-// THAT at local.go:270 -- the `compute_cap` path, which is the
-// mechanism #91 settled on as the one that works. The tree's own detector
-// classifies it live and always did; the comment was the only thing that
-// disagreed, two hundred lines from the call.
+//   - A version is a string pair and never a float, because "12.10" is not 12.1
+//     and a float says it is.
+//   - A comparison is on the integer pair, major and then minor, because sorting
+//     as text puts 12.9 above 12.10.
 //
-// CUDAAtLeast is the callerless one, and that is #91's answer rather than an
-// oversight. It existed for `min_cuda`, a config key that was removed because
-// no provider here can honour it: RunPod's create endpoint has no CUDA field
-// and answers 422 to the allowedCudaVersions ember used to send, and the
-// per-GPU cudaVersions its catalogue does report tracks capacity rather than
-// capability -- pinned to the committed capture by
-// runpod.TestCatalogue_ReportsCudaVersionsAndTheyAreNotAFloorForMinCUDA, which
-// is also what reopens the question if a later capture breaks the correlation.
-// `gpu_probe` is the live mechanism and runs on the node.
-//
-// So CUDAAtLeast should go the way node.RateFromFloat went -- its premise was
-// read from a schema, and a second mechanism for the half that matters already
-// exists, which are the two halves of that precedent. It is NOT deleted here
-// only because cmd/check-coverage's deadExcluded names it and fails over a
-// waiver it stops reporting, so the function and its waiver have to be removed
-// in one commit and that file was held by another change (#161). THREE edits,
-// not three LINES: the function, the waiver, and TestCUDAAtLeast at
-// spec_test.go:313, which calls it at five sites and must go with it or the
-// package will not build. This function stays. The two judgements worth
-// keeping are the ones above, and they belong to the parser rather than to the
-// comparison: strings rather than a float, and compared as a pair of integers.
+// The parse is shared with ParseComputeCap, which is its live caller:
+// nvidia-smi prints a compute capability as "7.5", the same shape, and
+// compute.go says so beside the call. A comparison used to sit next to this
+// function, for the min_cuda key; it was deleted with the key, because no
+// provider could honour the key and gpu_probe is the mechanism that works --
+// the node.RateFromFloat shape, a note where the function was.
 func ParseCUDAVersion(s string) (major, minor int, err error) {
 	maj, min, ok := strings.Cut(strings.TrimSpace(s), ".")
 	if !ok {
@@ -393,22 +372,6 @@ func ParseCUDAVersion(s string) (major, minor int, err error) {
 		return 0, 0, fmt.Errorf("cuda version %q has an unreadable minor", s)
 	}
 	return major, minor, nil
-}
-
-// CUDAAtLeast reports whether have is version want or newer.
-func CUDAAtLeast(have, want string) (bool, error) {
-	hm, hn, err := ParseCUDAVersion(have)
-	if err != nil {
-		return false, err
-	}
-	wm, wn, err := ParseCUDAVersion(want)
-	if err != nil {
-		return false, err
-	}
-	if hm != wm {
-		return hm > wm, nil
-	}
-	return hn >= wn, nil
 }
 
 // humanList renders a list the way the refusal reads it out: "cmd and cmds",
