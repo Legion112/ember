@@ -1127,7 +1127,43 @@ func TestNodes_SaysSoWhenItCannotScan(t *testing.T) {
 
 	h.scan = func(context.Context) (app.Scanned, error) { return app.Scanned{}, fmt.Errorf("docker is not running") }
 	if w := h.do(t, "GET", "/api/nodes", ""); w.Code != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502 when a provider could not be asked", w.Code)
+		t.Errorf("status = %d, want 502 when the sweep could not be started", w.Code)
+	}
+}
+
+// TestNew_CarriesTheScannerFromItsOptions is the join this route did not have.
+//
+// `GET /api/nodes` answered 501 in every `ember serve` there has ever been:
+// `Options` had no Scan field, `New` never assigned the Server's `scan`, and
+// cmd_serve could not have set it if it had wanted to. The three tests that
+// drove the handler set the unexported field directly, from inside this
+// package -- so the suite could not tell "the production value is missing"
+// from "this test did not set it", which is precisely how it survived.
+//
+// THE SCANNER GOES THROUGH THE CONSTRUCTOR, which is what makes the two
+// distinguishable. A test that reaches past `New` proves the handler works
+// and nothing about whether anything can hand it one; this one proves the
+// field a caller fills is the field the handler reads, and the lab
+// TestServe_ReportsWhatIsBillingToTheBrowser proves cmd_serve fills it.
+// Neither alone is enough: the first cannot see an unwired cmd_serve and the
+// second cannot run without Docker.
+func TestNew_CarriesTheScannerFromItsOptions(t *testing.T) {
+	asked := 0
+	h := newHarness(t, func(o *Options) {
+		o.Scan = func(context.Context) (app.Scanned, error) {
+			asked++
+			return app.Scanned{}, nil
+		}
+	})
+
+	if w := h.do(t, "GET", "/api/nodes", ""); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a server built with a scanner: %s", w.Code, w.Body.String())
+	}
+	// COUNTED, because 200 alone is consistent with a handler that answered
+	// out of nothing. What has to be true is that the function the caller
+	// passed is the one that ran.
+	if asked != 1 {
+		t.Errorf("the scanner was asked %d time(s), want 1", asked)
 	}
 }
 

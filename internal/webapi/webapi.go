@@ -194,6 +194,41 @@ type Options struct {
 	// server with no loop; the route answers 501.
 	Runs Runs
 
+	// Scan is what `ember ls` asks: every provider, for what ember's label is
+	// on, classified by internal/reconcile.
+	//
+	// AN INJECTED FUNCTION AND NOT A SECOND SCANNER, which is the only shape
+	// this route is allowed to have. `GET /api/nodes` projects
+	// internal/reconcile's own findings; two scanners is two answers to "what
+	// am I paying for", and the one that disagrees is the one that misses a
+	// node. cmd_serve wires app.ScanWith over the registry and the journal it
+	// already holds, so the web UI and `ember ls` share one classifier and one
+	// config read.
+	//
+	// IT WAS NOT A FIELD AT ALL FOR THE LIFE OF THIS PACKAGE, and that is why
+	// it is here. `scan` existed on the Server, was set by two test files
+	// reaching past the constructor, and had no production assignment -- so
+	// `GET /api/nodes` answered 501 in every shipped `ember serve`, and the
+	// whole projection behind it (nodesView, findingView, the monthly storage
+	// charge, the attention count) was reachable only from this package's own
+	// tests. Nothing automated reported it: the functions all have callers,
+	// and a nil function field is not a symbol TestNoProductionDeadCode
+	// reasons about. The browser had no type for any of it either, which is
+	// why nobody had ever seen the 501.
+	//
+	// IT REACHES PROVIDERS, SO IT IS NOT CACHED AND MUST NOT BE POLLED. Three
+	// sweeps per call -- nodes, stores, leftovers -- over every configured
+	// provider, on the HTTP request's own context, which is getOffers' shape
+	// and getOffers' exposure. Memoising the answer would be local.DetectGPU's
+	// defect pointed at money: a cached "RunPod said nothing" is exactly "I
+	// could not check RunPod" rendering as a clean bill of health, and a cached
+	// listing of what is billing is a stale bill. The page asks when a person
+	// presses a button, as the offers panel does, and never on a timer.
+	//
+	// Nil is every handler test and a server built without one; the route
+	// answers 501, as the upload and the run routes do for theirs.
+	Scan func(ctx context.Context) (app.Scanned, error)
+
 	// Dist serves the UI from disk instead of the embedded copy, for
 	// development. Empty uses what was built into the binary.
 	Dist string
@@ -228,7 +263,13 @@ type Server struct {
 	tokenDigest [sha256.Size]byte
 
 	// scan is injected so a handler test does not need a Docker daemon. The
-	// production value asks the providers.
+	// production value asks the providers, and for the life of this package
+	// there was not one: see Options.Scan, which New now copies here. A test
+	// may still set this field directly, which is how the 502 path is driven
+	// -- but a test setting it is no longer indistinguishable from `ember
+	// serve` having one, because TestNew_CarriesTheScannerFromItsOptions
+	// asserts the constructor carries it and a lab asserts the real binary
+	// answers 200.
 	scan func(ctx context.Context) (app.Scanned, error)
 }
 
@@ -258,6 +299,7 @@ func New(o Options) (*Server, error) {
 		sockMux:     http.NewServeMux(),
 		port:        strconv.Itoa(int(o.Port)),
 		tokenDigest: sha256.Sum256(o.Token.Bytes()),
+		scan:        o.Scan,
 	}
 	s.routes()
 	return s, nil
@@ -491,9 +533,27 @@ func (s *Server) getOffers(w http.ResponseWriter, r *http.Request) {
 	s.ok(w, viewOffers(ls))
 }
 
+// getNodes is `ember ls` for the browser.
+//
+// AN UNREACHABLE PROVIDER IS A 200 AND NOT A 502, which is the one thing worth
+// reading here. reconcile emits a KindUnreachable finding per provider it could
+// not ask, so a sweep that reached one provider and not another is a complete
+// answer about the first and a named failure about the second -- and losing the
+// first in order to report the second would be "I could not check RunPod"
+// hiding what the local daemon just said. What a 502 means is that the sweep
+// could not START: the journal of live nodes would not read, so there is
+// nothing to compare a provider's answer against and every classification
+// below would be wrong in the direction that says a billing node is fine.
+//
+// THE 501 IS A SERVER WITH NO SCANNER, and it is not a configuration `ember
+// serve` can be in: cmd_serve always wires one. It stays because the field is
+// injectable and a handler test passes none -- the same shape as the upload and
+// run routes -- and because answering 501 is better than panicking in a
+// handler.
 func (s *Server) getNodes(w http.ResponseWriter, r *http.Request) {
 	if s.scan == nil {
-		s.fail(w, http.StatusNotImplemented, errors.New("this server was built without a node scanner"))
+		s.fail(w, http.StatusNotImplemented, errors.New("this server was built without a node scanner, "+
+			"so it cannot say what is billing; `ember ls` asks the providers directly"))
 		return
 	}
 	sc, err := s.scan(r.Context())

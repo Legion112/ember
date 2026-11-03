@@ -2717,3 +2717,221 @@ func waitForQueuedRequest(t *testing.T, s served, within time.Duration) string {
 		time.Sleep(200 * time.Millisecond)
 	}
 }
+
+// billingProbe reads the billing panel.
+//
+// THE PAGE'S OWN STRUCTURE and not attributes added for a test: `.verdict`,
+// `table.ledger` and the storage line's `.hint`, so markup that changes breaks
+// this and the test changes with it -- which is the correct direction.
+//
+// `button` IS READ TOO, because "the panel asks nothing until a person presses
+// it" is half of what is being asserted and an empty panel is what a page that
+// never fetched looks like as well.
+const billingProbe = `(function () {
+	var panel = Array.from(document.querySelectorAll("section.panel"))
+		.find(function (s) {
+			var h = s.querySelector("h2");
+			return h && h.textContent.trim() === "what is billing";
+		});
+	if (!panel) { return ["panel|absent"]; }
+	function text(sel) {
+		var e = panel.querySelector(sel);
+		return e ? e.textContent.replace(/\s+/g, " ").trim() : "";
+	}
+	var rows = Array.from(panel.querySelectorAll("table.ledger tr"))
+		.map(function (r) { return r.innerText.replace(/\s+/g, " ").trim(); })
+		.join(" // ");
+	return [
+		"panel|present",
+		"verdict|" + text("p.verdict"),
+		"rows|" + rows,
+		"storage|" + Array.from(panel.querySelectorAll("p.hint"))
+			.map(function (e) { return e.textContent.replace(/\s+/g, " ").trim(); })
+			.filter(function (s) { return s.indexOf("storage:") === 0; })
+			.join("; "),
+		"error|" + text("p.error"),
+	];
+})()`
+
+// billingSays runs the probe once.
+func billingSays(t *testing.T, ctx context.Context) map[string]string {
+	t.Helper()
+	lines, err := chromedp.Run(ctx, chromedp.Evaluate[[]string](billingProbe))
+	if err != nil {
+		t.Fatalf("reading the billing panel: %v", err)
+	}
+	out := make(map[string]string, len(lines))
+	for _, l := range lines {
+		k, v, _ := strings.Cut(l, "|")
+		out[k] = v
+	}
+	return out
+}
+
+// waitForBilling polls until the panel says what it is supposed to.
+//
+// A POLL AND NOT A WaitVisible, for waitForOffers' reason: what is waited for
+// in one direction is an element's ABSENCE, and chromedp has no wait for that.
+func waitForBilling(
+	t *testing.T, ctx context.Context, want func(map[string]string) bool, within time.Duration,
+	what string,
+) map[string]string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		got := billingSays(t, ctx)
+		if want(got) {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the billing panel never %s within %v; it says verdict=%q rows=%q storage=%q error=%q",
+				what, within, got["verdict"], got["rows"], got["storage"], got["error"])
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// TestServe_UIReportsWhatIsBilling is the browser half of #105.
+//
+// WHY A BROWSER, which is the question this file's own header insists is
+// answered before a lab is added here. `GET /api/nodes` was a registered,
+// authenticated route that answered 501 in every `ember serve` there has ever
+// been, and the reason nobody had seen it is that `web/` had no type for the
+// answer -- so the Go wiring on its own would have moved the defect rather
+// than closed it: a route that works, a projection that is correct, and
+// nothing reading either. A Go test asserting that the handler returns what
+// the handler was told proves ember agrees with itself, which is the closed
+// loop this repository keeps paying for.
+//
+// WHAT NO cargo TEST CAN REACH. `Nodes::verdict` and `Nodes::nothing_running`
+// are decisions and `model::tests` drives them directly. What is only true in
+// a browser is the join: whether the button's click handler fetches, whether
+// the cookie Chrome is holding reaches `/api/nodes`, whether the answer
+// decodes into `Nodes` against the bytes Go really sends, and whether the rows
+// reach the DOM -- which is the `<For>` class of bug this file has now been
+// bitten by three times, and the reason `findings_table` has no key at all.
+//
+// THE FIRST ASSERTION IS THAT IT SAYS NOTHING. `Nodes::default()` has three
+// empty slices, so its verdict is "nothing is running and nothing was left
+// behind": rendered before the first press, that is a clean bill of health
+// over a scan that never happened, which is the one answer this panel must not
+// give wrongly. The signal is an `Option` for exactly that, and the absence is
+// asserted because an assertion that only looks for the presence passes
+// against a page that prints it unconditionally.
+//
+// NO RENTAL AND NO WORKLOAD IMAGE. The two findings this panel exists for -- a
+// store that outlives every node and a bridge network whose node is gone --
+// are states ember READS, so they are seeded through Docker and the lab is
+// seconds rather than minutes.
+func TestServe_UIReportsWhatIsBilling(t *testing.T) {
+	requireChrome(t)
+	l := harness.New(t)
+	l.WriteConfig(nil)
+	l.AppendConfig(serveConfig)
+
+	cmd, srv, wait := startServe(t, l)
+	defer func() {
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return
+		}
+		_ = wait()
+	}()
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Headless, chromedp.NoSandbox, chromedp.DisableGPU)
+	alloc, cancelAlloc := chromedp.NewExecAllocator(t.Context(), opts...)
+	defer cancelAlloc()
+	ctx, cancel := chromedp.NewContext(alloc)
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancelTimeout()
+
+	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
+	if err := chromedp.Do(ctx,
+		chromedp.Navigate(fmt.Sprintf("%s?t=%s", pageURL, srv.Token))); err != nil {
+		t.Fatalf("navigating to the one-time URL: %v", err)
+	}
+	console := watchConsole(t, ctx)
+
+	if err := chromedp.Do(ctx, chromedp.WaitVisible(`h1`)); err != nil {
+		t.Fatalf("the app did not mount: %v\n%s", err, console.text())
+	}
+
+	// NOTHING UNTIL SOMEBODY ASKS. See the header: the empty answer and the
+	// answer nobody asked for must not render the same, and the empty one is
+	// the reassuring sentence.
+	before := billingSays(t, ctx)
+	if before["panel"] != "present" {
+		t.Fatalf("the billing panel is not on the page at all: %+v", before)
+	}
+	if before["verdict"] != "" || before["rows"] != "" {
+		t.Errorf("the panel answered before anything was asked: verdict=%q rows=%q",
+			before["verdict"], before["rows"])
+	}
+
+	// A CLEAN DAEMON FIRST, so the finding below is a change and not the only
+	// thing this lab has ever seen. Reversed, an assertion that merely found
+	// the word "leftover" would pass against a panel that printed it always.
+	if err := chromedp.Do(ctx,
+		chromedp.Click(`//button[contains(text(), "check what is running")]`)); err != nil {
+		t.Fatalf("pressing the button: %v\n%s", err, console.text())
+	}
+	clean := waitForBilling(t, ctx, func(s map[string]string) bool {
+		return s["verdict"] != ""
+	}, 60*time.Second, "answered at all")
+	if !strings.Contains(clean["verdict"], "nothing is running") {
+		t.Errorf("a clean daemon did not read as clean: %q", clean["verdict"])
+	}
+	if clean["rows"] != "" {
+		t.Errorf("a clean daemon produced rows: %q", clean["rows"])
+	}
+
+	// NOW SEED WHAT AN OPERATOR IS AFRAID OF, with the page already open: a
+	// store that bills by the month with nothing attached, and the wreckage
+	// of a node that is gone.
+	l.CreateVolume(t.Context(), "ember-store-models")
+	l.CreateNetwork(t.Context(), "00000000beefcafe", time.Now().Add(-time.Hour))
+
+	if err := chromedp.Do(ctx,
+		chromedp.Click(`//button[contains(text(), "check what is running")]`)); err != nil {
+		t.Fatalf("pressing the button again: %v\n%s", err, console.text())
+	}
+	found := waitForBilling(t, ctx, func(s map[string]string) bool {
+		return strings.Contains(s["rows"], "leftover")
+	}, 60*time.Second, "reported the leftover")
+
+	// THE KINDS ARE THE WORDS `ember ls` PRINTS. `reconcile.Kind` is a uint8
+	// and the projection converted it with `string(f.Kind)`, so every finding
+	// used to reach a client as a control character -- which only a reader
+	// could ever have found, and nothing had read this field in either
+	// language.
+	for _, want := range []string{"leftover", "store", "ember-store-models", "beefcafe"} {
+		if !strings.Contains(found["rows"], want) {
+			t.Errorf("the rows do not mention %q: %q", want, found["rows"])
+		}
+	}
+	// The verdict counts the leftover and not the store, which is
+	// `reconcile.Kind.NeedsAttention`'s own decision carried across the wire
+	// rather than re-derived in the page.
+	if !strings.Contains(found["verdict"], "1 finding(s) need attention") {
+		t.Errorf("the verdict does not carry the count: %q", found["verdict"])
+	}
+	// And the panel no longer says the reassuring thing.
+	if strings.Contains(found["verdict"], "nothing is running") {
+		t.Errorf("the verdict still reads as clean over a leftover: %q", found["verdict"])
+	}
+
+	// The store is free on the local provider -- a Docker volume is not in a
+	// datacentre -- so the storage line is correctly absent, and that is
+	// asserted rather than left out: a page printing "storage: $0/month"
+	// would be pricing a charge at nothing, which is the one thing a leak
+	// report must not do.
+	if found["storage"] != "" {
+		t.Errorf("a free store produced a standing-charge line: %q", found["storage"])
+	}
+
+	if errs := console.errors(); errs != "" {
+		t.Errorf("the page logged errors:\n%s", errs)
+	}
+}

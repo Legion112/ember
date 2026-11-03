@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Legion112/ember/internal/config"
+	"github.com/Legion112/ember/internal/statestore"
 	"github.com/Legion112/ember/test/integration/harness"
 )
 
@@ -651,5 +653,230 @@ func TestServe_TheTokenIsNotInArgv(t *testing.T) {
 	}
 	if !strings.Contains(argv, "serve") {
 		t.Errorf("that was not ember serve's command line: %s", argv)
+	}
+}
+
+// nodesAnswer is `GET /api/nodes` as a client sees it.
+//
+// A CLIENT'S OWN VIEW, like `served` above and not a reach into
+// internal/webapi. The lab is a client of this route exactly as the browser
+// is, and a test that imported the server's unexported projection could not
+// see a field that stopped being marshalled.
+type nodesAnswer struct {
+	Findings       []nodesFinding `json:"findings"`
+	Leftovers      []nodesFinding `json:"leftovers"`
+	Stores         []nodesFinding `json:"stores"`
+	MonthlyStorage struct {
+		Micro   int64  `json:"micro_usd"`
+		Display string `json:"display"`
+	} `json:"monthly_storage"`
+	Attention int `json:"attention"`
+}
+
+type nodesFinding struct {
+	Kind     string `json:"kind"`
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	Reason   string `json:"reason"`
+}
+
+// TestServe_ReportsWhatIsBillingToTheBrowser is the production wiring of
+// `GET /api/nodes`, which did not exist.
+//
+// THE ROUTE ANSWERED 501 IN EVERY `ember serve` THERE HAS EVER BEEN.
+// `webapi.Options` had no Scan field, `New` never assigned the Server's
+// `scan`, and cmd_serve could not have set it if it had wanted to -- so the
+// whole projection behind the route, the monthly storage charge included, was
+// reachable only from internal/webapi's own tests, which set that unexported
+// field from inside the package. The suite therefore could not tell "the
+// production value is missing" from "this test did not set it", which is
+// exactly how it survived; and the browser had no type for the answer, which
+// is why nobody had ever seen the 501.
+//
+// SO THE ASSERTION IS AGAINST A REAL PROCESS. A handler test proves the
+// handler works and says nothing about whether anything hands it a scanner.
+// This is the other half: the binary cmd_serve builds, started the way an
+// operator starts it, asked the way the page asks.
+//
+// AND IT IS CROSS-CHECKED AGAINST `ember ls`, which is the claim the
+// projection's own doc comment makes -- "`ember ls`'s answer ... never a
+// second scan with its own rules". Two scanners is two answers to "what am I
+// paying for", and the one that disagrees is the one that misses a node. Both
+// channels are driven over the same seeded daemon in one lab, because an
+// assertion about agreement needs both answers.
+//
+// The objects are seeded through Docker rather than by renting: a store that
+// outlives every node and a bridge network whose node is gone are the two
+// findings this panel exists for, and both are states ember reads rather than
+// writes. No workload image and no generation, which is why this lab lives
+// here rather than behind the imagelab tag.
+func TestServe_ReportsWhatIsBillingToTheBrowser(t *testing.T) {
+	l := harness.New(t)
+	ctx := t.Context()
+
+	// The standing charge: bills by the gibibyte-month, has no deadline, is
+	// not reaped and is not ended by Ctrl-C. AGENTS.md puts it first among
+	// the resources that leak while every node is correctly destroyed.
+	l.CreateVolume(ctx, "ember-store-models")
+	// And the wreckage: a labelled network with no node container, already
+	// past its deadline so it is reported rather than mistaken for a run that
+	// is still starting up. Nothing bills for one; what it costs is every
+	// local run failing at once, weeks later, with an error naming Docker.
+	l.CreateNetwork(ctx, "00000000beefcafe", time.Now().Add(-time.Hour))
+
+	l.AppendConfig(serveConfig)
+	cmd, srv, wait := startServe(t, l)
+	defer func() {
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return
+		}
+		wait()
+	}()
+
+	got := ask(t, "GET", srv, "/api/nodes", "")
+	if got.Status != http.StatusOK {
+		t.Fatalf("GET /api/nodes answered %d: %s\n\nthis is the 501 the route answered "+
+			"for the life of the feature: cmd_serve wires webapi.Options.Scan and nothing else does",
+			got.Status, got.Body)
+	}
+
+	// NULL IS NOT AN EMPTY LIST, asserted on the bytes because `[]` and
+	// `null` decode into the same nil slice. Go marshals a nil slice as
+	// `null`, serde's `default` covers a field that is MISSING rather than
+	// one that is present and null, and this program has already lost a whole
+	// websocket envelope -- and with it a request's state -- to that.
+	if strings.Contains(string(got.Body), "null") {
+		t.Errorf("a list arrived as null on the wire, which serde cannot decode:\n%s", got.Body)
+	}
+
+	var ans nodesAnswer
+	if err := json.Unmarshal(got.Body, &ans); err != nil {
+		t.Fatalf("decoding the answer: %v\n%s", err, got.Body)
+	}
+
+	// THE KIND IS A WORD AND NOT A CONTROL CHARACTER, which is the defect
+	// this route carried into every one of these fields. `reconcile.Kind` is
+	// a uint8, so the projection's `string(f.Kind)` took the numeric value as
+	// a rune: every finding reached a client as "\a" rather than "store".
+	// `go vet`'s stringintconv does not report a byte-to-string conversion,
+	// and no test could, because nothing had ever read the field.
+	if len(ans.Stores) != 1 {
+		t.Fatalf("stores = %+v, want the one seeded store", ans.Stores)
+	}
+	if ans.Stores[0].Kind != "store" {
+		t.Errorf("kind = %q, want the word `ember ls` prints", ans.Stores[0].Kind)
+	}
+	if !strings.Contains(ans.Stores[0].ID, "models") {
+		t.Errorf("store id = %q, want the name `ember store rm` takes", ans.Stores[0].ID)
+	}
+
+	// THE THIRD SLICE, which the projection dropped for the life of the type.
+	// `ember ls` prints a leftover with the nodes and counts it towards exit
+	// 2; nodesView carried findings and stores alone.
+	if len(ans.Leftovers) != 1 {
+		t.Fatalf("leftovers = %+v, want the one seeded network", ans.Leftovers)
+	}
+	if ans.Leftovers[0].Kind != "leftover" {
+		t.Errorf("kind = %q, want leftover", ans.Leftovers[0].Kind)
+	}
+	if !strings.Contains(ans.Leftovers[0].ID, "beefcafe") {
+		t.Errorf("leftover id = %q, want the name `docker network ls` shows", ans.Leftovers[0].ID)
+	}
+
+	// The leftover needs attention and the store deliberately does not: a
+	// network whose node is gone is unambiguously garbage, and making every
+	// store exit non-zero would teach the operator to ignore the count.
+	if ans.Attention != 1 {
+		t.Errorf("attention = %d, want 1: the leftover and not the store", ans.Attention)
+	}
+
+	// AND NOW THE SAME DAEMON THROUGH `ember ls`. The two channels must name
+	// the same objects; a UI and a command that disagree about what is
+	// billing are two answers to the question an operator is asking once.
+	ls := l.Run(ctx, "ls")
+	if ls.ExitCode != 2 {
+		t.Errorf("ls exited %d over a reported leftover, want 2: %s", ls.ExitCode, ls.Combined())
+	}
+	for _, want := range []string{ans.Stores[0].ID, ans.Leftovers[0].ID} {
+		if !strings.Contains(ls.Stdout, want) {
+			t.Errorf("the route named %q and `ember ls` did not:\n%s", want, ls.Combined())
+		}
+	}
+	for _, want := range []string{"store", "leftover"} {
+		if !strings.Contains(ls.Stdout, want) {
+			t.Errorf("`ember ls` does not use the kind %q the route sent:\n%s", want, ls.Combined())
+		}
+	}
+
+	// The local provider prices a Docker volume at nothing -- it is not in a
+	// datacentre -- so the figure is zero here and the RENDERING is what this
+	// can assert: money crosses this wire twice so that the browser is never
+	// a second formatter of it, and an empty string would leave the page with
+	// nothing to print. A non-zero standing charge needs a rented store,
+	// which is the same reason no lab here can produce a non-zero
+	// requests.cost.
+	if ans.MonthlyStorage.Display == "" {
+		t.Error("monthly_storage carries no rendering, so the page has nothing to show")
+	}
+}
+
+// TestServe_SaysNothingAboutWhatItCouldNotScan is the refusal half.
+//
+// A 501 is a server built with no scanner, which is not a configuration
+// `ember serve` can be in -- so what this lab asserts is the state an operator
+// CAN reach: a scan whose journal of live nodes will not read. The sweep then
+// cannot start at all, because every classification below it compares a
+// provider's answer against those records, and a sweep with no records to
+// compare against reports every live node as untracked.
+//
+// 502 AND NOT A 200 WITH AN EMPTY LIST, which is the whole point: "I could not
+// check" must never render as a clean bill of health. An unreachable PROVIDER
+// is the other case and is deliberately a 200 -- reconcile emits a finding for
+// it, so the answer is complete about the providers that did answer and names
+// the one that did not.
+//
+// The journal is made unreadable by putting a file where its directory goes,
+// which is a state nothing in ember writes and a machine can produce: an
+// operator who pointed state_dir at a path something else owns.
+func TestServe_SaysNothingAboutWhatItCouldNotScan(t *testing.T) {
+	l := harness.New(t)
+	l.AppendConfig(serveConfig)
+	cmd, srv, wait := startServe(t, l)
+	defer func() {
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return
+		}
+		wait()
+	}()
+
+	// Green first, so the failure below is the thing being asserted and not a
+	// route that never worked.
+	if got := ask(t, "GET", srv, "/api/nodes", ""); got.Status != http.StatusOK {
+		t.Fatalf("GET /api/nodes answered %d before anything was broken: %s", got.Status, got.Body)
+	}
+
+	// statestore.DirName, which is one name for a path: the journal's
+	// subdirectory was a literal in the CLI and a second literal in this
+	// harness once, they drifted, and a lab asserting "a clean run leaves no
+	// records" passed without checking anything.
+	nodes := filepath.Join(l.StateDir(), statestore.DirName)
+	if err := os.RemoveAll(nodes); err != nil {
+		t.Fatalf("clearing the journal: %v", err)
+	}
+	if err := os.WriteFile(nodes, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("putting a file where the journal goes: %v", err)
+	}
+
+	got := ask(t, "GET", srv, "/api/nodes", "")
+	if got.Status != http.StatusBadGateway {
+		t.Fatalf("GET /api/nodes answered %d over an unreadable journal, want 502: %s",
+			got.Status, got.Body)
+	}
+	// The server's own sentence, in full, because `ember serve` is reachable
+	// only from this machine and the page prints whatever is in here.
+	if !strings.Contains(string(got.Body), nodes) {
+		t.Errorf("the refusal does not name the path that would not read:\n%s", got.Body)
 	}
 }

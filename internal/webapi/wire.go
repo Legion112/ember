@@ -624,9 +624,28 @@ func previewSuffix(preview bool) string {
 // internal/reconcile's own findings, projected -- never a second scan with its
 // own rules. Two scanners is two answers to "what am I paying for", and the
 // one that disagrees is the one that misses a node.
+//
+// IT CLAIMED TO BE `ember ls`'s ANSWER WHILE DROPPING A THIRD OF IT. For the
+// life of this type there was no Leftovers field: `app.Scanned` carries three
+// slices and this projected two, so a bridge network whose node is gone -- the
+// finding `ember ls` prints with the nodes and counts towards exit 2 -- was
+// absent from the UI, and Attention was computed over nodes and stores alone.
+// Nothing bills for a leftover, which is why it stayed invisible here as it
+// did in the lab harness; what it costs is every local run failing at once,
+// weeks later, with an error naming Docker instead of ember. A projection
+// whose doc comment says "`ember ls`'s answer" has to be all of it, or the
+// next field somebody adds to Scanned goes the same way.
 type nodesView struct {
 	Findings []findingView `json:"findings"`
-	Stores   []findingView `json:"stores"`
+
+	// Leftovers is what a destroyed node left behind. Its own slice rather
+	// than appended to Findings, for the reason `app.Scanned` keeps them
+	// apart: it is removed through a different interface and nothing was ever
+	// billing for it, so a page merging the two would invite a "destroy"
+	// button for an object there is nothing to destroy.
+	Leftovers []findingView `json:"leftovers"`
+
+	Stores []findingView `json:"stores"`
 
 	// MonthlyStorage is the charge no deadline, no reaper and no Ctrl-C ever
 	// ends, which is why it is reported on every listing and not only when
@@ -634,45 +653,113 @@ type nodesView struct {
 	MonthlyStorage money `json:"monthly_storage"`
 
 	// Attention is how many findings need a person. It is the number
-	// `ember ls` exits 2 for.
+	// `ember ls` exits 2 for -- over all three slices, which is what
+	// runLs sums.
+	//
+	// ON THE WIRE AND NEVER DERIVED IN THE PAGE, although the kinds are all
+	// there to derive it from. reconcile.Kind.NeedsAttention is "a switch
+	// rather than `k != KindOK`, so that a kind added later needs attention
+	// by default and its author has to decide otherwise in writing" -- and a
+	// second copy of that switch in Rust is a copy whose author will not be
+	// looking at the Go one. Money crosses this wire twice for the same
+	// reason.
 	Attention int `json:"attention"`
 }
 
+// findingView is one line of `ember ls`, in parts.
+//
+// EVERY FIELD HERE HAS A READER IN `web/`, which is the property this type did
+// not have. It carried a `Line` -- reconcile's own `Finding.String()` -- beside
+// the parts it is built from, argued for as "the rendered line as well as the
+// parts, because that string is what `ember ls` prints and an operator reading
+// both should see the same sentence in each". Nothing read either, because
+// nothing read this type at all; and the argument does not survive contact with
+// a browser. `Finding.String` is `%-14s %-28s %s` with `[$x/month]` and
+// `[$x so far]` appended, and HTML collapses runs of whitespace, so that string
+// in a page is not the sentence a terminal shows unless the page also asks for
+// `white-space: pre` -- which would put a terminal's column widths in a table
+// that has columns of its own. So it is the parts, which both channels agree
+// on because Go still formats every money figure exactly once.
+//
+// Provider is NOT redundant with ID, which is the thing worth knowing before
+// trimming either: an unreachable finding has no node, no record, no store and
+// no leftover, so ID is empty and Provider is the only thing naming who could
+// not be asked. That is the one finding the page must never render anonymously.
 type findingView struct {
 	Kind     string `json:"kind"`
 	Provider string `json:"provider,omitempty"`
 	ID       string `json:"id,omitempty"`
 	Reason   string `json:"reason"`
-	Line     string `json:"line"`
-	Accrued  *money `json:"accrued,omitempty"`
+
+	// Accrued is money already spent and it stops when the node is
+	// destroyed. Monthly is money that keeps being spent until somebody
+	// removes the store -- there is no deadline, no reaper and no Ctrl-C that
+	// ends it. Two fields and not one for exactly the reason reconcile keeps
+	// them apart: reading one as the other would be the wrong kind of wrong,
+	// and "$2.80" skimmed off a store line and off an orphan line are two
+	// very different numbers.
+	Accrued *money `json:"accrued,omitempty"`
+	Monthly *money `json:"monthly,omitempty"`
 }
 
+// viewNodes projects one sweep.
+//
+// EVERY SLICE STARTS EMPTY AND NEVER NIL. Go marshals a nil slice as `null`,
+// serde's `default` covers a field that is MISSING rather than one that is
+// present and null, and this repository has already lost a whole websocket
+// envelope to that -- so a scan that found nothing has to arrive as `[]`
+// three times over. The client tolerates `null` anyway, because the rule has
+// to hold for a field somebody adds later.
 func viewNodes(sc app.Scanned) nodesView {
-	v := nodesView{Findings: []findingView{}, Stores: []findingView{}}
+	v := nodesView{Findings: []findingView{}, Leftovers: []findingView{}, Stores: []findingView{}}
 	for _, f := range sc.Nodes {
 		v.Findings = append(v.Findings, viewFinding(f))
+	}
+	for _, f := range sc.Leftovers {
+		v.Leftovers = append(v.Leftovers, viewFinding(f))
 	}
 	for _, f := range sc.Stores {
 		v.Stores = append(v.Stores, viewFinding(f))
 	}
 	v.MonthlyStorage = usd(reconcile.MonthlyTotal(sc.Stores))
 
-	all := append(append([]reconcile.Finding(nil), sc.Nodes...), sc.Stores...)
+	// The same sum `runLs` returns FindingsError over, over the same three
+	// slices. Spelled here rather than exported from internal/cli because the
+	// CLI's copy is bound up with its exit code; what both rest on is
+	// reconcile.Attention, which is the one authority.
+	all := append(append(append([]reconcile.Finding(nil), sc.Nodes...), sc.Stores...), sc.Leftovers...)
 	v.Attention = reconcile.Attention(all)
 	return v
 }
 
+// viewFinding names one finding the way `ember ls` names it.
+//
+// THE SWITCH IS reconcile.Finding.String's, IN ITS ORDER, and the leftover arm
+// was missing from it -- which nothing could see, because nothing projected
+// leftovers either. A bridge network therefore arrived with an empty ID while
+// `ember ls` printed `local/ember-<run>`, so the UI and the command would have
+// named the same object differently in the one place an operator is comparing
+// them. The name and not the handle, for String's own reason: the handle's id
+// is the daemon's hash, which is what removal needs and not what an operator
+// matches against `docker network ls`.
 func viewFinding(f reconcile.Finding) findingView {
 	v := findingView{
-		Kind: string(f.Kind), Provider: string(f.Provider), Reason: f.Reason,
-		// The rendered line as well as the parts, because that string is what
-		// `ember ls` prints and an operator reading both should see the same
-		// sentence in each.
-		Line: f.String(),
+		// Kind.String() AND NOT string(f.Kind), which is what this line said.
+		// reconcile.Kind is a uint8, so the conversion took the numeric value
+		// as a rune: every finding reached the browser with a kind of "\x03",
+		// "\x04" or "\a" rather than "expired", "destroy-failed" or "store".
+		// `go vet`'s stringintconv does not report it -- byte-to-string is a
+		// legal and ordinary conversion -- and no test could, because nothing
+		// in either language had ever read this field. It is the whole route's
+		// defect in one line: a projection nobody reads is a projection nobody
+		// checks.
+		Kind: f.Kind.String(), Provider: string(f.Provider), Reason: f.Reason,
 	}
 	switch {
 	case f.Store != nil:
 		v.ID = f.Store.Handle.String()
+	case f.Leftover != nil:
+		v.ID = string(f.Provider) + "/" + f.Leftover.Name
 	case !f.Node.Handle.IsZero():
 		v.ID = f.Node.Handle.String()
 	case f.Record != nil:
@@ -681,6 +768,14 @@ func viewFinding(f reconcile.Finding) findingView {
 	if f.Accrued != nil {
 		m := usd(f.Accrued.Cost)
 		v.Accrued = &m
+	}
+	// Only where there is one, and only on a store: Monthly is zero on every
+	// other kind, and a `$0/month` beside an expired node would read as a
+	// standing charge ember had priced at nothing rather than as a figure that
+	// does not apply.
+	if f.Store != nil && f.Monthly > 0 {
+		m := usd(f.Monthly)
+		v.Monthly = &m
 	}
 	return v
 }

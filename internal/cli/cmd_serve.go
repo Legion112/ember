@@ -218,10 +218,37 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		Deps: d, Store: store, Queue: q, AllowPaid: o.AllowPaid, Out: out, Log: o.Log,
 	}
 
+	// AND THE ONE THING `GET /api/nodes` NEEDS, which it did not have in any
+	// shipped `ember serve`: `webapi.Options` had no Scan field, nothing
+	// assigned the Server's `scan`, and the route therefore answered 501 every
+	// time -- with the whole projection behind it, the monthly storage charge
+	// included, reachable only from webapi's own tests. See webapi.Options.Scan.
+	//
+	// THE REGISTRY AND THE JOURNAL THIS PROCESS ALREADY HOLDS, through
+	// app.ScanWith rather than app.Scan. Scan loads the config and builds a
+	// registry of its own, which here would be a second read of the authority
+	// -- the config is the ceiling and is deliberately read once, at startup --
+	// and `ember reap`'s own comment says why a second pair is wrong: two
+	// reads are two chances for the two copies to disagree about which
+	// provider a finding belongs to.
+	//
+	// The journal is opened once rather than per request. statestore.Open
+	// holds no file handle and takes a mutex per call, and every write is
+	// write-then-rename, so a read here cannot see half a record -- which is
+	// the same property `ember ls` already relies on while an `ember up` runs
+	// in another terminal.
+	journal, err := app.OpenStore(ps.State)
+	if err != nil {
+		return err
+	}
+	scan := func(ctx context.Context) (app.Scanned, error) {
+		return app.ScanWith(ctx, reg, journal, cfg)
+	}
+
 	srv, err := webapi.New(webapi.Options{
 		Config: cfg, Registry: reg, Store: store, Blobs: blobs, Inputs: inputs, Queue: q,
 		AllowPaid: o.AllowPaid, Port: o.Port, Dist: o.Dist, Log: logger,
-		Token: token, Socket: sock, Runs: runs,
+		Token: token, Socket: sock, Runs: runs, Scan: scan,
 	})
 	if err != nil {
 		return err
