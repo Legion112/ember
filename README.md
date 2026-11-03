@@ -2378,6 +2378,23 @@ rental in flight, and the cancel button meanwhile answered with the
 provisioning-window message saying the rental was coming up, which by then was
 false.
 
+**Stopping `ember serve` with Ctrl-C ends the request it was running as
+cancelled, with the reason, rather than leaving it to the sweep above.** SIGINT
+cancels the context the rental was using, and that cancellation *is* the error
+being recorded — so the three writes that record how a request ended travel on
+a context of their own, detached from the run's and bounded at ten seconds.
+Before that they could not land at all: the write was refused before the
+database was reached, the row kept the `running` the claim had written, and the
+next start marked it `interrupted` with nothing in the reason column — the one
+column the watcher and `ember history` print. The sweep still covers what it
+was written for, a process that never got the chance to write: SIGKILL, an OOM
+kill, a closed laptop. Cancelled and not failed, because the operator pressed
+Ctrl-C or the node reached its deadline, and calling that a failed generation
+sends them looking for a bug that is not there. A write that cannot finish
+inside its bound is abandoned and logged, because `ember serve` waits for the
+queue before it exits and a write that never returns is a server that never
+stops.
+
 A request that finished normally keeps the status its own generation wrote,
 even when the rental then failed to tear down. The teardown error is still
 reported — a node that may still be billing is the one thing an operator must

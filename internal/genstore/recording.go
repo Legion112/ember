@@ -227,8 +227,36 @@ func (s *RecordingStore) ClaimNext(_ context.Context, runID string, c Compat) (R
 	return Request{}, false, nil
 }
 
+// began is the real store's first act, reproduced because its absence here is
+// what hid #159 from every test in the tree.
+//
+// A CANCELLED CONTEXT IS A WRITE THAT DID NOT LAND. The sqlite store is
+// `database/sql`: the context is checked when a connection is taken, so a
+// write on a cancelled one answers `begin: context canceled` BEFORE SQLite is
+// reached and leaves the row exactly as it was -- no partial write, and no
+// version of it that depends on timing. This fake used to take one happily, so
+// a row looked recorded in precisely the case where nothing had been written:
+// a fake tidier than the thing it stands in for, which this repository has now
+// paid for seven times.
+//
+// ON THE TWO WRITES A TEARDOWN REACHES, and not on every method. Update is
+// called by Queue.finish, Queue.endIfUnfinished, Queue.fail and Recorder.set,
+// and AppendEvents by the flush that follows a generation -- all of them while
+// the context the rental used may already be cancelled. Nothing else in ember
+// reaches a store from one, so a check on the rest would be a guard with no
+// defect available to catch.
+func began(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	return nil
+}
+
 // Update applies fn to a request and writes it back.
-func (s *RecordingStore) Update(_ context.Context, id ReqID, fn func(*Request)) error {
+func (s *RecordingStore) Update(ctx context.Context, id ReqID, fn func(*Request)) error {
+	if err := began(ctx); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.record("Update", string(id)); err != nil {
@@ -254,9 +282,12 @@ func (s *RecordingStore) Update(_ context.Context, id ReqID, fn func(*Request)) 
 }
 
 // AppendEvents records progress.
-func (s *RecordingStore) AppendEvents(_ context.Context, id ReqID, es []report.Event) error {
+func (s *RecordingStore) AppendEvents(ctx context.Context, id ReqID, es []report.Event) error {
 	if len(es) == 0 {
 		return nil
+	}
+	if err := began(ctx); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

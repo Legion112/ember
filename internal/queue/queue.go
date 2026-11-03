@@ -400,7 +400,7 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 	if err != nil {
 		// Nothing was rented, so nothing is billing. The request carries the
 		// reason, which is the whole point of resolving before renting.
-		q.fail(ctx, first.ID, err)
+		q.fail(first.ID, err)
 		return true, fmt.Errorf("request %s: %w", first.ID, err)
 	}
 
@@ -427,7 +427,7 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 		// The rental broke. If drain never reached this request, nothing has
 		// written how it ended and the row still says `running`; if it did,
 		// this leaves what drain wrote alone.
-		q.endIfUnfinished(ctx, first.ID, rentErr)
+		q.endIfUnfinished(first.ID, rentErr)
 	}
 	return true, rentErr
 }
@@ -500,7 +500,7 @@ func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat ge
 		// event: the rental's own events reach the opener's sink alone.
 		q.set(req.ID, func(r *genstore.Request) { r.Model = s.Caps().Model })
 		err := q.generate(ctx, s, req)
-		q.finish(ctx, req.ID, err)
+		q.finish(req.ID, err)
 		switch {
 		case errors.Is(err, app.ErrCancelled):
 			// A CANCELLED REQUEST DOES NOT STOP THE RENTAL, and that is the
@@ -571,15 +571,34 @@ func (q *Queue) generate(ctx context.Context, s app.Served, req genstore.Request
 	dir := q.dirOf(req.ID)
 	snk := q.sinkFor(req.ID)
 	err := s.Generate(ctx, snk, run, dir, stop)
-	snk.flush(ctx)
+	snk.flush()
 	return err
 }
 
 // fail records a request that never got a node.
-func (q *Queue) fail(ctx context.Context, id genstore.ReqID, cause error) {
+//
+// THE THIRD WRITER OF A TERMINAL STATUS, found by sweeping the class #159
+// names two of. Its own call site says "nothing was rented, so nothing is
+// billing -- the request carries the reason, which is the whole point of
+// resolving before renting", and that was untrue in one window: Planner.Plan
+// takes the drain loop's context, so a SIGINT landing during the offer
+// listing, the store pre-flight or the period check returned a context error
+// AND left this write unable to land. Same writeCtx for the same two reasons.
+//
+// Through classify rather than a literal StatusFailed, because detaching the
+// context without that would have traded a row with no reason for a row with a
+// confident wrong one: a plan a money ceiling refused is a failure, and a plan
+// the operator interrupted is not. There is one account of what Ctrl-C means
+// in this package and this is now the third caller of it.
+func (q *Queue) fail(id genstore.ReqID, cause error) {
+	status, msg := classify(cause)
+
+	ctx, cancel := writeCtx()
+	defer cancel()
+
 	if uerr := q.Store.Update(ctx, id, func(r *genstore.Request) {
-		r.Status = genstore.StatusFailed
-		r.Err = cause.Error()
+		r.Status = status
+		r.Err = msg
 		r.Ended = q.at()
 	}); uerr != nil {
 		q.log().Error("could not record a failed request", "request", id, "err", uerr)
@@ -588,10 +607,19 @@ func (q *Queue) fail(ctx context.Context, id genstore.ReqID, cause error) {
 
 // classify maps the error a request ended with onto the row it leaves behind.
 //
-// One function because there are two writers of a terminal status -- drain,
-// for a request it generated, and once, for one whose rental broke before
-// drain could reach it -- and two copies of this switch would be two accounts
-// of what Ctrl-C means.
+// ONE FUNCTION, AND FOR A WHILE THERE WERE TWO. The writers are fail, for a
+// request that never got a node; drain, for one it generated; once, for one
+// whose rental broke before drain could reach it; and Recorder.Finish, which
+// is how `ember up` and a run submitted over the socket record the same fact.
+// Two copies of this switch are two accounts of what Ctrl-C means -- and
+// record.go held the second one, `statusOf`, byte-for-byte the same answers
+// under a comment claiming to be the single spelling, while this one's comment
+// claimed the same thing. See the note where it was: it predated this function
+// and the commit that extracted this one in the name of having only one is the
+// commit that gave the package two.
+//
+// The interesting answer is the one that is not obvious: a cancelled context
+// is NOT a failure.
 func classify(cause error) (genstore.Status, string) {
 	switch {
 	case cause == nil:
@@ -613,8 +641,21 @@ func classify(cause error) (genstore.Status, string) {
 }
 
 // finish records how a request ended.
-func (q *Queue) finish(ctx context.Context, id genstore.ReqID, cause error) {
+//
+// IT TAKES NO CONTEXT, and that is the fix for #159 rather than an economy.
+// This used to be handed the drain loop's own -- the context `ember serve`
+// cancels on SIGINT, which is what produced most of the errors that reach
+// here -- so the write answered `begin: context canceled` and the row kept the
+// `running` ClaimNext wrote: a generation an operator stopped with Ctrl-C came
+// back from the next start swept to `interrupted` with no reason anywhere. A
+// parameter the caller cannot supply is a parameter nobody can get wrong,
+// which is this repository's "prefer making a bug unrepresentable over testing
+// for it" rule; writeCtx has both halves and the argument for each.
+func (q *Queue) finish(id genstore.ReqID, cause error) {
 	status, msg := classify(cause)
+
+	ctx, cancel := writeCtx()
+	defer cancel()
 
 	if err := q.Store.Update(ctx, id, func(r *genstore.Request) {
 		r.Status = status
@@ -651,8 +692,18 @@ func (q *Queue) finish(ctx context.Context, id genstore.ReqID, cause error) {
 // The check is inside the mutator rather than a read before it, because
 // Store.Update runs SELECT, the mutator and UPDATE in one transaction: asking
 // first and writing after would be the same decision with a window in it.
-func (q *Queue) endIfUnfinished(ctx context.Context, id genstore.ReqID, cause error) {
+//
+// IT TAKES NO CONTEXT, for finish's reason and more sharply: the error being
+// recorded here is the one the RENTAL returned, and the ordinary way for a
+// rental to return an error is a cancelled context. So this writer's most
+// common input was precisely the state in which its write could not land --
+// the half-working fix #159 is about, in the one case its own argument is
+// written around.
+func (q *Queue) endIfUnfinished(id genstore.ReqID, cause error) {
 	status, msg := classify(cause)
+
+	ctx, cancel := writeCtx()
+	defer cancel()
 
 	if err := q.Store.Update(ctx, id, func(r *genstore.Request) {
 		if r.Status.Terminal() {
@@ -705,7 +756,7 @@ func (q *Queue) lifecycle(opener genstore.ReqID) report.Sink { return q.sinkFor(
 // for Recorder.set's reason -- a teardown's context is already cancelled on
 // Ctrl-C, and the row is the only record of what the rental cost.
 func (q *Queue) set(id genstore.ReqID, fn func(*genstore.Request)) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), writeTimeout)
+	ctx, cancel := writeCtx()
 	defer cancel()
 	if err := q.Store.Update(ctx, id, fn); err != nil {
 		q.log().Error("could not record a rental's lifecycle", "request", id, "err", err)
@@ -760,7 +811,18 @@ type sink struct {
 }
 
 // flush writes whatever is buffered.
-func (s *sink) flush(ctx context.Context) { s.buf.Flush(ctx) }
+//
+// ON ITS OWN CONTEXT, for the reason finish takes none: generate's only caller
+// hands it the drain loop's, and this flush runs AFTER s.Generate has returned
+// -- so on Ctrl-C it was the tail of the event stream being written through
+// the context that had just ended the generation it describes. The stream is
+// the truth and the columns a derived index of it, which makes a lost tail the
+// expensive half rather than the cheap one.
+func (s *sink) flush() {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	s.buf.Flush(ctx)
+}
 
 // Cost is gone, and what replaced it is the point of the change that removed
 // it.
