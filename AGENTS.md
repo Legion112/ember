@@ -781,10 +781,16 @@ that sentence made unrepresentable rather than merely tested.
   **local** provider, `local.go` reports `Region: ""` for a Docker volume --
   correctly, it is not in a datacentre -- and `CheckStoreAssets` skips on an
   empty region by design. So it returned `Asked: false` on every lab there is,
-  and the suite could not tell the check from its own absence. Its unit tests
-  go red on reinstatement; the labs would not have noticed it being deleted.
-  Measured: with the pre-flight patched never to run, `go test ./...` and all
-  107 labs were green before this.
+  and the suite could not tell the check from its own absence.
+  **Measured rather than inferred, and the first wording of this entry was
+  wrong about half of it**: with the pre-flight patched never to run, three
+  unit tests go red -- `TestUp_RefusesAStoreMissingTheWeightsBeforeChoosingAnOffer`,
+  `TestUp_AnEmptyObjectIsNotTheWeights` and
+  `TestAppPlanner_FillsAnEmptyStoreOnAMachineWithNoCardRatherThanRefusing` --
+  and **106 of the 107 labs pass, the one failure being the new one**. So the
+  unit suite did report it and the lab suite reported nothing, which is the
+  claim worth making; "`go test ./...` was green too" was an inference from
+  one targeted run and is not true.
 
   **A volume is one host DIRECTORY, and that is the whole point rather than an
   implementation detail.** The thing the pre-flight turns on is a join: the
