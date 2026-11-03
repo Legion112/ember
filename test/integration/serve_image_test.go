@@ -2768,10 +2768,26 @@ func billingSays(t *testing.T, ctx context.Context) map[string]string {
 	return out
 }
 
-// waitForBilling polls until the panel says what it is supposed to.
+// waitForBilling polls until the panel says what it is supposed to, or says it
+// cannot.
 //
 // A POLL AND NOT A WaitVisible, for waitForOffers' reason: what is waited for
 // in one direction is an element's ABSENCE, and chromedp has no wait for that.
+//
+// IT RACES THE REFUSAL AGAINST THE ANSWER, which is `orExited`'s rule one layer
+// out and which this file has already been corrected for once: the picker lab
+// spent fourteen minutes waiting for a job row that was never going to appear
+// while the server's refusal was already on screen, and the same bug was named
+// in 1.35 seconds once it waited for either. Without the `error` clause below,
+// reinstating the original 501 spends the lab's whole minute and reports "never
+// answered at all" -- measured at 61.41s -- rather than the 1.4 seconds it
+// takes to read the sentence the panel is already showing. The diagnosis was
+// not lost, because `p.error` carries the server's own words and the failure
+// prints them; what was lost is a minute per run and the first thing a reader
+// of the failure sees.
+//
+// The predicate still decides what COUNTS as answered, so a caller that wants
+// the error case can ask for it: this only stops the wait, it does not pass.
 func waitForBilling(
 	t *testing.T, ctx context.Context, want func(map[string]string) bool, within time.Duration,
 	what string,
@@ -2782,6 +2798,12 @@ func waitForBilling(
 		got := billingSays(t, ctx)
 		if want(got) {
 			return got
+		}
+		// The thing that means it will never happen. A refusal on screen is a
+		// final answer: the fetch is over, the panel is showing the server's
+		// sentence, and nothing further is coming without another press.
+		if got["error"] != "" {
+			t.Fatalf("the billing panel never %s; it refused: %s", what, got["error"])
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the billing panel never %s within %v; it says verdict=%q rows=%q storage=%q error=%q",
@@ -2857,6 +2879,18 @@ func TestServe_UIReportsWhatIsBilling(t *testing.T) {
 	if err := chromedp.Do(ctx, chromedp.WaitVisible(`h1`)); err != nil {
 		t.Fatalf("the app did not mount: %v\n%s", err, console.text())
 	}
+	// BOTH WATCHERS, because `console.errors()` cannot see an uncaught throw.
+	// That is measured and recorded where this helper is: it filters to
+	// "panicked" and "undecodable", and an exception nobody caught arrives as
+	// a different CDP event entirely -- so the reconnect lab's console
+	// assertion was GREEN against the `Socket::drop` defect twice over. The
+	// residue here is small (a wasm panic does log "panicked", `api::get` has
+	// no undecodable path, and a throw that stopped the render would fail the
+	// assertions below anyway), which is an argument for it being cheap rather
+	// than for leaving a check that is known not to be able to fire. Installed
+	// after the navigation, because the listener is per document and the `?t=`
+	// exchange's 303 is part of that navigation.
+	recordPageErrors(t, ctx)
 
 	// NOTHING UNTIL SOMEBODY ASKS. See the header: the empty answer and the
 	// answer nobody asked for must not render the same, and the empty one is
@@ -2931,6 +2965,9 @@ func TestServe_UIReportsWhatIsBilling(t *testing.T) {
 		t.Errorf("a free store produced a standing-charge line: %q", found["storage"])
 	}
 
+	if errs := pageErrors(t, ctx); errs != "" {
+		t.Errorf("the page threw:\n%s", errs)
+	}
 	if errs := console.errors(); errs != "" {
 		t.Errorf("the page logged errors:\n%s", errs)
 	}

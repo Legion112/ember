@@ -5528,6 +5528,28 @@ A leaked node bills by the hour in silence. These are not style preferences.
   token URL means the operator had a shell to get the page, but `ssh -L
   7777:localhost:7777` is the deployment this file already argues about, and
   that operator's shell is on the other machine.
+  **The forwarded-port operator carries that argument alone, and the stronger
+  version of it was written down first and is not supported.** "An operator who
+  only ever opens the web UI" needs a configured `serve_token` as well as the
+  forward -- a minted one does not survive a restart and is printed on the
+  machine running the server -- and no lab and no deployment in `README.md`
+  exercises that pair, so the pure case is a shape rather than an observation.
+  What does not need it is that **`ember ls` on that laptop is a different
+  installation and not the same mechanism reached differently** -- and the
+  reason offered for that in review was that #146 made the CLI a socket client
+  and a unix socket does not travel through `ssh -L`. **Checked, and it is not
+  the reason**: `s.sockMux` carries exactly one pattern beyond the API,
+  `POST /api/runs`, and `runLs` calls `app.Scan` directly at both of its sites.
+  `ember ls` has never been a client of `ember serve` at all. The true reason
+  is larger: it loads the config, reads the credentials and asks the providers
+  **itself**, so reaching it from the laptop means a second ember installation
+  *with the provider credentials on the laptop* -- which is the thing the
+  browser is there to avoid rather than a packaging detail. Recorded at this
+  length because the weaker reason is the plausible one, and this file's own
+  rule is that an argument about a mechanism is worth one grep.
+  And the fact with no other carrier for that operator is the narrow one: the
+  **standing storage charge**, which `ember spend` and `ember history`
+  deliberately do not price because pricing a store means asking a provider.
 
   **Wiring the Go half ALONE would have moved the defect rather than closed
   it**, which is why the panel is in the same change: a route that answers, a
