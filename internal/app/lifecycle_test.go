@@ -1,7 +1,9 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,5 +154,62 @@ func TestLifecycle_DoesNotWriteBackToThePlansOptions(t *testing.T) {
 	}
 	if a.es[0].Node != "test/na" || b.es[0].Node != "test/nb" {
 		t.Errorf("events crossed: a saw %q, b saw %q", a.es[0].Node, b.es[0].Node)
+	}
+}
+
+// TestLifecycle_OnlyTheEventThatMeansADeadlineCarriesOne.
+//
+// THE OTHER HALF OF report.Event's omitzero, asserted against the events this
+// package really builds rather than against a struct literal. The tag test in
+// internal/report proves a zero Deadline is absent from the wire; this one
+// proves the field really is zero on the kinds that do not mean it -- which
+// is the gap a check of either half alone sits in, and the gap
+// `capabilities.model` and the unrecorded preview frame both sat in.
+//
+// node_memory is in the list because it is the kind furthest from the
+// deadline's own hook: a different function, a different probe, and one of
+// the five the issue measured carrying "deadline":"0001-01-01T00:00:00Z".
+func TestLifecycle_OnlyTheEventThatMeansADeadlineCarriesOne(t *testing.T) {
+	c := &collect{}
+	o := Plan{}.lifecycle(c)
+
+	deadline := time.Date(2026, 11, 1, 13, 0, 0, 0, time.UTC)
+	o.OnReady(handle("n1"), node.Endpoint{}, deadline, node.Rate(340000))
+	o.OnDestroyed(handle("n1"), node.Billing{
+		Rate: node.Rate(340000), Elapsed: 90 * time.Second,
+		Billable: 2 * time.Minute, Cost: node.MicroUSD(11333),
+	}, nil)
+	o.OnDestroyed(handle("n1"), node.Billing{}, errTest)
+
+	spec := memSpec(t)
+	reportMemory(t.Context(), c, answer(t, spec, strings.Join([]string{
+		"cgroup2_max 34359738368",
+		"cgroup2_current 33285996544",
+		"mem_total_kb 741343232",
+		"assets 60129542144",
+	}, "\n")), spec, memOpts())
+
+	if len(c.es) != 4 {
+		t.Fatalf("got %d event(s), want node_ready, run_cost, destroy_failed and node_memory: %+v", len(c.es), c.es)
+	}
+	for _, e := range c.es {
+		b, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(b, &keys); err != nil {
+			t.Fatal(err)
+		}
+		raw, present := keys["deadline"]
+		if e.Kind == report.KindNodeReady {
+			if !present || string(raw) != `"2026-11-01T13:00:00Z"` {
+				t.Errorf("node_ready lost the deadline an operator needs: %s", b)
+			}
+			continue
+		}
+		if present {
+			t.Errorf("a %s claims a deadline nobody set: %s", e.Kind, raw)
+		}
 	}
 }
