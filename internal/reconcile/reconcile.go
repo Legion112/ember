@@ -207,7 +207,7 @@ func (f Finding) String() string {
 // Scan classifies everything known about every provider.
 //
 // errs is a parameter rather than something swallowed inside: a provider that
-// could not be reached is a finding, and the whole point of `ember ls --all`
+// could not be reached is a finding, and the whole point of `ember ls`
 // is that it cannot report "nothing is running" when it does not know.
 func Scan(
 	listings map[node.ProviderID][]node.Node,

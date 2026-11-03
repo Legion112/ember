@@ -440,7 +440,7 @@ func TestCatalogueReport_RefusesAnImpossiblePeriodAndAnInventedKind(t *testing.T
 
 // TestCatalogueReport_ALineItCannotPlaceIsAFinding. A sample that is in the
 // file and not in the total is exactly the clean-bill-of-health failure
-// `ember ls --all` exits non-zero to avoid, over a file nothing can rebuild.
+// `ember ls` exits non-zero to avoid, over a file nothing can rebuild.
 func TestCatalogueReport_ALineItCannotPlaceIsAFinding(t *testing.T) {
 	d, cfg := snapshots(t, &fakeCatalogue{}, 10)
 

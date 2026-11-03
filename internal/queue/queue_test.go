@@ -1439,7 +1439,7 @@ func TestCancel_IsSafeToAskTwice(t *testing.T) {
 // Nothing generating is nothing to cancel, and that is reported as false.
 //
 // The API turns false into a 409 rather than recording a cancellation, for
-// the reason `ember ls --all` exits non-zero on a provider it could not ask:
+// the reason `ember ls` exits non-zero on a provider it could not ask:
 // "I could not stop it" must not render as "it is stopped" over a card that
 // may still be billing.
 func TestCancel_ReportsFalseWhenNothingIsGenerating(t *testing.T) {

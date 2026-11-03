@@ -278,10 +278,19 @@ func yamlKeys(t *testing.T) []string {
 //     that TestREADME_NamesEveryVerb's comment already refuses. A RENAMED
 //     flag is caught by the first direction the moment the new name appears
 //     nowhere; a REMOVED one leaves README describing something nobody can
-//     type, and nothing would fire. It found one on its first run --
-//     `ember ls --all`, at README:1361 and five more times in AGENTS.md.
-//     `ember ls` has one flag, `--config`; it has asked every configured
-//     provider since it was written, and `--all` has never existed.
+//     type, and nothing would fire. It found one on its first run -- a
+//     `--all` on an `ember ls`, at README:1361 and five more times in
+//     AGENTS.md. `ember ls` has one flag, `--config`; it has asked every
+//     configured provider since it was written, and `--all` has never
+//     existed.
+//
+// NAMED IN TWO SPANS AND NOT ONE, which is the shape README:593 and
+// AGENTS.md:434 already use for the same record and is now load-bearing:
+// TestComments_CiteNoFlagThatNoFlagSetDeclares reads this file too, and a
+// comment spelling the invocation out would be the one citation the sweep
+// left behind. There is no exemption for it, because an escape hatch for a
+// test is an escape hatch -- the rule that keeps `ssh.InsecureIgnoreHostKey`
+// untypeable and left the RunPod mapper's public-port branch uncovered.
 func TestREADME_DocumentsEveryFlag(t *testing.T) {
 	b, err := os.ReadFile(readmePath())
 	if err != nil {
@@ -308,7 +317,7 @@ func TestREADME_DocumentsEveryFlag(t *testing.T) {
 			name, strings.Join(where, " and "))
 	}
 
-	for _, m := range readmeEmberFlags(readme) {
+	for _, m := range emberFlags(readme) {
 		if _, ok := declared[m.name]; ok {
 			continue
 		}
@@ -368,13 +377,20 @@ func continuesFlagName(c byte) bool {
 	return c == '-' || c == '_' || flagNameStart(c) || (c >= 'A' && c <= 'Z')
 }
 
-type readmeFlag struct {
+type citedFlag struct {
 	name string
 	line int
 }
 
-// readmeEmberFlags returns the flags README types at ember, for the stale
+// emberFlags returns the flags a document types at ember, for the stale
 // direction.
+//
+// NAMED FOR WHAT IT READS AND NOT FOR README, because it has two callers now:
+// TestComments_CiteNoFlagThatNoFlagSetDeclares runs the same window over
+// every comment in the tree. One rule, measured once, rather than a second
+// spelling of it beside the first -- the journal's "nodes" subdirectory,
+// which was a literal in the CLI and a second literal in the lab harness
+// until they disagreed and an assertion read the wrong directory.
 //
 // From each occurrence of the word `ember` to the end of the line or the next
 // backtick, whichever comes first. A narrow window on purpose: this direction
@@ -398,8 +414,8 @@ type readmeFlag struct {
 // because llama-server's config example sits beside the word ember teaches the
 // reader to stop believing the test, which is what `allow_interruptible` cost
 // when it read like a safety switch and guarded nothing.
-func readmeEmberFlags(readme string) []readmeFlag {
-	var out []readmeFlag
+func emberFlags(readme string) []citedFlag {
+	var out []citedFlag
 	for i, line := range strings.Split(readme, "\n") {
 		for j := 0; ; {
 			k := strings.Index(line[j:], "ember")
@@ -421,7 +437,7 @@ func readmeEmberFlags(readme string) []readmeFlag {
 				rest = rest[:e]
 			}
 			for _, name := range flagTokens(rest) {
-				out = append(out, readmeFlag{name: name, line: i + 1})
+				out = append(out, citedFlag{name: name, line: i + 1})
 			}
 		}
 	}

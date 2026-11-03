@@ -255,7 +255,7 @@ func WithNode(
 	h, createErr := p.Create(ctx, req)
 	if createErr != nil {
 		// The record stays. An intent with no node id is exactly what
-		// `ember ls --all` is meant to go and ask the provider about, because
+		// `ember ls` is meant to go and ask the provider about, because
 		// "the call failed" does not mean "nothing was created".
 		_ = o.Store.Update(runID, func(r *statestore.Record) {
 			r.LastErr = createErr.Error()

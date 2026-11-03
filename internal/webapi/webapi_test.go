@@ -754,7 +754,7 @@ func TestCancel_StopsARunningRequestWithoutEndingTheRental(t *testing.T) {
 // A row that says running with no rental generating it is what a restart
 // leaves behind before queue.Run's Interrupt sweep reaches it. Marking it
 // cancelled would report a card as stopped that may still be billing -- the
-// same refusal as `ember ls --all` exiting non-zero on a provider it could
+// same refusal as `ember ls` exiting non-zero on a provider it could
 // not ask.
 func TestCancel_WillNotClaimToHaveStoppedWhatItCouldNotReach(t *testing.T) {
 	cases := map[string]Drain{

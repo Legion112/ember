@@ -84,7 +84,7 @@ func runCatalogueSnapshot(args []string, out io.Writer, d deps) error {
 	}
 	if len(snap.Failed) > 0 {
 		// A provider that could not be asked is a finding, not a silence --
-		// the rule `ember ls --all` exits non-zero for. Here the gap it
+		// the rule `ember ls` exits non-zero for. Here the gap it
 		// leaves is permanent, which is the stronger version of the same
 		// argument.
 		return &FindingsError{N: len(snap.Failed)}
@@ -382,7 +382,7 @@ func joinLevels(ls []catalogue.Level) string {
 //
 // Exit 2 and never a silent skip. A line ember could not place is a sample
 // that is in the file and not in the total, and a report quietly missing part
-// of its history is the clean-bill-of-health failure `ember ls --all` exits
+// of its history is the clean-bill-of-health failure `ember ls` exits
 // non-zero to avoid -- here over a file that cannot be rebuilt.
 //
 // A file in the directory that is not a day file counts too. A day somebody

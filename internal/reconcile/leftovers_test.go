@@ -85,7 +85,7 @@ func TestScanLeftovers_ReportsANetworkWithNoReadableLabel(t *testing.T) {
 
 // TestScanLeftovers_AnUnreachableProviderIsAFinding: "I could not ask the
 // daemon what ember left on it" must not render as "nothing was left", for the
-// same reason `ember ls --all` exits non-zero on a provider it could not ask.
+// same reason `ember ls` exits non-zero on a provider it could not ask.
 func TestScanLeftovers_AnUnreachableProviderIsAFinding(t *testing.T) {
 	got := ScanLeftovers(nil, map[node.ProviderID]error{
 		"local": errors.New("docker daemon is not reachable"),

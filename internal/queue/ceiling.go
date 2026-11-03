@@ -193,7 +193,7 @@ func (c Ceilings) Allow(ctx context.Context, s Spender, now time.Time, projected
 			// Returned and not swallowed. A ceiling that cannot read what has
 			// been spent does not know whether this rental is allowed, and
 			// renting on "probably fine" is the one answer a spend ceiling
-			// must never give -- the same rule as `ember ls --all` exiting
+			// must never give -- the same rule as `ember ls` exiting
 			// non-zero over a provider it could not ask.
 			return err
 		}
