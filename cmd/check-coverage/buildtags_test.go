@@ -351,31 +351,73 @@ func lintConfigTags(t *testing.T, root string) map[string]bool {
 func makeVetTags(t *testing.T, root string) map[string]bool {
 	t.Helper()
 
+	fields, found := makeVarFields(t, root, labTagsVar)
+	if !found {
+		t.Fatalf("no %s assignment in %s; the vet recipe's tag list is the source this test compares against, and it cannot be found", labTagsVar, makefileName)
+	}
+	if len(fields) == 0 {
+		t.Fatalf("%s assigns %s nothing; `go vet` would then compile no tagged file at all", makefileName, labTagsVar)
+	}
+	out := map[string]bool{}
+	for _, tag := range fields {
+		out[tag] = true
+	}
+	return out
+}
+
+// makeVarFields reads a Makefile variable's assignment as whitespace-separated
+// fields, and says whether it found one at all.
+//
+// One reader for both callers -- the vet tag list and the publish gate's lab
+// list -- because two parsers for one file is the drift this package's other
+// guards are about. `\` continuations are followed, which the vet list does
+// not need and PUBLISH_LABS does: a list of six test names on one line is a
+// line nobody reviews.
+//
+// A trailing `#` comment is cut, so a variable documented at the end of its
+// own line does not contribute the comment's words as values.
+func makeVarFields(t *testing.T, root, name string) ([]string, bool) {
+	t.Helper()
+
 	raw, err := os.ReadFile(filepath.Join(root, makefileName))
 	if err != nil {
 		t.Fatalf("read %s: %v", makefileName, err)
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		rest, ok := strings.CutPrefix(line, labTagsVar)
+
+	lines := strings.Split(string(raw), "\n")
+	for i, line := range lines {
+		rest, ok := strings.CutPrefix(line, name)
 		if !ok {
 			continue
 		}
 		rest = strings.TrimLeft(rest, " \t")
+		// The op check is what stops PUBLISH_LABS matching PUBLISH_LABS_LOG
+		// and PUBLISH_LABS_RUN, whose remainders begin with `_`.
+		var after string
+		matched := false
 		for _, op := range []string{":=", "?=", "+=", "="} {
-			if after, found := strings.CutPrefix(rest, op); found {
-				out := map[string]bool{}
-				for _, tag := range strings.Fields(after) {
-					out[tag] = true
-				}
-				if len(out) == 0 {
-					t.Fatalf("%s assigns %s nothing; `go vet` would then compile no tagged file at all", makefileName, labTagsVar)
-				}
-				return out
+			if a, found := strings.CutPrefix(rest, op); found {
+				after, matched = a, true
+				break
 			}
 		}
+		if !matched {
+			continue
+		}
+
+		var fields []string
+		for j := i; ; j++ {
+			body, _, _ := strings.Cut(after, "#")
+			continued := strings.HasSuffix(strings.TrimRight(body, " \t"), `\`)
+			fields = append(fields, strings.Fields(strings.TrimSuffix(strings.TrimRight(body, " \t"), `\`))...)
+			if !continued || j+1 >= len(lines) {
+				break
+			}
+			after = lines[j+1]
+		}
+		return fields, true
 	}
-	t.Fatalf("no %s assignment in %s; the vet recipe's tag list is the source this test compares against, and it cannot be found", labTagsVar, makefileName)
-	return nil
+	return nil, false
 }
 
 // runScripts collects every `run:` script in a parsed workflow document.

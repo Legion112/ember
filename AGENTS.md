@@ -343,6 +343,48 @@ moment it imports a sibling, the sibling's dependencies become its own.
   assertion while linting nothing. Checked by reinstating the gap, by
   inventing a third tag the test had never heard of, and by pasting a
   hand-written `-tags` back into CI.
+- **And `PUBLISH_LABS` was exactly that list, cited by three comments here as
+  the precedent against being one.** The gate between a built workload image
+  and `docker push` selected its labs with a hand-written alternation of five
+  test names, checked against nothing -- and `go test -run` over an expression
+  that matches fewer tests than intended prints at most a warning and **exits
+  0**. Measured: `make test-image-labs-publish
+  PUBLISH_LABS=TestWorkloadImage_ThisNameDoesNotExist` exited 0 having run
+  none of the five assertions, and the realistic case is worse because it is
+  silent -- one ordinary rename ran four of five and `go test` said nothing at
+  all. This is **the second time this one gate has been found unable to
+  fail**: `pipefail` fixed "a lab failed and make said 0" and cannot touch "a
+  lab was never selected and make said 0", which has the same consequence and
+  no symptom. The irony is the whole lesson -- two copies of the list became
+  one copy, which is the fix the three comments cite, and nobody asked what
+  checked the survivor.
+
+  Both halves are needed and neither is the other's belt.
+  `TestPublishGateNamesEveryWorkloadImageLab` reads the Makefile variable and
+  compares it against the tree in both directions: a name the list has and no
+  test declares, which is the rename and the typo, and a `TestWorkloadImage_`
+  the list does not name, which is how the image that lacked `embernode fetch`
+  shipped in the first place. It cannot see a `PUBLISH_LABS` overridden on the
+  command line, which is how this was measured, so the recipe counts what
+  `go test -list` selected against `$(words $(PUBLISH_LABS))` -- which is why
+  the variable is a list of names and not an alternation, and why the `-run`
+  expression is derived from it rather than written beside it. The two also
+  cover each other: the Go test cannot see a broken derivation and the count
+  cannot see a lab nobody listed. All four lab targets get the count, because
+  `TestWorkloadImage_`, `TestPreview_` and `TestServe_` are prefixes that a
+  single rename cannot empty and a prefix change can -- there the minimum is
+  one, which is the honest bound a prefix allows.
+
+  `ShipsTheServerItAlreadyCompiles` was outside the gate and is in it now, by
+  the sentence already written for `LinksNothingItDoesNotShip`: free, needing
+  no image, and about the artifact being published. Checked by reinstating all
+  four defects and judging exit codes -- a list naming nothing (make exits 2
+  before touching Docker), one rename (five selected against six named, exit
+  2), a renamed lab against the Go guard (exit 1, both directions at once), a
+  stale exclusion (exit 1) -- and, because belt and braces reads exactly like
+  a dead gate, by deleting the guard with the rename still in place and
+  watching `go test ./cmd/check-coverage/` go green, which is what proves
+  nothing else in the tree was reporting it.
 - **"Document CLI flag, config key and behaviour changes in `README.md`" names
   three things, one of them was read out of the tree, and the one that could
   have been and was not had drifted by seven.**
