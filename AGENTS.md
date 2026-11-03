@@ -1797,6 +1797,38 @@ that sentence made unrepresentable rather than merely tested.
   than by the zero itself: the local provider's rentals are free, so cost
   alone cannot tell "somebody else paid" from "nobody did". Billable is tested
   beside cost for exactly that case.
+- **The same column in the browser read `$0` for a whole generation, because
+  the row was gated on one number and displayed another.** The watcher's money
+  row appeared when `Progress::spent` -- the card time the queue emits per
+  job -- became non-zero, was captioned "card time", and rendered
+  `requests.cost`, which is the rental. Those are different quantities written
+  at different times to different requests: `run_cost` arrives from
+  `provision.WithNode`'s **deferred** teardown and `Queue.lifecycle` routes it
+  to the opener's sink alone. So the row read `$0` from the first completed job
+  until the node was destroyed and `$0` for ever on a rider -- the entry above,
+  reached in a second language, where `Entry.Rode`'s answer had not been
+  carried across. `Progress::rental` is that answer for one request, and it
+  asks **who was told the rental's facts** rather than reading the zero: a
+  `node_ready` in this request's stream is the same routing decision that
+  decides which request is charged, so there is one source of truth and not a
+  second guess at it. Five states, and the two the old row could not tell
+  apart are the two with no figure at all.
+  **It was unreachable in every lab, which is why nothing caught it.** The
+  local provider's price is zero, so `spent` is zero on every rental a lab
+  here can start and the defective row never rendered -- a browser assertion
+  about the figure would have passed against the bug, so the lab waits for the
+  *sentence* and that is the half that goes red.
+  **`Progress::rental_cost` is gone, and it was never the fix.** It held the
+  same integer as `requests.cost`, from the same event, arriving at the same
+  moment, and zero for ever on a rider for the same reason -- two carriers of
+  one figure, which is `queue.Cost`'s mistake, and the one this page may print
+  is the other one, because `Money` crosses the wire twice so that the browser
+  is never a second formatter of money. What the event adds is that the figure
+  **exists**, which is what tells a recorded `$0` from a rental nobody has
+  priced, so it is a `charged bool` now. There is no dollar card-time figure
+  on the page and that is written down rather than left to be noticed:
+  `JobRun.Cost` is kept off the posted `Job` on purpose, so nothing on the
+  browser's wire carries one, and `ember history` is the column.
 - **"It has no figures" is the fact; "it ran before ember recorded them" was a
   guess at the cause.** Two different things contribute a rental cost and no
   per-job figures -- a request from before schema version 3, and one that

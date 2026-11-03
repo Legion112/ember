@@ -15,8 +15,8 @@ use leptos::task::spawn_local;
 
 use crate::api;
 use crate::model::{
-    Config, Envelope, Hires, Input, Job, NewRequest, Offers, Progress, Request, RequestList,
-    VaeTiling,
+    Config, Envelope, Hires, Input, Job, NewRequest, Offers, Progress, Rental, Request,
+    RequestList, VaeTiling,
 };
 
 /// App is the whole page.
@@ -1177,13 +1177,85 @@ fn Watch(watching: RwSignal<String>) -> impl IntoView {
                         // 56 GiB.
                         <dd>{move || progress.get().resident} " of loading, paid once"</dd>
                     </Show>
-                    <Show when=move || progress.get().spent != 0>
-                        <dt>"card time"</dt>
-                        <dd>{move || {
-                            request.get().map(|r| r.cost.text().to_string())
-                                .unwrap_or_default()
-                        }}</dd>
-                    </Show>
+                    // THE RENTAL, AND THE CAPTION NAMES THE NUMBER IT SHOWS.
+                    //
+                    // This row was gated on `progress.spent` -- the card time
+                    // the queue emits per job -- captioned "card time", and
+                    // rendered `request.cost`, which is the whole rental:
+                    // written from `run_cost`, which arrives from
+                    // provision.WithNode's DEFERRED teardown, and routed by
+                    // Queue.lifecycle to the request that opened the rental
+                    // and to no other. So it appeared at the first completed
+                    // job and read `$0` until the node was destroyed, and
+                    // `$0` for ever on a rider -- a money row of zeros, which
+                    // reads as free.
+                    //
+                    // Which of the five states it is in is Progress::rental,
+                    // so it can be checked without a browser; what is here is
+                    // the sentence each one gets. A dash for the rider, which
+                    // is the cell `ember history` prints, and words for the
+                    // two states that have no figure at all -- because the
+                    // distinction between "nobody has priced this yet",
+                    // "somebody else paid for it" and "it cost nothing" is
+                    // the whole content of the row.
+                    //
+                    // NO DOLLAR FIGURE FOR THE CARD TIME, and that is a limit
+                    // rather than an omission: `Money` arrives rendered by Go
+                    // because this page must not be a second formatter of
+                    // money, and nothing on the browser's wire carries a
+                    // rendered card-time figure -- `JobRun.Cost` is kept off
+                    // `Job` on purpose, so that the figure an operator is
+                    // billed against is not settable by the thing being
+                    // billed. `ember history` is where that column lives.
+                    {move || {
+                        let cost = request.get().map(|r| r.cost).unwrap_or_default();
+                        match progress.get().rental() {
+                            Rental::Silent => ().into_any(),
+                            Rental::Pending => view! {
+                                <dt>"rental"</dt>
+                                <dd>"not priced yet"
+                                    <span class="hint">
+                                        " — what a rental cost is recorded when its node
+                                         is destroyed"
+                                    </span>
+                                </dd>
+                            }.into_any(),
+                            Rental::Accruing => view! {
+                                <dt>"rental"</dt>
+                                <dd>"accruing"
+                                    <span class="hint">
+                                        " — card time has been charged to this request;
+                                         what the rental cost is recorded when its node
+                                         is destroyed"
+                                    </span>
+                                </dd>
+                            }.into_any(),
+                            Rental::Rode => view! {
+                                <dt>"rental"</dt>
+                                <dd>"—"
+                                    <span class="hint">
+                                        " this generated on a rental another request
+                                         opened, and that request is the one charged
+                                         for it"
+                                    </span>
+                                </dd>
+                            }.into_any(),
+                            Rental::Charged => view! {
+                                <dt>"rental"</dt>
+                                <dd>{cost.text().to_string()}
+                                    // SAID IN WORDS, because `$0` on its own
+                                    // is the reading this whole row exists to
+                                    // stop: here it is the recorded figure
+                                    // and the rental really was free, which
+                                    // is a different claim from the four
+                                    // zeros above it.
+                                    <Show when=move || cost.is_free()>
+                                        <span class="hint">" — this rental was free"</span>
+                                    </Show>
+                                </dd>
+                            }.into_any(),
+                        }
+                    }}
                 </dl>
 
                 <Show when=move || !progress.get().failure.is_empty()>

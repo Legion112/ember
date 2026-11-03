@@ -1544,6 +1544,40 @@ make web                 # builds the Rust/WASM frontend
 ember serve              # http://127.0.0.1:7777/
 ```
 
+### What the watcher says about money
+
+The progress panel's money row is the **rental**, and it says which of five
+states that rental is in rather than printing a number that is not yet one:
+
+| on screen | what it means |
+|---|---|
+| *(no row)* | this request has not run, so there is no rental to price |
+| `not priced yet` | it opened a rental that is still up; a rental's cost is recorded when its node is destroyed |
+| `accruing` | the same, and card time has already been charged to it, so the rate is above zero |
+| `—` | it generated on a rental **another request opened**, and that request is the one charged for it |
+| `$0.0478` | the rental was torn down and this is what it cost; `$0` here means free and says so |
+
+The row used to be captioned *card time*, gated on the card time, and display
+`requests.cost` — which is the whole rental, written once from the deferred
+teardown and only to the request that **opened** the rental. So it appeared at
+the first completed job and read `$0` for the rest of the generation, and `$0`
+for ever on a request that rode an existing rental. A money row of zeros reads
+as free, which is the one direction it must never be wrong in, and
+`ember history`'s `rode along` column exists for exactly that reason. Which
+state it is in is decided by asking **who was told the rental's facts** — a
+`node_ready` reaching this request's stream is the same routing decision that
+decides which request is charged — and never by the zero itself, because the
+local provider's rentals really are free and cost alone cannot tell "somebody
+else paid" from "nobody did".
+
+There is **no dollar figure for card time on this page**, and that is a limit
+rather than an omission. Money crosses the wire twice — the integer to compare
+on and the string Go rendered — so that the browser is never a second
+formatter of it, and nothing on the browser's wire carries a rendered
+card-time figure: `JobRun.Cost` is kept off the posted `Job` on purpose, so
+the figure an operator is billed against is not settable by the thing being
+billed. [`ember history`](#which-run-was-it) is where that column lives.
+
 ### How it fits together
 
 Everything below the dashed line is what `ember up` already did; `ember serve`
