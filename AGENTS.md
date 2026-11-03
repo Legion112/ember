@@ -792,6 +792,36 @@ that sentence made unrepresentable rather than merely tested.
   image shipping was that the registry in that experiment was a closed port.
   Both halves of this entry are the one rule -- a gate nobody has watched fail
   is a gate nobody should trust -- and both were found by reinstating the bug.
+
+  **`AssertNoStray` is gone, and the name in this document is now the name of
+  the lesson rather than of a function** -- the `queue.Cost` arrangement.
+  Repairing the ordering above meant spelling snapshot-reap-report in the
+  cleanup, because a zero-argument method cannot carry a snapshot taken before
+  the reap, and the method was left behind: for the life of the suite it had
+  **no caller**, while fourteen comments -- six labs, eight in `internal/` --
+  and this entry named it as the thing guarding them, and its own doc comment
+  said "it is also run from the lab's own cleanup" (#113). The property was
+  checked the whole time, by `reportStray`; what was wrong was that a reader
+  following the name arrived at a function that never ran. Nothing automated
+  reported it, and that is structural: `TestNoProductionDeadCode` does not
+  load `test/`, because a lab caller and no caller at all are the same verdict
+  to it -- so the harness is the one tree where this shape has to be found by
+  reading, and that refusal is one defect older than it was.
+  **Wiring it up was tried first and a measurement refused it.** #113's own
+  suggestion was the mid-test home: the three labs that leak on purpose call
+  `Reap()` themselves to declare the orphan, and it looks as though nothing
+  can then say whether that reap was complete, since the cleanup's snapshot is
+  taken afterwards. It can, and the "afterwards" is why -- the snapshot lands
+  after the body's reap and *before* the cleanup's own, so whatever a declared
+  reap left is exactly what it sees. Reinstated, a `Reap` that keeps its
+  containers: both orphan labs go red at `reportStray` with no mid-test
+  assertion anywhere, so an `AssertNoStray()` beside their `Reap()` reported
+  the same objects one line earlier and nothing else. That is `queue.Cost`
+  and not `sdserver.Client.Cancel`: a second path for one check, where the
+  other path is the live one. The two judgements worth keeping -- snapshot
+  before the reap, and over this suite run's objects rather than the daemon's
+  -- are a note where the function was, the `node.RateFromFloat` shape,
+  because whoever adds the next stray check makes them again.
 - **A cleanup that deleted another run's live nodes.** `Lab.Nodes` filtered
   containers on the mere presence of `ember.run-id`, with no value, and `Reap`
   force-removed everything it returned plus every labelled network and volume
@@ -813,7 +843,7 @@ that sentence made unrepresentable rather than merely tested.
   leftover`, and a second suite's deliberately-expired network is swept by this
   one's `ember reap` whatever the harness filters on. Only exclusivity makes
   those assertions true. It is an flock and not a pid file because the kernel
-  releases it when the holder dies, and two labs here SIGKILL ember on purpose;
+  releases it when the holder dies, and three labs here SIGKILL ember on purpose;
   a lock that could go stale would have to be stealable, which is the
   daemon-wide delete again with extra steps.
 - **"Another run is in progress" is a wait. "Something ember will report is on
@@ -908,8 +938,8 @@ that sentence made unrepresentable rather than merely tested.
   while a volume ember itself left behind is still reported. The first lab
   that forgot would otherwise have turned a working check into a failing
   suite, which is how a working check gets weakened instead of obeyed.
-- **A lab that leaks on purpose says so.** The two SIGKILL labs exist to leave
-  a node behind, and the first run of the repaired stray check reported both.
+- **A lab that leaks on purpose says so.** The SIGKILL labs exist to leave a
+  node behind, and the first run of the repaired stray check reported them.
   They call `Reap()` themselves once they have finished asserting, which
   declares the orphan as deliberate and keeps the check unconditional for
   every lab that leaks by mistake. Relaxing the check instead would have put
@@ -917,6 +947,13 @@ that sentence made unrepresentable rather than merely tested.
   above, and must be: it was created during this suite run, which is the only
   thing that distinguishes it from the stale container of a run that died
   yesterday -- and that one is left alone because nothing here made it.
+  **There are three of them and this entry said two**: `ember serve`'s,
+  `TestOrphan_SigkillLeavesExactlyOneFindableNode`, and
+  `TestOrphan_DryRunReapDestroysNothing`, which kills ember as well and reaps
+  from a `defer`. The declaration does not turn the final check off, which is
+  the thing a reader would reasonably assume and is measured two entries up:
+  the cleanup's snapshot is taken after a lab's own reap, so an incomplete one
+  is reported against the lab that declared it.
 - **The run id travels into `Destroy`; it is never re-derived from the thing
   being destroyed.** `local.Destroy` used to read it off the container's own
   label in order to find the bridge network beside it -- and a container

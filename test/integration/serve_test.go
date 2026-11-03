@@ -360,9 +360,9 @@ func TestServe_DestroysItsRentalOnSigint(t *testing.T) {
 	if !strings.Contains(out, "every rental has been destroyed") {
 		t.Errorf("ember exited without reporting the teardown:\n%s", out)
 	}
-	// The cleanup's own AssertNoStray covers the network beside the
-	// container, which is the thing a leak check forgot once and nobody
-	// noticed until Docker had subnetted its whole address pool.
+	// The cleanup's own stray report covers the network beside the container,
+	// which is the thing a leak check forgot once and nobody noticed until
+	// Docker had subnetted its whole address pool.
 }
 
 // TestServe_SigkillLeavesExactlyOneFinding is the other half, and the honest
@@ -400,9 +400,12 @@ func TestServe_SigkillLeavesExactlyOneFinding(t *testing.T) {
 		t.Errorf("ls exited %d after a killed serve, want 2. Output:\n%s", res.ExitCode, res.Combined())
 	}
 
-	// Deliberate, so it is declared: these two labs exist to leave a node
-	// behind, and reaping it here keeps the stray check unconditional for
-	// every lab that leaks by mistake.
+	// Deliberate, so it is declared: three labs here exist to leave a node
+	// behind -- this one and the two in orphan_test.go -- and reaping it here
+	// keeps the stray check unconditional for every lab that leaks by
+	// mistake. No assertion is needed after it: the cleanup's snapshot is
+	// taken once this body returns and before its own reap, so anything this
+	// one failed to remove is reported against this lab.
 	l.Reap()
 }
 
