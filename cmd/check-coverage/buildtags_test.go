@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Legion112/ember/internal/repotree"
 )
 
 // The gates must know every build tag in this tree, and nothing was checking
@@ -219,6 +221,17 @@ func treeBuildTags(t *testing.T, root string) (map[string][]string, int) {
 		if d.IsDir() {
 			switch d.Name() {
 			case ".git", "bin", "testdata", "target", "node_modules":
+				return fs.SkipDir
+			}
+			// A NESTED CHECKOUT'S TAGS ARE NOT THIS TREE'S, and this guard is
+			// the one where that cuts both ways. A tag only another worktree
+			// uses fails both gates here for files nobody in this tree can
+			// lint -- and a tag this tree has STOPPED using stays
+			// "accounted for" because another checkout still has it, which is
+			// the dead-configuration direction the `imagelabs` typo is about.
+			// See internal/repotree for why the test is the directory's own
+			// `.git` and not a name.
+			if repotree.Nested(root, path) {
 				return fs.SkipDir
 			}
 			return nil

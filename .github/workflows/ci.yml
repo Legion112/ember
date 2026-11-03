@@ -32,13 +32,27 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Asked of make rather than spelled here, the way the vet step below and
+      # workload-image.yml already do. This step used to run `gofmt -l .`, and
+      # `.` is the whole directory: an agent worktree is a second checkout of
+      # this repository at `.claude/worktrees/<name>/`, inside the one it was
+      # cut from, so the walk read another developer's files as this commit's
+      # -- and `make fmt`, the same walk with `-w`, rewrote them. Invisible
+      # here, because CI checks out fresh; #143 is the same defect at the
+      # tree-walking guards.
+      #
+      # cmd/check-coverage's TestGofmtReachesEveryGoFileInThisCheckout holds
+      # GOFMT_PATHS to the tree in both directions, and
+      # TestCIGofmtStepAsksMakeForThePaths stops this step growing a second
+      # copy of the list.
       - name: gofmt
         run: |
-          unformatted=$(gofmt -l .)
+          GOFMT_PATHS=$(make -s print-GOFMT_PATHS)
+          unformatted=$(gofmt -l $GOFMT_PATHS)
           if [ -n "$unformatted" ]; then
             echo "::error::not gofmt'd:"
             echo "$unformatted"
-            gofmt -d .
+            gofmt -d $GOFMT_PATHS
             exit 1
           fi
 

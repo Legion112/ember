@@ -535,6 +535,91 @@ moment it imports a sibling, the sibling's dependencies become its own.
   `go.mod` in the **working tree** is repaired by the tidy and leaves an empty
   diff and a passing check. The untidy state has to be in the **index**, which
   is what a CI checkout gives it.
+- **A guard that walks from the repository root reads every checkout nested
+  inside it, and agent worktrees put four of them there.** Claude Code cuts a
+  worktree at `.claude/worktrees/<name>/` -- *inside* the checkout it was cut
+  from, a whole second copy of the tree -- so
+  `TestComments_CiteNoFlagThatNoFlagSetDeclares` reported **457 findings on
+  master at 927ef78**, every one a correct complaint about a file in somebody
+  else's worktree, because those checkouts predate the sweep that removed a
+  `--all` from an `ember ls`. The guard was working; it was reading the wrong
+  tree. CI never sees it, because CI checks out fresh. This is `LAB_LOG_DIR`'s defect
+  through a tree walk instead of a log path -- an assertion reading the wrong
+  file -- and the daemon-wide `Reap`'s root cause: safe while this repository
+  was one checkout, unsafe the moment there were four.
+
+  **Measured rather than assumed, with one nested checkout holding a stale
+  `--all` citation, an `InsecureIgnoreHostKey` and a tag nothing here uses.**
+  Exposed: that guard, `TestNoInsecureIgnoreHostKey` and
+  `TestEveryBuildTagReachesTheGates`, each exit 1 naming a path under
+  `.claude/`. Immune and left alone: `TestNoListenOutsideLoopback` and
+  `internal/logx`'s `walkModule`, because both filter to the `internal/`,
+  `cmd/` and `test/` prefixes before reading anything and a nested path has
+  none of them; `TestNothingRentsOutsideInternalApp`, the README guards,
+  `TestNoWorkflowPublishesAMovingLatestTag` and
+  `TestPublishGateNamesEveryWorkloadImageLab`, which are handed one
+  directory; and `TestNoProductionDeadCode`, `go vet ./...`,
+  `go build ./...` and `golangci-lint run ./...`, which resolve through the
+  module and a nested checkout has a `go.mod` of its own. Recorded because
+  two of those are immune by a prefix allow-list rather than by the rule
+  below, and an allow-list widened later takes the exposure back.
+
+  **`.golangci.yml` is clean and `gofmt` was the fourth site -- the only one
+  that WRITES.** `make fmt` was `gofmt -l -w .`, and CI's gate was
+  `gofmt -l .`: measured, with one unformatted file in a nested checkout,
+  `gofmt -l .` named it and `make fmt` rewrote another developer's working
+  tree. `gofmt` has no exclusion flag and no notion of a module, so it cannot
+  be taught the prune -- it has to be handed paths, which makes the list
+  exactly what `LAB_TAGS` and `PUBLISH_LABS` exist not to be unless something
+  checks it. `GOFMT_PATHS` is that list and
+  `TestGofmtReachesEveryGoFileInThisCheckout` checks it against the tree in
+  both directions: a `.go` file under none of the paths, which is how a whole
+  top-level directory arrives unformatted and unreported, and a listed path
+  with no Go source, which is how `interna` beside `internal` passes the
+  first direction while formatting nothing. `TestCIGofmtStepAsksMakeForThePaths`
+  stops the workflow growing a second copy, which is
+  `TestNoWorkflowSpellsItsOwnVetTags` one tool over -- and **its first
+  version reported `echo "::error::not gofmt'd:"`, CI's own error message**,
+  which is `TestNoListenOutsideLoopback`'s first version flagging
+  `loopback.Listen` for the third time in this file. The matcher bounds the
+  word by the character after it and has a table of its own.
+
+  **The prune is `internal/repotree.Nested` and not the name `.claude`.** A
+  nested checkout is recognisable by what it IS -- a directory holding its own
+  `.git`, a file for a worktree and a directory for a clone, which `os.Stat`
+  does not distinguish -- so a stray clone under `vendor/`, a `cp -a` copy and
+  the next tool's own directory are all covered, while a name catches only the
+  one somebody remembered. `go list` was the alternative and is refused for
+  all three guards by an argument already in the tree:
+  `TestEveryBuildTagReachesTheGates`'s own comment says `go list` resolves
+  through a build context, so the `integration && imagelab` files -- the ones
+  these guards most need to read -- are invisible to it. **A package and not
+  three copies of four lines, because the copies have no guard available**:
+  "every whole-tree walk prunes" is not derivable from the tree, since telling
+  a walk of the module root from `internal/app`'s walk of a temp output
+  directory needs to know what the root argument evaluates to, and a check
+  keyed on the spelling `filepath.WalkDir` would fire on both. One function
+  with one test is the only shape whose correctness anything can assert; it
+  is in `testSupport` for `providertest`'s reason, since the callers are in
+  three different packages and so it cannot be a `_test.go` file.
+
+  **A prune that is too wide is worse than the bug, so every guard that asks
+  carries a floor.** `TestNoInsecureIgnoreHostKey` had none -- a walk that
+  visited nothing passed -- and has a file count now. Reinstated by making
+  `Nested` answer true unconditionally: `internal/repotree` goes red, and so
+  do all four guards, each at its own floor ("parsed only 0 Go files"). The
+  root comparison is the same shape and the real callers prove it matters,
+  because every walk root here is itself a worktree root with a `.git` file:
+  deleting it prunes the first directory of every walk and the same four go
+  red. The error direction is pinned too -- a stat that fails for any reason
+  other than absence reads as this tree's own, because answering "nested"
+  there is a silent dead gate and answering "ours" is a failure that names the
+  path. Negative controls, which are the half that matters: a real stale
+  `--all` citation, a real `InsecureIgnoreHostKey`, a real new build tag and a
+  real `.go` file outside `GOFMT_PATHS` each still turn their guard red with
+  the nested checkout present, and a no-op reword of the prune's comment stays
+  green. And the gofmt guard was deleted with its defect still in place, which
+  leaves `go test ./...` at exit 0 -- nothing else in the tree reports it.
 
 ## Threat model
 

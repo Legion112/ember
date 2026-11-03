@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/repotree"
 )
 
 func pub(t *testing.T) ssh.PublicKey {
@@ -57,8 +58,21 @@ func TestTrustIsSealed(t *testing.T) {
 // this test's own name and the prose in fingerprint.go that explains the rule,
 // which trains the reader to ignore the failure — the one outcome a guard test
 // must never produce.
+//
+// It walks THIS checkout and prunes any other, for the reason
+// internal/repotree carries: an agent worktree lives inside the tree it was
+// cut from, so without the prune a permissive callback in somebody else's
+// copy fails this suite -- and a syntax error in a file they were halfway
+// through editing fails it with a parse error naming a path that is not in
+// this repository at all.
+//
+// The file count is a floor and not a tally, because this walk's own failure
+// mode is now visiting nothing: a prune that grew too wide would leave the
+// guard reporting success for source it never read, which is the
+// `AssertNoStray` shape. There are about two hundred.
 func TestNoInsecureIgnoreHostKey(t *testing.T) {
 	root := filepath.Join("..", "..")
+	parsed := 0
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -67,11 +81,15 @@ func TestNoInsecureIgnoreHostKey(t *testing.T) {
 			if d.Name() == ".git" || d.Name() == "bin" {
 				return filepath.SkipDir
 			}
+			if repotree.Nested(root, path) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
+		parsed++
 		fset := token.NewFileSet()
 		f, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {
@@ -90,6 +108,9 @@ func TestNoInsecureIgnoreHostKey(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if parsed < 150 {
+		t.Fatalf("parsed only %d Go files; the walk is broken, not the module -- a guard that read nothing reports that nothing is wrong", parsed)
 	}
 }
 
