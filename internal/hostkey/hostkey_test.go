@@ -69,7 +69,7 @@ func TestTrustIsSealed(t *testing.T) {
 // The file count is a floor and not a tally, because this walk's own failure
 // mode is now visiting nothing: a prune that grew too wide would leave the
 // guard reporting success for source it never read, which is the
-// `AssertNoStray` shape. There are about two hundred.
+// `AssertNoStray` shape. There are 313 of them, so the floor is well under it.
 func TestNoInsecureIgnoreHostKey(t *testing.T) {
 	root := filepath.Join("..", "..")
 	parsed := 0
