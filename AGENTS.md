@@ -5275,7 +5275,7 @@ A leaked node bills by the hour in silence. These are not style preferences.
   can enforce: it is read on the node, after the pod is billing, and the
   comparison is the unmeasured half -- CUDA minor-version compatibility means
   an image built against 12.6 runs on a 12.x driver older than 12.6, so
-  `CUDAAtLeast` over the driver's figure refuses hosts the image works on,
+  a floor over the driver's figure refuses hosts the image works on,
   which is `hasCapacity`'s own defect reached a third time. Settling it needs a
   rental on a host with an old driver and was not made. `pod_running.json`'s
   `"cudaVersion": "12.4"` is **confirmed** schema-derived and undecoded:
@@ -5330,8 +5330,10 @@ A leaked node bills by the hour in silence. These are not style preferences.
   test gone with the function kept is **1** ("nothing anywhere calls it");
   waiver gone alone is **1** ("only test code calls it (3 site(s))"); and the
   function gone with the test and waiver kept does not compile
-  `internal/node`'s tests. Losing only the test is green, so it was never the
-  load-bearing third. The two judgements are a note on `ParseCUDAVersion`, the
+  `internal/node`'s tests. Losing only the test is **0** under `go test
+  ./cmd/check-coverage/` and **red** under `make cover-check` -- `internal/node`
+  at 98.5% against its 100% floor, with the function at 0.0% -- so the test has
+  to go either way, and "green" is a claim about one command. The two judgements are a note on `ParseCUDAVersion`, the
   `node.RateFromFloat` shape. The waiver's reason, "the evidence that the key is
   unenforced", was stale the moment `min_cuda` went, and left with it.
 
