@@ -356,9 +356,18 @@ func TestAppPlanner_TheStoreFillIsProjectedAgainstThePeriodCeilings(t *testing.T
 	// nil recorder, the missing weights, the absent GPU catalogue,
 	// --allow-paid and this one -- and a bare `err != nil` is how the gate
 	// beside this one came to be green over its own deletion.
-	for _, want := range []string{"max_day_usd", "2026-11-17", "$19.99", "$20", "$0.06", "$20.05"} {
+	// "ceiling of $20," AND NOT "$20", because "$20" is a SUBSTRING of the
+	// $20.05 two fields later: measured, with the ceiling figure misprinted,
+	// `go test -run AgainstThePeriodCeilings ./internal/queue/` is exit 0
+	// against the bare spelling. `AGENTS.md`'s "a mention is a whole token",
+	// which the config-key guard learned over `--as`, one test over.
+	for _, want := range []string{"max_day_usd", "2026-11-17", "$19.99", "ceiling of $20,", "$0.06", "$20.05"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal does not mention %q, so it is not the period ceiling's: %v", want, err)
+			// The projection is the captured CPU catalogue's price, so a
+			// `cpus.json` that no longer comes to $0.06/hr reads here as a
+			// gate that did not fire.
+			t.Errorf("the refusal does not mention %q, so it is not the period ceiling's "+
+				"(or testdata/cpus.json no longer prices the fill at $0.06/hr): %v", want, err)
 		}
 	}
 	if strings.Contains(err.Error(), "--allow-paid") {
