@@ -723,6 +723,255 @@ func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
 	}
 }
 
+// TestServe_UICancelSaysWhatTheServerAnswered presses the one button in the
+// page whose answer used to go nowhere.
+//
+// WHY A BROWSER. `POST /api/requests/{id}/cancel` answers carefully in both
+// directions -- a 409 whose message names the remediation, and a 200 carrying
+// `cancelling` so a page can say a stop is on its way while the status
+// honestly still reads `running` -- and the page decoded all of it into a
+// `serde_json::Value` and threw the `Result` away with `let _ =`. The Go side
+// is well covered and every assertion in it is about the handler; `cargo test`
+// covers whether the BUTTON should be drawn and nothing about what the click
+// does with the answer. Each half agreed with itself, which is the shape of a
+// feature built end to end and connected to nothing, and only a browser
+// crosses the gap.
+//
+// BOTH DIRECTIONS IN ONE LAB, in the order an operator meets them, because a
+// lab that asserted only the accepted path would pass against a page that
+// swallows every refusal -- which is what it did.
+//
+// HOW THE REFUSAL IS REACHED, and it is a real state rather than a contrived
+// one. `queue.Cancel` returns false unless the request is the one its drain
+// loop is generating, and the row says `running` from `ClaimNext` -- which is
+// before `generate` registers the stop channel. So the whole of provisioning
+// is a window in which the row is cancellable and no rental is generating it,
+// and that is exactly the state the 409 is written for: "recorded as
+// generating, but no rental in this process is generating it".
+//
+// AND THE WINDOW IS MADE LONG RATHER THAN RACED. On this provider the window
+// is a container create, an sshd and a one-second model load -- a handful of
+// seconds against a two-second listing poll, which is a coin flip and cost
+// one thirteen-minute run to learn. `gpu_probe` runs on the node before the
+// weights and before the server, so a probe that sleeps puts twenty-five
+// deterministic seconds inside the window with no test-only code anywhere:
+// it is the config key an operator uses for a card that needs time to come
+// up, doing what it says, on a lab node that has no card at all.
+//
+// WHAT PROVES THE ANSWER WAS READ is that the accepted cancel's word differs
+// from the one the page puts there when it asks. The button goes away the
+// moment the click lands -- a double-clicked button is the ordinary case and
+// the second ask is the one that comes back 409 -- so the cell says something
+// before the server has answered. If that placeholder read "cancelling" too,
+// this assertion would pass against a page that had gone back to ignoring the
+// body. It reads "asking"; see `Stopping` in model.rs.
+//
+// Only the CLICKS are driven here; the batch is posted through the API the way
+// the other labs post one. What is under test is the row the page drew and
+// what it does with the two answers, and a page-driven batch would make this
+// lab's generation time a function of the compose panel's defaults.
+func TestServe_UICancelSaysWhatTheServerAnswered(t *testing.T) {
+	requireChrome(t)
+	l := servableLab(t)
+	l.AppendConfig(slowProbeConfig)
+	cmd, srv, wait := startServe(t, l)
+	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
+
+	// SIGINT and not the context's SIGKILL, for TestServe_UI's reason -- and
+	// here it is the only thing that ends the rental at all: a cancelled
+	// request leaves its rental up on purpose, which is the whole difference
+	// between cancelling a job and cancelling a rental.
+	defer func() {
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return
+		}
+		if out := wait(); !strings.Contains(out, "every rental has been destroyed") {
+			t.Errorf("ember exited without reporting the teardown:\n%s", out)
+		}
+	}()
+
+	// Three jobs, so the batch is still generating when the second half of
+	// this lab presses cancel on it. A single 192x192 job finishes in a few
+	// seconds, and a request that ended is a request with no button.
+	batch := queueJobs(t, srv, `{"provider":"local","jobs":[
+		{"prompt":"a paper boat","width":192,"height":192,"steps":4,"seed":1,"output":"boat"},
+		{"prompt":"a lighthouse","width":192,"height":192,"steps":4,"seed":2,"output":"light"},
+		{"prompt":"a railway station","width":192,"height":192,"steps":4,"seed":3,"output":"station"}
+	]}`)
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Headless, chromedp.NoSandbox, chromedp.DisableGPU)
+	alloc, cancelAlloc := chromedp.NewExecAllocator(t.Context(), opts...)
+	defer cancelAlloc()
+	ctx, cancel := chromedp.NewContext(alloc)
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 12*time.Minute)
+	defer cancelTimeout()
+
+	if err := chromedp.Do(ctx,
+		chromedp.Navigate(fmt.Sprintf("%s?t=%s", pageURL, srv.Token))); err != nil {
+		t.Fatalf("navigating to the one-time URL: %v", err)
+	}
+	console := watchConsole(t, ctx)
+	if err := chromedp.Do(ctx, chromedp.WaitVisible(`h1`)); err != nil {
+		t.Fatalf("the app did not mount: %v\n%s", err, console.text())
+	}
+
+	// THE REFUSAL. The row reads `running` from the claim while the node is
+	// still running the probe, so the queue has nothing to signal.
+	waitForText(t, ctx, rowOf(batch)+`//td[@class="status"]`, "running",
+		2*time.Minute, console)
+	if err := chromedp.Do(ctx, chromedp.Click(stopOf(batch)+`/button`)); err != nil {
+		t.Fatalf("pressing cancel: %v\n%s", err, console.text())
+	}
+	if err := shortWait(ctx, queuePanel+`//p[@class="error"]`, 45*time.Second); err != nil {
+		t.Fatalf("the page said nothing about a refused cancel: %v\n"+
+			"the queue panel says: %q\nthe request is %q\n%s",
+			err, panelText(ctx), getRequest(t, srv, batch).Status, console.text())
+	}
+	refusal := waitForText(t, ctx, queuePanel+`//p[@class="error"]`,
+		"restart ember serve", 10*time.Second, console)
+	t.Logf("the page says: %s", refusal)
+	if !strings.Contains(refusal, "no rental in this process is generating it") {
+		t.Errorf("the page shows %q; the server's own sentence is what names the "+
+			"remediation, and `reason` carries it in full for exactly this", refusal)
+	}
+
+	// AND THE BUTTON CAME BACK, because nothing was stopped. A refused cancel
+	// that left the row un-pressable would be the opposite failure: a request
+	// still generating with no way to ask again after the restart the message
+	// asks for.
+	if err := shortWait(ctx, stopOf(batch)+`/button`, 30*time.Second); err != nil {
+		t.Fatalf("the cancel button did not come back after a refusal: %v\n"+
+			"the queue panel says: %q\n%s", err, panelText(ctx), console.text())
+	}
+
+	// Generating for real now, which is what registers the stop channel. The
+	// watcher is opened by clicking the row's own id -- its first button --
+	// so the evidence is on screen rather than polled from the API.
+	//
+	// A JOB ROW EXISTING IS THE SIGNAL, and not a step within it: a row
+	// appears when `unit_started` is emitted, which is already inside
+	// `generate`, and the step text is gone again as soon as that job's
+	// images arrive. Waiting for "step " cost a ten-minute run that read
+	// "job 1/3 ... 1 file(s)" and never saw one, because the first job had
+	// finished before the socket replayed its frames.
+	if err := chromedp.Do(ctx, chromedp.Click(rowOf(batch)+`/td[1]/button`)); err != nil {
+		t.Fatalf("watching the request: %v\n%s", err, console.text())
+	}
+	if err := shortWait(ctx, `.jobs li`, 5*time.Minute); err != nil {
+		t.Fatalf("no job of the batch ever started: %v\n%s", err, console.text())
+	}
+
+	// THE ACCEPTED ONE, which says so before the next poll: the status the row
+	// holds is still `running` and will be for as long as sd-server takes to
+	// stop, so saying only that would read as a click that did not register.
+	if err := chromedp.Do(ctx, chromedp.Click(stopOf(batch)+`/button`)); err != nil {
+		t.Fatalf("pressing cancel on a generating request: %v\n%s", err, console.text())
+	}
+	if err := shortWait(ctx, stopOf(batch)+`/span[contains(text(), "cancelling")]`,
+		30*time.Second); err != nil {
+		t.Fatalf("the accepted cancel never said what the server answered: %v\n"+
+			"the queue panel says: %q\n"+
+			"a page that ignores the body is left saying \"asking\", which is the "+
+			"word it puts there before the request is sent\n%s",
+			err, panelText(ctx), console.text())
+	}
+
+	// AND NO BUTTON IS LEFT on that row, because a double-clicked button is
+	// the ordinary case: the second ask is the one that comes back 409, and a
+	// refusal printed over a cancel that worked is worse than no message at
+	// all.
+	left, lerr := chromedp.Run(ctx, chromedp.Evaluate[int](
+		`document.querySelectorAll('table.queue td.stop button').length`))
+	if lerr != nil {
+		t.Fatalf("counting the cancel buttons: %v\n%s", lerr, console.text())
+	}
+	if left != 0 {
+		t.Errorf("%d cancel button(s) are still pressable after an accepted cancel; "+
+			"the second ask is the one that comes back refused", left)
+	}
+
+	// The earlier refusal is gone, so the operator is not reading a sentence
+	// about the ask before this one.
+	stale, serr := chromedp.Run(ctx, chromedp.Evaluate[int](
+		`document.querySelectorAll('table.queue ~ p.error, table.queue + p.error').length`))
+	if serr != nil {
+		t.Fatalf("asking whether the refusal is still on screen: %v\n%s", serr, console.text())
+	}
+	if stale != 0 {
+		t.Error("the refused cancel's message is still on screen after an accepted one")
+	}
+
+	// AND THE QUEUE RECORDED IT, which is the half the handler deliberately
+	// does not write: a generating request is still generating when the
+	// handler returns, so how it ended belongs to the drain loop. Read from
+	// the store through the API, because reading it back off the page would be
+	// the page agreeing with itself.
+	waitForStatus(t, srv, batch, "cancelled", 5*time.Minute)
+
+	if errs := console.errors(); errs != "" {
+		t.Errorf("the page logged errors:\n%s", errs)
+	}
+}
+
+// slowProbeConfig puts a known number of seconds between the claim and the
+// generation.
+//
+// NOT A TEST HOOK: `gpu_probe` is the config key an operator writes for a card
+// that needs time to initialise, `gpucheck.Wait` runs it over SSH before the
+// assets and before the server, and this node has no card to check -- so a
+// probe that sleeps and exits zero is that key doing exactly what it says.
+// What it buys is the only window in which a row is honestly `running` and the
+// queue has nothing to signal, long enough to click in rather than race.
+const slowProbeConfig = `
+gpu_probe: ["sh", "-c", "sleep 25"]
+`
+
+// The queue panel's own structure, named once rather than per call site: two
+// spellings of one selector is the drift the journal's "nodes" literal cost.
+//
+// A ROW IS FOUND BY THE ID THE PAGE PRINTS, which is the first eight
+// characters of the request id in its own button -- so a lab with more than
+// one request in the listing cannot assert about whichever row the ordering
+// happened to put first.
+const queuePanel = `//section[h2[text()="the queue"]]`
+
+func rowOf(id string) string {
+	return fmt.Sprintf(`%s//table[@class="queue"]//tr[td/button[text()=%q]]`,
+		queuePanel, id[:8])
+}
+
+func stopOf(id string) string { return rowOf(id) + `/td[@class="stop"]` }
+
+// shortWait waits for one selector under its own deadline.
+//
+// `waitForText` CANNOT STAND IN FOR THIS, and the difference cost a
+// thirteen-minute run with "context deadline exceeded" for a diagnosis:
+// chromedp.Text resolves at least one node and blocks until the context ends,
+// so an element that never appears is not a thirty-second failure but the
+// whole lab's budget. Every wait here is for something that may legitimately
+// not be there, which is the state each assertion is about.
+func shortWait(ctx context.Context, sel string, within time.Duration) error {
+	c, cancel := context.WithTimeout(ctx, within)
+	defer cancel()
+	return chromedp.Do(c, chromedp.WaitVisible(sel))
+}
+
+// panelText is the queue panel as a person would read it, for a failure
+// message. Bounded, and never fatal: a diagnosis that cannot be printed
+// without its own failure path is a diagnosis nobody gets.
+func panelText(ctx context.Context) string {
+	c, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	text, err := chromedp.Run(c, chromedp.Text(queuePanel))
+	if err != nil {
+		return fmt.Sprintf("(the panel could not be read: %v)", err)
+	}
+	return text
+}
+
 // setNumber types a value into one of the page's number controls, named by
 // the label beside it.
 //

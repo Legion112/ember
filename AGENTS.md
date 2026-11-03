@@ -3285,6 +3285,63 @@ A leaked node bills by the hour in silence. These are not style preferences.
   returns -- ember is polling sd-server for the job's own answer -- so the
   status it ends up with belongs to the queue. Two writers for one row means
   the loser overwrites the one that knew.
+- **Both of those answers were built, serialized, parsed and thrown away one
+  frame later.** The page posted the cancel as
+  `api::post::<_, serde_json::Value>` and discarded the `Result` with
+  `let _ =`, and the queue panel had no error signal at all -- the only two in
+  the page are `Compose`'s and the file picker's -- so cancel was the one
+  control in this program whose failure went nowhere. The 409 whose message
+  names the remediation reached `api::reason`, which exists to carry a
+  server's sentence *in full* and says so in its own comment, and the string
+  was dropped: what the operator saw was a row that still said `running` with
+  a `cancel` button still on it, which is indistinguishable from a click that
+  did not register -- so they clicked again, over a card that may still be
+  billing, and the second ask is the one that comes back 409. `cancelling` had
+  a writer, a wire name, a comment explaining it and **no reader**, which is
+  the preview-frame shape in miniature, and `grep -rn 'cancelling' web/`
+  returned nothing.
+  **The type is named now, for the reason every other route on this seam has
+  one**: a `serde_json::Value` decodes a field nobody reads and nobody finds
+  out. `Cancelled::label` keeps the two answers apart -- a stop on its way
+  (`cancelling`, beside a status that honestly still reads `running`) and a
+  request the handler ended itself (its own final status, which reaches the
+  operator before the two-second poll) -- and `Stopping::label` adds the state
+  that is neither: an ask this page has sent and had no answer to, which says
+  `asking`. **Those three words being three is what makes the fix checkable
+  from outside.** The page marks a request the moment it asks, because the
+  round trip must not be a window in which the button is still there -- so if
+  the placeholder were spelled `cancelling` as well, a browser could not tell
+  a page that reads the body from one that has gone back to ignoring it, and
+  the only check left would be a Rust unit test of the page agreeing with
+  itself. An empty cell there is worse again: it reads as nothing having
+  happened, which is the defect.
+  **The button goes away rather than going grey**, because what it must not do
+  is send a second request: the Go side survives a double click by design
+  (`Cancel` checks the id and forgets the channel rather than closing a closed
+  one) and the page should not be producing the ask that comes back refused. A
+  refusal releases it again -- nothing was stopped, and the 409's remediation
+  is a restart after which the retry is the right move.
+  **Only a browser crosses this gap, and the lab drives both directions on one
+  request.** The refusal is reached in a real state rather than a contrived
+  one: the row says `running` from `ClaimNext`, and `generate` registers the
+  stop channel after `WithNode`, the asset verify and the model load -- so the
+  whole of provisioning is a window in which the row is cancellable and no
+  rental is generating it, which is exactly what the 409 is written for. A lab
+  asserting only the accepted path would pass against a page that swallows
+  every refusal, which is the `AssertNoStray` failure reached from a fourth
+  direction.
+  **The window is made long rather than raced, and with no test-only code.**
+  On the local provider it is a container create, an sshd and a one-second
+  model load -- a handful of seconds against a two-second listing poll, which
+  is a coin flip and cost one thirteen-minute run to learn. `gpu_probe` runs
+  over SSH before the assets and before the server, so a lab config whose
+  probe sleeps puts twenty-five deterministic seconds inside the window: the
+  key an operator writes for a card that needs time to come up, doing what it
+  says, on a node that has no card at all. A `waitForText` is also not a
+  bounded wait -- `chromedp.Text` resolves at least one node and blocks until
+  the context ends, so an element that never appears spends the whole lab's
+  budget and reports "context deadline exceeded", which is how that run was
+  spent.
 
 ## Style
 

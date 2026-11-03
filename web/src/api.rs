@@ -214,3 +214,39 @@ impl Drop for Socket {
         let _ = self.ws.close();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::reason;
+
+    /// The 409 the cancel route answers, verbatim, carrying the remediation.
+    ///
+    /// IN THIS MODULE so `reason` stays private: it is called from one place
+    /// and widening it to be reachable from a test file would be a hole in
+    /// the wall for a test's convenience.
+    ///
+    /// The sentence is the whole point of the body. For the life of the page
+    /// it was built, serialized, parsed here and dropped one frame later by a
+    /// `let _ =` at the call site, so an operator pressing cancel on a
+    /// request ember cannot stop saw a row that still said `running` with a
+    /// `cancel` button still on it -- indistinguishable from a click that
+    /// never registered, over a card that may still be billing.
+    #[test]
+    fn a_refusal_reaches_the_operator_with_the_remediation_in_it() {
+        const BODY: &str = r#"{"error":"request 080f21c0 is recorded as generating, but no rental in this process is generating it; restart ember serve to have the queue reconcile it"}"#;
+        let got = reason(409, BODY);
+        assert!(
+            got.contains("restart ember serve"),
+            "the remediation did not survive: {got}"
+        );
+        assert!(
+            !got.contains("409"),
+            "the status code stood in for a message that was there: {got}"
+        );
+
+        // AND A BODY THAT IS NOT ONE still says something, because a UI that
+        // prints nothing over a failure is the state this whole path was in.
+        assert_eq!(reason(500, "not json at all"), "the server answered 500");
+        assert_eq!(reason(409, r#"{"error":""}"#), "the server answered 409");
+    }
+}

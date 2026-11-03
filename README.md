@@ -1959,8 +1959,19 @@ Chromium binary. It queues a three-job batch, waits until it is generating,
 queues a second request, and asserts from ember's own output that **one** node
 served both — then drives the real page in a real browser: refused with no
 credential, then the one-time URL opened, the token gone from the address bar,
-offers listed, prompt typed, generate clicked, the sampling step advancing, and
+offers listed, prompt typed, generate clicked, the sampling step advancing, the
+money row saying the rental is not priced yet rather than printing a `$0`, and
 an image that decodes.
+
+A second browser lab presses **cancel** in both directions on one request: once
+while the rental is still being provisioned, where the row reads `running` and
+the queue has nothing to signal, and the page has to print the 409's own
+`restart ember serve`; then once it really is generating, where the page has to
+say `cancelling` before the next poll and take the button away. A lab that
+asserted only the accepted path would pass against a page that swallows every
+refusal, which is what it did. That lab's config gives `gpu_probe` a sleep, so
+the first window is twenty-five deterministic seconds rather than a race
+against the listing poll.
 
 Both directions in one browser, because every claim about the cookie is a claim
 about Chrome rather than about ember: that a 303 leaves the token out of the
@@ -2019,6 +2030,32 @@ generating — a row left as running by a restart, say — answers 409 and recor
 nothing: "I could not stop it" and "it is stopped" are different answers, and
 the first must not render as the second over a card that may still be
 billing.
+
+**The page says which of the three happened**, and until recently it said none
+of them: the answer was decoded into a dynamic value and the whole `Result`
+thrown away, so a refused cancel left a row that still read `running` with a
+`cancel` button still on it — indistinguishable from a click that never
+registered, which is what sent an operator clicking again over a card that may
+still be billing.
+
+- A **refused** one prints the server's own sentence, in full, including the
+  `restart ember serve` the 409 names. The button comes back, because nothing
+  was stopped and a retry after that restart is the right move.
+- An **accepted** one on a generating request says `cancelling` beside a status
+  that still honestly reads `running` — the queue is polling sd-server for the
+  job's own answer and is the one that records how the batch ended, so the
+  handler does not write a second answer over it. That word is the `cancelling`
+  flag the response carries, and it arrives before the two-second poll does.
+- An **accepted** one on a queued request says `cancelled`, which is the status
+  the handler wrote itself: a queued request has no rental, so there was
+  nothing to signal and nothing left to wait for.
+
+In all three the button goes away the moment the click lands and the cell says
+`asking` until the server answers, because a double-clicked button is the
+ordinary case and the second ask is the one that comes back 409 — a refusal
+printed over a cancel that worked is worse than no message at all. `asking` is
+a different word from `cancelling` on purpose: one is this page having sent a
+request and the other is the server having accepted one.
 
 ### What it cost
 

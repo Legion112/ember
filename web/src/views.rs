@@ -15,8 +15,8 @@ use leptos::task::spawn_local;
 
 use crate::api;
 use crate::model::{
-    Config, Envelope, Hires, Input, Job, NewRequest, Offers, Progress, Rental, Request,
-    RequestList, VaeTiling,
+    Cancelled, Config, Envelope, Hires, Input, Job, NewRequest, Offers, Progress, Rental, Request,
+    RequestList, Stopping, VaeTiling,
 };
 
 /// App is the whole page.
@@ -1016,6 +1016,27 @@ fn AdvancedForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView
 fn Queue(watching: RwSignal<String>) -> impl IntoView {
     let list = RwSignal::new(RequestList::default());
 
+    // WHAT A REFUSED CANCEL SAYS. This panel had no error signal at all --
+    // the only two in the page are Compose's and the file picker's -- so the
+    // cancel button was the one control here whose failure went nowhere: the
+    // server's 409 names the remediation ("restart ember serve to have the
+    // queue reconcile it"), `api::reason` pulls that sentence out of the body
+    // in full, and `let _ =` dropped it one frame later. A row that keeps its
+    // `running` status and its `cancel` button is indistinguishable from a
+    // click that never registered, over a card that may still be billing.
+    let error = RwSignal::new(String::new());
+
+    // The cancels this page has asked for and the rows have not caught up
+    // with, holding the server's own answer about each.
+    //
+    // A LIST AND NOT A SINGLE ID, because queued requests are cancellable
+    // independently and a slow answer about one must not hide the button on
+    // another. Entries are forgotten in `reload` rather than on a timer: the
+    // row's own status is what says the queue has recorded the outcome, and
+    // until it does, this is the only thing on screen that knows a stop was
+    // accepted.
+    let stopping: RwSignal<Vec<Stopping>> = RwSignal::new(Vec::new());
+
     // Polled rather than pushed. The socket carries one request's progress;
     // the queue changes when somebody queues or cancels something, which is
     // rare enough that two seconds is imperceptible and cheap enough that a
@@ -1023,6 +1044,15 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
     let reload = move || {
         spawn_local(async move {
             if let Ok(l) = api::get::<RequestList>("/api/requests?limit=50").await {
+                // FORGOTTEN WHEN THE ROW ITSELF SAYS SO, and never before: a
+                // request gone from the listing or ended is one whose cancel
+                // button `is_cancellable` has already taken away, so there is
+                // nothing left for this to guard -- and dropping an entry any
+                // earlier would put the button back under a stop that is
+                // still travelling.
+                stopping.update(|s| {
+                    s.retain(|c| l.requests.iter().any(|r| r.id == c.id && !r.is_terminal()))
+                });
                 list.set(l);
             }
         });
@@ -1049,6 +1079,8 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                             let running = list.get().running == r.id;
                             let cancellable = r.is_cancellable();
                             let cancel_id = r.id.clone();
+                            let asked_id = r.id.clone();
+                            let pending_id = r.id.clone();
                             view! {
                                 <tr class:running=running
                                     class:watching=move || watching.get() == id>
@@ -1065,17 +1097,107 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                                         {if r.cost.is_free() { String::new() }
                                          else { r.cost.text().to_string() }}
                                     </td>
-                                    <td>
-                                        <Show when=move || cancellable>
+                                    <td class="stop">
+                                        // READ INSIDE A CLOSURE, which is the
+                                        // keyed-list rule this page has paid
+                                        // for once already: a <For> re-renders
+                                        // a row only when its KEY changes, and
+                                        // the key is (id, status), so a value
+                                        // computed at row-render time freezes
+                                        // -- which is how the progress row sat
+                                        // at "starting" while the step advanced
+                                        // in the database. These two read the
+                                        // signal each time, so the button and
+                                        // the word swap without the row being
+                                        // rebuilt or the status having moved.
+                                        <Show when={
+                                            let id = asked_id.clone();
+                                            move || stopping.get().iter().any(|c| c.id == id)
+                                        }>
+                                            <span class="hint stopping">{
+                                                let id = asked_id.clone();
+                                                move || stopping.get().iter()
+                                                    .find(|c| c.id == id)
+                                                    .map(|c| c.label().to_string())
+                                                    .unwrap_or_default()
+                                            }</span>
+                                        </Show>
+                                        // THE BUTTON GOES AWAY RATHER THAN
+                                        // GOING GREY, because what it must not
+                                        // do is send a second request: a
+                                        // double-clicked button is the ordinary
+                                        // case here, the Go side survives it
+                                        // (`Cancel` checks the id and forgets
+                                        // the channel rather than closing a
+                                        // closed one), and the second ask is
+                                        // the one that comes back 409 and reads
+                                        // as the first having failed.
+                                        <Show when={
+                                            let id = pending_id.clone();
+                                            move || cancellable
+                                                && !stopping.get().iter().any(|c| c.id == id)
+                                        }>
                                             <button class="link" on:click={
                                                 let id = cancel_id.clone();
                                                 move |_| {
                                                     let id = id.clone();
+                                                    error.set(String::new());
+                                                    // MARKED BEFORE THE
+                                                    // REQUEST IS SENT, so the
+                                                    // round trip is not a
+                                                    // window in which the
+                                                    // button is still there.
+                                                    // With no answer yet the
+                                                    // cell says "asking",
+                                                    // which is a state of its
+                                                    // own and not the word the
+                                                    // server's answer gets --
+                                                    // see Stopping for why
+                                                    // that distinction is what
+                                                    // a browser can check.
+                                                    stopping.update(|s| {
+                                                        s.retain(|c| c.id != id);
+                                                        s.push(Stopping {
+                                                            id: id.clone(),
+                                                            answer: None,
+                                                        });
+                                                    });
                                                     spawn_local(async move {
-                                                        let _ = api::post::<_, serde_json::Value>(
+                                                        match api::post::<_, Cancelled>(
                                                             &format!("/api/requests/{id}/cancel"),
                                                             &serde_json::json!({}),
-                                                        ).await;
+                                                        ).await {
+                                                            // The server's own
+                                                            // answer replaces
+                                                            // the ask, so the
+                                                            // word on screen is
+                                                            // the handler's and
+                                                            // never this page's
+                                                            // guess.
+                                                            Ok(c) => stopping.update(|s| {
+                                                                s.retain(|x| x.id != id);
+                                                                s.push(Stopping {
+                                                                    id: id.clone(),
+                                                                    answer: Some(c),
+                                                                });
+                                                            }),
+                                                            // RELEASED ON A
+                                                            // REFUSAL: nothing
+                                                            // was stopped, so
+                                                            // the button has to
+                                                            // come back -- the
+                                                            // 409's remediation
+                                                            // is a restart, and
+                                                            // after one the
+                                                            // retry is the right
+                                                            // move.
+                                                            Err(e) => {
+                                                                stopping.update(|s| {
+                                                                    s.retain(|c| c.id != id)
+                                                                });
+                                                                error.set(e);
+                                                            }
+                                                        }
                                                     });
                                                 }
                                             }>"cancel"</button>
@@ -1087,6 +1209,16 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                     </For>
                 </tbody>
             </table>
+
+            // IN FULL, the same as the other two panels: `ember serve` is
+            // reachable only from this machine, so there is nobody to withhold
+            // the server's own sentence from -- and the alternative is a UI
+            // saying nothing at all over an error that names the command that
+            // fixes it.
+            <Show when=move || !error.get().is_empty()>
+                <p class="error">"the cancel was refused: " {move || error.get()}</p>
+            </Show>
+
             // THE OLD CAPTION HERE SAID THE OPPOSITE, and it was wrong about
             // its own premise: "a request that is already generating cannot
             // be cancelled: it would mean destroying the node, which takes
