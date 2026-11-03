@@ -232,11 +232,46 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// reads are two chances for the two copies to disagree about which
 	// provider a finding belongs to.
 	//
-	// The journal is opened once rather than per request. statestore.Open
-	// holds no file handle and takes a mutex per call, and every write is
-	// write-then-rename, so a read here cannot see half a record -- which is
-	// the same property `ember ls` already relies on while an `ember up` runs
-	// in another terminal.
+	// THE JOURNAL IS OPENED ONCE FOR THE REASON ABOVE AND FOR NO OTHER.
+	// statestore.Open holds no file handle, so opening per request would cost
+	// nothing; what it would cost is a second place this server decides where
+	// the state directory is, and `ps` came from the one config read. That is
+	// the whole argument, and the previous spelling of this comment added a
+	// safety one that `statestore` does not support -- it said "every write is
+	// write-then-rename, so a read here cannot see half a record", which is
+	// true of `Update` alone.
+	//
+	// A SCAN CAN RACE A RENTAL'S OWN JOURNAL WRITES, and the two reasons are
+	// both structural. `Create` is `O_WRONLY|O_CREATE|O_EXCL` and then a
+	// `Write`, so the record exists at its final name with length ZERO
+	// between the two statements; `Forget` is a bare `os.Remove`, which
+	// `List`'s ReadDir-then-read races with no write involved at all. And the
+	// mutex is per `*statestore.Store` INSTANCE: `app.BuildOptions` opens its
+	// own per rental, so the one opened here is a second instance over one
+	// directory and the lock serialises the two against each other not at
+	// all.
+	//
+	// Measured in exactly this arrangement, two instances from
+	// `app.OpenStore` over one directory, 20,000 creates against a hammering
+	// List: with every record FORGOTTEN after it is written -- which is what
+	// a rental does, and why this journal is "deliberately empty after a
+	// clean run" -- 34,779 Lists and 1,230 failures, 1,041 of them the
+	// `Forget` window and 189 the zero-length one. Without the forget the
+	// directory grows to 20,000 files, List slows to 77 passes and samples
+	// neither. So the near-empty journal is not the safe case, it is the
+	// regime where the race is reachable, and the wider of the two windows is
+	// the one with no write in it.
+	//
+	// What that costs is a 502 from `GET /api/nodes` if the button is pressed
+	// in the microseconds a rental is recording or forgetting a record -- and
+	// nothing worse, because `List` returns the error rather than dropping the
+	// row, so the failure is loud and transient rather than a billing node
+	// reported as fine. It is #168, it predates this wiring (`ember ls`
+	// against a running `ember up` has always had it), and what this change
+	// adds is that the hazard is now INTRA-process and reachable from a
+	// browser. Fixing it belongs in `statestore`, where `Create` can claim a
+	// name with `link(2)` over a fully written temp and `List` can tell a
+	// record that was forgotten from one that will not parse.
 	journal, err := app.OpenStore(ps.State)
 	if err != nil {
 		return err
