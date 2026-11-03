@@ -1293,6 +1293,139 @@ that sentence made unrepresentable rather than merely tested.
   a source port against `/proc/net/tcp` -- racy, Linux-only, and wrong through
   a forward, where the connection is made by sshd as the logged-in user and
   would therefore pass. One token answers both threats and widens no seal.
+
+  **`internal/loopback` HAS been widened now, it is additive, and every clause
+  of the paragraph above is still true except the one about the seal -- which
+  was never true of the code.** The two things that changed are that #29
+  shipped, so the socket is a *choice* rather than the only way to close the
+  every-uid case, and that #146 needs a channel a **browser cannot reach** --
+  which is the one property that paragraph lists as a drawback and is, for a
+  CLI client, the whole requirement. So the socket is a second channel beside
+  the port rather than instead of it: the token stays mandatory, `webapi.New`
+  still refuses a zero one, and the token is still the only answer on TCP.
+  The forward argument is why: `ssh -L 7777:localhost:7777` puts a TCP port on
+  a laptop's loopback and a socket on this machine says nothing about it, so
+  deleting the credential would have reopened exactly the threat it was built
+  for. `SO_PEERCRED` is still not used and still not needed -- the mode is the
+  check, applied by `connect(2)` before ember sees a byte, and it needs no
+  code at all.
+
+  **The clause that was untrue: `nolisten_test.go` did not have to stop
+  banning `ListenUnix`, because the ban was already "outside this package".**
+  The walk skips any file whose path starts `internal/loopback/`, so
+  `net.ListenUnix` and `net.Listen("unix", …)` were always legal here and
+  illegal everywhere else; `StateSocket` needed no loosening and got none.
+  What the entry read as a cost was a cost that did not exist -- the same
+  shape as `ember ls --all`, an argument that persuades about a mechanism
+  nobody checked. So the re-seal is a **correction and a test** rather than a
+  change: the map's comment said "entry points in net that can publish a
+  **port**", which stopped being the rule the day a path could be published,
+  and the inspection called `t.Errorf` inline so the only evidence it worked
+  was a clean tree -- which is also what a broken matcher reports.
+  `findListens` is extracted, and `TestNoListenGuardCatchesEverySpelling`
+  hands it eleven spellings that must be reported, the unix two among them,
+  and five that must not. **The negative control is the half that matters**:
+  the first version of this guard flagged `loopback.Listen`, the one call it
+  exists to permit, so the correct spellings go through the same function and
+  must come back clean. Checked by pasting `net.ListenUnix` and
+  `net.Listen("unix", p)` into `internal/webapi` and watching the walk report
+  both.
+
+  **`Socket` is `Bind`'s shape and the directory is the caller's only say.**
+  Unexported fields, no struct-literal path, `StateSocket` the one
+  constructor: a caller names a **state directory**, the way a caller of
+  `Port` names a port, and this package appends `socket/serve.sock`. There is
+  no `--socket` flag and a lab asserts there is none -- not because the path
+  is a secret, it is not, but because a path an operator can type is a path
+  outside the directory whose mode ember checked.
+
+  **The mode is the authentication, and `bind(2)` takes no mode argument.**
+  That is the one thing about this that is not obvious: the socket is created
+  at `0777 &^ umask`, and measured on this machine, whose umask is 0002, a
+  socket bound with no intervention is **0775** -- group-writable, and
+  `connect(2)` needs *write* permission, so every member of the operator's
+  primary group could have reached it. A socket chmod-ed to 0000 refuses its
+  own owner, measured, so the mode is a live control rather than advice. The
+  obvious repair is `os.Chmod` after the bind, and **between the bind and the
+  chmod the socket is already connectable** -- so `ListenSocket` holds the
+  umask at 0177 for the length of the bind instead, under a mutex, and the
+  socket is 0600 from the moment it exists. What that window costs is
+  measured rather than waved at: umask is per-process, so for the length of
+  one `bind(2)` anything else ember creates would come out at 0600/0700 --
+  and every mode literal in ember's own packages is **already 0600 or 0700**,
+  28 of them with not one wider, so nothing can come out different and
+  anything that did would come out stricter. It also leaves no uncoverable
+  branch, which a chmod's error return would: `internal/loopback` is gated at
+  100 and a failure on a file this process has just created in a directory it
+  owns is the class this repository excludes elsewhere by argument.
+
+  **Containment twice, by two mechanisms, as the tar extractor is.** The
+  socket is 0600 *and* it lives in a directory ember creates at 0700 whose
+  parent is refused if group or others can write in it -- so the mode holds if
+  the directory is widened and the directory holds if a filesystem ignores the
+  mode. The directory check is `keys.LoadSigner`'s rule about a private key's
+  parent reached through a socket, and **stricter than its `0o002`** on
+  purpose: that one guards a file an operator placed, where a group-writable
+  directory may be something they meant, and this guards a directory ember
+  makes for itself, so there is no wider mode to tolerate. What a group member
+  could do with it is the sharp version -- unlink the socket and leave *their
+  own* listener at ember's path, which hands the operator's requests, and the
+  rentals they pay for, to somebody else. A subdirectory rather than the state
+  directory itself for exactly that reason: ember creates this one and
+  therefore owns its mode, while `state_dir` is operator-named and may predate
+  the feature.
+
+  **"Arrived on the socket" is a context value and there is no wire spelling
+  of it.** This is the one way the change could have been worse than no
+  change: a header would be accepted on the loopback port too, and the
+  mandatory credential would have been replaced by a string anyone on the box
+  can type. The key is an unexported zero-size type used as its own value, so
+  nothing outside `internal/webapi` can put it on a context; it is set by one
+  `ConnContext`, on one `http.Server`. **Two servers and not one that inspects
+  the connection**, because a type switch on a `net.Conn` re-derives the fact
+  from the connection where the *listener* is what `loopback` proved -- so the
+  difference between the two channels is a missing field rather than a
+  condition. And `ServeSocket` takes a `*loopback.SocketListener`, a concrete
+  type whose only constructor is `ListenSocket`, so handing it a TCP listener
+  is a **compile error** -- `hostkey.Pin` and `exposure.PortRequest`'s shape,
+  applied to the thing that would otherwise drift into "either channel is
+  fine".
+
+  **`checkOrigin` still runs on the socket and `checkHost` does not, and that
+  is a decision rather than a consequence.** `hostOK` is the one place it is
+  written, for `guarded` and for the websocket handshake both, because two
+  copies of "unless it came in on the socket" is two places for one to be
+  forgotten. `checkHost` compares the `Host` header against the port this
+  server listens on, and a request that arrived on a socket came through no
+  port -- `curl --unix-socket` sends `Host: localhost`, which does not parse
+  as host:port at all -- so requiring it would not be a stricter check, it
+  would be a channel that refuses everything. `checkOrigin` is about who
+  **composed** the request rather than where it arrived, costs nothing, and
+  through a proxy an operator puts in front of the socket it is the only thing
+  left that refuses a page on another site. The cookie and the `?t=` exchange
+  are left reachable and unrefused: both are browser mechanisms on a channel a
+  browser cannot open, so a branch for them would be one only the account that
+  is already authenticated could take.
+
+  **Windows is a refusal and not a socket, and it is a build tag rather than a
+  runtime check.** `net.Listen` there will bind AF_UNIX and `os.Chmod` honours
+  only the read-only bit, so the socket would exist, the announcement would
+  describe a channel authenticated by the operating system, and the one thing
+  authenticating it would not be set -- the "reads as working" defect, on a
+  security control. `//go:build !unix` returns an error naming the platform
+  and the mode, so there is no branch anywhere that could conclude at run time
+  that this machine cannot have a socket when it can.
+
+  **The gain is asserted in two halves and the third is a deduction, which is
+  said rather than implied.** The sentence this entry opens with is "answers
+  the every-uid case", and what proves it would be a connect from a second
+  account -- which a test run cannot make without root, and a lab that needed
+  root would be a lab nobody runs. So the socket's 0600 and the directory's
+  0700 are asserted against what a real `ember serve` created, `connect(2)`
+  needing write permission is measured by hand, and "another uid cannot
+  connect" follows from the two. It is a deduction from two measured facts and
+  not a third measurement; there is no test in this repository that a second
+  uid is refused.
 - **Replacing `subtle.ConstantTimeCompare` with `==` is caught by nothing, and
   that is written down rather than papered over.** Thirteen of the fourteen
   defects reinstated for this change went red; that one did not, and no test

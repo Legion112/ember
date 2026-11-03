@@ -131,6 +131,24 @@ var errNoCredential = errors.New("this ember serve is authenticated and the requ
 // precedence rule between two spellings of it would be a rule that can be
 // wrong. A browser sends the cookie; curl and the labs send the header.
 func (s *Server) authenticate(r *http.Request) error {
+	// THE OPERATING SYSTEM ALREADY ANSWERED, AND IT ANSWERED BETTER.
+	//
+	// A request that arrived on the unix socket got there through connect(2)
+	// on a node at 0600 in a directory at 0700, so the kernel refused every
+	// account but the operator's own before ember saw a byte -- which is the
+	// question this whole file exists to ask, settled by a mechanism that has
+	// no secret to leak, no rotation to lack and nothing to put in a URL.
+	//
+	// THIS IS THE ONE LINE THAT COULD WIDEN THE PORT, so what reaches it
+	// matters more than what it does: arrivedOnSocket reads a value that only
+	// socket.go's ConnContext puts on a context, on the one http.Server that
+	// serves the one listener type loopback.ListenSocket can produce. There
+	// is no header, no query parameter and no proxy header that spells it, so
+	// a request on the loopback port cannot reach this return however it is
+	// composed.
+	if arrivedOnSocket(r.Context()) {
+		return nil
+	}
 	if tok, ok := bearer(r.Header.Get("Authorization")); ok && s.tokenMatches(tok) {
 		return nil
 	}

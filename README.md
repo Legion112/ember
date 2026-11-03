@@ -2084,6 +2084,56 @@ not written down gets believed past them:
   sealed, and widening it was not needed for any of this. The deployment story
   is still an SSH forward, which the token is what makes safe to use.
 
+#### And a second channel, where the operating system answers instead
+
+`ember serve` also listens on a **unix socket at `<state_dir>/socket/serve.sock`**,
+mode **0600**, in a directory ember creates at **0700**. It serves exactly the
+same routes as the port, and a request that arrives on it carries **no token at
+all**: `connect(2)` on a unix socket needs write permission on the socket, so
+the kernel refuses every account but yours before ember sees the request. There
+is nothing a token could add to that, and nothing for a local client to go and
+find.
+
+The two channels answer the same question for different clients and neither
+replaces the other:
+
+| | loopback port 7777 | `<state_dir>/socket/serve.sock` |
+|---|---|---|
+| who can reach it | every uid on this machine, and anything on an `ssh -L` forward | the owner only, enforced by the mode |
+| what authenticates a request | the token, mandatory | `connect(2)` |
+| `Origin` checked | yes | yes |
+| `Host` checked against the port | yes | no — a socket request arrives on no port |
+| a browser can use it | yes | no |
+
+**The token is still the only answer on the port.** Nothing a request can say
+marks it as having arrived on the socket: the mark is a value on the request's
+context, set by the one `http.Server` that serves the socket, so there is no
+header, query parameter or proxy header that claims it. The two listeners are
+served by two servers whose only difference is that field.
+
+`Host` is not checked on the socket because it is a statement about a TCP port
+and a socket request arrives on none — `curl --unix-socket` sends
+`Host: localhost`, which has no port in it at all. `Origin` *is* still checked,
+because it is about who composed the request rather than where it arrived: if
+you put a proxy in front of the socket, it is the only thing left that refuses
+a page on another site.
+
+A clean exit unlinks the socket. A process killed outright leaves the path
+behind, and the next `ember serve` clears it — but only after finding that
+nothing is listening on it: a socket a running `ember serve` is accepting on is
+a **refusal** to start rather than something to take, because taking it would
+leave the first server answering a path nothing can reach.
+
+There is **no `--socket` flag**. The path is composed from the state directory
+by `internal/loopback`, which is the only package that opens a listener of
+either kind, so a socket in a directory whose mode ember has not checked is not
+a thing this program can be asked for. On a platform with no file modes
+(Windows), `ember serve` refuses to start rather than offering a channel it
+describes as authenticated and cannot authenticate.
+
+What this is **not**: a reason to bind off loopback. The TCP listener is still
+`127.0.0.1` and `[::1]` only.
+
 ### Where the state goes
 
 The queue and the history are a SQLite database beside the node journal, under
