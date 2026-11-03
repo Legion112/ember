@@ -45,6 +45,31 @@ import (
 // does not enter that loop at all: it rents through provision.WithNode exactly
 // as it always has, and this type only watches.
 
+// RunStore is the generation history as a layer that RENTS needs it, and
+// nothing more.
+//
+// FIVE METHODS RATHER THAN genstore.Store, for Spender's reason one direction
+// over: what a layer can do to the database should be visible in its type.
+// Spender is the ceiling's READ and says "this decides whether to spend
+// money"; this is the WRITE that renting forces, and says "this records the
+// rental it started". What it deliberately cannot reach is Enqueue and
+// ClaimNext -- a queued row is exactly what a drain loop takes, so a layer
+// that could write one could rent a second card from a row describing the run
+// already in flight, which is the two-GPU defect this repository keeps
+// recording. AppPlanner holds one of these because filling a store is a
+// rental it makes on its own initiative, and a rental nobody recorded is the
+// hole in the ledger #148 is about.
+//
+// genstore.Store satisfies it, so every existing caller passes its store
+// unchanged and there is no second implementation to keep in step.
+type RunStore interface {
+	Adopt(ctx context.Context, r genstore.Request) (genstore.ReqID, error)
+	Update(ctx context.Context, id genstore.ReqID, fn func(*genstore.Request)) error
+	UpdateJob(ctx context.Context, id genstore.ReqID, idx int, fn func(*genstore.JobRun)) error
+	AppendEvents(ctx context.Context, id genstore.ReqID, es []report.Event) error
+	AddImage(ctx context.Context, im genstore.Image) error
+}
+
 // Recorder writes one run's event stream through to the generation history.
 //
 // THE NUMBERING IS NOT ITS JOB, and that separation was a real bug. Emitters
@@ -56,7 +81,7 @@ import (
 // not a Stream itself, because a Stream inside a Stream stamps twice.
 type Recorder struct {
 	// Store is where the rows go, and Req which request they belong to.
-	Store genstore.Store
+	Store RunStore
 	Req   genstore.ReqID
 
 	// Key is where a file this run produced can be found, in blob.Store

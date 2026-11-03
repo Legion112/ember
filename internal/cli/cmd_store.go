@@ -412,8 +412,19 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := plan.SyncAssets(ctx, out); err != nil {
-		return err
+	// RECORDED, THROUGH `ember up`'s OWN HELPER. This is a rental -- the
+	// cheapest machine with no card, for as long as the download takes -- and
+	// it was in no ledger either, which is the same defect #148 is about
+	// reached from the command line instead of from the queue. recordRental opens
+	// the store in this plan's own state directory, writes the row before the
+	// create call and hands back the sink the rental reports to; it cannot fail
+	// the run, and `report.Text` is silent about every event a sync emits, so
+	// this command's output is byte-for-byte what it was.
+	sink, finish := recordRental(out, plan)
+	syncErr := plan.SyncAssets(ctx, out, sink)
+	finish(syncErr)
+	if syncErr != nil {
+		return syncErr
 	}
 	outf(out, "the store now holds every asset %s lists.\n", *cfgPath)
 	return nil

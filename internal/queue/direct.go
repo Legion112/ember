@@ -414,13 +414,16 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 // AdoptRun writes the row for a run nobody queued and hands back the stream it
 // reports to.
 //
-// ONE ADOPT AND ONE RECORDER FOR BOTH CALLERS. `ember up` in a shell and a run
-// submitted over the socket record the same columns from the same events, and
-// two copies of this would drift the first time one of them gained a field --
-// which is the reason the recorder moved out of Queue in the first place. The
-// `also` sinks are the difference between the two: the shell path passes
-// report.Text so the operator's terminal gets the lines, and the socket path
-// passes none, because its operator reads the stream through the client.
+// ONE ADOPT AND ONE RECORDER FOR EVERY CALLER. `ember up` in a shell, a run
+// submitted over the socket, and the CPU machine `ember serve` rents for
+// itself when a queued request's store is empty all record the same columns
+// from the same events, and a copy per caller would drift the first time one
+// of them gained a field -- which is the reason the recorder moved out of
+// Queue in the first place. The `also` sinks are the difference between them:
+// the shell paths pass report.Text so the operator's terminal gets the lines,
+// the socket path passes none because its operator reads the stream through
+// the client, and the queue's own store fill passes none because there is no
+// operator at all -- which is exactly why it has to be in the ledger.
 //
 // WRAPPED IN A Stream, which is not decoration: emitters do not number events,
 // and an unnumbered one arrives as Seq 0 -- where genstore's INSERT OR REPLACE
@@ -429,7 +432,7 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 // database rather than by a test.
 func AdoptRun(
 	ctx context.Context,
-	store genstore.Store,
+	store RunStore,
 	plan app.Plan,
 	log *slog.Logger,
 	now func() time.Time,

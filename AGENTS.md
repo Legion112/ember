@@ -972,6 +972,18 @@ that sentence made unrepresentable rather than merely tested.
   forgotten -- so a change that records either turns the lab red, which is the
   moment to read the comment beside the assertion.
 
+  **BOTH GAPS ARE CLOSED NOW AND THIS PARAGRAPH IS THE RECORD OF WHAT THEY
+  WERE, not a description of the code.** The arrangement worked exactly as it
+  was written to: #149 fixed the second and #148 the first, each turned this
+  lab red, and each inverted the assertion rather than deleting it -- so the
+  lab asserts the terminal status and the reason on a rental that failed after
+  the node existed, and two ledger rows with the cheap machine's own cost in
+  `ember spend`'s period total. The entry at the end of **Money** has #148's
+  design call and what the reinstatement measured. Left in place rather than
+  rewritten because a prediction this file made and the code then met is worth
+  more than a tidy present tense; the tense is corrected here so nobody reads
+  the sentences above as a gap that is still open.
+
   **It drives the queue in process, and that is forced rather than chosen.**
   `app.Deps.CloudBaseURL` and `S3BaseURL` are Go fields, so the compiled
   `ember` cannot be pointed at a fake provider -- which this file already
@@ -4688,6 +4700,95 @@ A leaked node bills by the hour in silence. These are not style preferences.
   the context ends, so an element that never appears spends the whole lab's
   budget and reports "context deadline exceeded", which is how that run was
   spent.
+- **The queue's own store-filling rental was in no ledger, and the question
+  worth an issue was which row it belongs to.** #142 taught `ember serve` to
+  rent a machine with no card when a queued request's store is missing its
+  weights -- the measurement behind it is $0.61 of a $0.63 rental spent
+  downloading at a card's rate -- and `fillStore` called `SyncAssets`, which
+  took no `report.Sink` and passed `p.Options` rather than
+  `p.lifecycle(sink)`. So neither of the two moments a caller cannot otherwise
+  see reached anybody: the node becoming ready, and what the rental cost,
+  which arrives from `provision.WithNode`'s **deferred** teardown. `ember
+  history` and `ember spend` were blind to a rental ember chose to make with
+  nobody at the keyboard, which is the one kind of spending a ledger exists
+  for -- "a total that is missing part of its history says so, every time",
+  against the entry that says it. The issue's own first wording overstated it
+  as one sync per request; `fillStore` runs on an `AssetsMissingError` and the
+  next plan finds the store full, so it is one unrecorded rental per fill.
+
+  **A ROW OF ITS OWN, and the other two candidates are wrong for reasons this
+  file already records.** Charging it to the triggering request is the cheap
+  answer and makes `requests.cost` hold two rentals, in the one column
+  documented, read and summed as one -- so `ember spend`'s cost-per-image
+  would divide a bill nobody can decompose, and it is wrong for every request
+  after the first, which gets the filled store for free. A `rentals` table is
+  the thorough answer and buys nothing today: every rental ember has ever
+  recorded is already a request row, `Entry.Rode` already says which rows
+  carry a rental's cost, and a second thing for `ember spend` to sum is a
+  second place for the total to be wrong -- plus a migration, a fake method
+  and conformance rows for a shape with one reader. What the sync IS is a
+  rental nobody queued, which is exactly what `genstore.Adopt` and
+  `queue.AdoptRun` exist for, so there is **no new column, no migration and no
+  reader to teach**: `ember history` already prints a jobs-less run with a
+  dash for images and card time and counts it in the footnote saying how many
+  rows it left figures out of. What is NOT recorded is which request caused
+  it -- there is no column for a parent and inventing one would be a migration
+  for a field nothing reads -- so an operator sees two rentals, which is what
+  happened.
+
+  **`ember store sync` was the same hole with an operator at the keyboard**,
+  and it is the same fix rather than a second one: `recordRental` -- `ember
+  up`'s own helper, renamed because a name claiming one caller while two use
+  it is the `AssertNoStray` defect -- opens the store, writes the row before
+  the create call and cannot fail the run. `report.Text` renders nothing for
+  any event a sync emits, so that command's output is byte-for-byte what it
+  was.
+
+  **A planner that cannot record refuses to rent**, which is
+  `refuseOverPeriod`'s nil-`Ledger` rule applied to a write: an unrecorded
+  rental is the defect being fixed, so a nil recorder would reopen it
+  silently. It also removes the panic that a nil interface would have taken
+  inside the drain goroutine, which is `AppPlanner.out()`'s own argument.
+  `AppPlanner` therefore holds a `RunStore` BESIDE its `Spender` rather than
+  one `genstore.Store` -- five methods that can record a run and cannot
+  `Enqueue` or `ClaimNext`, because a queued row is what a drain loop takes
+  and a layer able to write one could rent a second card from the record of
+  the run already in flight. Two narrow types over one store, which is
+  `Spender`'s own argument in the other direction: what a layer can do to the
+  database is visible in its type. And `Plan`'s doc comment said "rents
+  nothing", which stopped being true the day `fillStore` landed; it is
+  corrected rather than left as one more argument that persuades about a
+  mechanism nobody re-read.
+
+  **The reinstatement found the `--allow-paid` gate on that rental could not
+  fail, which is a worse defect than the one being fixed.** This file says the
+  sync "is a rental and is gated like one"; the test for it asserted `err !=
+  nil`, and `internal/queue`'s fake served **no CPU catalogue** -- so the run
+  stopped at a 404 before `refusePaid` was ever reached, and deleting that
+  gate outright left the test GREEN. Measured both ways rather than argued:
+  against the tree as it was, no CPU route and the weak assertion, deleting
+  the gate is **exit 0**; with the captured `cpus.json` served and the
+  assertion naming the flag, it is **exit 1**. The fake serves the provider's
+  own committed fixture rather than a second copy of a field shape, and there
+  is still no `/v2/pods` route -- which is what makes the create failure
+  reachable from a unit test at all, and the create failure is the rental most
+  worth recording, because the row goes down before the call.
+
+  **Nine defects reinstated plus that historical measurement, each judged on
+  an exit code, with a negative control at both ends.** Eight went red where
+  expected; the ninth is an asymmetry worth writing down rather than a miss.
+  The sink wired and the lifecycle hooks not -- `p.Options` in place of
+  `p.lifecycle(sink)`, which is the original defect's own shape -- is **GREEN
+  in the unit suite and RED in the lab**, because the unit row's create fails
+  before a node exists, so it has no node and no cost either way. The lab is
+  the only place in this tree that can assert the MONEY: every other rents
+  from the local provider, whose price is zero, so a cost assertion there
+  would compare a blank against a blank and pass against the defect.
+  `runpodfake` prices a CPU pod at $0.06/hr and a GPU pod at $0.89/hr, read
+  back off the pod as the bill rather than as a list price, so the sync row
+  carries a real rate and `ember spend`'s period total has to equal both
+  rentals -- which is also the first assertion in this repository that the
+  aggregate counts a rental ember started on its own initiative.
 
 ## Style
 

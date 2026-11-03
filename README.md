@@ -1345,6 +1345,20 @@ nothing. What happens next depends on who is asking:
   That rental is gated by `--allow-paid` and projected against `max_day_usd`
   and `max_month_usd` like any other.
 
+That second rental is **its own row** in the generation history, so
+`ember history` lists it and `ember spend` counts it. It is a rental ember
+chose to make with nobody at the keyboard, which is exactly the spending a
+ledger exists for — an operator reconciling an invoice would otherwise find a
+line nothing here could account for. It shows up as a run with no card, no
+jobs and a dash for images and card time, which is the same shape a `cmds` run
+has, and it is counted once on its own row rather than folded into the cost of
+the request that triggered it: that column is one rental's cost, and the
+requests after the first get the filled store for free. Nothing records which
+request caused it. `ember store sync` is recorded the same way, because it is
+the same rental typed by hand. If a configured `ember serve` has no generation
+history to write to, it refuses to fill the store rather than renting a machine
+it cannot account for.
+
 It does not check digests, for the reason `ember store verify` does not: that
 would mean reading every object back through this process to re-derive a number
 the node derives anyway, at datacentre bandwidth, before the workload starts.

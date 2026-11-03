@@ -91,8 +91,25 @@ func (p Plan) lifecycle(sink report.Sink) provision.Options {
 // The same rental discipline as Do and a different thing done on it: no
 // workload follows, and nothing is brought home, because the bytes land on
 // the store which is the whole point.
-func (p Plan) SyncAssets(ctx context.Context, out io.Writer) error {
-	return provision.WithNode(ctx, p.Provider, p.Spec, p.Offer, p.Options,
+//
+// IT TAKES A SINK FOR THE REASON Do DOES, and the absence of one was a money
+// defect rather than an omission. This is a RENTAL -- a CPU machine at
+// $0.06/hr for as long as fifty-six gigabytes take to arrive -- and it used to
+// pass p.Options straight through, so neither of the two moments a caller
+// cannot otherwise see (the node becoming ready, and what the rental cost,
+// which arrives from WithNode's DEFERRED teardown) reached anybody. `ember
+// serve` starts one of these ON ITS OWN INITIATIVE when a queued request's
+// store is empty, and with nothing numbering the events there was no row to
+// write them to: `ember history` and `ember spend` were blind to a rental
+// ember chose to make, against this repository's own "a total that is missing
+// part of its history says so, every time".
+//
+// So lifecycle(sink) and not p.Options, which is the one line that makes the
+// rental reportable -- and the sink is non-nil for the same reason Do's is:
+// both of its hooks call Emit, so a nil would panic inside a rental with a
+// node running. Both callers pass one.
+func (p Plan) SyncAssets(ctx context.Context, out io.Writer, sink report.Sink) error {
+	return provision.WithNode(ctx, p.Provider, p.Spec, p.Offer, p.lifecycle(sink),
 		func(ctx context.Context, s provision.Session) error {
 			client, so, err := dialNode(ctx, s, p.Options, 0)
 			if err != nil {
