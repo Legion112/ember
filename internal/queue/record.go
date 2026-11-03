@@ -278,13 +278,20 @@ func (r *Recorder) Emit(e report.Event) {
 // destroy_failed arrive from provision.WithNode's DEFERRED teardown, after the
 // last ordinary flush and after the caller has stopped emitting -- so a
 // buffered one is a buffer nobody will drain, and what goes missing is what
-// the rental cost and the one line an operator must not miss. The rest are
+// the rental cost and the one line an operator must not miss.
+//
+// run_failed WAS IN THIS LIST AND WAS EMITTED BY NOTHING, so the list
+// reserved for events that cannot afford to wait named one that never
+// arrived. It is gone: a request's failure is `requests.status` and
+// `requests.err`, which are columns the socket reads as current state rather
+// than events a buffer could lose -- see report.go, where the two kinds were
+// declared. The rest are
 // here because they arrive once per rental, so flushing them costs nothing,
 // and because an image is the thing the operator is waiting for: a gallery
 // that lags behind the file on disk looks broken.
 func urgent(k report.Kind) bool {
 	switch k {
-	case report.KindJobImages, report.KindRunFailed,
+	case report.KindJobImages,
 		report.KindServerStarting, report.KindModelResident,
 		report.KindNodeReady, report.KindNodeMemory,
 		report.KindRunCost, report.KindDestroyFailed:

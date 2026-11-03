@@ -86,13 +86,11 @@ var renderings = map[Kind]struct {
 			"host reports 700.0 GiB total, 48.0 GiB cached; weights are 56.0 GiB\n",
 	},
 
-	// Silent on purpose: the CLI reports all five through slog, and
+	// Silent on purpose: the CLI reports all three through slog, and
 	// lifecycle_test.go greps for the slog spelling of "node ready".
 	KindNodeReady:     {event: Event{Kind: KindNodeReady, Node: "local/abc"}, want: ""},
 	KindRunCost:       {event: Event{Kind: KindRunCost, Cost: 120000}, want: ""},
 	KindDestroyFailed: {event: Event{Kind: KindDestroyFailed, Err: "boom"}, want: ""},
-	KindRunFinished:   {event: Event{Kind: KindRunFinished}, want: ""},
-	KindRunFailed:     {event: Event{Kind: KindRunFailed, Err: "boom"}, want: ""},
 }
 
 // A cancel the server would not take says what it will still cost.
@@ -245,7 +243,6 @@ func kindByName(t *testing.T, name string) Kind {
 		"KindNodeReady":     KindNodeReady, "KindNodeMemory": KindNodeMemory,
 		"KindRunCost":       KindRunCost,
 		"KindDestroyFailed": KindDestroyFailed,
-		"KindRunFinished":   KindRunFinished, "KindRunFailed": KindRunFailed,
 	}
 	k, ok := byName[name]
 	if !ok {

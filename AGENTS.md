@@ -1473,6 +1473,76 @@ that sentence made unrepresentable rather than merely tested.
   and the queue records it as an image row keyed `(request, job, index,
   preview)`, which is overwritten rather than accumulated because the file on
   disk is. Both halves were checked by reinstating the bug.
+- **The same shape again, in a field rather than a row: a failed request's
+  reason reached the browser and no view read it.** `requestView.Error` is
+  populated by `viewRequest` from `requests.err`, on both JSON routes and the
+  socket; `web/src/model.rs` decodes it; `views.rs` read it nowhere. Measured
+  the only way that means anything -- deleting the field from the Rust wire
+  type left the crate compiling and every `cargo test` green, because serde
+  drops what nothing asks for. So the whole operator-visible state of a failed
+  generation was the word `failed` in one table cell, over a request stopped by
+  `max_month_usd`, by a sampler the cached capabilities do not list, or by a
+  card that broke. **This one was filed and the others were not, because a
+  document claimed it**: the entry above refusing a warning at enqueue says in
+  prose that "a refused request carries the reason, which the page shows". It
+  did not. A claim in this file is worth exactly what the code does.
+  **The trap in the obvious fix is a caption that is true of one kind.**
+  `report.KindRunFailed` existed, was listed as urgent, and `model.rs` had an
+  arm for it -- shared with `destroy_failed`, whose view prints "THE NODE MAY
+  STILL BE RUNNING AND BILLING -- check `ember ls`". A request a money ceiling
+  refused never had a node, so emitting that kind would have printed a false
+  alarm about a machine that does not exist, on the one page an operator reads
+  to decide whether to go and check their bill. That is the false "abandoned"
+  this file already refuses, and the `proj` preview caption. So the reason is a
+  **third** class with no verdict and no remediation of ember's own -- the
+  server's sentence already carries one where there is one -- and `p.fatal`
+  stays attached to `destroy_failed` alone, asserted by counting it in the
+  browser lab over a request that never reached a provider.
+  **`Request::reason` is not gated on `failed`, and that is the decision.** A
+  cancelled request carries a reason too and it is the one with money in it --
+  "the job in flight cannot be stopped, so it will finish and be paid for" is
+  written to the same column -- so a status check there would hide exactly the
+  sentence the operator pressed the button to read. Nor is it gated on
+  `is_terminal`: nothing writes the column without ending the request, so that
+  guard would be a branch nothing can reach.
+- **`report.KindRunFinished` and `KindRunFailed` are deleted, and the test is
+  whether a second live mechanism exists.** Both were declared, both were in
+  `Kinds()`, both were rendered as deliberately silent by `Text`, and
+  `KindRunFailed` was in the queue's `urgent` list -- the one reserved for
+  events that "would be lost rather than late". **Nothing ever emitted
+  either**, so that list named an event that never arrived, and `report.go`'s
+  comment claimed they "end a run" while nothing in the program ended one by
+  saying so. One more of the things found here written, listed, covered and
+  connected to nothing -- deliberately not given a number, because the running
+  count above reads third, fourth and sixth and no entry claims the fifth.
+  Deleted and not wired up, which is the opposite of the `sdserver.Client.Cancel`
+  call and the same as `queue.Cost`: for Cancel there was no second mechanism,
+  so deleting it would have deleted the mechanism, and here the fact is
+  `requests.status` and `requests.err` -- columns, already on every route and
+  the socket. An event for the same fact is the "two carriers of one figure"
+  mistake, and it is the worse carrier of the two, because current state
+  survives a reconnect with no backlog to replay and an event has to be folded
+  from one. The only thing a column cannot say is "the stream is over", which
+  is all `KindRunFinished` could have meant, and a terminal status answers it.
+  `TestText_DecidesAboutEveryKind` walks `report.go` for declared constants, so
+  re-adding one without rendering it fails -- checked by doing exactly that.
+- **The socket's own comment claimed it sent the request "every time something
+  changed" and it sent it every time an EVENT changed.** `send` returned early
+  on `len(es) == 0 && !force`, which is right for every state that emits -- and
+  the one state that does not is the one this is about: `queue.fail` writes the
+  row for a request refused before a provider was reached and emits nothing,
+  because there is no sink for a rental that was never opened. So a tab already
+  watching such a request sat on the state the socket sent when it connected,
+  with the reason in the database and on the wire type, for as long as it stayed
+  open. The queue table never had the gap, because it polls -- which is why
+  #103's "the watcher and the queue row can both read it without touching Go"
+  was half right, and the half that was wrong is a `bytes.Equal` on the
+  marshalled view. **The marshalled view and not a few chosen fields**, so the
+  comparison cannot come to disagree with what the client is sent: a field
+  added later is in it by construction. Both directions are live --
+  `TestWS_SaysNothingWhileNothingHappens` is what stops the fix being an
+  unconditional re-send four times a second, which would hide the difference
+  between "no progress" and "ember stopped".
 - **A typed subset is the right answer until a browser is the caller.** The sd
   job typed eleven fields and sent everything else through `extra`, which was
   correct while the only caller was a YAML file an operator edits by hand -- a

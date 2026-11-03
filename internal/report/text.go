@@ -135,8 +135,8 @@ func render(e Event) string {
 			cgroupName(e.MemCgroup), limitName(e.MemLimit), HumanBytes(e.MemCurrent),
 			HumanBytes(e.MemTotal), HumanBytes(e.MemCached), HumanBytes(e.Bytes))
 
-	case KindNodeReady, KindRunCost, KindDestroyFailed, KindRunFinished, KindRunFailed:
-		// Deliberately silent. The CLI already reports all five through its
+	case KindNodeReady, KindRunCost, KindDestroyFailed:
+		// Deliberately silent. The CLI already reports all three through its
 		// slog handler, and test/integration/lifecycle_test.go greps for the
 		// slog spelling of "node ready" -- so printing them here as well
 		// would both duplicate `ember up`'s output and leave two spellings of

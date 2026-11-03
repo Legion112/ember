@@ -1,6 +1,7 @@
 package webapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -121,12 +122,30 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 }
 
+// wsCursor is what one stream remembers between polls.
+//
+// THE REQUEST VIEW AND NOT ONLY THE SEQUENCE NUMBER, which is the half that
+// was missing. `after` answers "is there a new event"; `req` answers "has the
+// request changed", and those are different questions for the one state that
+// matters -- a request refused before anything was rented has a reason in its
+// row and no event anywhere, because `queue.fail` writes the row and there is
+// no sink for a rental that was never opened.
+//
+// The MARSHALLED view and not a few chosen fields, so this cannot come to
+// disagree with what the client is actually sent: every field that reaches a
+// browser is in the comparison by construction, and one added later needs no
+// second edit here. It is the bytes `send` is about to write either way.
+type wsCursor struct {
+	after int64
+	req   []byte
+}
+
 // stream sends everything after the cursor, then everything that arrives.
 func (s *Server) stream(ctx context.Context, conn *websocket.Conn, id genstore.ReqID, after int64) error {
 	// The first send happens before any wait, so a client that reconnects
 	// mid-generation sees the backlog at once rather than a quarter of a
 	// second of nothing.
-	last, err := s.send(ctx, conn, id, after, true)
+	cur, err := s.send(ctx, conn, id, wsCursor{after: after}, true)
 	if err != nil {
 		return err
 	}
@@ -145,11 +164,11 @@ func (s *Server) stream(ctx context.Context, conn *websocket.Conn, id genstore.R
 				return err
 			}
 		case <-ticker.C:
-			next, err := s.send(ctx, conn, id, last, false)
+			next, err := s.send(ctx, conn, id, cur, false)
 			if err != nil {
 				return err
 			}
-			last = next
+			cur = next
 		}
 	}
 }
@@ -160,13 +179,12 @@ func (s *Server) stream(ctx context.Context, conn *websocket.Conn, id genstore.R
 // force sends even with nothing new, which is what the first write does: a
 // client needs the request's current state before it has seen any event, and
 // a request that finished before the socket opened produces no further ones.
-func (s *Server) send(ctx context.Context, conn *websocket.Conn, id genstore.ReqID, after int64, force bool) (int64, error) {
-	es, err := s.opts.Store.Events(ctx, id, after)
+// It is also the only thing that sends an envelope for an id no request
+// exists under, which a UI racing its own POST depends on.
+func (s *Server) send(ctx context.Context, conn *websocket.Conn, id genstore.ReqID, cur wsCursor, force bool) (wsCursor, error) {
+	es, err := s.opts.Store.Events(ctx, id, cur.after)
 	if err != nil {
-		return after, err
-	}
-	if len(es) == 0 && !force {
-		return after, nil
+		return cur, err
 	}
 
 	// AN EMPTY LIST AND NEVER null.
@@ -181,7 +199,7 @@ func (s *Server) send(ctx context.Context, conn *websocket.Conn, id genstore.Req
 	if es == nil {
 		es = []report.Event{}
 	}
-	env := wsEnvelope{Next: after, Events: es}
+	env := wsEnvelope{Next: cur.after, Events: es}
 	if n := len(es); n > 0 {
 		env.Next = es[n-1].Seq
 	}
@@ -192,24 +210,42 @@ func (s *Server) send(ctx context.Context, conn *websocket.Conn, id genstore.Req
 	// The request travels with its events whenever either changed, so a
 	// client cannot hold a progress line for a request it still believes is
 	// queued.
+	next := wsCursor{after: env.Next}
 	if req, gerr := s.opts.Store.Get(ctx, id); gerr == nil {
 		ims, _ := s.opts.Store.Images(ctx, id)
 		v := viewRequest(req, ims)
 		env.Request = &v
+		if next.req, err = json.Marshal(v); err != nil {
+			return cur, err
+		}
 	} else if !errors.Is(gerr, genstore.ErrNotFound) {
-		return env.Next, gerr
+		return cur, gerr
+	}
+
+	// NEITHER HALF CHANGED, SO NOTHING IS WRITTEN. A socket that re-sent the
+	// same state four times a second would make a UI re-render on a timer and
+	// would hide the difference between "no progress" and "ember stopped" --
+	// which is TestWS_SaysNothingWhileNothingHappens, and it is why the fix
+	// for the missing push is a comparison rather than an unconditional send.
+	//
+	// The cursor is returned whether or not anything went out, because the
+	// request view has to be remembered even on the poll that found it
+	// unchanged; returning `cur` here would compare every poll against the
+	// state of two polls ago.
+	if len(es) == 0 && bytes.Equal(next.req, cur.req) && !force {
+		return next, nil
 	}
 
 	body, err := json.Marshal(env)
 	if err != nil {
-		return env.Next, err
+		return cur, err
 	}
 	// Bounded, so a client that has stopped reading cannot hold this
 	// goroutine for as long as the generation lasts.
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := conn.Write(wctx, websocket.MessageText, body); err != nil {
-		return env.Next, err
+		return next, err
 	}
-	return env.Next, nil
+	return next, nil
 }

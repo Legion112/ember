@@ -166,6 +166,65 @@ func TestWS_SaysNothingWhileNothingHappens(t *testing.T) {
 	}
 }
 
+// TestWS_PushesARequestThatChangedWithNoEventBehindIt.
+//
+// THE ENVELOPE'S OWN COMMENT CLAIMED THIS AND THE CODE DID NOT DO IT: "events
+// AND the request, every time something changed". `send` returned early on
+// `len(es) == 0 && !force`, so what it really sent was "the request, every
+// time an EVENT changed" -- and the one state with no event behind it is the
+// one an operator most needs. A request refused before a provider is reached
+// (a money ceiling, a sampler the cached caps do not list) is failed by
+// `queue.fail`, which writes the row and emits nothing at all: there is no
+// sink for a rental that was never opened. So a watcher sat on the state the
+// socket sent when it connected, with the reason already in the database and
+// on the wire type, for as long as the tab was open.
+//
+// The queue table never had the gap, because it polls `/api/requests` -- which
+// is why this is a socket test and not a UI one, and why #103's "without
+// touching Go" was half right.
+//
+// NOT A RE-SEND ON A TIMER. TestWS_SaysNothingWhileNothingHappens is the
+// other half and still holds: what is compared is the request view itself, so
+// a poll that finds nothing new still writes nothing.
+func TestWS_PushesARequestThatChangedWithNoEventBehindIt(t *testing.T) {
+	h := newHarness(t)
+	id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
+
+	_, wsURL := wsServer(t, h)
+	c := dialWS(t, wsURL+"/ws?id="+id)
+
+	first := readEnvelope(t, c)
+	if first.Request == nil || first.Request.Status != string(genstore.StatusQueued) {
+		t.Fatalf("the first envelope does not describe a queued request: %+v", first.Request)
+	}
+	if first.Request.Error != "" {
+		t.Fatalf("a queued request already carries an error: %q", first.Request.Error)
+	}
+
+	const why = "max_month_usd would be exceeded: $47.80 spent of $50 and this rental projects $3.58"
+	if err := h.store.Update(t.Context(), genstore.ReqID(id), func(r *genstore.Request) {
+		r.Status = genstore.StatusFailed
+		r.Err = why
+		r.Ended = time.Now().UTC()
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	env := readEnvelope(t, c)
+	if len(env.Events) != 0 {
+		t.Errorf("got %d event(s); nothing emitted any", len(env.Events))
+	}
+	if env.Request == nil {
+		t.Fatal("the envelope that reported the change carries no request")
+	}
+	if got := env.Request.Status; got != string(genstore.StatusFailed) {
+		t.Errorf("status = %q, want failed", got)
+	}
+	if got := env.Request.Error; got != why {
+		t.Errorf("error = %q, want the reason the row carries: %q", got, why)
+	}
+}
+
 func TestWS_RefusesWhatItCannotStream(t *testing.T) {
 	h := newHarness(t)
 	_, wsURL := wsServer(t, h)

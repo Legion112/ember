@@ -1672,6 +1672,13 @@ can never be told something a reconnect would not tell it. A preview frame is
 written to the run directory and recorded as an image row with `preview` set,
 which is how a step and its picture reach the page together.
 
+Each envelope carries the events **and** the request, and it is written
+whenever either has changed. Both halves matter: the request on its own would
+re-send four times a second, and the events on their own miss the one state
+with nothing behind them — a request refused before a provider was reached
+writes its row and emits no event at all, so a tab watching it used to sit on
+whatever the socket said when it connected.
+
 The frontend is Rust compiled to WebAssembly, in [`web/`](web). It needs
 `cargo`, the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` at the
 version [`web/Cargo.toml`](web/Cargo.toml) pins — `make web` checks all three
@@ -1730,6 +1737,24 @@ least. Every field in the form explains itself on hover.
 | the `hires`, `vae_tiling` and `slg` blocks | `lora` |
 | an image it has already uploaded, by digest, and its `strength` | |
 | preview mode and interval | |
+
+**A request that failed says why, in the row and in the watcher.** The reason
+is already a column — `requests.err`, written whether the refusal came before
+anything was rented (a money ceiling, no capacity, a sampler the cached
+capabilities do not list) or on a card that broke — and it has been on the wire
+to the browser on every route and the socket since the API was written. Nothing
+read it: the whole operator-visible state of a failed generation was the word
+`failed` in one table cell. `ember history` printed the reason and the page did
+not, which is the one place a document here claimed something the code did not
+do.
+
+The row prints it under its status and the watcher prints it as a line of its
+own, and **neither of them is the destroy warning.** "The node may still be
+running and billing — check `ember ls`" belongs to a destroy that failed and to
+nothing else: a request a ceiling refused never had a node, and sending an
+operator to check their bill for a machine that never existed is a false alarm
+on the one page they would read to decide. The same reason the sweep answers
+"not abandoned" for everything it cannot be sure of.
 
 **A request the page cannot read is named, and does not blank the table.** The
 queue listing crosses a language: a number is a Go `int` on the way out and an
