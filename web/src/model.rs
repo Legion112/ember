@@ -262,6 +262,56 @@ pub struct Listing {
     pub error: String,
 }
 
+impl Listing {
+    /// Which of the three things this provider's answer is.
+    ///
+    /// A METHOD AND NOT A CHAIN OF `if` INSIDE THE VIEW MACRO, the reason
+    /// `Rows::note` and `Request::reason` are: the precedence is a decision
+    /// and `cargo test` cannot reach one written as a view branch. The
+    /// precedence is the whole content of the component's own comment -- "I
+    /// could not reach RunPod" must never render as "RunPod has nothing" --
+    /// and until this method existed the only thing asserting it was that
+    /// comment.
+    ///
+    /// THE ERROR WINS OVER THE OFFERS, and the order matters even though
+    /// `app.Offers` fills one field or the other and never both: it is the
+    /// wire that decides what this page can be handed, not the one writer
+    /// that exists today, and the direction a mistake has to fall is towards
+    /// saying so. The same rule `Caps.PublicSSH` defaults in.
+    pub fn answer(&self) -> Answer {
+        if !self.error.is_empty() {
+            return Answer::Failed {
+                provider: self.provider.clone(),
+                why: self.error.clone(),
+            };
+        }
+        if self.offers.is_empty() {
+            return Answer::Nothing {
+                provider: self.provider.clone(),
+            };
+        }
+        Answer::Rentable {
+            offers: self.offers.clone(),
+        }
+    }
+}
+
+/// What a provider's answer says, once the precedence has been applied.
+#[derive(Clone, Debug)]
+pub enum Answer {
+    /// The provider could not be asked. A finding, not a silence: `ember ls`
+    /// exits 2 for this and the page says it in `p.error`.
+    Failed { provider: String, why: String },
+
+    /// The provider answered and has nothing matching the filter. Said in
+    /// words rather than as an empty table, because an empty table is also
+    /// what a page that never asked looks like.
+    Nothing { provider: String },
+
+    /// What it has, in the order the provider listed it.
+    Rentable { offers: Vec<Offer> },
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Offers {
     #[serde(default, deserialize_with = "nullable")]

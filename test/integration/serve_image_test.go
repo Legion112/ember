@@ -539,6 +539,183 @@ func TestServe_UI(t *testing.T) {
 	}
 }
 
+// offersProbe reads the offers panel the way a person does: whether there is
+// a table, what is in it, and whether either sentence that replaces one is on
+// screen.
+//
+// THREE ANSWERS AND NOT ONE, because the defect had two readings and only the
+// milder one is about the rows. A page that refreshed its table and went on
+// swallowing a provider's error would pass an assertion about the rows alone,
+// which is the AssertNoStray shape: a check that can pass for either reason
+// proves neither.
+const offersProbe = `(function () {
+	function texts(sel, sub) {
+		return Array.from(document.querySelectorAll(sel))
+			.map(function (e) { return e.textContent.trim(); })
+			.filter(function (s) { return s.indexOf(sub) !== -1; })
+			.join("; ");
+	}
+	var t = document.querySelector("table.offers");
+	return [
+		"table|" + (t ? t.innerText.replace(/\s+/g, " ").trim() : ""),
+		"nothing|" + texts("p.hint", "has nothing matching"),
+		"failed|" + texts("p.error", "could not be asked"),
+	];
+})()`
+
+// offersSay runs the probe once.
+func offersSay(t *testing.T, ctx context.Context) map[string]string {
+	t.Helper()
+	lines, err := chromedp.Run(ctx, chromedp.Evaluate[[]string](offersProbe))
+	if err != nil {
+		t.Fatalf("reading the offers panel: %v", err)
+	}
+	out := make(map[string]string, len(lines))
+	for _, l := range lines {
+		k, v, _ := strings.Cut(l, "|")
+		out[k] = v
+	}
+	return out
+}
+
+// waitForOffers polls until the panel says what it is supposed to, and fails
+// with what it said instead.
+//
+// A POLL AND NOT A WaitVisible, for the reason waitForText is one: what is
+// being waited for is an element's DISAPPEARANCE in one direction and its
+// text in the other, and chromedp has no wait for either.
+func waitForOffers(
+	t *testing.T, ctx context.Context, want func(map[string]string) bool, within time.Duration,
+	what string,
+) map[string]string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		got := offersSay(t, ctx)
+		if want(got) {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the offers panel never %s within %v; it says table=%q nothing=%q failed=%q",
+				what, within, got["table"], got["nothing"], got["failed"])
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// setText types into one of the page's text controls, named by the label
+// beside it.
+//
+// `setNumber`'s selector and keystrokes, with enough backspaces for a card
+// name: the same one spelling for both labs, which is why that helper exists.
+func setText(t *testing.T, ctx context.Context, label, value string) {
+	t.Helper()
+	sel := fmt.Sprintf(`//label[span[@class="help" and text()=%q]]/input`, label)
+	keys := kb.End + strings.Repeat(kb.Backspace, 32) + value
+	if err := chromedp.Do(ctx, chromedp.SendKeys(sel, keys)); err != nil {
+		t.Fatalf("setting %s to %q: %v", label, value, err)
+	}
+}
+
+// TestServe_UIShowsTheSecondAnswerAndNotTheFirst is #130.
+//
+// WHY A BROWSER, AND WHY THIS IS NOT THE cargo TEST BESIDE IT. The decision
+// -- which of the three things a listing renders as -- is `Listing::answer`,
+// and `views::tests` drives it through the signal three times. What no Rust
+// test can see is the `<For>`: a keyed list re-renders a row only when its
+// key changes, the key was the provider's NAME, and `leptos::For` hands the
+// item to the child by value -- so the second query of one provider was
+// discarded by the renderer, with every layer below it correct. That is the
+// third time this exact class has shipped in this file, and a browser is what
+// found it each time.
+//
+// THE FILTER AND NOT THE PROVIDER, because changing the provider resets the
+// signal to `Offers::default()` and empties the list, so the one case that
+// could not refresh is narrowing the card -- which is what the box is for.
+//
+// THREE PRESSES AND NOT TWO: a table that has gone and come back is the
+// ordinary way an operator uses that box, and a fix that cleared the rows
+// once would pass against two presses.
+//
+// NO RENTAL AND NO WORKLOAD IMAGE. `/api/offers` asks the local provider what
+// it has, which costs nothing and touches no card, so this lab is seconds
+// rather than minutes -- and the state it is about is reachable with no
+// seeding at all, unlike the money column one request over.
+func TestServe_UIShowsTheSecondAnswerAndNotTheFirst(t *testing.T) {
+	requireChrome(t)
+	l := harness.New(t)
+	l.WriteConfig(nil)
+	l.AppendConfig(serveConfig)
+
+	cmd, srv, wait := startServe(t, l)
+	defer func() {
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return
+		}
+		_ = wait()
+	}()
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Headless, chromedp.NoSandbox, chromedp.DisableGPU)
+	alloc, cancelAlloc := chromedp.NewExecAllocator(t.Context(), opts...)
+	defer cancelAlloc()
+	ctx, cancel := chromedp.NewContext(alloc)
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancelTimeout()
+
+	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
+	if err := chromedp.Do(ctx,
+		chromedp.Navigate(fmt.Sprintf("%s?t=%s", pageURL, srv.Token))); err != nil {
+		t.Fatalf("navigating to the one-time URL: %v", err)
+	}
+	console := watchConsole(t, ctx)
+
+	if err := chromedp.Do(ctx,
+		chromedp.WaitVisible(`h1`),
+		chromedp.Click(`//button[contains(text(), "what is available")]`),
+	); err != nil {
+		t.Fatalf("asking what is available: %v\n%s", err, console.text())
+	}
+	first := waitForOffers(t, ctx, func(s map[string]string) bool {
+		return s["table"] != ""
+	}, 30*time.Second, "showed a table at all")
+
+	// Narrowed to a card no provider has. Same provider, so the same key as
+	// the press before it -- which is the entire premise of the defect.
+	setText(t, ctx, "card", "nosuchcard")
+	if err := chromedp.Do(ctx,
+		chromedp.Click(`//button[contains(text(), "what is available")]`)); err != nil {
+		t.Fatalf("asking again with a narrowed filter: %v\n%s", err, console.text())
+	}
+	narrowed := waitForOffers(t, ctx, func(s map[string]string) bool {
+		return s["table"] == "" && s["nothing"] != ""
+	}, 30*time.Second,
+		"replaced the first answer with the second (it is still showing a table)")
+	if narrowed["table"] != "" {
+		t.Errorf("a narrowed filter still shows the first answer: %q", narrowed["table"])
+	}
+
+	// And widened again, because that is the other half of using the box.
+	setText(t, ctx, "card", "")
+	if err := chromedp.Do(ctx,
+		chromedp.Click(`//button[contains(text(), "what is available")]`)); err != nil {
+		t.Fatalf("asking again with the filter cleared: %v\n%s", err, console.text())
+	}
+	again := waitForOffers(t, ctx, func(s map[string]string) bool {
+		return s["table"] != "" && s["nothing"] == ""
+	}, 30*time.Second, "brought the table back")
+	if again["table"] != first["table"] {
+		t.Errorf("the same query answered differently:\nfirst %q\nthird %q",
+			first["table"], again["table"])
+	}
+
+	if errs := console.errors(); errs != "" {
+		t.Errorf("the page logged errors:\n%s", errs)
+	}
+}
+
 // TestServe_UIGreysWhatTheServerSaysItCannotDo is the capability gate's only
 // honest check.
 //

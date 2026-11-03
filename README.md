@@ -1601,6 +1601,24 @@ make web                 # builds the Rust/WASM frontend
 ember serve              # http://127.0.0.1:7777/
 ```
 
+### What the offers panel shows
+
+Pressing **what is available** shows what each provider answered to *that*
+press. Narrowing the card filter and pressing again replaces the table with
+the new answer — `local has nothing matching` when the filter excludes
+everything it has, and `runpod could not be asked: <why>` when the provider
+could not be reached at all.
+
+It used to show the **first** answer for ever. The provider blocks were a
+keyed list whose key was the provider's name, which does not change between
+two queries of one provider, so every press after the first was discarded by
+the renderer: a filter narrowed to a card nobody has went on showing the card
+from the press before it, and a provider that answered nothing but a `dial
+tcp: no such host` went on showing an H100 at $2.49 in US-KS-2 with no error
+anywhere. The one control that varies between two presses is the card filter,
+and that is exactly the case the key could not refresh — changing the provider
+clears the list, which is why this was invisible.
+
 ### What the watcher says about money
 
 The progress panel's money row is the **rental**, and it says which of five

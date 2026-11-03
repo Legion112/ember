@@ -15,8 +15,8 @@ use leptos::task::spawn_local;
 
 use crate::api;
 use crate::model::{
-    Cancelled, Config, Envelope, Hires, Input, Job, NewRequest, Offers, Progress, Rental, Request,
-    RequestList, Stopping, VaeTiling,
+    Answer, Cancelled, Config, Envelope, Hires, Input, Job, Listing, NewRequest, Offers, Progress,
+    Rental, Request, RequestList, Stopping, VaeTiling,
 };
 
 /// App is the whole page.
@@ -411,53 +411,90 @@ fn Compose(config: RwSignal<Config>, watching: RwSignal<String>) -> impl IntoVie
     }
 }
 
+/// What every provider answered, as of NOW.
+///
+/// A NAMED FUNCTION OVER THE SIGNAL, which is the whole fix and the only
+/// shape `cargo test` can hold: it returns a closure that reads `offers`
+/// every time it is called, so the answers on screen are the answers of the
+/// last query rather than of the first.
+///
+/// WHAT IT REPLACED WAS A `<For>` KEYED ON THE PROVIDER'S NAME. A keyed list
+/// re-renders a row only when its KEY changes -- `tachys` calls the view
+/// function for added keys and moves retained ones -- and `leptos::For`
+/// hands the item over BY VALUE, so a child that reads it reads it once. The
+/// provider's name does not change between two queries of that provider, and
+/// the one control that varies between two presses of "what is available" is
+/// the card filter, so narrowing it rendered the FIRST answer for ever. The
+/// milder reading is a stale price; the measured one is worse -- a server
+/// answering zero offers and "dial tcp: lookup rest.runpod.io: no such host"
+/// left an H100 at $2.49 in US-KS-2 on screen with no error anywhere, over a
+/// provider that could not be reached. That is the thing this component's own
+/// comment forbids, two lines from the key that caused it.
+///
+/// NOT A KEY THAT ENCODES THE ROW, which would also have worked and is the
+/// worse answer: a key is stable identity, and one built out of the data
+/// rebuilds the DOM for a price change and leaves the next field somebody
+/// adds in the same hole. There is no identity to preserve across queries
+/// here anyway -- rebuilding a handful of provider blocks on each press
+/// costs nothing, which is what AGENTS.md records about the progress rows
+/// this same rule was paid for once already.
+fn listed(offers: RwSignal<Offers>) -> impl Fn() -> Vec<Answer> + Copy {
+    move || offers.get().listings.iter().map(Listing::answer).collect()
+}
+
 /// Listings shows what each provider answered.
 #[component]
 fn Listings(offers: RwSignal<Offers>, gpu: RwSignal<String>) -> impl IntoView {
+    let answers = listed(offers);
     view! {
-        <For each=move || offers.get().listings key=|l| l.provider.clone() let:l>
-            {
-                // A provider that could not be asked says so. "I could not
-                // reach RunPod" must never render as "RunPod has nothing".
-                if !l.error.is_empty() {
-                    view! {
-                        <p class="error">
-                            {l.provider.clone()} " could not be asked: " {l.error.clone()}
-                        </p>
-                    }.into_any()
-                } else if l.offers.is_empty() {
-                    view! { <p class="hint">{l.provider.clone()} " has nothing matching"</p> }
-                        .into_any()
-                } else {
-                    view! {
-                        <table class="offers">
-                            <tbody>
-                                <For each=move || l.offers.clone() key=|o| o.token.clone() let:o>
-                                    <tr on:click={
-                                        let model = o.gpu.clone();
-                                        move |_| gpu.set(model.clone())
-                                    }>
-                                        <td>{o.gpu.clone()}</td>
-                                        <td>{format!("{} GiB", o.vram_gib)}</td>
-                                        <td class="price">{o.price.text().to_string()}</td>
-                                        <td>{o.region.clone()}</td>
-                                        <td>
-                                            {if o.interruptible {
-                                                // Worth seeing before choosing
-                                                // rather than discovering: the
-                                                // provider can take it back
-                                                // mid-run.
-                                                "interruptible"
-                                            } else { "" }}
-                                        </td>
-                                    </tr>
-                                </For>
-                            </tbody>
-                        </table>
-                    }.into_any()
-                }
-            }
-        </For>
+        {move || answers().into_iter().map(|a| answered(a, gpu)).collect::<Vec<_>>()}
+    }
+}
+
+/// One provider's answer, laid out. The decision of WHICH of the three it is
+/// belongs to `Listing::answer`, where cargo test reaches it.
+fn answered(a: Answer, gpu: RwSignal<String>) -> AnyView {
+    match a {
+        // A provider that could not be asked says so. "I could not reach
+        // RunPod" must never render as "RunPod has nothing".
+        Answer::Failed { provider, why } => view! {
+            <p class="error">{provider} " could not be asked: " {why}</p>
+        }
+        .into_any(),
+        Answer::Nothing { provider } => {
+            view! { <p class="hint">{provider} " has nothing matching"</p> }.into_any()
+        }
+        // NO KEY ON THE INNER LIST EITHER, and not because a token is a bad
+        // key -- it is a good one. The rows are rebuilt with the block that
+        // holds them, so there is nothing for a key to retain, and leaving
+        // the inner `<For>` keyed on the offer token while fixing the outer
+        // list would have put the same frozen row one level down.
+        Answer::Rentable { offers } => view! {
+            <table class="offers">
+                <tbody>
+                    {offers.into_iter().map(|o| view! {
+                        <tr on:click={
+                            let model = o.gpu.clone();
+                            move |_| gpu.set(model.clone())
+                        }>
+                            <td>{o.gpu.clone()}</td>
+                            <td>{format!("{} GiB", o.vram_gib)}</td>
+                            <td class="price">{o.price.text().to_string()}</td>
+                            <td>{o.region.clone()}</td>
+                            <td>
+                                {if o.interruptible {
+                                    // Worth seeing before choosing rather
+                                    // than discovering: the provider can take
+                                    // it back mid-run.
+                                    "interruptible"
+                                } else { "" }}
+                            </td>
+                        </tr>
+                    }).collect::<Vec<_>>()}
+                </tbody>
+            </table>
+        }
+        .into_any(),
     }
 }
 
@@ -1763,7 +1800,110 @@ fn urlish(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::urlish;
+    use super::{listed, urlish};
+    use crate::model::{Answer, Listing, Offer, Offers};
+    use leptos::prelude::*;
+
+    fn one(provider: &str, offers: Vec<Offer>, error: &str) -> Offers {
+        Offers {
+            listings: vec![Listing {
+                provider: provider.into(),
+                offers,
+                error: error.into(),
+            }],
+        }
+    }
+
+    fn card(token: &str, gpu: &str) -> Offer {
+        Offer {
+            token: token.into(),
+            gpu: gpu.into(),
+            ..Default::default()
+        }
+    }
+
+    /// THE SECOND QUERY'S ANSWER, which is #130.
+    ///
+    /// The provider's name is the same in both, which is exactly why the
+    /// keyed `<For>` this replaced could never show the second: a retained
+    /// key is moved and never rebuilt, and the item is handed to the child by
+    /// value. So the assertion is that the closure answers from the signal
+    /// each time it is called, and the signal is written the way the button
+    /// writes it -- `offers.set` with one provider's new listing.
+    ///
+    /// Three presses and not two: a table that has gone and come back is the
+    /// ordinary way the card filter is used, and a fix that only cleared the
+    /// rows once would pass against two.
+    #[test]
+    fn a_second_query_of_one_provider_replaces_the_first_answer() {
+        let sig = RwSignal::new(one("runpod", vec![card("t1", "h100-80g")], ""));
+        let answers = listed(sig);
+
+        match &answers()[..] {
+            [Answer::Rentable { offers }] => {
+                assert_eq!(offers.len(), 1);
+                assert_eq!(offers[0].gpu, "h100-80g");
+            }
+            other => panic!("the first answer is not a table: {other:?}"),
+        }
+
+        // Narrowed to a card this provider does not have. Same provider, so
+        // the same key.
+        sig.set(one("runpod", Vec::new(), ""));
+        match &answers()[..] {
+            [Answer::Nothing { provider }] => assert_eq!(provider, "runpod"),
+            other => panic!("a narrowed filter still shows the first answer: {other:?}"),
+        }
+
+        // And back, because an operator widens the filter again.
+        sig.set(one("runpod", vec![card("t2", "rtx4090")], ""));
+        match &answers()[..] {
+            [Answer::Rentable { offers }] => assert_eq!(offers[0].gpu, "rtx4090"),
+            other => panic!("the third answer did not arrive: {other:?}"),
+        }
+    }
+
+    /// The error case beside the rows, because a page that refreshed its rows
+    /// and still swallowed the error would pass the test above on its own --
+    /// which is the `AssertNoStray` shape, a check that can pass for either
+    /// reason.
+    ///
+    /// This is the measured failure in #130: the server switched to zero
+    /// offers plus a `dial tcp` sentence and the table went on showing a card
+    /// at a price.
+    #[test]
+    fn a_provider_that_could_not_be_asked_replaces_the_table_it_had() {
+        let sig = RwSignal::new(one("runpod", vec![card("t1", "h100-80g")], ""));
+        let answers = listed(sig);
+        assert!(matches!(answers()[0], Answer::Rentable { .. }));
+
+        sig.set(one(
+            "runpod",
+            Vec::new(),
+            "get https://rest.runpod.io/v1/pods: dial tcp: no such host",
+        ));
+        match &answers()[..] {
+            [Answer::Failed { provider, why }] => {
+                assert_eq!(provider, "runpod");
+                assert!(why.contains("no such host"), "{why}");
+            }
+            other => panic!("the failure did not reach the page: {other:?}"),
+        }
+    }
+
+    /// The precedence `Listing::answer` exists for, asserted on the one shape
+    /// no writer produces today: an error beside offers. The wire decides
+    /// what this page can be handed, and the direction the mistake has to
+    /// fall is towards saying the provider could not be asked.
+    #[test]
+    fn an_error_wins_over_the_offers_beside_it() {
+        let l = Listing {
+            provider: "runpod".into(),
+            offers: vec![card("t1", "h100-80g")],
+            error: "dial tcp: no such host".into(),
+        };
+        assert!(matches!(l.answer(), Answer::Failed { .. }));
+    }
 
     /// A card model with a space in it -- "NVIDIA H100 80GB HBM3" is how
     /// RunPod spells one -- must not end the query parameter early, or the
