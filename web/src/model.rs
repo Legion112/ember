@@ -759,6 +759,56 @@ pub struct JobProgress {
     pub cancel_error: String,
 }
 
+/// What a watcher may honestly say about the rental's cost.
+///
+/// THE ROW USED TO BE GATED ON ONE NUMBER AND DISPLAY ANOTHER. It appeared
+/// when `Progress::spent` -- the card time the queue emits per job -- became
+/// non-zero, under the caption "card time", and printed `Request::cost`,
+/// which is the whole rental. Those are different quantities written at
+/// different times to different requests: `requests.cost` comes from
+/// `run_cost`, which `provision.WithNode` emits from its DEFERRED teardown,
+/// and `Queue.lifecycle` routes to the request that opened the rental and to
+/// no other. So the row read `$0` from the first completed job until the node
+/// was destroyed, and `$0` for ever on a request that rode an existing
+/// rental -- which AGENTS.md records as the one thing a money column must not
+/// do: "a rider's rental cost is zero by design, and a money column of zeros
+/// reads as free".
+///
+/// `ember history` answers it with `Entry.Rode` per row, and this is the same
+/// answer for one request: the state is decided by asking WHO WAS TOLD the
+/// rental's facts, never by the zero itself. The local provider's rentals are
+/// genuinely free, so cost alone cannot tell "somebody else paid" from
+/// "nobody did" -- and `node_ready` reaching this request's stream is the
+/// same routing decision that decides which request is charged, so it is one
+/// source of truth rather than a second guess at it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rental {
+    /// Nothing has happened that could have cost anything: no node became
+    /// ready for this request and no job of it has started. The row is
+    /// absent, because a request that has not run has no rental to price.
+    Silent,
+
+    /// This request opened a rental that has not been torn down, so what it
+    /// cost does not exist yet rather than being zero.
+    Pending,
+
+    /// Pending, and card time has already been charged to this request -- so
+    /// the card's rate is above zero and the figure is growing while the
+    /// operator reads it. The stronger claim is made only when the event
+    /// stream proves it, which is the direction `Caps.PublicSSH` defaults in.
+    Accruing,
+
+    /// This request generated on a rental another request opened, which is
+    /// the one charged for it. Its zero is by design and is `ember history`'s
+    /// dash.
+    Rode,
+
+    /// The rental was torn down and this request is the one it is charged to,
+    /// so `Request::cost` is the figure and `$0` means free rather than
+    /// unpriced.
+    Charged,
+}
+
 /// What a watcher has folded out of the event stream.
 #[derive(Clone, Debug, Default)]
 pub struct Progress {
@@ -777,10 +827,35 @@ pub struct Progress {
     pub jobs: Vec<JobProgress>,
 
     /// The accumulating card time, from the last cost event.
+    ///
+    /// A FIGURE AND NOT A DISPLAY STRING, so this is read as evidence and
+    /// never printed: a positive card time means this request has been
+    /// charged for time on a card whose rate is above zero, which is the one
+    /// money fact a watcher has before the teardown writes the rental's own.
+    /// What it is NOT is a number this page may render -- see `Money` for
+    /// why -- and nothing on the browser's wire carries a rendered card-time
+    /// figure, because `JobRun.Cost` is kept off `Job` on purpose. The
+    /// figure in dollars is `ember history`'s card-time column.
     pub spent: i64,
 
-    /// The whole rental, once it has been destroyed.
-    pub rental_cost: i64,
+    /// Whether the rental's own cost has been recorded for this request.
+    ///
+    /// IT REPLACED AN `i64` HOLDING THE SAME NUMBER AS `Request::cost`, which
+    /// is the `queue.Cost` mistake in miniature: two carriers of one figure,
+    /// and the one this page could actually print is the other one. `run_cost`
+    /// arrives from `provision.WithNode`'s deferred teardown and carries
+    /// `cost_micro_usd`; `Recorder` writes that same integer to `requests.cost`,
+    /// which reaches the page as a `Money` with the string Go rendered. So the
+    /// event adds exactly one thing the row cannot get anywhere else: that the
+    /// figure EXISTS. Without it a recorded $0 -- the local provider's rentals
+    /// really are free -- cannot be told from a rental nobody has priced yet,
+    /// and `Money::is_free` alone would make "free" and "not yet" the same
+    /// cell.
+    ///
+    /// It is true only for the request that OPENED the rental, because
+    /// `Queue.lifecycle` emits `run_cost` to that request's sink and a rider's
+    /// sink never sees it.
+    pub charged: bool,
 
     /// Lines the node itself wrote, newest last.
     pub log: Vec<String>,
@@ -870,7 +945,12 @@ impl Progress {
                 self.dropped = (e.total - e.index).max(0);
             }
             "run_cost" => {
-                self.rental_cost = e.cost_micro_usd;
+                // THE ARRIVAL AND NOT THE AMOUNT. See Progress::charged: the
+                // amount reaches this page as `Request::cost`, already
+                // rendered by the one formatter in the program, and folding
+                // the integer in here as well would be a second copy of a
+                // number this page must not format.
+                self.charged = true;
                 self.node = e.node.clone();
             }
             "destroy_failed" | "run_failed" => {
@@ -914,6 +994,48 @@ impl Progress {
             .filter(|j| !j.done && !j.cancelled && j.step > 0)
             .cloned()
             .collect()
+    }
+
+    /// What the money row may say, and in which of five states.
+    ///
+    /// A METHOD AND NOT A CLOSURE IN THE VIEW, the reason `sampling` is one:
+    /// this is a decision and the view is a layout, and a decision inside a
+    /// view macro can only be checked by a browser. It also has to be
+    /// checkable where it cannot be driven -- every lab rents from the local
+    /// provider, whose price is zero, so `Accruing` and a non-free `Charged`
+    /// are states no lab on this machine can reach. That is exactly why the
+    /// defect this replaces was invisible: with `spent` always zero the old
+    /// row never rendered in a lab at all.
+    ///
+    /// ORDER IS THE WHOLE FUNCTION. `charged` is asked first because it is
+    /// the only state in which a figure exists; then the opener, because
+    /// `node_ready` reached its stream; then the rider, because a job of this
+    /// request has started on a rental whose readiness it was never told
+    /// about.
+    pub fn rental(&self) -> Rental {
+        if self.charged {
+            return Rental::Charged;
+        }
+        if !self.node.is_empty() {
+            // `spent` is read as evidence and not as a figure: a positive
+            // card time cannot happen at a zero rate, so "accruing" is
+            // proved rather than assumed. Zero says nothing either way --
+            // the first job may simply not have finished -- so it falls back
+            // to the weaker sentence.
+            if self.spent != 0 {
+                return Rental::Accruing;
+            }
+            return Rental::Pending;
+        }
+        // A RIDER IS THE ABSENCE OF `node_ready`, not the zero in the cost.
+        // Its own per-job events reach its own sink, so a started job with no
+        // node of its own is a request generating on somebody else's rental.
+        // Jobs and not `spent`, because a rider on a free rental has card
+        // time zero for ever and is still a rider.
+        if !self.jobs.is_empty() {
+            return Rental::Rode;
+        }
+        Rental::Silent
     }
 
     /// The whole log as one string, for a `<pre>`.
@@ -1069,10 +1191,150 @@ mod tests {
         assert!(p.jobs[0].done);
         assert_eq!(p.jobs[0].files, 2);
         assert_eq!(p.spent, 55_000);
-        // The rental's own total, which is larger than the sum of its jobs by
-        // exactly the per-rental overhead the served shape pays once.
-        assert_eq!(p.rental_cost, 120_000);
+        // THE ARRIVAL AND NOT THE AMOUNT. The rental's own total is larger
+        // than the sum of its jobs by exactly the per-rental overhead the
+        // served shape pays once -- and it reaches this page as
+        // `Request::cost`, rendered by Go. What the event adds is that the
+        // figure now exists, which is what tells a recorded $0 from a rental
+        // nobody has priced.
+        assert!(p.charged, "run_cost arrived, so the rental has been priced");
+        assert_eq!(p.rental(), Rental::Charged);
         assert!(p.failure.is_empty());
+    }
+
+    /// The five states the money row can be in, and the two the old row
+    /// could not tell apart.
+    ///
+    /// The row was gated on `spent` and displayed `Request::cost`, so it had
+    /// two states on screen -- absent, and a figure -- for five on the wire.
+    /// "nothing has been priced yet", "somebody else's rental" and "this one
+    /// was free" all rendered as `$0`, which is the reading a money column
+    /// must never allow.
+    #[test]
+    fn the_rental_state_is_who_was_told_and_never_the_zero() {
+        let ready = {
+            let mut e = ev(1, "node_ready");
+            e.node = "local/ember-run".into();
+            e
+        };
+        let started = {
+            let mut e = ev(2, "unit_started");
+            e.index = 1;
+            e.total = 2;
+            e
+        };
+        let paid = {
+            let mut e = ev(3, "unit_cost");
+            e.unit = "job".into();
+            e.index = 1;
+            e.total = 2;
+            e.spent_micro_usd = 30_000;
+            e
+        };
+        let torn = {
+            let mut e = ev(4, "run_cost");
+            e.node = "local/ember-run".into();
+            e.cost_micro_usd = 120_000;
+            e
+        };
+
+        for (want, events, why) in [
+            (
+                Rental::Silent,
+                vec![],
+                "a request that has not run has no rental to price",
+            ),
+            (
+                Rental::Pending,
+                vec![&ready],
+                "this request opened a rental that has not been torn down",
+            ),
+            (
+                Rental::Accruing,
+                vec![&ready, &started, &paid],
+                "card time at a rate above zero, so the figure is growing",
+            ),
+            (
+                Rental::Rode,
+                vec![&started],
+                "a job started and no node_ready ever reached this stream",
+            ),
+            (
+                // A RIDER ON A FREE RENTAL IS STILL A RIDER, which is why the
+                // test is `jobs` and not `spent`: the local provider's price
+                // is zero, so a rider there has card time zero for ever and
+                // the zero says nothing about who paid.
+                Rental::Rode,
+                vec![&started, &{
+                    let mut e = ev(3, "job_images");
+                    e.index = 1;
+                    e.total = 2;
+                    e.files = 1;
+                    e
+                }],
+                "a finished free rider has no cost of its own and still rode",
+            ),
+            (
+                Rental::Charged,
+                vec![&ready, &started, &paid, &torn],
+                "run_cost arrived, so Request::cost is a figure and not a gap",
+            ),
+        ] {
+            let mut p = Progress::default();
+            for e in events {
+                p.apply(e);
+            }
+            assert_eq!(p.rental(), want, "{why}");
+        }
+    }
+
+    /// The envelope the old row read `$0` out of, verbatim from the wire.
+    ///
+    /// `ws.go` sends the request alongside the events, and mid-generation
+    /// that request's `cost` is `{"micro_usd":0,"display":"$0"}` -- the
+    /// server really does send the string, so `Money::text`'s own `"$0"`
+    /// fallback was never even reached. Thirty thousand microdollars of card
+    /// time had been reported by then. The assertion is that the page is now
+    /// in a state that prints a sentence rather than that figure.
+    #[test]
+    fn a_running_request_is_not_in_a_state_that_prints_its_zero_cost() {
+        const ENVELOPE: &str = r#"{
+            "next": 6,
+            "events": [
+                {"seq":1,"kind":"node_ready","node":"local/ember-run",
+                 "endpoint":"root@127.0.0.1:2222"},
+                {"seq":5,"kind":"unit_started","unit":"job","index":1,"total":2,
+                 "desc":"\"a paper boat\" 192x192"},
+                {"seq":6,"kind":"unit_cost","unit":"job","index":1,"total":2,
+                 "cost_micro_usd":15000,"spent_micro_usd":30000}
+            ],
+            "request": {"id":"req-1","status":"running","provider":"local",
+                        "gpu":"localhost","cost":{"micro_usd":0,"display":"$0"},
+                        "jobs":[],"images":[]},
+            "running": "req-1"
+        }"#;
+
+        let env: Envelope = serde_json::from_str(ENVELOPE).expect("envelope decodes");
+        let mut p = Progress::default();
+        for e in &env.events {
+            p.apply(e);
+        }
+        let req = env.request.expect("the request travels with the events");
+
+        assert_eq!(
+            req.cost.text(),
+            "$0",
+            "the server sent the string, not a blank"
+        );
+        assert!(
+            !p.charged,
+            "no run_cost has arrived, so nothing has been priced"
+        );
+        assert_eq!(
+            p.rental(),
+            Rental::Accruing,
+            "card time has been charged and the rental has not been priced"
+        );
     }
 
     /// A cancel marks the job it reached and says how many never started.

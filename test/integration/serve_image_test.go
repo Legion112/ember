@@ -483,6 +483,34 @@ func TestServe_UI(t *testing.T) {
 			"the current pass and not the job", step)
 	}
 
+	// THE MONEY ROW SAYS WHICH STATE THE RENTAL IS IN, and the figure it
+	// shows is the one its caption names.
+	//
+	// The row used to be gated on `progress.spent` -- the card time the queue
+	// emits per job -- captioned "card time", and render `request.cost`,
+	// which is the whole rental and is written once from the DEFERRED
+	// teardown, to the request that opened the rental and to no other. So it
+	// read `$0` for the whole generation and `$0` for ever on a rider.
+	//
+	// THE LOAD-BEARING HALF IS THE SENTENCE, not the absence of a figure, and
+	// the reason is this provider: the local provider's price is zero, so
+	// `spent` is zero on every rental any lab here can start and the old row
+	// never rendered at all. That is why nothing caught it. Reinstating the
+	// old gate therefore makes the row VANISH rather than print `$0`, and
+	// only the wait below goes red -- an assertion that the row carries no
+	// "$" would pass against the bug it is written for.
+	rental := waitForText(t, ctx, `dl.rental`, "rental", 2*time.Minute, console)
+	if !strings.Contains(rental, "not priced yet") {
+		t.Errorf("the money row says %q; a rental that is still up has no cost yet, and "+
+			"the operator has to be able to tell that from a rental that cost nothing",
+			rental)
+	}
+	if strings.Contains(rental, "$") {
+		t.Errorf("the money row shows a figure (%q) for a rental ember has not priced; "+
+			"requests.cost is written from run_cost, which arrives from the teardown",
+			rental)
+	}
+
 	// And the image arrives, and is an image.
 	if err := chromedp.Do(ctx,
 		chromedp.WaitVisible(`.gallery figure:not(.preview) img`),
