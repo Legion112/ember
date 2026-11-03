@@ -5632,18 +5632,38 @@ A leaked node bills by the hour in silence. These are not style preferences.
   closed port. `cargo test` drives it instead, in both directions and over the
   case where the store listing failed and the node listing did not.
 
-  **Reinstated, judged on exit codes, with a control at both ends.** Nine
-  defects, each red: the unassigned `scan` in `New` (the unit join red, the lab
-  red at the 501), `string(f.Kind)` back (red in three places at once), the
-  leftovers slice dropped from `viewNodes` (red), `Attention` summed over two
-  slices (red at 3-want-4), the leftover arm removed from `viewFinding`'s id
-  switch (red), a nil slice in place of each `[]` (red on the bytes), the
-  `unreachable()` scan narrowed to `findings` (red in `cargo test`), the
-  verdict's unreachable clause deleted (red), and the panel rendering
-  `Nodes::default()` with no `Option` (red in the browser on the pre-press
-  assertion). A reworded comment stayed green in every pass, and
-  `go test ./...` plus `cargo test` were green before the first patch and after
-  the last.
+  **Reinstated, judged on exit codes, with a control at both ends of every
+  pass and four negative controls. Eleven defects, each red.** Through
+  `go test`: the `scan: o.Scan` assignment removed from `New` (exit 1 at
+  `TestNew_CarriesTheScannerFromItsOptions`); `string(f.Kind)` back (exit 1);
+  the `sc.Leftovers` loop removed from `viewNodes` (exit 1); `Attention`
+  summed over two slices (exit 1 at 3-want-4); the leftover arm removed from
+  `viewFinding`'s id switch (exit 1); and `var v nodesView` in place of the
+  three `[]findingView{}` (exit 1 on the bytes). Through `cargo test`, all
+  exit 101: `unreachable()` narrowed to `findings`; the verdict's blind
+  clause deleted; and `nothing_running` back to two clauses. Through the labs,
+  which are the half that proves the production wiring: **`Scan` not set in
+  `cmd_serve`** is exit 1 with **two** labs failing, at
+  `GET /api/nodes answered 501: this server was built without a node scanner`
+  -- the refusal an operator would have got for the life of the feature; the
+  dropped leftovers again over the real wire (exit 1, `leftovers = []`);
+  `string(f.Kind)` again over the real wire, which names the characters
+  themselves (`kind = "\a"`, `kind = "\x06"`); the panel rendering
+  `Some(Nodes::default())` instead of `None` (exit 1 in Chrome at *the panel
+  answered before anything was asked: verdict="nothing is running and nothing
+  was left behind"*); and `findings_table` returning nothing, which is the
+  `<For>` class the browser lab exists for (exit 1, *never reported the
+  leftover within 1m0s*, with the verdict still reading "1 finding(s) need
+  attention" -- so only the rows went, which is the defect's exact shape).
+  Four negative controls -- a reworded Go comment, a reworded Rust doc
+  comment, a reworded comment through the labs and one through the browser --
+  all green. **One attempt reported BUILD-ERROR rather than a result**, which
+  is this file's own trap working: a marker appended to `Kind: string(f.Kind),
+  Provider` put a `//` comment inside a composite literal, and the harness
+  refused to read a tree that would not compile as a failing suite. Both
+  controls green at both ends of all four passes, and `git diff` empty over
+  every file the harness touched -- which is the check added after a pass
+  shipped claiming a deletion that a stale backup had put back.
 
 ## Style
 
