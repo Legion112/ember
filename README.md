@@ -654,9 +654,9 @@ machines would carry records for nodes the other machine cannot see.
 it through the create call, so the pin is built in memory from a key this
 process generated and is gone when the run is — there is no `known_hosts` file
 to go stale, to be synced to another machine, or to be edited. A
-`<state_dir>/known_hosts.json` used to be written for by a code path nothing
-ever reached; it is gone, and a file of that name left behind by an older
-ember is read by nothing and can be deleted.
+`<state_dir>/known_hosts.json` used to be written by a code path nothing ever
+reached; it is gone, and a file of that name left behind by an older ember is
+read by nothing and can be deleted.
 
 `allow_interruptible` bids on hardware the provider can take back mid-run. It
 defaults to false, which refuses it — and **`runpod_cloud: COMMUNITY` needs it

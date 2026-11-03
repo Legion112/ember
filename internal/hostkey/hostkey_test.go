@@ -75,11 +75,40 @@ func TestTrustIsSealed(t *testing.T) {
 // is every type that *could* be handed to Callback, including one nothing
 // constructs yet.
 //
-// What it gives up: a method named check that is not Trust's at all. That is
-// accepted rather than narrowed, because a second meaning of `check` in a
-// package this small is itself worth a rename, and the alternative -- matching
-// the parameter list as well -- is a guard that reads straight past an
-// implementation whose author spelled net.Addr through an alias.
+// A RECEIVER IT CANNOT NAME IS A FATAL, and the first version of this guard
+// skipped one instead -- which is the whole reason that rule exists.
+// TestFlagTablesClassifyEveryFlagSetMethod puts it best: "the alternative to
+// failing on a method it cannot classify is reading straight past a flag,
+// which is one more gate that cannot fail in a repository that has already
+// found four." A method receiver in Go is T, *T, T[P] or *T[P]; this unwraps
+// the star and names the identifier, so a GENERIC receiver -- *ast.IndexExpr
+// or *ast.IndexListExpr -- took the skip. Measured on the version that
+// skipped: a permissive generic check in trust.go, an exported constructor
+// for it, and internal/app's dialNode handing it to session.Dial left
+// `go build`, `go test ./...`, `go vet` and `golangci-lint` ALL at exit 0,
+// with ember dialling every node it rents with no host key verification at
+// all -- and TestTrustIsSealed, TestNoInsecureIgnoreHostKey,
+// TestSessionCarriesAPinAndNotAnArbitraryTrust and TestNoProductionDeadCode
+// green beside it, because the types were untouched and the constructor had a
+// caller. A guard that can be walked around is worse than none, because it
+// reads as protection.
+//
+// What it gives up, stated rather than left to be discovered:
+//
+//   - A method named check that is not Trust's at all is counted. Accepted
+//     rather than narrowed, because a second meaning of `check` in a package
+//     this small is itself worth a rename, and the alternative -- matching the
+//     parameter list as well -- is a guard that reads straight past an
+//     implementation whose author spelled net.Addr through an alias.
+//   - A PERMISSIVE check IN A _test.go FILE OF THIS PACKAGE IS NOT REPORTED,
+//     because the walk skips test files. AGENTS.md says "not behind a flag,
+//     not in a test" and "no escape hatch for a seal, not even for a test",
+//     so this is a real gap in the written rule and it is bounded rather than
+//     closed: production cannot reference a _test.go identifier, and this
+//     package's own tests cannot reach sshdial, so such a type can be handed
+//     to nothing that dials. Including test files would mean this guard
+//     reporting itself the moment a test needs a stand-in Trust, which is the
+//     shape of a guard people learn to ignore.
 //
 // The file count is a floor for TestNoInsecureIgnoreHostKey's reason: a glob
 // that matched nothing would report that nothing is wrong.
@@ -110,11 +139,25 @@ func TestTrustHasOneImplementationAndItIsPin(t *testing.T) {
 			if star, isPtr := typ.(*ast.StarExpr); isPtr {
 				typ = star.X
 			}
+			where := name + ":" + strconv.Itoa(fset.Position(fn.Pos()).Line)
 			id, ok := typ.(*ast.Ident)
 			if !ok {
-				continue
+				// A receiver this guard cannot name is a FATAL and never a
+				// skip, which is TestFlagTablesClassifyEveryFlagSetMethod's
+				// rule: the alternative to failing on what it cannot classify
+				// is reading straight past the thing it is looking for. A
+				// generic receiver is *ast.IndexExpr or *ast.IndexListExpr and
+				// took the skip this replaced -- and a generic type is a live
+				// Trust the moment it is instantiated, so with one wired into
+				// internal/app's dialNode ember dialled every node with no
+				// host key verification at all while this guard, go vet,
+				// golangci-lint and the whole unit suite were exit 0.
+				t.Fatalf("%s: check has a %T receiver, which this guard cannot name, so it cannot say whether "+
+					"Trust has gained an implementation -- a generic receiver is this shape, and a generic type "+
+					"is a Trust once instantiated. Read the note in trust.go, then teach this guard the shape "+
+					"rather than letting it skip one", where, typ)
 			}
-			impls[id.Name] = name + ":" + strconv.Itoa(fset.Position(fn.Pos()).Line)
+			impls[id.Name] = where
 		}
 	}
 	if parsed < 3 {
