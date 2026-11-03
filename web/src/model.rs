@@ -1036,6 +1036,21 @@ pub struct Event {
 /// What the socket sends.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Envelope {
+    /// The cursor the server has handed over, which is what a reconnect
+    /// resumes from.
+    ///
+    /// READ BY `Progress::fold` AND NOT BY NOTHING, which it was for the life
+    /// of the field: `Socket::open` took an `after`, its one caller passed
+    /// the literal `0`, and this number had no reader outside a test
+    /// assertion while three comments in this crate described the reconnect
+    /// it is for. It is the same figure `apply` derives from the events, and
+    /// the reason the cursor is taken from the SERVER's answer as well is
+    /// that `apply`'s own advance is a side effect of folding an event at
+    /// all: a reader who moved it inside a match arm would leave the cursor
+    /// standing still over any kind this page does not render, and a cursor
+    /// that means something other than its doc comment says is how a resume
+    /// silently starts asking for the wrong rows. `fold` takes the larger of
+    /// the two, so it can never move past an event that was not folded.
     #[serde(default)]
     pub next: i64,
     #[serde(default, deserialize_with = "nullable")]
@@ -1044,6 +1059,122 @@ pub struct Envelope {
     pub request: Option<Request>,
     #[serde(default)]
     pub running: String,
+}
+
+/// Stream is what a watcher's progress socket is doing, and what the page
+/// says about it.
+///
+/// IT REPLACED AN `RwSignal<bool>` WITH THREE WRITERS AND NO READER.
+/// `connected` was set true on open and false on close and on a failed open,
+/// and `grep -rn connected web/src` found no other line -- so a stream that
+/// ended mid-generation left the last frame on screen under a panel still
+/// captioned as though the card were sampling, for ever. The generation
+/// carried on and was billed; the page looked like ember had stopped. The
+/// same shape as the preview frame nothing inserted and as `cancelling`,
+/// which had a writer, a wire name, a comment and no reader.
+///
+/// THREE STATES AND NOT A BOOL, because the page has to say two different
+/// things and sometimes nothing, and "the stream stopped" and "the stream
+/// stopped and is not coming back" need different remedies from the operator.
+/// `Live` is also the state before the first handshake has completed: the
+/// page has nothing to say about a socket it has only just asked for, and the
+/// thing that does need to know the difference is the retry bound, which is
+/// reset by the open handler rather than by this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stream {
+    /// Open, or opening for the first time. Nothing is printed.
+    #[default]
+    Live,
+
+    /// Closed, with a re-open scheduled.
+    Reconnecting,
+
+    /// Closed, with the retry bound spent.
+    Lost,
+}
+
+impl Stream {
+    /// note is the line the page prints, and `None` is the state that prints
+    /// nothing.
+    ///
+    /// A LINE THAT IS ALWAYS THERE IS NOT A SIGNAL, which is why `Live`
+    /// answers nothing rather than "connected": a tab that says so while
+    /// everything is normal teaches the operator to stop reading the line,
+    /// and the one state this exists for is the one where the step on screen
+    /// is stale.
+    ///
+    /// NO VERDICT ABOUT THE GENERATION, deliberately. ember cannot tell a
+    /// dropped socket from a stopped server from a sleeping laptop, and the
+    /// generation may well still be running and billing -- so the sentence
+    /// says what is true (the step shown is the last one that arrived) and
+    /// names the two things that answer the rest, rather than guessing.
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Stream::Live => None,
+            Stream::Reconnecting => Some(
+                "the progress stream stopped, so the step shown is the last one that \
+                 arrived — reconnecting",
+            ),
+            Stream::Lost => Some(
+                "the progress stream stopped and did not come back, so the step shown is \
+                 the last one that arrived — the generation may still be running: reload \
+                 this page, or ask ember history",
+            ),
+        }
+    }
+}
+
+/// RETRY_ATTEMPTS bounds the re-opens a watcher makes.
+///
+/// TWELVE, which is about forty-three seconds of backoff, and the figure is
+/// chosen against the slowest of the three cases rather than the fastest. A
+/// socket that dropped on its own and a forwarded port that blipped are back
+/// inside a second; a laptop that slept comes back when its timers do; and an
+/// `ember serve` RESTART is the one that sets the bound, because it is the
+/// remediation ember's own cancel 409 prints and the operator has to type the
+/// command again -- a bound a hand restart cannot fit inside would make
+/// "including because ember serve restarted" a case this never covers.
+/// Forty-three seconds is still under a minute, and the last attempts are one
+/// every five seconds against a closed port on loopback, which costs nothing
+/// measurable.
+///
+/// AND IT IS BOUNDED AT ALL because the alternative cannot report: an
+/// unbounded retry is a loop nobody asked for, and a page that retries for
+/// ever can never print the sentence that tells an operator the stream is not
+/// coming back and that reloading is what fixes it.
+pub const RETRY_ATTEMPTS: u32 = 12;
+
+/// reopen_after answers when a watcher re-opens a stream that just ended, and
+/// `None` when it must not.
+///
+/// A DECISION IN `model` AND NOT A CHAIN OF `if` IN A CLOSURE, for
+/// `Listing::answer`'s reason: a retry policy written inside an event handler
+/// can only be checked by driving a browser, and this one has two rules worth
+/// an exit code of their own.
+///
+/// A TERMINAL REQUEST IS NOT A LOSS. Nothing more will be said about a
+/// request that is done, failed, cancelled or interrupted, so a stream that
+/// ends over one has delivered everything there was -- and re-opening would
+/// be a socket, and a goroutine on the other end polling SQLite, for a
+/// generation that finished. This is also what makes the restart case
+/// terminate: `queue.Run` sweeps everything it finds running to `interrupted`
+/// at startup, so the first successful reconnect after a restart arrives at a
+/// terminal row and stops.
+///
+/// BACKOFF RATHER THAN A FIXED CADENCE, which is `awaitJob`'s measurement one
+/// layer out: a flat interval is a guess about how long the thing being
+/// waited for takes, and here the first attempt -- a socket that dropped on
+/// its own with the server still up -- is the one most likely to succeed, so
+/// it is the one that must not wait two seconds.
+pub fn reopen_after(terminal: bool, attempt: u32) -> Option<std::time::Duration> {
+    if terminal || attempt >= RETRY_ATTEMPTS {
+        return None;
+    }
+    // 250ms doubling to a five-second cap. The cap is what keeps twelve
+    // attempts inside a minute while still leaving the later ones far enough
+    // apart to be worth making.
+    let ms = (250_u64 << attempt).min(5_000);
+    Some(std::time::Duration::from_millis(ms))
 }
 
 /// Where one job has got to.
@@ -1203,6 +1334,27 @@ pub struct Progress {
 const MAX_LOG: usize = 400;
 
 impl Progress {
+    /// fold takes one envelope: every event in it, and then the cursor the
+    /// server handed back.
+    ///
+    /// THE ORDER IS LOAD-BEARING. `apply` ignores anything at or below the
+    /// cursor, so advancing it first would drop every event in the envelope
+    /// that set it -- which is the whole content of the first send after a
+    /// reconnect.
+    ///
+    /// `max` and not an assignment, so this can never move the cursor
+    /// BACKWARDS over a `force` send: the server echoes the client's own
+    /// `after` as `next` when it has no new events, which is the ordinary
+    /// shape of an envelope carrying only a changed request.
+    pub fn fold(&mut self, env: &Envelope) {
+        for e in &env.events {
+            self.apply(e);
+        }
+        if env.next > self.cursor {
+            self.cursor = env.next;
+        }
+    }
+
     /// apply folds one event in.
     ///
     /// IDEMPOTENT PER SEQUENCE NUMBER, because a reconnect can re-deliver:
@@ -1434,6 +1586,166 @@ mod tests {
 
         assert_eq!(p.cursor, 1);
         assert_eq!(p.spent, 30_000, "a re-delivered event was applied again");
+    }
+
+    /// A reconnect that resumed from zero replays the whole generation, and
+    /// the fold has to come out of that unchanged.
+    ///
+    /// THE OTHER HALF OF "no gap and no duplicate", at the layer that decides
+    /// it. The lab can see a gap -- a row that never reports its files -- and
+    /// cannot see a duplicate, because `apply`'s idempotence is what hides
+    /// one; so the duplicate is asserted here, over the whole envelope rather
+    /// than one event, which is the shape a resume actually delivers.
+    ///
+    /// Its negative control is the assertion that the cursor MOVED: an
+    /// envelope folded into a Progress that rejected everything in it would
+    /// satisfy "nothing was counted twice" perfectly.
+    #[test]
+    fn folding_a_replayed_envelope_changes_nothing() {
+        let mut cost = ev(2, "unit_cost");
+        cost.spent_micro_usd = 30_000;
+        let env = Envelope {
+            next: 3,
+            events: vec![ev(1, "log"), cost, ev(3, "log")],
+            ..Default::default()
+        };
+
+        let mut p = Progress::default();
+        p.fold(&env);
+        let once = (p.cursor, p.spent, p.log.len());
+        assert_eq!(once, (3, 30_000, 2), "the first fold did not land");
+
+        p.fold(&env);
+        p.fold(&env);
+        assert_eq!(
+            (p.cursor, p.spent, p.log.len()),
+            once,
+            "a replayed envelope was folded again"
+        );
+    }
+
+    /// The cursor is the server's own `next`, which is the figure a reconnect
+    /// asks from.
+    ///
+    /// IT HAD NO READER AT ALL. `Socket::open` took an `after` and its one
+    /// caller passed `0`, so this number crossed the wire on every envelope
+    /// and was dropped. What the assertion is about is the ORDER inside
+    /// `fold`: advancing the cursor before applying would make `apply`'s own
+    /// "at or below the cursor" check throw away every event in the envelope
+    /// that carried it, which is the entire first send after a reconnect.
+    #[test]
+    fn the_cursor_follows_the_servers_own_figure() {
+        let mut p = Progress::default();
+        p.fold(&Envelope {
+            next: 7,
+            events: vec![ev(7, "log")],
+            ..Default::default()
+        });
+        assert_eq!(p.cursor, 7);
+        assert_eq!(
+            p.log.len(),
+            1,
+            "the event in the envelope that set the cursor was dropped"
+        );
+
+        // A `force` send with nothing new echoes the client's own cursor
+        // back, which must not move it and must certainly not move it down.
+        p.fold(&Envelope {
+            next: 7,
+            ..Default::default()
+        });
+        assert_eq!(p.cursor, 7);
+    }
+
+    /// A stream that is open says nothing, and a stream that stopped says so.
+    ///
+    /// `connected` was a bool with three writers and NO READER, so this is the
+    /// reader -- and the absence in the first arm is as much of the assertion
+    /// as the sentences: a line that is always on screen is not a signal.
+    #[test]
+    fn only_a_stopped_stream_is_reported() {
+        assert_eq!(Stream::Live.note(), None);
+
+        let reconnecting = Stream::Reconnecting
+            .note()
+            .expect("a stopped stream says so");
+        assert!(
+            reconnecting.contains("last one that arrived"),
+            "the operator is not told the step is stale: {reconnecting}"
+        );
+        assert!(
+            reconnecting.contains("reconnecting"),
+            "the operator is not told ember is trying again: {reconnecting}"
+        );
+
+        let lost = Stream::Lost.note().expect("a stream that is gone says so");
+        assert!(
+            lost.contains("did not come back"),
+            "a spent retry bound reads like one still in progress: {lost}"
+        );
+        // The remedy, because this is the state nothing else will fix. And
+        // the generation may still be running: a watcher that stopped is not
+        // a rental that stopped.
+        assert!(
+            lost.contains("reload") && lost.contains("still be running"),
+            "the state nothing recovers from names no remedy: {lost}"
+        );
+        assert_ne!(
+            Stream::Reconnecting.note(),
+            Stream::Lost.note(),
+            "a page that is still trying and one that has given up read the same"
+        );
+    }
+
+    /// The retry is bounded, backs off, and does not run at all over a
+    /// request that has ended.
+    #[test]
+    fn the_retry_is_bounded_and_backs_off() {
+        // A terminal request has said everything there was, so re-opening
+        // would be a socket and a polling goroutine for a finished
+        // generation.
+        assert_eq!(reopen_after(true, 0), None);
+
+        let first = reopen_after(false, 0).expect("the first re-open is made");
+        let second = reopen_after(false, 1).expect("the second re-open is made");
+        assert!(
+            first < second,
+            "the retry does not back off: {first:?} then {second:?}"
+        );
+        // The first attempt is the one most likely to succeed -- a socket
+        // that dropped with the server still up -- so it must not wait the
+        // way the last one does.
+        assert!(
+            first <= std::time::Duration::from_millis(500),
+            "the first re-open waits {first:?}, which an operator reads as a freeze"
+        );
+
+        // Capped, or the eighth attempt would be two minutes out.
+        let last = reopen_after(false, RETRY_ATTEMPTS - 1).expect("the last re-open is made");
+        assert!(
+            last <= std::time::Duration::from_secs(5),
+            "the backoff is uncapped: {last:?}"
+        );
+
+        // AND IT STOPS. An unbounded retry is a loop nobody asked for, and a
+        // page that retries for ever can never print the sentence telling the
+        // operator to reload.
+        assert_eq!(reopen_after(false, RETRY_ATTEMPTS), None);
+        assert_eq!(reopen_after(false, RETRY_ATTEMPTS + 1), None);
+
+        // The whole bound, which is what the comment above RETRY_ATTEMPTS
+        // claims: long enough for an `ember serve` restart, short enough that
+        // a tab against a server that has gone says so.
+        let total: std::time::Duration = (0..RETRY_ATTEMPTS)
+            .map(|a| reopen_after(false, a).expect("every attempt below the bound is made"))
+            .sum();
+        assert!(
+            total >= std::time::Duration::from_secs(30)
+                && total <= std::time::Duration::from_secs(60),
+            "the retry bound is {total:?}, which is not the forty-odd seconds it is \
+             written as -- long enough for a hand restart of ember serve, short enough \
+             that a tab against a server that has gone says so"
+        );
     }
 
     /// The same frame arrives on several polls, which is what a real server

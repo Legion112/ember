@@ -1813,6 +1813,22 @@ with nothing behind them — a request refused before a provider was reached
 writes its row and emits no event at all, so a tab watching it used to sit on
 whatever the socket said when it connected.
 
+**A watcher whose stream ends reconnects, from the sequence number it had
+reached.** The page says so while it is trying — one line under *what is
+happening*, saying the step on screen is the last one that arrived — and the
+line goes away when the socket is back. The cases are an `ember serve` that
+was restarted, a laptop that slept, and a forwarded port that blipped; in all
+three the generation may well still be running and billing, so a watcher that
+simply froze was a picture of a generation captioned as though the card were
+sampling. The retry is **bounded** at about forty seconds of backoff —
+long enough to outlast a restart typed by hand, short enough that a tab left
+open against a server that has gone says it is not coming back and that
+reloading is what fixes it. A request that has already ended is not retried at
+all: everything that was going to be said has been. Resuming is safe to
+overlap, because folding an event is idempotent on its sequence number, and
+`ember serve --log-level debug` records the cursor each watcher resumed from —
+the one thing about a reconnect that is otherwise invisible from either end.
+
 The frontend is Rust compiled to WebAssembly, in [`web/`](web). It needs
 `cargo`, the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` at the
 version [`web/Cargo.toml`](web/Cargo.toml) pins — `make web` checks all three

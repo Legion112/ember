@@ -536,6 +536,22 @@ func (l *Lab) StartRaw(ctx context.Context, full ...string) (*exec.Cmd, func() s
 	}
 }
 
+// Printed is everything the last-started subprocess has written so far.
+//
+// WaitForLine's SIBLING, FOR THE ASSERTION THAT IS ABOUT THE SECOND
+// OCCURRENCE. WaitForLine returns the FIRST line matching its substring,
+// which is the right answer for an address printed once at startup and the
+// wrong one for a line a server writes per event: the progress socket records
+// the cursor each watcher resumed from, and what the reconnect lab is about is
+// the SECOND of those. A caller that needs to count or to parse polls this.
+func (l *Lab) Printed() string {
+	l.t.Helper()
+	if l.last == nil {
+		l.t.Fatal("Printed before Start; there is no subprocess to read")
+	}
+	return l.last.String()
+}
+
 // WaitForLine blocks until the last-started subprocess has printed sub.
 //
 // IT EXISTS BECAUSE Start's OWN READER WAITS FOR THE PROCESS. That works for

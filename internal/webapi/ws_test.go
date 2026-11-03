@@ -1,8 +1,10 @@
 package webapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -115,6 +117,41 @@ func TestWS_ResumesFromTheClientsCursor(t *testing.T) {
 	}
 	if env.Events[0].Seq != 5 {
 		t.Errorf("first event has Seq %d, want 5", env.Events[0].Seq)
+	}
+}
+
+// TestWS_RecordsTheCursorItWasAskedToResumeFrom.
+//
+// THE LAB'S INSTRUMENT, SEALED HERE. Whether a browser resumes from its cursor
+// or from zero is not visible on the page at all -- `Progress::apply` is
+// idempotent per sequence number, so a client that replayed a whole hour of
+// progress renders exactly what one that resumed correctly renders. The only
+// place that knows is this handler, and TestServe_UIResumesAProgressStreamItLost
+// reads this line out of `ember serve --log-level debug` to prove the reconnect
+// carried a cursor. A lab resting on a log line wants that line asserted
+// somewhere an exit code can see it, or the lab's evidence is a grep for a
+// string nothing promises to print.
+func TestWS_RecordsTheCursorItWasAskedToResumeFrom(t *testing.T) {
+	var logged bytes.Buffer
+	h := newHarness(t, func(o *Options) {
+		o.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	})
+	id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
+
+	_, wsURL := wsServer(t, h)
+	c := dialWS(t, wsURL+"/ws?id="+id+"&after=4")
+	// Read one envelope so the handler has certainly run past the log line
+	// before the buffer is examined.
+	readEnvelope(t, c)
+
+	if got := logged.String(); !strings.Contains(got, "after=4") {
+		t.Errorf("the cursor the client resumed from was not recorded:\n%s", got)
+	}
+	// The negative control: the number has to be the one the client sent, or
+	// the line would read `after=4` for every connection and the lab's
+	// assertion would hold against a client that resumed from nothing.
+	if got := logged.String(); strings.Contains(got, "after=0") {
+		t.Errorf("the line reports a cursor nobody asked for:\n%s", got)
 	}
 }
 
