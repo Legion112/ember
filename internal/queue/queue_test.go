@@ -1506,3 +1506,120 @@ func TestCancel_DoesNotReachTheNextRequestOnTheSameRental(t *testing.T) {
 		t.Errorf("the second request ended as %q, want done", got.Status)
 	}
 }
+
+// observingPlanner looks at the queue from inside provisioning.
+//
+// The only moment a test can see the window `Holding` exists for: `Plan` is
+// called after ClaimNext has written `running` to the row and before any
+// rental exists, which is where a cancel from the web UI ordinarily lands.
+type observingPlanner struct {
+	*fakePlanner
+	at func(genstore.Request)
+}
+
+func (p observingPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error) {
+	p.at(r)
+	return p.fakePlanner.Plan(ctx, r)
+}
+
+// Holding is true from the claim; Running is not. The gap is a 409's
+// remediation.
+//
+// THE ROW READS `running` FROM ClaimNext and `generate` registers the stop
+// channel after the plan, the create, the gpu probe, the asset verify and the
+// model load -- so there is a window, often tens of seconds long, in which a
+// rental IS in this process and `Cancel` has nothing to signal. webapi used to
+// answer a cancel there by telling the operator to restart `ember serve`,
+// which destroys the rental they are paying for to reconcile a request that
+// was seconds from generating. These two answers are what let it say
+// something else.
+//
+// BOTH DIRECTIONS, because a `Holding` that answered true always would
+// satisfy the first assertion and would make the restart advice unreachable
+// for the state it IS true of -- a row left `running` by an ember that is
+// gone.
+func TestHolding_IsTrueFromTheClaimAndNotOnlyWhileGenerating(t *testing.T) {
+	served := &fakeServed{caps: sdserver.Capabilities{Model: "sd15"}}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+	id := enqueue(t, st, "rtx2080ti", "first")
+
+	var heldDuringPlan, generatingDuringPlan bool
+	q.Planner = observingPlanner{fakePlanner: pl, at: func(r genstore.Request) {
+		heldDuringPlan = q.Holding(r.ID)
+		_, generatingDuringPlan = q.Running()
+	}}
+
+	if q.Holding(id) {
+		t.Error("a request nothing has claimed is held")
+	}
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !heldDuringPlan {
+		t.Error("the request was not held while its rental was being provisioned, so the " +
+			"API cannot tell that window from a row left running by a dead process")
+	}
+	if generatingDuringPlan {
+		t.Error("Running() reported a generation during provisioning; if these two agreed " +
+			"there would be nothing to tell the two refusals apart")
+	}
+	// AND IT IS GIVEN BACK. A finished request still held would make the
+	// restart advice unreachable, which is the mirror defect.
+	if q.Holding(id) {
+		t.Error("the request is still held after its rental was destroyed")
+	}
+	if q.Holding("") {
+		t.Error("an empty id is held; every request with no id would read as this one")
+	}
+}
+
+// A rider is held as itself, and the request before it stops being held.
+//
+// `once` holds the request that OPENED the rental; a request claimed at the
+// bottom of drain is a different id, and between its claim -- which writes
+// `running` to its row -- and `generate` registering its stop channel, the
+// same window exists. It is short, because the model is already resident, and
+// a short window answered with "restart ember serve" is still answered with
+// the one action that destroys the rental. Reinstating drain's own hold is
+// green against every other test in this package, which is why this one is
+// here.
+//
+// OBSERVED FROM INSIDE THE BATCH, which is where the two can be told apart:
+// `generate` sets `current` and `stop` and never touches `held`, so by this
+// point `held` is whatever the last claim recorded -- the rider with drain's
+// hold in place, and the opener without it.
+func TestHolding_FollowsTheClaimOntoARiderAndNotTheRequestThatOpenedIt(t *testing.T) {
+	served := &fakeServed{caps: sdserver.Capabilities{Model: "sd15"}}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+
+	opener := enqueue(t, st, "rtx2080ti", "first")
+	rider := enqueue(t, st, "rtx2080ti", "second")
+
+	type seen struct{ opener, rider bool }
+	got := map[int]seen{}
+	served.onStop = func(_ <-chan struct{}, n int) error {
+		got[n] = seen{opener: q.Holding(opener), rider: q.Holding(rider)}
+		return nil
+	}
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("batches = %d, want the rental to have served both", len(got))
+	}
+	if !got[0].opener || got[0].rider {
+		t.Errorf("during the opener's batch: opener held = %v, rider held = %v",
+			got[0].opener, got[0].rider)
+	}
+	if !got[1].rider {
+		t.Error("the rider is not held while it is the request on the rental, so a cancel " +
+			"in the gap before its stop channel exists would be told to restart ember serve")
+	}
+	if got[1].opener {
+		t.Error("the opener is still held while the rider is the one on the rental; one " +
+			"drain goroutine holds one request, and two would make the value a guess")
+	}
+}

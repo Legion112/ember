@@ -745,9 +745,18 @@ func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
 // one. `queue.Cancel` returns false unless the request is the one its drain
 // loop is generating, and the row says `running` from `ClaimNext` -- which is
 // before `generate` registers the stop channel. So the whole of provisioning
-// is a window in which the row is cancellable and no rental is generating it,
-// and that is exactly the state the 409 is written for: "recorded as
-// generating, but no rental in this process is generating it".
+// is a window in which the row is cancellable and no rental is generating it.
+//
+// WHICH IS ONE OF THE TWO 409s AND NOT THE OTHER, and the sleep below is what
+// makes sure this lab reaches the one it means. A rental IS in this process
+// here, running the probe, about to generate -- so the refusal has to say the
+// rental is coming up and to ask again. The sentence it used to print,
+// "restart ember serve to have the queue reconcile it", belongs to a row left
+// `running` by an ember that is GONE, and following it here destroys the
+// rental the operator is paying for. That state cannot be reached from a lab
+// without writing a row behind the queue's back, so webapi's own
+// TestCancel_SaysTheRentalIsComingUpRatherThanAskingForARestart is what holds
+// the two answers apart; this is what proves which one a browser is shown.
 //
 // AND THE WINDOW IS MADE LONG RATHER THAN RACED. On this provider the window
 // is a container create, an sshd and a one-second model load -- a handful of
@@ -830,12 +839,30 @@ func TestServe_UICancelSaysWhatTheServerAnswered(t *testing.T) {
 			"the queue panel says: %q\nthe request is %q\n%s",
 			err, panelText(ctx), getRequest(t, srv, batch).Status, console.text())
 	}
+	// WHICH 409, and this is the whole of #119. There are two ways to reach
+	// this refusal and the sleep above picks one of them deliberately: a
+	// rental IS in this process, it is running the probe, and it is about to
+	// generate. The message used to be the other one -- "restart ember serve
+	// to have the queue reconcile it" -- which is the single action that
+	// destroys the rental the operator is paying for, to reconcile a request
+	// that was seconds from running. So what is asserted here is the
+	// provisioning sentence AND the absence of the restart advice: a lab that
+	// checked only for a 409, or only for an error element, would pass
+	// against the destructive wording going straight back in.
 	refusal := waitForText(t, ctx, queuePanel+`//p[@class="error"]`,
-		"restart ember serve", 10*time.Second, console)
+		"coming up", 10*time.Second, console)
 	t.Logf("the page says: %s", refusal)
-	if !strings.Contains(refusal, "no rental in this process is generating it") {
-		t.Errorf("the page shows %q; the server's own sentence is what names the "+
-			"remediation, and `reason` carries it in full for exactly this", refusal)
+	if !strings.Contains(refusal, "ask again") {
+		t.Errorf("the page shows %q; the provisioning window resolves itself, so the "+
+			"remediation is to ask again rather than to restart anything", refusal)
+	}
+	if strings.Contains(refusal, "restart ember serve to have the queue reconcile it") {
+		t.Errorf("the page shows %q; that is the refusal for a row left running by an "+
+			"ember that is GONE, and following it here destroys a live rental", refusal)
+	}
+	if !strings.Contains(refusal, "do not restart ember serve") {
+		t.Errorf("the page shows %q; the operator's instinct is the advice this message "+
+			"replaced, so saying not to is the useful half", refusal)
 	}
 
 	// AND THE BUTTON CAME BACK, because nothing was stopped. A refused cancel

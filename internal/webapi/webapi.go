@@ -85,6 +85,14 @@ type Drain interface {
 	// it. False means that request is not the one generating, which a caller
 	// must not report as "stopped" -- see cancelRequest.
 	Cancel(genstore.ReqID) bool
+
+	// Holding is whether this process has claimed that request at all --
+	// anywhere between the claim and the end of its batch, generating or
+	// not.
+	//
+	// NOT A SECOND SPELLING OF Running, and the difference is a rental the
+	// operator is paying for: see cancelRequest's two 409s.
+	Holding(genstore.ReqID) bool
 }
 
 // Options are what a server needs.
@@ -650,16 +658,41 @@ func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 
 	if req.Status == genstore.StatusRunning {
 		if !s.cancelRunning(id) {
-			// Running in the row and not running in this process. That is
-			// what a restart leaves behind -- queue.Run's Interrupt sweep
-			// has not reached it yet -- or a row written by an ember that is
-			// gone. Reported rather than marked cancelled, for the reason
-			// `ember ls --all` exits non-zero on a provider it could not
-			// ask: "I could not stop it" and "it is stopped" are different
-			// answers, and the first one must not render as the second over
-			// a card that may still be billing.
+			// Running in the row and not running in this process. Reported
+			// rather than marked cancelled, for the reason `ember ls` exits
+			// non-zero on a provider it could not ask: "I could not stop it"
+			// and "it is stopped" are different answers, and the first must
+			// not render as the second over a card that may still be
+			// billing.
+			//
+			// TWO STATES REACH HERE AND ONLY ONE OF THEM IS THE ONE THE
+			// MESSAGE USED TO DESCRIBE. The row reads `running` from
+			// ClaimNext and the queue registers its stop channel in
+			// `generate`, so the whole of provisioning -- the plan, the
+			// create, the gpu probe, the asset verify, the model load -- is
+			// a window in which the row is cancellable and `Cancel` has
+			// nothing to signal. That is the ORDINARY way to get here: an
+			// operator who clicks cancel while a node is coming up. The
+			// other is a row left `running` by an ember that is gone, which
+			// queue.Run's Interrupt sweep clears on the next start.
+			//
+			// One message for both told the first one to restart
+			// `ember serve`, which destroys the rental they are paying for
+			// in order to reconcile a request that was seconds from
+			// generating -- a destructive remedy for a condition that
+			// resolves itself. The queue can tell them apart without a
+			// counter, because there is one drain goroutine and a rental
+			// lives inside one iteration of its loop, so the two answers are
+			// two answers.
+			if s.holdingRequest(id) {
+				s.fail(w, http.StatusConflict, fmt.Errorf("request %s has a rental coming up "+
+					"and has not started generating yet, so there is nothing to stop; "+
+					"ask again once it is generating, or leave it queued -- do not restart "+
+					"ember serve, which would destroy the rental it is waiting for", id))
+				return
+			}
 			s.fail(w, http.StatusConflict, fmt.Errorf("request %s is recorded as generating, "+
-				"but no rental in this process is generating it; restart ember serve to have "+
+				"but no rental in this process holds it; restart ember serve to have "+
 				"the queue reconcile it", id))
 			return
 		}
@@ -701,6 +734,21 @@ func (s *Server) cancelRunning(id genstore.ReqID) bool {
 		return false
 	}
 	return s.opts.Queue.Cancel(id)
+}
+
+// holdingRequest asks whether a rental for this request is in this process,
+// tolerating no queue the way cancelRunning and running() do.
+//
+// NO LOOP IS NOT "A RENTAL IS COMING UP", which is why the nil case answers
+// false rather than the gentler sentence: with no drain goroutine there is
+// nothing to come up, and the gentler sentence would tell an operator to wait
+// for a rental nothing is provisioning. The uninformative answer is the one
+// that does not promise anything -- Caps.PublicSSH's direction, in a message.
+func (s *Server) holdingRequest(id genstore.ReqID) bool {
+	if s.opts.Queue == nil {
+		return false
+	}
+	return s.opts.Queue.Holding(id)
 }
 
 // getEvents replays from a cursor.

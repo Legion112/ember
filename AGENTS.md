@@ -3455,6 +3455,47 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `Caps.PublicSSH`'s decision: a fake that claimed to have stopped something
   without being told would make every cancel test pass against a handler that
   never called `Cancel`.
+- **Two different states reach the cancel 409, and one message told the
+  operator to take the destructive action in the state it is wrong for.** The
+  refusal itself is right -- "I could not stop it" and "it is stopped" are
+  different answers -- and the remediation was *"restart ember serve to have
+  the queue reconcile it"*, which is true of a row left `running` by an ember
+  that is gone and false of the state this fires in most often. The row reads
+  `running` from `ClaimNext` and `generate` registers the stop channel after
+  the plan, the create, the gpu probe, the asset verify and the model load, so
+  the ordinary way to reach the 409 is clicking cancel while the rental is
+  still being **provisioned** -- where a rental is very much in this process,
+  it is about to generate, and restarting `ember serve` destroys the card the
+  operator is paying for in order to reconcile a request that was seconds from
+  running. A destructive remedy for a condition that resolves itself.
+  **It was invisible until the answer was rendered**: until #108 the page
+  posted the cancel as `api::post::<_, serde_json::Value>` and dropped the
+  `Result` with `let _ =`, so the sentence was built, serialized, parsed and
+  thrown away -- the fix for one defect exposing the next, which is the
+  ordinary way this goes.
+  **The queue can tell them apart without a counter**, which is the fact two
+  rentals at once being unrepresentable already rests on: one drain goroutine,
+  a rental inside one iteration of its loop, so "this process holds a rental
+  for that request" is a single value. `Queue.held` is set at each claim and
+  cleared when `once` returns -- so it covers the teardown as well, because a
+  request whose destroy is still running has not been handed back to anybody
+  -- and `Holding` is deliberately NOT a second spelling of `Running`: the two
+  differ for exactly as long as a rental takes to come up, and that difference
+  is the only thing that can distinguish the two 409s. With no drain loop at
+  all `holdingRequest` answers false and the restart advice stands, because
+  nothing is coming up and the gentler sentence would be a promise.
+  **The assertion that the two answers DIFFER is what stops them being merged
+  back together**, and it is a unit test rather than a lab because only one of
+  the two states is reachable from a browser: #116's cancel lab puts
+  `sleep 25` in `gpu_probe`, which runs over SSH before the assets and before
+  the server, so the provisioning window is twenty-five deterministic seconds
+  with no test-only code -- while a row left `running` by a dead process cannot
+  be produced without writing it behind the queue's back, and `queue.Run`'s
+  Interrupt sweep clears it at startup anyway. So the lab asserts which of the
+  two a browser is shown, including the **absence** of the restart clause, and
+  `TestCancel_SaysTheRentalIsComingUpRatherThanAskingForARestart` holds both
+  apart. A lab that checked only for a 409, or only that an error element
+  appeared, would pass against the destructive wording going straight back in.
 - **The queue records how a cancelled generation ended; the handler does
   not.** A queued request has no rental and nothing to tell, so the handler
   makes it terminal. A running one is still generating when the handler
