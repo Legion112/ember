@@ -3423,6 +3423,57 @@ A leaked node bills by the hour in silence. These are not style preferences.
   dump, which is the only thing that could have found it. The exit is now
   collected by a goroutine and the defer waits on a channel with a five-second
   cap.
+  **The cap had no test for the life of the fix, and the one fake that could
+  have reached it returns on `ctx.Done()`.** Measured: deleting the five-second
+  cap outright leaves `go test -race ./internal/app/ ./internal/queue/` at exit
+  0, so the sentence above asserted a property with no exit code behind it --
+  which is what the trust-on-first-use claim in this file was corrected for.
+  `fakeServerRunner`'s `linger` is `<-ctx.Done()`, and that is the **tidier**
+  behaviour: it is right for every test that uses it, because ember stops the
+  server by cancelling. The bug the cap exists for is a `wait` that does not
+  return even then -- "cancelling the context closes the session, sd-server
+  keeps running, and no exit status ever arrives" -- so every test that drove
+  this defer handed it an exit that was always going to arrive, and the cap was
+  never the thing that released it. The **sixth** instance of a fake kinder
+  than the thing it stands in for, and #128 called it the fifth: the five this
+  file already records are `runpodfake`'s 200 on a deleted pod, the preview
+  fake that never repeated a frame, **the queue fake that stamped `Seq`
+  itself**, the cancel fake with no error object and `RecordingProvider`
+  echoing the injected host key -- the issue listed four and left out the
+  `Seq` one, which is the entry that cost a whole generation's event stream.
+  Counted here rather than carried forward, because a running total in prose
+  is the thing this file has been wrong about before. A **second**
+  fake beside the first rather than a flag on it, and no widening of
+  `sshx.Runner`: the seam already hands back a `wait func() error`, which is
+  all this needs.
+  **A WEDGE PRINTS NO `--- FAIL`, which is why the test carries its own
+  deadline rather than being left to the package timeout.** CI greps the unit
+  log for `--- SKIP` and reads `go test`'s status, and a hang is invisible to
+  both until the binary's own `-timeout` prints a goroutine dump that names
+  nothing an operator or a reviewer can act on. Same rule as the browser labs:
+  race the thing you are waiting for against the thing that means it will never
+  happen. 7.0s on the tree as it stands -- two seconds for the port wait plus
+  the cap -- and without the cap it does not return at all. Checked by deleting
+  the cap, by widening it past the assertion's bound, and -- because belt and
+  braces reads exactly like a dead gate -- by deleting the cap with the new
+  test skipped, which is green: nothing else in the tree reports it.
+  **`ws.go`'s ten-second write bound is the same shape, was equally untested,
+  and now has the same test.** It is the lesser case: one watcher goroutine
+  against a peer that has stopped reading, rather than a process that will not
+  exit. Replacing its `context.WithTimeout` with `context.WithCancel` was
+  green too. The parent must have **no deadline of its own**, which is why that
+  test spends the whole ten seconds -- `WithCancel` inherits a deadline, so a
+  bounded parent would pass against the defect as happily as against the fix,
+  and the real parent is the websocket handler's request context, which has
+  none. No new seam for it either: `coder/websocket` allows one message writer
+  at a time and acquires it through a context-aware channel, so an unclosed
+  `Writer` blocks the next `Write` exactly as a filled socket buffer does.
+  Narrowing `send`'s `*websocket.Conn` to an interface so a fake could block
+  would be a production type shaped by a test's convenience, which is the line
+  `sshx.Runner` is not widened across either. `tunnel.Forwarder`'s `closeAll`
+  is the third of the family and is left as it is, for the reason already
+  recorded above: on the cancellation path the leak is unrepresentable, and
+  what it guards is the shape.
 - **A server that died has to be noticed at once, not at `ready_timeout`.**
   Handed `--diffusion-model` for a monolithic checkpoint, sd-server printed
   `get sd version from file failed`, exited after about a second, and ember

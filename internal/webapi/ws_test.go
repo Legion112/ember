@@ -308,6 +308,70 @@ func TestWS_ReportsWhichRequestIsGenerating(t *testing.T) {
 	}
 }
 
+// TestWS_AWriteThatCannotProceedIsBoundedRatherThanHoldingTheWatcher.
+//
+// `send`'s write is wrapped in a ten-second timeout so that a client which has
+// stopped reading cannot hold this goroutine for as long as the generation
+// lasts. It is the lesser half of the family `runServed`'s deferred reaper
+// belongs to -- one watcher goroutine against a peer, rather than a process
+// that will not exit -- and it was equally untested: replacing the
+// `context.WithTimeout` with `context.WithCancel` left
+// `go test -race ./internal/webapi/` green.
+//
+// THE PARENT MUST HAVE NO DEADLINE OF ITS OWN, which is the whole reason this
+// takes ten seconds. `WithCancel(ctx)` inherits the parent's deadline, so a
+// test that passed a bounded context would pass against the defect as well --
+// and the real parent is the websocket handler's request context, which has
+// none. In production the write is the only thing standing between a dead peer
+// and a goroutine per watched request.
+//
+// A REAL CONN AND NO NEW SEAM. coder/websocket allows one message writer at a
+// time and acquires it through a context-aware channel, so an unclosed
+// `Writer` makes the next `Write` block in exactly the way a filled socket
+// buffer does. Narrowing `send`'s `*websocket.Conn` to an interface so a fake
+// could block would be a production type shaped by a test's convenience, which
+// is the line `sshx.Runner` is not widened across either. Nothing goes on the
+// wire for this, so the client does not even have to be reading.
+//
+// Its own deadline and its own message, because A WEDGE PRINTS NO `--- FAIL`:
+// the SKIP grep and `go test`'s status both see a hang as nothing at all until
+// the package timeout dumps goroutines.
+func TestWS_AWriteThatCannotProceedIsBoundedRatherThanHoldingTheWatcher(t *testing.T) {
+	h := newHarness(t)
+	id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
+
+	_, wsURL := wsServer(t, h)
+	c := dialWS(t, wsURL+"/ws?id="+id)
+
+	// Held open and never closed, so the conn's single message writer is
+	// taken for the rest of the test.
+	held, cancelHeld := context.WithCancel(t.Context())
+	defer cancelHeld()
+	if _, err := c.Writer(held, websocket.MessageText); err != nil {
+		t.Fatalf("could not take the conn's message writer: %v", err)
+	}
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		// force, so there is certainly an envelope to write, and a parent
+		// with no deadline, so only the bound can end it.
+		_, _ = h.send(context.WithoutCancel(t.Context()), c, genstore.ReqID(id), wsCursor{}, true)
+		done <- time.Since(start)
+	}()
+
+	select {
+	case took := <-done:
+		if took > 30*time.Second {
+			t.Fatalf("send returned after %v, want the ten-second bound to have ended it", took)
+		}
+	case <-time.After(40 * time.Second):
+		t.Fatal("WEDGED: send did not return within 40s against a write that cannot proceed, " +
+			"so the watcher goroutine has no bound -- a hang rather than a failure, which is " +
+			"why this assertion carries its own deadline")
+	}
+}
+
 // contextWithTimeout is t.Context with a deadline, so a hung read fails the
 // test instead of the suite's whole timeout.
 func contextWithTimeout(t *testing.T, d time.Duration) (context.Context, context.CancelFunc) {
