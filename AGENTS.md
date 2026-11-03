@@ -4860,20 +4860,35 @@ A leaked node bills by the hour in silence. These are not style preferences.
   rental on a host with an old driver and was not made. `pod_running.json`'s
   `"cudaVersion": "12.4"` is **confirmed** schema-derived and undecoded:
   `grep -n Cuda internal/provider/runpod/types.go` returns nothing.
-  **One thing is NOT done and it is bookkeeping rather than behaviour.**
-  `node.CUDAAtLeast` and `ParseCUDAVersion` now have no caller at all and
-  should go the way `node.RateFromFloat` went -- premise read from a schema, and
-  a live second mechanism in `gpu_probe`, which are both halves of that
-  precedent. They are still here because `cmd/check-coverage`'s `deadExcluded`
-  names `internal/node.CUDAAtLeast` and fails over an entry it stops reporting,
-  so the function and its waiver have to be deleted in one commit, and that
-  file was held by another change. Three lines of deletion; the waiver's stated
-  reason -- "deleting this would remove the evidence that the key is
-  unenforced" -- is **stale as of this commit**, because the evidence is now the
-  refusal, the capture guard and `TestCreate_SendsNoCudaFieldAtAll`, none of
-  which is that function. The two judgements worth keeping when it goes are at
-  `ParseCUDAVersion`: strings rather than a float, because "12.10" is not 12.1,
-  and compared as a pair of integers for the same reason.
+  **One thing is NOT done and it is bookkeeping rather than behaviour --
+  `node.CUDAAtLeast` alone, and the first wording of this entry said "and
+  `ParseCUDAVersion`" and was wrong.** That is this file's own recurring defect
+  committed by the change that is correcting one, and it was caught in review
+  rather than by a test: the parser is **live**, through
+  `node.ParseComputeCap` and `local.Provider.Detect`, which is the
+  `compute_cap` path this very entry names as the mechanism that works. So the
+  claim was false about the one function #91 settles on, the stated follow-up
+  would not have compiled, and the same commit edited `compute.go`'s doc
+  comment in a file whose own line twenty lines above the call already said the
+  two share a parser. What makes it worth recording rather than quietly fixing
+  is that `TestNoProductionDeadCode` had it right the whole time -- with the
+  waiver removed it reports `internal/node.CUDAAtLeast ... (3 site(s))` and
+  never names the parser -- so the detector and the comment disagreed and the
+  comment was the one a reader would have believed. **A claim about what calls
+  what is checkable with one grep, which is exactly why nobody ran it.**
+  `CUDAAtLeast` is the callerless one and should go the way
+  `node.RateFromFloat` went -- premise read from a schema, and a live second
+  mechanism in `gpu_probe`, which are both halves of that precedent. It is
+  still here because `cmd/check-coverage`'s `deadExcluded` names it and fails
+  over an entry it stops reporting, so the function and its waiver have to be
+  deleted in one commit and that file was held by another change (#161). **Two
+  lines of deletion, not three.** The waiver's stated reason -- "deleting this
+  would remove the evidence that the key is unenforced" -- is **stale as of
+  this commit**, because the evidence is now the refusal, the capture guard and
+  `TestCreate_SendsNoCudaFieldAtAll`, none of which is that function. The two
+  judgements worth keeping belong to the parser that stays rather than to the
+  comparison that goes: strings rather than a float, because "12.10" is not
+  12.1, and compared as a pair of integers for the same reason.
   **And the comment guard caught this change citing `ember ls --all`.**
   `rejectRemovedKeys`'s doc comment reached for that flag as its precedent for
   "a documented thing nobody can use is worse than no documented thing" --

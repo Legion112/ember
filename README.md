@@ -1189,12 +1189,26 @@ first was `dataCenter` against `dataCenterId` on network volumes.
 the workload and costs the probe rather than the run. In practice the floor is
 not tight anyway: a rented RTX 4090 reported driver 595.91.07 with
 `CUDA Version: 13.2`, ahead of the 13.0.1 the images are built against — which
-is also the number a node-side floor would have to be compared against, and
-why one is not built: CUDA minor-version compatibility means an image built
-against 12.6 runs on a 12.x driver older than 12.6, so comparing the two as
-versions refuses hosts the image works on. Settling that needs a rental on a
-host with an old driver, and until somebody has one the probe is the honest
-mechanism: it asks the card to do the thing, rather than asking a number.
+is also the number a node-side floor would have to be compared against.
+
+One is not built, and the reason is a reading rather than a measurement, which
+is worth separating. **Measured:** `nvidia-smi --version` and `nvidia-smi -q`
+both report a `CUDA Version`, so the number exists and ember could read it
+(`--query-gpu` does not offer it — that one gives `compute_cap`, a compute
+capability and a different number). **Read from NVIDIA's published
+documentation and observed nowhere in this repository:** that CUDA
+minor-version compatibility lets an image built against 12.6 run on a 12.x
+driver older than 12.6 — which, if it holds, means comparing the two as
+versions would refuse hosts the image works on. Nothing here has watched that
+hold or fail, and settling it needs a rental on a host whose driver is older
+than the image, which is not something a create call can ask for.
+
+The conclusion is the same either way, which is why the floor is not built on
+either reading: if the compatibility guarantee holds, a version comparison
+over-refuses; if it does not, there is still no observation of the failure to
+calibrate one against, and the figure is read on the node after the pod is
+already billing. So the probe is the honest mechanism: it asks the card to do
+the thing, rather than asking a number.
 
 ### Choosing the image by the card
 
