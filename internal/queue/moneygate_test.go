@@ -28,18 +28,20 @@ import (
 // `plan.Offer.Price` with a literal 0 in the ceiling call beside it -- a
 // ceiling that projects nothing refuses nothing, which is the $54 case
 // exactly. Found by sweeping the class for #157 rather than by review, which
-// is the third time in this repository a money gate has turned out to be held
-// in place by nothing: `AGENTS.md` records the --allow-paid gate on the store
-// fill (#155) and this change records the period ceiling beside it.
+// is how the --allow-paid gate on the store fill was found (#155) and how the
+// period ceiling beside it was found here. NO RUNNING TOTAL: the first
+// wording of this comment called it "the third time", and this change alone
+// adds two or three to whatever the count was -- a tally in prose is the
+// thing `AGENTS.md` records itself having been wrong about, so the instances
+// are named rather than numbered.
 //
 // WHY NOTHING COULD SEE THEM. Both gates read `plan.Offer`, so they are on the
-// far side of a successful `app.NewPlan` -- and no fake in this package served
-// a GPU catalogue. `storeFakes` deliberately does not, because a provider that
-// cannot say what cards it has is what makes the pre-flight's ORDER
-// observable; `ceiling_test.go` reaches the ceiling through the local
-// provider, which plans fine and is FREE, so refusePaid returns nil and the
-// projection is zero. Every path to these two lines went through a provider
-// that either could not choose an offer or could not be charged for one.
+// far side of a successful `app.NewPlan` -- and no fake in this package could
+// get one. `ceiling_test.go` reaches the ceiling through the local provider,
+// which plans fine and is FREE, so refusePaid returns nil and the projection
+// is zero. `storeFakes` served no GPU catalogue. Every path to these two lines
+// went through a provider that either could not choose an offer or could not
+// be charged for one.
 //
 // SO THE FAKE HERE IS THE ONE THING MISSING: a paid provider that CAN choose
 // an offer. It is the provider's own committed capture rather than a second
@@ -47,9 +49,26 @@ import (
 // `dataCenterId` bought -- and it prices the RTX 4090 at $0.89/hr, which is
 // the figure `AGENTS.md`'s own measurements quote for a 4090.
 //
-// IT IS NOT storeFakes WITH ONE MORE ROUTE, because three tests in
-// preflight_test.go assert positively on failing at "list offers from runpod"
-// and would stop asserting the order they exist for.
+// IT IS NOT storeFakes WITH ONE MORE ROUTE, AND THE FIRST REASON GIVEN FOR
+// THAT WAS FALSE. This comment used to read "because three tests in
+// preflight_test.go assert positively on failing at 'list offers from
+// runpod'". Measured: adding a /v2/catalog/gpus route to `storeFakes` breaks
+// NOTHING -- `go test ./internal/queue/` exit 0 -- there is ONE such
+// assertion in this package, at preflight_test.go:255, and it survives the
+// route; the three are in internal/cli/preflight_test.go, a different package
+// with its own fake, and one of those three is a negative. A comment wrong
+// about why a seal holds is how the seal gets removed by somebody being
+// helpful, and that one would have sent the next reader to delete a helper
+// they believed was redundant.
+//
+// THE REAL REASON IS THE FIXTURE AND IT IS STRONGER: `storeConfig` pins the
+// store to EU-RO-1, a store's datacentre OVERRIDES the configured placement
+// and narrows Filter.Region, and the committed `gpus.json` carries capacity
+// only in CA-MTL-3, US-MO-1 and US-IL-1. So `storeFakes` can never produce a
+// GPU offer at all, whatever routes it serves -- the gates behind plan.Offer
+// are out of its reach by FIXTURE and not by routing. Reaching them from
+// there would mean moving `storeConfig`'s region or re-capturing the
+// catalogue, perturbing five existing tests to serve one.
 //
 // THERE IS STILL NO /v2/pods ROUTE, so nothing here can create a node even if
 // a gate let it through -- and a plan that got past both gates returns a
@@ -76,6 +95,17 @@ func pricedFakes(t *testing.T) app.Deps {
 		Engine:       dockerengine.NewRecordingEngine(),
 		HomeDir:      t.TempDir(),
 		CloudBaseURL: api.URL,
+		// S3BaseURL IS SET ALTHOUGH NOTHING HERE READS IT, because
+		// app.CheckStoreAssets falls back to s3.EndpointFor(store.Region) --
+		// a real RunPod endpoint -- whenever this field is empty. It is
+		// unreachable today, since `pricedConfig` names no store and no
+		// assets so the pre-flight returns before that line; it goes live the
+		// first time somebody gives `pricedConfig` a store, and the rule it
+		// would break then is the one `AGENTS.md` states by name: a test that
+		// registers a cloud provider must not be able to reach it. The same
+		// handler, whose default branch is a 404, so an object call reads as
+		// an empty store and no packet leaves this process.
+		S3BaseURL: api.URL,
 		// Injected rather than resolved, so this test cannot pick up the
 		// developer's own RUNPOD_API_KEY and make a live call.
 		Creds:     &config.Credentials{RunPod: node.NewSecret([]byte("rp-token"))},
@@ -133,7 +163,8 @@ func TestAppPlanner_ReachesTheAllowPaidGateOnTheCardItChose(t *testing.T) {
 	}
 	for _, want := range []string{"--allow-paid", "$0.89/hr", "runpod"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal does not mention %q, so it is not the money gate's: %v", want, err)
+			t.Errorf("the refusal does not mention %q, so it is not the money gate's "+
+				"(or testdata/gpus.json no longer prices the 4090 at $0.89/hr): %v", want, err)
 		}
 	}
 
@@ -166,14 +197,26 @@ func TestAppPlanner_ReachesTheAllowPaidGateOnTheCardItChose(t *testing.T) {
 //     exists not to be;
 //   - the live one adds them, gets $20.34, and refuses.
 //
-// AND THE TTL IS THE NARROWED ONE, which is what the ACCEPTANCE arm pins.
-// `pricedConfig` allows two hours and the request asks for one, so the honest
-// projection is $0.89 and the config's own TTL would make it $1.78. With
-// $18.95 already spent, the narrowed figure is $19.84 and goes ahead while the
-// config's would be $20.73 and refuse -- so a ceiling reading
-// `p.Config.TTL` in place of `cfg.TTL` fails here and nowhere else. That is
-// the deadline the node will actually get, which is the whole reason the
-// projection uses it.
+// THE CEILING IS MATCHED AS "ceiling of $20," AND NOT AS "$20", because "$20"
+// is a SUBSTRING of the $20.34 two fields later. Measured: with the ceiling
+// figure misprinted, `go test -run AgainstThePeriodCeilings ./internal/queue/`
+// is exit 0 against the bare "$20" -- the assertion was held up by the total
+// beside it and the property by a different test entirely. That is
+// `AGENTS.md`'s "a mention is a whole token" rule, which the config-key guard
+// learned over `--as`, reached one test over; the comma is what the message
+// puts after the figure, so the bound costs nothing.
+//
+// AND THE TTL IS THE NARROWED ONE. `pricedConfig` allows two hours and the
+// request asks for one, so the honest projection is $0.89 and the config's own
+// TTL would make it $1.78 -- that is the deadline the node will actually get,
+// which is the whole reason the projection uses it. Measured: substituting
+// `p.Config.TTL` for `cfg.TTL` is red in BOTH arms -- at the refusal's `want`
+// list, because $0.89 and $20.34 both move, and at the acceptance, because
+// $18.95 + $1.78 is $20.73 and refuses where $19.84 goes ahead. The first
+// wording of this comment said the acceptance arm caught it "and nowhere
+// else", which understated the test it was describing; the acceptance arm is
+// a second witness rather than the only one, and it is the one that would
+// still fire if the refusal's figures were ever loosened.
 func TestAppPlanner_ProjectsTheChosenCardsPriceAgainstThePeriodCeilings(t *testing.T) {
 	cfg := pricedConfig()
 	cfg.MaxDayUSD = "20"
@@ -188,9 +231,15 @@ func TestAppPlanner_ProjectsTheChosenCardsPriceAgainstThePeriodCeilings(t *testi
 	if err == nil {
 		t.Fatal("a card projected past the day's ceiling was planned through")
 	}
-	for _, want := range []string{"max_day_usd", "2026-11-17", "$19.45", "$20", "$0.89", "$20.34"} {
+	for _, want := range []string{"max_day_usd", "2026-11-17", "$19.45", "ceiling of $20,", "$0.89", "$20.34"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal does not mention %q, so it is not the period ceiling's: %v", want, err)
+			// The price figures are the capture's, so a `gpus.json` whose
+			// RTX 4090 is no longer $0.89/hr reads here as a gate that did
+			// not fire. Said in the message rather than left to be worked
+			// out, because a figure that moved and a gate that broke are the
+			// same red line otherwise.
+			t.Errorf("the refusal does not mention %q, so it is not the period ceiling's "+
+				"(or testdata/gpus.json no longer prices the 4090 at $0.89/hr): %v", want, err)
 		}
 	}
 	if strings.Contains(err.Error(), "--allow-paid") {

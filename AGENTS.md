@@ -5338,10 +5338,13 @@ A leaked node bills by the hour in silence. These are not style preferences.
   The waiver's reason, "the evidence that the key is unenforced", was stale the
   moment `min_cuda` went, and left with it.
 - **The period ceiling on the store fill could not fail either, and sweeping
-  the class found two more on the two lines above it.** #155's entry is four
-  entries up: the `--allow-paid` gate on the queue's own store-filling rental
-  was green over its own deletion, because the fake served no CPU catalogue
-  and the run stopped at a 404 before the gate was reached. This file's
+  the class found two more on the two lines above it.** #155 found the
+  `--allow-paid` gate on the queue's own store-filling rental green over its
+  own deletion, because the fake served no CPU catalogue and the run stopped
+  at a 404 before the gate was reached. (The first wording said that entry was
+  "four entries up". It was two at the time and three after a rebase, which is
+  why there is no count here: a positional reference in this file is the
+  hand-maintained list with no list.) This file's
   sentence covers **both** calls -- the sync "is a rental and is gated like one
   -- `refusePaid` and the period ceilings, the same two calls the GPU rental
   gets" -- and the second half was in the same state for the same reason one
@@ -5400,43 +5403,83 @@ A leaked node bills by the hour in silence. These are not style preferences.
 
   **Both were invisible for one structural reason: the two gates read
   `plan.Offer`, so they are on the far side of a successful `app.NewPlan`, and
-  no fake in `internal/queue` served a GPU catalogue.** `storeFakes`
-  deliberately does not, because a provider that cannot say what cards it has
-  is what makes the pre-flight's order observable, and three tests assert
-  positively on failing at `list offers from runpod`. `ceiling_test.go` reaches
-  the ceiling through the **local** provider, which plans fine and is **free**
-  -- so `refusePaid` returns nil and the projection is zero, and
+  no fake in `internal/queue` could get one.** `ceiling_test.go` reaches the
+  ceiling through the **local** provider, which plans fine and is **free** --
+  so `refusePaid` returns nil and the projection is zero, and
   `TestAppPlanner_ChecksThePeriodCeilingBeforeRenting` proves `Plan` arrives at
   the ceiling through the **nil-ledger** branch, which `refuseOverPeriod`
-  answers before it ever computes a projection. Every route to those two lines
-  went through a provider that either could not choose an offer or could not be
-  charged for one. So the missing piece was one fake: a paid provider that CAN
-  choose an offer, serving the provider's own committed `gpus.json` at
-  `/v2/catalog/gpus` and pricing the RTX 4090 at $0.89/hr. A new helper and not
-  a route added to `storeFakes`, for the reason above. There is still no
-  `/v2/pods` route, so nothing there can create a node even if a gate let it
-  through.
+  answers before it ever computes a projection. `storeFakes` served no GPU
+  catalogue. Every route to those two lines went through a provider that either
+  could not choose an offer or could not be charged for one. So the missing
+  piece was one fake: a paid provider that CAN choose an offer, serving the
+  provider's own committed `gpus.json` at `/v2/catalog/gpus` and pricing the
+  RTX 4090 at $0.89/hr. There is still no `/v2/pods` route, so nothing there
+  can create a node even if a gate let it through.
 
-  **And the narrowed TTL is pinned by the ACCEPTANCE arm rather than by the
-  refusal**, which is the one place this is subtle. The config allows two
-  hours and the request asks for one, so the honest projection is $0.89 and
-  the config's own TTL would make it $1.78. With $18.95 spent against a $20
-  day, the narrowed figure is $19.84 and goes ahead while the config's is
-  $20.73 and refuses -- so a ceiling reading `p.Config.TTL` in place of
-  `cfg.TTL` is red there and nowhere else, while the refusal arm is red
-  against both readings and distinguishes neither. A refusal that fires for
-  two different reasons is the thing three refusal tests in this package have
-  already been corrected for.
+  **A NEW HELPER AND NOT A ROUTE ADDED TO `storeFakes`, AND THE FIRST REASON
+  GIVEN FOR THAT WAS FALSE -- which is this file's own recurring defect
+  committed by the entry recording it.** Both this entry and
+  `moneygate_test.go` said the route could not go there because "three tests
+  in `preflight_test.go` assert positively on failing at `list offers from
+  runpod`" and would stop asserting the order they exist for. Measured: adding
+  a `/v2/catalog/gpus` route to `storeFakes` breaks **nothing**,
+  `go test ./internal/queue/` exit 0. There is **one** such assertion in that
+  package, at `preflight_test.go:255`, and it survives the route; the three
+  are in `internal/cli/preflight_test.go`, a different package with its own
+  fake, and one of those three is a **negative**. **The real reason is the
+  fixture and it is stronger than the one that was written:** `storeConfig`
+  pins the store to EU-RO-1, a store's datacentre *overrides* the configured
+  placement and narrows `Filter.Region`, and the committed `gpus.json` carries
+  capacity only in CA-MTL-3, US-MO-1 and US-IL-1 -- so `storeFakes` can never
+  produce a GPU offer at all, whatever routes it serves. The gates behind
+  `plan.Offer` are out of its reach by **fixture** and not by routing, and
+  reaching them from there would mean moving `storeConfig`'s region or
+  re-capturing the catalogue, perturbing five existing tests to serve one. A
+  comment wrong about *why* a seal holds is how the seal gets removed by
+  somebody being helpful -- the `AssertNoStray` cleanup comment that claimed
+  the opposite of what the code did -- and this one would have sent the next
+  reader to delete a helper they believed was redundant.
+
+  **And the narrowed TTL is red in BOTH arms, which the first wording of this
+  entry got wrong in the direction that undersells the test.** The config
+  allows two hours and the request asks for one, so the honest projection is
+  $0.89 and the config's own TTL would make it $1.78; with $18.95 spent
+  against a $20 day the narrowed figure is $19.84 and goes ahead while the
+  config's is $20.73 and refuses. This said the acceptance arm caught a
+  ceiling reading `p.Config.TTL` "and nowhere else", and that the refusal arm
+  "is red against both readings and distinguishes neither". Measured:
+  substituting `p.Config.TTL` is red at the refusal's `want` list as well,
+  because $0.89 and $20.34 both move, **and** at the acceptance. The
+  acceptance arm is a second witness rather than the only one, and it is the
+  one that would still fire if the refusal's figures were ever loosened.
+
+  **The ceiling is matched as `ceiling of $20,` and not as `$20`, because the
+  short spelling could not fail.** `$20` is a substring of the `$20.05` and
+  `$20.34` two fields later in the same message, so misprinting the ceiling
+  figure leaves `go test -run AgainstThePeriodCeilings ./internal/queue/` at
+  **exit 0** -- the assertion was held up by the total beside it and the
+  property by a different test entirely,
+  `TestCeilings_RefuseARentalThatWouldCrossTheCeiling`.
+  That is the "a mention is a whole token" rule the config-key guard settled
+  over `--as`, met again inside a money assertion, and the comma is what the
+  message already puts after the figure so the bound costs nothing. With it,
+  the same misprint is **exit 1** in both tests.
 
   **What is deliberately left alone, written down so it is not read as a
-  miss.** `DirectRunner.Start` has `refusePaid` and **no** period ceiling, and
-  that is the design recorded above rather than a hole: the ceilings bound
-  spending with nobody at the keyboard, and a submitted `ember up` is the
-  operator asking -- "the config path travels and the ceilings replace",
-  which is why that path takes the file the operator named. `ember up` and
-  `ember store sync` in a shell are the same case and have no period ceiling
-  either. `internal/webapi` and `internal/provision` were **measured and
-  restored** and nothing in them was edited. Two of the deletions also turned
+  miss.** `DirectRunner.Start` has `refusePaid` and **no** period ceiling,
+  which is the recorded design *taken before the rental moved into the
+  daemon*: the ceilings bound spending with nobody at the keyboard, and a
+  submitted `ember up` is the operator asking -- "the config path travels and
+  the ceilings replace", which is why that path takes the file the operator
+  named. `ember up` and `ember store sync` in a shell are the same case and
+  have no period ceiling either. **That is the right call for this change and
+  not a settled one**, because #146 moved where the rental lives without
+  moving the ceiling, and a submitted run still *consumes* the queue's
+  allowance: `AdoptRun` writes `requests.cost` and `genstore.Spend` sums that
+  column with no status filter, so `max_month_usd` reads as a bound on the
+  month and is a bound on the queue alone. Its own issue, not this one.
+  `internal/webapi` and `internal/provision` were **measured and restored**
+  and nothing in them was edited. Two of the deletions also turned
   `TestNoProductionDeadCode` red as collateral, because stubbing a gate out
   leaves the symbol it called with no production caller -- a true report about
   the patched tree and not a second finding.
@@ -5446,7 +5489,12 @@ A leaked node bills by the hour in silence. These are not style preferences.
   each one introduces asserted before any suite result is believed, a build
   check ahead of every test run, and one backup per path taken once -- the five
   harness traps this file records, including the rollback that half-patched its
-  own backup.
+  own backup. **Four more measurements were taken afterwards, in review, and
+  three of them corrected a sentence above rather than the code**: the
+  `storeFakes` route, the un-narrowed TTL, the misprinted ceiling and
+  `s3.EndpointFor`'s fallback. Which is the expectation this file already
+  states about a reinstatement pass -- the first round is reliably incomplete
+  -- holding for the prose and not only for the suite.
 
 ## Style
 
