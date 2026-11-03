@@ -17,21 +17,14 @@ import (
 // wsServer runs the handler on a real listener.
 //
 // A real one and not httptest.NewRecorder, because a websocket handshake
-// hijacks the connection and a recorder has none to hijack. The port the
-// guard compares against is the one httptest chose, so the server is checking
-// its own address rather than a constant.
+// hijacks the connection and a recorder has none to hijack. Through `live`
+// rather than its own httptest.NewServer, because the port dance -- httptest
+// picks the port and the guard compares the Host header against this
+// server's own -- was two copies of one thing the moment headers_test.go
+// needed a socket too.
 func wsServer(t *testing.T, h *harness) (*httptest.Server, string) {
 	t.Helper()
-	srv := httptest.NewServer(h.Handler())
-	t.Cleanup(srv.Close)
-
-	// httptest binds 127.0.0.1 on a port it picks, so the guard has to be
-	// told which one this server is.
-	_, port, ok := splitHostPort(strings.TrimPrefix(srv.URL, "http://"))
-	if !ok {
-		t.Fatalf("could not read the port out of %q", srv.URL)
-	}
-	h.port = port
+	srv := live(t, h)
 	return srv, "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 

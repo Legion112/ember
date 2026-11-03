@@ -109,8 +109,7 @@ func (s *Server) postInput(w http.ResponseWriter, r *http.Request) {
 			"files", swept.Files, "bytes", swept.Bytes)
 	}
 
-	w.WriteHeader(http.StatusCreated)
-	s.write(w, inputView{
+	s.write(w, http.StatusCreated, inputView{
 		ID: staged.Ref, Format: staged.Format,
 		Width: staged.Width, Height: staged.Height, Bytes: staged.Bytes,
 	})

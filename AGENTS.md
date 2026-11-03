@@ -283,6 +283,38 @@ moment it imports a sibling, the sibling's dependencies become its own.
   and `TestConformance_CannotCatchARederivedRunID` asserts that the suite
   still cannot see it -- a limitation nobody can read out of the code is a
   limitation that will be forgotten.
+- **`httptest.NewRecorder` reads the live header map, so a recorder cannot
+  assert a declared content type.** `net/http` snapshots the headers when
+  `WriteHeader` runs and `ResponseRecorder.Header()` returns the map rather
+  than that snapshot, so a recorder reports whatever the handler set whenever
+  it set it. `Server.ok` wrote the status line and *then* called `write`,
+  which set `Content-Type` -- discarded -- so every 200 `ember serve` has ever
+  sent went out as `http.DetectContentType`'s guess,
+  `text/plain; charset=utf-8` over a JSON body, while every **error** was
+  declared correctly because `fail` happened to set the header first: the
+  declaration was exactly inverted from what the code read as, and
+  `postRequest`'s 202 and `postInput`'s 201 had the same slip. Nothing in the
+  program was in a position to notice -- `web/src/api.rs` reads the body as
+  text and parses it unconditionally, with no `resp.json()` and no
+  content-type check anywhere in the page, so the seam's data half was right
+  and only its declared type was wrong.
+  **The gate was the `AssertNoStray` failure in a header.**
+  `TestImage_ServedWithItsTypeDeclaredAndNotSniffed` was named for exactly
+  this property and passed with it destroyed: with `getImage`'s two `Set`
+  calls moved to after `http.ServeContent`, the recorder still reported
+  `image/png` and `nosniff` while the wire had lost `X-Content-Type-Options`
+  entirely -- Go sniffs `\x89PNG` to the same content type, so only the header
+  that cannot be guessed went missing, which is the half that matters.
+  Measured on this tree rather than argued: the same defect under the same
+  assertions is GREEN through a recorder and RED over a socket, and deleting
+  the header outright turns the recorder red, so the green is blindness to
+  *ordering* and not a dead assertion. So `internal/webapi/headers_test.go`
+  owns a real listener and every assertion about a header `net/http` could
+  have discarded -- including the three that used to sit on a recorder in
+  `TestStatic_RefusesAPageLoadReadably` -- and the rest of the package stays
+  on the recorder, because a decision about a request body, a status code or a
+  store call is the same decision either way. The line is "does this assertion
+  depend on *when* a header was set".
 - **A gate's tag list is derived from the tree, never maintained beside it.**
   `.golangci.yml` named `integration` and not `imagelab` while `go vet` ran
   with both from three hand-written copies, so the image labs -- the ones
@@ -1061,6 +1093,16 @@ that sentence made unrepresentable rather than merely tested.
   asset that travels zero network hops. A *result* image is still cached
   forever, because it never changes; a preview frame is `no-store`, because it
   is written over as sampling proceeds.
+- **A declared content type is said once, in the one place a JSON response is
+  written.** `nosniff` was on the image route alone, argued for in a comment
+  above it, and was the header that silently vanished when that route's
+  ordering broke -- so it is set beside the `Content-Type` in `Server.write`
+  now, where every JSON answer and every refusal goes through. Three call
+  sites that each have to remember an ordering is the journal's "nodes"
+  subdirectory rule reached through a header: one name for a path, not one per
+  call site. A browser allowed to second-guess the type is a browser deciding
+  what bytes a rented machine produced are, which is the argument the image
+  route already carried and the JSON routes never had.
 - **A nil slice is `null` on the wire, and `null` is not an empty list.** The
   websocket's first envelope of every connection carries no events by design,
   so it arrived as `{"events":null}` -- and serde's `default` covers a field

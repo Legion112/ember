@@ -836,7 +836,16 @@ func TestEvents_RefusesACursorThatIsNotASequenceNumber(t *testing.T) {
 
 // --- images ---
 
-func TestImage_ServedWithItsTypeDeclaredAndNotSniffed(t *testing.T) {
+// TestImage_AppearsOnTheRequestAsAPathAndNotAKey.
+//
+// THE HEADERS USED TO BE ASSERTED HERE and are now asserted over a socket --
+// TestHeaders_AnImageIsServedWithItsTypeDeclaredAndNotSniffed. This test
+// could not fail for the property its old name claimed: with getImage's two
+// Set calls moved to after http.ServeContent, the recorder still reported
+// image/png and nosniff while the wire had lost the nosniff. What is left is
+// what a recorder is sufficient for -- a status, a body, and the shape of the
+// path a browser is given.
+func TestImage_AppearsOnTheRequestAsAPathAndNotAKey(t *testing.T) {
 	h := newHarness(t)
 	id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
 
@@ -854,22 +863,10 @@ func TestImage_ServedWithItsTypeDeclaredAndNotSniffed(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 	}
-	// Declared, never sniffed: these are bytes a rented machine produced,
-	// and letting a browser decide what they are is letting the node decide.
-	if got := w.Header().Get("Content-Type"); got != "image/png" {
-		t.Errorf("content-type = %q", got)
-	}
-	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
-		t.Errorf("x-content-type-options = %q, want nosniff", got)
-	}
-	// A result never changes, so it is worth caching.
-	if got := w.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") {
-		t.Errorf("cache-control = %q, want a result to be cacheable", got)
-	}
 
-	// And it appears on the request, as a path a browser can fetch rather
-	// than a blob key -- which is this process's business and could be an S3
-	// object tomorrow.
+	// It appears on the request, as a path a browser can fetch rather than a
+	// blob key -- which is this process's business and could be an S3 object
+	// tomorrow.
 	one := decode[requestView](t, h.do(t, "GET", "/api/requests/"+id, ""))
 	if len(one.Images) != 1 {
 		t.Fatalf("images = %+v", one.Images)
@@ -879,9 +876,13 @@ func TestImage_ServedWithItsTypeDeclaredAndNotSniffed(t *testing.T) {
 	}
 }
 
-// TestImage_APreviewIsNeverCached. It is written over as sampling proceeds, so
-// a cached one is a progress display that appears to freeze.
-func TestImage_APreviewIsNeverCached(t *testing.T) {
+// TestImage_AskingForAPreviewNeverServesTheResult.
+//
+// A preview and a result are different images of the same job, and the
+// no-store half -- a cached preview is a progress display that appears to
+// freeze -- moved to the socket with the rest of the headers, for the reason
+// above.
+func TestImage_AskingForAPreviewNeverServesTheResult(t *testing.T) {
 	h := newHarness(t)
 	id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
 
@@ -899,12 +900,8 @@ func TestImage_APreviewIsNeverCached(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 	}
-	if got := w.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("cache-control = %q, want no-store", got)
-	}
 
-	// A preview and a result are different images of the same job, so asking
-	// for one must not serve the other.
+	// Asking for one must not serve the other.
 	if w := h.do(t, "GET", "/api/requests/"+id+"/images/1/0", ""); w.Code != http.StatusNotFound {
 		t.Errorf("asking for the result got %d, want 404 -- only a preview exists", w.Code)
 	}
