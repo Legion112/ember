@@ -289,3 +289,117 @@ func TestAppPlanner_AnEmptyStoreWithoutAllowPaidRentsNothingAtAll(t *testing.T) 
 		t.Errorf("the empty store stopped for some other reason than the money gate: %v", err)
 	}
 }
+
+// TestAppPlanner_TheStoreFillIsProjectedAgainstThePeriodCeilings.
+//
+// THE SIBLING OF THE TEST ABOVE, AND IT HAD NO TEST AT ALL. `AGENTS.md` says
+// the store fill "is a rental and is gated like one -- refusePaid and the
+// period ceilings, the same two calls the GPU rental gets". Both calls are in
+// fillStore; until this, only one of them could fail. Deleting
+// `p.refuseOverPeriod(ctx, cfg.TTL, sync.Offer.Price)` left `go test ./...` at
+// exit 0, measured, and no lab could see it either: nothing anywhere under
+// `test/` configures max_day_usd or max_month_usd, so `Ceilings.IsZero()`
+// short-circuits before reading anything and the gate's removal changes no
+// answer. #155 found the --allow-paid gate beside it in the same state, which
+// is the point rather than a coincidence -- the two were written together and
+// neither was ever shown to fire here.
+//
+// IT IS A UNIT TEST AND NOT A LAB, and the reason is the opposite of #155's
+// step 8. That one asserts the MONEY A RENTAL CAME TO, which only the store
+// lab can do, because every other lab here rents from the local provider at
+// zero and a cost assertion would compare a blank against a blank. This gate
+// fires BEFORE anything is created, on a projection built from the offer's own
+// price -- so the only thing it needs is a priced offer, and `storeFakes`
+// already serves the provider's committed `cpus.json`, which prices the CPU
+// machine the fill plans at the $0.06/hr `AGENTS.md` cites. A lab would cross
+// no join the unit test does not: a refusal creates no node, mounts no store
+// and writes no object, so there would be nothing for Docker to be there for.
+//
+// THREE NUMBERS, CHOSEN SO THAT ONLY THE REAL GATE PASSES THEM. $19.99 spent
+// today, a $20 day ceiling, and a $0.06 projection:
+//
+//   - a ceiling that ignored the ledger would compare $0.06 against $20 and
+//     allow it;
+//   - a ceiling that REPORTED rather than PROJECTED would compare $19.99
+//     against $20 and allow it -- which is the "ceiling every period breaches
+//     by one rental" this exists not to be;
+//   - the live one adds them, gets $20.05, and refuses.
+//
+// The day rather than the month because the day is checked first and because
+// nothing on a rental path had ever driven it.
+//
+// AND THE ACCEPTANCE IS IN THE SAME TEST, so weakening either half cannot be
+// done without the other going red: a refusal alone is consistent with a
+// ceiling that refuses every fill there is, which is what a free rental must
+// never get. Under the ceiling the fill goes ahead and fails at the create,
+// which is the fake's missing /v2/pods route and the same positive assertion
+// the test above this one makes.
+func TestAppPlanner_TheStoreFillIsProjectedAgainstThePeriodCeilings(t *testing.T) {
+	// Over: $19.99 spent, a $20 day, and a $0.06 machine takes it to $20.05.
+	spent := genstore.NewRecordingStore()
+	spentOn(t, spent, at(17, 9), 19_990_000)
+	runs := genstore.NewRecordingStore()
+
+	cfg := storeConfig()
+	cfg.MaxDayUSD = "20"
+	over := AppPlanner{
+		Config: cfg, Deps: storeFakes(t, map[string]int64{}),
+		AllowPaid: true, Runs: runs, Ledger: spent,
+		Now: func() time.Time { return at(17, 12) },
+	}
+
+	_, err := over.Plan(t.Context(), aRequest())
+	if err == nil {
+		t.Fatal("a store fill past the day's ceiling was planned through")
+	}
+	// WHICH refusal, because an empty store has five ways to stop here -- the
+	// nil recorder, the missing weights, the absent GPU catalogue,
+	// --allow-paid and this one -- and a bare `err != nil` is how the gate
+	// beside this one came to be green over its own deletion.
+	for _, want := range []string{"max_day_usd", "2026-11-17", "$19.99", "$20", "$0.06", "$20.05"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q, so it is not the period ceiling's: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "--allow-paid") {
+		t.Errorf("the fill stopped on the flag rather than on the ceiling: %v", err)
+	}
+	if strings.Contains(err.Error(), "create node") {
+		t.Errorf("the fill asked for a machine before the ceiling refused it: %v", err)
+	}
+	// A SECOND, INDEPENDENT WITNESS, and it is the one the row-before-create
+	// rule makes meaningful: recordSync's first call is Adopt, so a row here
+	// would mean the ceiling fired after the ledger had already been told a
+	// rental was about to happen. No row means it fired before.
+	rows, err := runs.List(t.Context(), genstore.Filter{})
+	if err != nil {
+		t.Fatalf("read the ledger: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("a refused fill adopted %d row(s), so it got past the ceiling and into recordSync: %+v",
+			len(rows), rows)
+	}
+
+	// Under: $19.00 spent takes the same machine to $19.06, inside the same
+	// $20, and the fill goes ahead.
+	room := genstore.NewRecordingStore()
+	spentOn(t, room, at(17, 9), 19_000_000)
+	under := AppPlanner{
+		Config: cfg, Deps: storeFakes(t, map[string]int64{}),
+		AllowPaid: true, Runs: genstore.NewRecordingStore(), Ledger: room,
+		Now: func() time.Time { return at(17, 12) },
+	}
+
+	_, err = under.Plan(t.Context(), aRequest())
+	if err == nil {
+		t.Fatal("a request planned against a store with none of its weights on it")
+	}
+	if strings.Contains(err.Error(), "max_day_usd") {
+		t.Errorf("a fill that fits inside the ceiling was refused by it anyway: %v", err)
+	}
+	// Positively, so this cannot pass because the run stopped somewhere
+	// earlier: it got all the way to asking for the machine.
+	if !strings.Contains(err.Error(), "create node") {
+		t.Errorf("the fill did not reach the create call under a ceiling it fits inside: %v", err)
+	}
+}
