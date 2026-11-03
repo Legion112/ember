@@ -4660,6 +4660,26 @@ findings, or 3 on a usage error.
   field is the one whose entire job is to stop a run that costs too much.
   Filed rather than reworded here, because a message is read before it is
   grepped and three of them want one wording rather than three.
+- **That sharpest gap is closed (#124), with the one wording the entry above
+  asked for, and the key is the caller's.** `ParseUSD` is shared by four keys
+  -- `max_hourly_usd`, `max_run_usd`, `max_day_usd`, `max_month_usd` -- so it
+  cannot name one, and does not need to: every call site already wraps with
+  `%w` under their own key, and `TestBudgets_NameTheKeyAndWhatToWrite` holds
+  each wrapper to it. The parser carries the other half, in one
+  `malformedPrice` for all three places a wrong *shape* is refused -- the
+  accepted form, copyable examples, the rules by name and the reason there is
+  a rule -- rather than a message per rule, because the per-rule list is the
+  fuzz corpus's and a second copy of it is how they drift. The original string
+  is still quoted as typed. `price out of range` got its own wording, about
+  integer overflow and naming the bound from the constant the check uses, and
+  explicitly not a policy ceiling. `empty price` and `negative price` are
+  unchanged: they are self-describing and the argument for a remediation is
+  weakest there. **The classification is untouched and that is the claim worth
+  checking**: the diff changes error constructors and one named constant, and
+  `FuzzParseUSD`'s oracle agreed for 12.9 million executions after it. Each of
+  the three shape sites, the range wording, the example, the named rule and
+  the stated reason was reinstated separately and went red; a no-op patch
+  stayed green.
 
 Document CLI flag, config key and behaviour changes in `README.md` in the same
 commit.

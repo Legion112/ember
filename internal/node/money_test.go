@@ -92,6 +92,65 @@ func TestParseUSD_ErrorsQuoteWhatWasTyped(t *testing.T) {
 	}
 }
 
+// TestParseUSD_RefusalsSayWhatToWrite. `malformed price "$1,000"` was the
+// whole message for every spelling ParseUSD declines for its shape, while the
+// function's own doc comment enumerated the answer, so an operator told their
+// string was malformed had to guess which of eight rules they broke. There is
+// one input per place the refusal is raised -- a bare trailing point, a bad
+// character in the whole part, a bad character in the fraction -- because
+// each is its own return statement and a wording that reaches two of three is
+// a wording that reaches the one nobody tried.
+//
+// The assertion is on the substance that makes it a remediation: the accepted
+// form, an example the operator can copy, the rule their string most likely
+// broke, and the reason there is a rule. A test that checked only that the
+// message is longer would pass for any padding.
+func TestParseUSD_RefusalsSayWhatToWrite(t *testing.T) {
+	shape := []string{
+		"plain decimal number of dollars",
+		"1.79, 0.429, $2.49",
+		"thousands separator",
+		"exponent",
+		"wrong by orders of magnitude",
+	}
+	for _, in := range []string{"5.", "$1,000", "1e3", "0x10", "1.5x", "1 000"} {
+		_, err := ParseUSD(in)
+		if err == nil {
+			t.Fatalf("ParseUSD(%q) was accepted", in)
+		}
+		for _, want := range shape {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("ParseUSD(%q) error %q does not carry %q", in, err, want)
+			}
+		}
+	}
+
+	// The range refusal is about overflow and says so, and it says what
+	// overflowed rather than reaching for a policy ceiling ParseUSD
+	// deliberately does not have.
+	_, err := ParseUSD("99999999999999999999")
+	if err == nil {
+		t.Fatal("an amount past int64 microdollars was accepted")
+	}
+	for _, want := range []string{"out of range", "922337203685 dollars", "not cents or microdollars"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("out-of-range error %q does not carry %q", err, want)
+		}
+	}
+}
+
+// TestParseUSD_TheRangeNamedIsTheRangeEnforced. The message quotes the ceiling
+// and the check enforces it, and a message that names a figure the code does
+// not hold to is the comment that justifies the entry somebody remembered.
+func TestParseUSD_TheRangeNamedIsTheRangeEnforced(t *testing.T) {
+	if _, err := ParseUSD("922337203685"); err != nil {
+		t.Errorf("the largest whole part the message names was refused: %v", err)
+	}
+	if _, err := ParseUSD("922337203686"); err == nil {
+		t.Error("one dollar past the figure the message names was accepted")
+	}
+}
+
 // TestRate_CostRoundsUp: an estimate that reads low is an estimate that lets a
 // run start which the budget would have refused.
 func TestRate_CostRoundsUp(t *testing.T) {

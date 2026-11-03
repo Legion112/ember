@@ -198,17 +198,17 @@ func ParseUSD(s string) (MicroUSD, error) {
 		whole = "0"
 	}
 	if hasFrac && frac == "" {
-		return 0, fmt.Errorf("malformed price %q", orig)
+		return 0, malformedPrice(orig)
 	}
 
 	var cents int64
 	for _, c := range whole {
 		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("malformed price %q", orig)
+			return 0, malformedPrice(orig)
 		}
 		cents = cents*10 + int64(c-'0')
-		if cents > math.MaxInt64/micros/10 {
-			return 0, fmt.Errorf("price out of range %q", orig)
+		if cents > maxWholeDollars {
+			return 0, fmt.Errorf("price %q is out of range: ember holds money as integer microdollars, so the whole part cannot exceed %d dollars -- check the figure is in dollars and not cents or microdollars", orig, int64(maxWholeDollars))
 		}
 	}
 	total := cents * micros
@@ -233,7 +233,7 @@ func ParseUSD(s string) (MicroUSD, error) {
 		scale := int64(micros / 10)
 		for i, c := range frac {
 			if c < '0' || c > '9' {
-				return 0, fmt.Errorf("malformed price %q", orig)
+				return 0, malformedPrice(orig)
 			}
 			if i >= 6 {
 				truncated = truncated || c != '0'
@@ -247,6 +247,31 @@ func ParseUSD(s string) (MicroUSD, error) {
 		return 0, fmt.Errorf("price %q is positive but below one microdollar, which ember cannot tell from no ceiling at all: write 0 for no limit, or a figure of at least 0.000001", orig)
 	}
 	return MicroUSD(total), nil
+}
+
+// maxWholeDollars is the largest whole part ParseUSD accepts: the most that
+// still fits an int64 of microdollars after a digit has been appended, which
+// is why it is a tenth of the plain quotient. Named so the check and the
+// message that quotes it cannot come apart.
+const maxWholeDollars = math.MaxInt64 / micros / 10
+
+// malformedPrice is the one refusal for every spelling ParseUSD declines for
+// being the wrong shape. It is one wording rather than one message per rule
+// because the rules are enumerated, with the accept/refuse classification, in
+// money_fuzz_test.go, and a message per rule is eight strings to keep in step
+// with a list that already exists; what the operator needs is the accepted
+// form and the reason there is a rule at all.
+//
+// The key the operator typed it under is not named here. Every caller wraps
+// the error with its own key -- max_hourly_usd, max_run_usd, max_day_usd or
+// max_month_usd, from the config and, for the first two, from a queued
+// request -- so naming one here would be wrong for the other three.
+//
+// The original string is quoted, as typed: see ParseUSD.
+func malformedPrice(orig string) error {
+	return fmt.Errorf("malformed price %q: write a plain decimal number of dollars, optionally after a $ -- 1.79, 0.429, $2.49 -- "+
+		"with no thousands separator, sign, exponent, trailing point, radix prefix, space inside the number or non-ASCII digit, "+
+		"because each of those has a reading that is wrong by orders of magnitude", orig)
 }
 
 // There is deliberately no float64 entry point to Rate. `RateFromFloat` was
