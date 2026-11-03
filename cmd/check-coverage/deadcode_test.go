@@ -319,7 +319,20 @@ var deadExcluded = []struct{ sym, why string }{
 	// Deliberately unreachable from production, and AGENTS.md says so in
 	// words. These two are the entries that are not a backlog: they are the
 	// answer.
-	{"internal/hostkey.(*Store).TrustOnFirstUse", "TOFU is unreachable through WithNode, which mints a key for every node; reached only by the trust-on-first-use lab and this package's tests"},
+	// The reason this entry gave was wrong in both halves, which matters
+	// because for a few hours it was the only thing in the repository that
+	// went red over a reinstated TOFU fallback -- a stale-inventory check
+	// whose own message says to delete the entry (#111). It said TOFU is
+	// "unreachable through WithNode, which mints a key for every node":
+	// minting is why the fallback *branch* was unreached, not why it could
+	// not be written, and one line in trustFor reinstated it. And it named a
+	// "trust-on-first-use lab" that does not exist; the callers are this
+	// package's own tests and internal/tunnel/sshdial's. What guards it now
+	// is a type -- provision.trustFor and provision.Session.Trust are
+	// hostkey.Pin -- so the fallback does not compile on that path, and the
+	// mechanism is asserted positively beside it. This entry is bookkeeping
+	// and was never the seal.
+	{"internal/hostkey.(*Store).TrustOnFirstUse", "no production caller: provision.trustFor and provision.Session.Trust are typed hostkey.Pin, so a trust that is not a pin cannot be named on the path that rents nodes. Kept for a provider that genuinely cannot accept an injected key, of which there is none today; reached by this package's tests and internal/tunnel/sshdial's"},
 	{"internal/httpx.(*StatusError).Retryable", "httpx has no retry loop and must not gain one; the classifier sits where somebody would add it"},
 	{"internal/hostkey.(*Store).Get", "a pin is read through Trust, never by id; Get exists for the store's own tests and for a reader that does not exist yet"},
 

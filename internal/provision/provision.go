@@ -152,8 +152,16 @@ func (o Options) destroyTimeout() time.Duration {
 
 // Session is what a run gets once its node is usable.
 type Session struct {
-	Node  node.ReadyNode
-	Trust hostkey.Trust
+	Node node.ReadyNode
+
+	// Trust is a hostkey.Pin and not a hostkey.Trust, which is a seal rather
+	// than a tidy-up: the one other Trust in this module is
+	// hostkey.Store.TrustOnFirstUse, and a session carrying it is the exact
+	// defect #111 reinstated -- TOFU against a brand-new IP, which the two
+	// tests named for it could not see because both watched for a log line
+	// nothing emits. The field's type is now what refuses it.
+	Trust hostkey.Pin
+
 	RunID node.RunID
 
 	// Log already carries this run's id, and that is the whole reason it is
@@ -434,13 +442,26 @@ func WaitReady(ctx context.Context, p provider.Provider, h node.Handle, o Option
 // fell through to trust-on-first-use -- against a brand-new IP, which is the
 // one case TOFU cannot defend and the exact thing minting the key exists to
 // avoid. It warned, and a warning in a log is not a security control.
-func trustFor(r node.ReadyNode, o Options, minted node.HostKey) (hostkey.Trust, error) {
+//
+// The return type is hostkey.Pin and not hostkey.Trust, because a warning was
+// not the only thing that failed to be a control: the regression tests were
+// `!strings.Contains(log, "first use")` and ember has never logged that
+// string, so reinstating the bug as a one-line `return
+// o.Pins.TrustOnFirstUse(id), nil` here left the whole suite and every lab
+// green (#111). It does not compile now. That is a seal on this function and
+// not on the module -- hostkey.Store.TrustOnFirstUse still exists, and
+// internal/session's dial still takes the interface -- so the tests below
+// also assert the mechanism positively: the trust this returns must refuse,
+// on the first key it is ever offered, a key ember did not mint. TOFU cannot
+// do that, which is what makes the assertion a decision procedure between the
+// two rather than a message to match.
+func trustFor(r node.ReadyNode, o Options, minted node.HostKey) (hostkey.Pin, error) {
 	reported := r.Node().HostKey
 
 	if !minted.IsZero() {
 		fp, err := hostkey.FromNodeKey(minted)
 		if err != nil {
-			return nil, fmt.Errorf("node %s: the host key ember minted: %w", r.Handle(), err)
+			return hostkey.Pin{}, fmt.Errorf("node %s: the host key ember minted: %w", r.Handle(), err)
 		}
 		// If the provider also reports one, the two must agree. A provider
 		// handing back a different key than the one ember supplied has
@@ -448,10 +469,10 @@ func trustFor(r node.ReadyNode, o Options, minted node.HostKey) (hostkey.Trust, 
 		if !reported.IsZero() {
 			rfp, err := hostkey.FromNodeKey(reported)
 			if err != nil {
-				return nil, fmt.Errorf("node %s: the host key the provider reported: %w", r.Handle(), err)
+				return hostkey.Pin{}, fmt.Errorf("node %s: the host key the provider reported: %w", r.Handle(), err)
 			}
 			if !fp.Equal(rfp) {
-				return nil, fmt.Errorf(
+				return hostkey.Pin{}, fmt.Errorf(
 					"node %s reports host key %s but ember injected %s; the provider has substituted a key, so ember will not connect",
 					r.Handle(), rfp, fp)
 			}
@@ -465,8 +486,10 @@ func trustFor(r node.ReadyNode, o Options, minted node.HostKey) (hostkey.Trust, 
 	// that has never had a key authenticates nothing, and reaching here
 	// would mean ember had stopped injecting -- which is worth a refusal,
 	// not a warning. hostkey.Store.TrustOnFirstUse remains for a provider
-	// that genuinely cannot accept an injected key; nothing is one today.
-	return nil, fmt.Errorf(
+	// that genuinely cannot accept an injected key; nothing is one today,
+	// and the return type above means it could not be reached from here
+	// even if one arrived without that decision being made deliberately.
+	return hostkey.Pin{}, fmt.Errorf(
 		"node %s: ember did not mint a host key for this node, so there is nothing to verify it against; "+
 			"it will not connect rather than trust whatever answers", r.Handle())
 }
