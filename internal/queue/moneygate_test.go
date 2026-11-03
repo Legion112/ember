@@ -61,14 +61,16 @@ import (
 // helpful, and that one would have sent the next reader to delete a helper
 // they believed was redundant.
 //
-// THE REAL REASON IS THE FIXTURE AND IT IS STRONGER: `storeConfig` pins the
-// store to EU-RO-1, a store's datacentre OVERRIDES the configured placement
-// and narrows Filter.Region, and the committed `gpus.json` carries capacity
-// only in CA-MTL-3, US-MO-1 and US-IL-1. So `storeFakes` can never produce a
-// GPU offer at all, whatever routes it serves -- the gates behind plan.Offer
-// are out of its reach by FIXTURE and not by routing. Reaching them from
-// there would mean moving `storeConfig`'s region or re-capturing the
-// catalogue, perturbing five existing tests to serve one.
+// THE REAL REASON IS THE FIXTURE AND IT IS STRONGER: `storeConfig` asks for
+// EU-RO-1 and the fake's volume listing reports it -- the region that reaches
+// Filter.Region is the PROVIDER's answer, which AttachStore reads off
+// `storeFakes`'s own network-volumes handler, and a store's datacentre
+// OVERRIDES the configured placement -- while the committed `gpus.json`
+// carries capacity only in CA-MTL-3, US-MO-1 and US-IL-1. So `storeFakes` can
+// never produce a GPU offer at all: the gates behind plan.Offer are out of
+// its reach by FIXTURE and not by the catalogue route it was missing.
+// Reaching them from there would mean moving that region on both sides or
+// re-capturing the catalogue, perturbing five existing tests to serve one.
 //
 // THERE IS STILL NO /v2/pods ROUTE, so nothing here can create a node even if
 // a gate let it through -- and a plan that got past both gates returns a
@@ -98,13 +100,18 @@ func pricedFakes(t *testing.T) app.Deps {
 		// S3BaseURL IS SET ALTHOUGH NOTHING HERE READS IT, because
 		// app.CheckStoreAssets falls back to s3.EndpointFor(store.Region) --
 		// a real RunPod endpoint -- whenever this field is empty. It is
-		// unreachable today, since `pricedConfig` names no store and no
-		// assets so the pre-flight returns before that line; it goes live the
-		// first time somebody gives `pricedConfig` a store, and the rule it
-		// would break then is the one `AGENTS.md` states by name: a test that
-		// registers a cloud provider must not be able to reach it. The same
-		// handler, whose default branch is a 404, so an object call reads as
-		// an empty store and no packet leaves this process.
+		// unreachable today and TWO conditions short rather than one:
+		// `pricedConfig` names no store and no assets, and the check also
+		// returns at preflight.go's creds.S3.IsZero() arm, BEFORE the
+		// endpoint is built, which is where these Creds land it. So the hole
+		// needs a store AND S3 credentials in this literal, and it opens the
+		// day somebody adds either half for a reason that has nothing to do
+		// with the other. The rule it would break then is the one `AGENTS.md`
+		// states by name: a test that registers a cloud provider must not be
+		// able to reach it. The same handler, whose default branch is a 404,
+		// so an object call reads as an empty store -- packets do leave, over
+		// loopback to this test's own httptest listener, and none of them
+		// reaches a RunPod endpoint.
 		S3BaseURL: api.URL,
 		// Injected rather than resolved, so this test cannot pick up the
 		// developer's own RUNPOD_API_KEY and make a live call.

@@ -5428,12 +5428,14 @@ A leaked node bills by the hour in silence. These are not style preferences.
   are in `internal/cli/preflight_test.go`, a different package with its own
   fake, and one of those three is a **negative**. **The real reason is the
   fixture and it is stronger than the one that was written:** `storeConfig`
-  pins the store to EU-RO-1, a store's datacentre *overrides* the configured
-  placement and narrows `Filter.Region`, and the committed `gpus.json` carries
-  capacity only in CA-MTL-3, US-MO-1 and US-IL-1 -- so `storeFakes` can never
-  produce a GPU offer at all, whatever routes it serves. The gates behind
-  `plan.Offer` are out of its reach by **fixture** and not by routing, and
-  reaching them from there would mean moving `storeConfig`'s region or
+  asks for EU-RO-1 and the fake's volume listing reports it -- the region that
+  reaches `Filter.Region` is the provider's answer, which `AttachStore` reads
+  off `storeFakes`'s own `network-volumes` handler, and a store's datacentre
+  *overrides* the configured placement -- while the committed `gpus.json`
+  carries capacity only in CA-MTL-3, US-MO-1 and US-IL-1. So `storeFakes` can
+  never produce a GPU offer at all. The gates behind `plan.Offer` are out of
+  its reach by **fixture** and not by the catalogue route it was missing, and
+  reaching them from there would mean moving that region on both sides or
   re-capturing the catalogue, perturbing five existing tests to serve one. A
   comment wrong about *why* a seal holds is how the seal gets removed by
   somebody being helpful -- the `AssertNoStray` cleanup comment that claimed
@@ -5477,7 +5479,9 @@ A leaked node bills by the hour in silence. These are not style preferences.
   moving the ceiling, and a submitted run still *consumes* the queue's
   allowance: `AdoptRun` writes `requests.cost` and `genstore.Spend` sums that
   column with no status filter, so `max_month_usd` reads as a bound on the
-  month and is a bound on the queue alone. Its own issue, not this one.
+  month and is a bound on the queue alone. That is **#165**, not this one: a
+  pointer to an issue nobody can find is the shape this file keeps
+  correcting.
   `internal/webapi` and `internal/provision` were **measured and restored**
   and nothing in them was edited. Two of the deletions also turned
   `TestNoProductionDeadCode` red as collateral, because stubbing a gate out
@@ -5489,12 +5493,17 @@ A leaked node bills by the hour in silence. These are not style preferences.
   each one introduces asserted before any suite result is believed, a build
   check ahead of every test run, and one backup per path taken once -- the five
   harness traps this file records, including the rollback that half-patched its
-  own backup. **Four more measurements were taken afterwards, in review, and
-  three of them corrected a sentence above rather than the code**: the
-  `storeFakes` route, the un-narrowed TTL, the misprinted ceiling and
-  `s3.EndpointFor`'s fallback. Which is the expectation this file already
-  states about a reinstatement pass -- the first round is reliably incomplete
-  -- holding for the prose and not only for the suite.
+  own backup. **And the measurements review took afterwards found both kinds,
+  which is why they are named rather than counted.** Prose only: the
+  `storeFakes` route and the un-narrowed TTL, two sentences above that were
+  false about code that was right. Code: the misprinted ceiling, which moved a
+  `want` list in both tests, and `s3.EndpointFor`'s fallback, which added an
+  `S3BaseURL`. The first wording of this sentence said "four measurements,
+  three of them prose" -- a wrong tally, three paragraphs under the paragraph
+  correcting a wrong positional count, which is the whole argument for not
+  keeping one. The expectation it bears out is the one this file already
+  states: the first round of a reinstatement pass is reliably incomplete, and
+  that holds for the prose and not only for the suite.
 
 ## Style
 
