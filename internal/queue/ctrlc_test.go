@@ -270,10 +270,9 @@ func TestQueue_ACtrlCdTeardownStillLeavesADoneBatchDone(t *testing.T) {
 // has already had to retract about the trust-on-first-use lab and about
 // `runServed`'s own cap. A store that blocks AppendEvents is the same shape as
 // the one two cases up, and it has an exit code. Both halves of Emit's
-// condition get one, because `due` and `urgent` reach the same flush by
-// different routes: flushAfter is 250ms against a zero `last`, so the FIRST
-// event of a run is due whatever its kind, and the urgent list is what carries
-// run_cost out of a teardown.
+// condition get one, and `due || urgent(…)` SHORT-CIRCUITS -- so the urgent
+// subtest has to set `last` to be about its own arm at all, which is this same
+// mistake one layer in and is argued where the line is.
 func TestQueue_ARecordingWriteCannotOutliveItsBound(t *testing.T) {
 	// Each subtest spends the bound, so they run together: the same trade
 	// ws.go's ten-second write bound makes, where the parent context must
@@ -291,11 +290,32 @@ func TestQueue_ARecordingWriteCannotOutliveItsBound(t *testing.T) {
 		// server_starting is on urgent()'s list and reaches neither
 		// Recorder.set nor recordJob, so the flush is the only write it
 		// makes.
+		//
+		// `last` IS SET, AND WITHOUT IT THIS SUBTEST PROVES WHAT THE NEXT ONE
+		// PROVES. The flush is reached by `due || urgent(e.Kind)`, which
+		// SHORT-CIRCUITS -- and `due` is true for the first event of any run
+		// whatever its kind, because flushAfter is 250ms against a zero
+		// `last`. So an urgent event on a fresh recorder never evaluates the
+		// urgent arm at all: measured with the bound in place, where reaching
+		// the flush shows as 10s and not reaching it as 0s, deleting the
+		// urgent arm entirely left THIS subtest at 10.00s. One line makes it
+		// discriminate -- full condition 10.01s, `if due` alone 0.00s. The
+		// property survived either way, since both arms reach one call site
+		// and one subtest bounds it; what did not was the CONDITION, so
+		// splitting that line into two call sites later could leave the
+		// urgent branch unbounded with the suite green. Which is "what would
+		// this say if the bug were present?" answered "the same thing the
+		// subtest below says" -- the shape the retraction in this file's
+		// doc comment is about, found one layer in by a reviewer taking the
+		// 250ms claim seriously enough to follow it.
 		"emit an urgent event": func(t *testing.T) {
-			blockingRecorder(t).Emit(report.Event{Kind: report.KindServerStarting})
+			r := blockingRecorder(t)
+			r.last = time.Now()
+			r.Emit(report.Event{Kind: report.KindServerStarting})
 		},
 		// A log line is on no list, which is the `due` half: the buffer's
-		// own clock makes the first event of any run flushable.
+		// own clock makes the first event of any run flushable. `last` is
+		// left at the zero time here, which is what makes it due.
 		"emit a due event": func(t *testing.T) {
 			blockingRecorder(t).Emit(report.Event{Kind: report.KindLog, Text: "a line the node wrote"})
 		},
