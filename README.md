@@ -487,6 +487,13 @@ container you started by hand, or one a `SIGKILL`ed lab left yesterday,
 survives the suite. `make reap-labs` is what clears those; it refuses while a
 suite holds the lock.
 
+Each lab target tees its output into a directory of its own under `/tmp` and
+then greps that log back for `--- SKIP`, so two checkouts must not share one:
+`tee` truncates the file as the second run starts, and the first run's gate
+would be reading it. The directory is named from a digest of the checkout's own
+path — `git clone` calls every clone `ember`, so the name alone is not enough —
+and `make print-LAB_LOG_DIR` is how to ask which one is this checkout's.
+
 Go 1.27. The Makefile prefers `~/sdk/go1.27.0` when present so the compiler
 cannot drift from what `go.mod` declares.
 
