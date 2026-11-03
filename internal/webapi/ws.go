@@ -59,7 +59,12 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	// coder/websocket refuses a cross-origin handshake by default, which
 	// covers Origin; this covers the rebinding case, where the page is
 	// same-origin with a name that resolves here.
-	if err := checkHost(r.Host, s.port); err != nil {
+	//
+	// hostOK AND NOT checkHost, which is the one line that keeps this route in
+	// step with the rest: a request on the unix socket arrived on no port, so
+	// the comparison has nothing to compare against -- see hostOK, which is
+	// where that decision lives rather than being spelled twice.
+	if err := hostOK(r, s.port); err != nil {
 		s.fail(w, http.StatusForbidden, err)
 		return
 	}

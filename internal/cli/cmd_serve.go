@@ -16,6 +16,7 @@ import (
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/logx"
+	"github.com/Legion112/ember/internal/loopback"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/webapi"
@@ -45,6 +46,7 @@ func runServe(args []string, out io.Writer, d deps) error {
 		outf(out, "It listens on loopback only. Nothing ember serves is reachable from\nanother machine.\n\n")
 		outf(out, "EVERY REQUEST NEEDS A TOKEN. A loopback port is reachable by every uid on\nthis machine, and a request with no Origin -- which is what curl sends -- is\nindistinguishable from your own tooling, so the second account over could\notherwise queue a paid rental. ember serve mints a token for each run and\nprints a URL ending in ?t=<token>; open that and the browser is authorised\nfor as long as the process lives. Set serve_token in credentials.yaml, or\nEMBER_SERVE_TOKEN, for one that survives a restart. There is no --token\nflag: /proc/<pid>/cmdline is world-readable, which is the same uid the\ntoken exists to keep out.\n\n")
 		outf(out, "The token is not a substitute for --allow-paid, which stays off by default:\nauthentication answers who is asking and --allow-paid is a ceiling on what\nthe answer permits.\n\n")
+		outf(out, "IT ALSO SERVES A UNIX SOCKET under the state directory, at mode 0600, which\nanswers the same routes with no token at all: connect(2) needs write\npermission on the socket, so the operating system refuses the account next\ndoor rather than ember refusing it afterwards. A browser cannot open a unix\nsocket, so the loopback port and its token are still what a browser uses.\n\n")
 		outf(out, "A request may narrow the ceilings in your config and never widen them.\nThe image, the store, the ports and the sd.serve argv are read from the\nfile and cannot be chosen over HTTP.\n\n")
 		fs.PrintDefaults()
 	}
@@ -185,10 +187,22 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// gets built and then has one attached.
 	token, minted := serveToken(creds)
 
+	// AND THE SECOND CHANNEL'S PATH, NAMED BY loopback AND NOT HERE. The
+	// caller hands over the state directory and that package appends its own
+	// subdirectory and basename, so there is no path this file could choose
+	// -- `loopback.Bind`'s rule, with a filesystem in place of a network.
+	// Resolved before the server is built for the same reason the token is:
+	// a server that exists and then has a channel attached has an ordering in
+	// which it does not.
+	sock, err := loopback.StateSocket(ps.State)
+	if err != nil {
+		return err
+	}
+
 	srv, err := webapi.New(webapi.Options{
 		Config: cfg, Registry: reg, Store: store, Blobs: blobs, Inputs: inputs, Queue: q,
 		AllowPaid: o.AllowPaid, Port: o.Port, Dist: o.Dist, Log: logger,
-		Token: token,
+		Token: token, Socket: sock,
 	})
 	if err != nil {
 		return err
@@ -199,6 +213,17 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// means "another ember serve is already running" is reported after this
 	// one has claimed to start.
 	lns, err := srv.Listen(ctx)
+	if err != nil {
+		return err
+	}
+
+	// BOTH CHANNELS BOUND BEFORE EITHER IS ANNOUNCED, and a socket that
+	// cannot be opened stops the server rather than being left out. A channel
+	// the announcement describes as authenticated by the operating system and
+	// that is quietly absent is the "reads as working" defect this repository
+	// keeps recording -- and the client #146 is for would get
+	// connection-refused with nothing to read.
+	sockLn, err := srv.ListenSocket(ctx)
 	if err != nil {
 		return err
 	}
@@ -219,13 +244,22 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// that exits with a GPU still rented bills by the hour with nobody
 	// watching, and the TTL is the only thing that eventually stops it.
 	var (
-		wg               sync.WaitGroup
-		serveErr, runErr error
+		wg                        sync.WaitGroup
+		serveErr, sockErr, runErr error
 	)
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		serveErr = srv.Serve(ctx, lns)
+	}()
+	// THE SOCKET IS WAITED FOR LIKE THE PORT AND FOR THE SAME REASON. It is
+	// its own http.Server -- see webapi/socket.go, where that separation is
+	// what stops a TCP request being marked as authenticated -- so it has its
+	// own drain, and a process that returned while it was still accepting
+	// would be a process whose rental is gone and whose channel is not.
+	go func() {
+		defer wg.Done()
+		sockErr = srv.ServeSocket(ctx, sockLn)
 	}()
 	go func() {
 		defer wg.Done()
@@ -234,7 +268,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	wg.Wait()
 
 	outf(out, "\nevery rental has been destroyed.\n")
-	return errors.Join(serveErr, runErr)
+	return errors.Join(serveErr, sockErr, runErr)
 }
 
 // serveToken decides which credential this server will accept, and reports
@@ -340,6 +374,7 @@ func announce(out io.Writer, srv *webapi.Server, cfg config.Config, allowPaid bo
 		outf(out, "  Paid providers are refused. Start with --allow-paid to let the UI spend money.\n")
 	}
 	announceToken(out, srv, minted)
+	announceSocket(out, srv)
 
 	outf(out, "  Images land in %s\n", outputs)
 	outf(out, "\nCtrl-C to stop. Any rental is destroyed before this exits.\n\n")
@@ -364,6 +399,20 @@ func announceToken(out io.Writer, srv *webapi.Server, minted bool) {
 	outf(out, "  That keeps out another account on this machine and anything reaching a\n"+
 		"  forwarded port. It does not keep out your own uid or root, which can read\n"+
 		"  the token, and it never expires -- restart ember to revoke it.\n")
+}
+
+// announceSocket names the channel that needs no token.
+//
+// SAID BESIDE THE TOKEN AND NOT INSTEAD OF IT, because the two answer the
+// same question for different clients and an operator has to know which one
+// they are on. The mode is printed because it IS the authentication: a reader
+// who knows the socket is 0600 knows why no token was asked for, and one who
+// does not would reasonably assume the channel is unauthenticated.
+func announceSocket(out io.Writer, srv *webapi.Server) {
+	outf(out, "  A unix socket at %s (mode 0600) serves the same routes with no\n"+
+		"  token: connect(2) needs write permission on it, so the operating system\n"+
+		"  refuses every account but yours before ember sees the request. A browser\n"+
+		"  cannot reach it; the port above is what a browser uses.\n", srv.SocketPath())
 }
 
 // announcePeriods says where the period ceilings stand.

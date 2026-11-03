@@ -81,6 +81,34 @@ func TestServe_AnswersOnBothLoopbackFamilies(t *testing.T) {
 		})
 	}
 
+	// AND THE SAME REQUEST WITH NO CREDENTIAL IS REFUSED, ON THE SERVER Serve
+	// IS ACTUALLY RUNNING.
+	//
+	// Every other refusal assertion in this package goes through Handler() --
+	// a recorder, or an httptest.Server wrapping the mux -- so none of them
+	// can see what the *http.Server that Serve builds does with a connection.
+	// That became the difference between a test and nothing the day a second
+	// channel arrived: ServeSocket marks its connections as already
+	// authenticated through ConnContext, and a copy of that field on Serve's
+	// own server would leave every request on the loopback port
+	// unauthenticated. Measured by reinstating exactly that -- the rest of
+	// this package stays green and this line goes red, and before it existed
+	// only the lab reported it.
+	req, err := http.NewRequestWithContext(t.Context(), "GET",
+		fmt.Sprintf("http://127.0.0.1:%d/api/config", port), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("the loopback port answered a request with no credential with %d, want 403",
+			resp.StatusCode)
+	}
+
 	cancel()
 	select {
 	case err := <-done:

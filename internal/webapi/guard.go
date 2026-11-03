@@ -56,10 +56,43 @@ import (
 // port is this server's own, so a Host naming a different one is not this
 // server being addressed -- it is a proxy, or a rebinding attempt.
 func guard(r *http.Request, port string) error {
-	if err := checkHost(r.Host, port); err != nil {
+	if err := hostOK(r, port); err != nil {
 		return err
 	}
 	return checkOrigin(r.Header.Get("Origin"), port)
+}
+
+// hostOK is checkHost unless the request arrived on the unix socket.
+//
+// WHAT THE TWO CHECKS DO ON THE SOCKET IS A DECISION AND NOT A CONSEQUENCE,
+// so it is written here rather than left to fall out of the code. Both were
+// written against a browser, and a browser cannot open a unix socket -- there
+// is no fetch, no XHR and no <img src> that names one. What can still put a
+// browser's request on it is something the operator built in front of it, a
+// proxy with `proxy_pass http://unix:...`, and that is what decides the split:
+//
+//   - checkOrigin STILL RUNS, on the socket as on the port. It costs nothing,
+//     it is the half that is about who COMPOSED the request rather than where
+//     it arrived, and through such a proxy it is the only thing left that
+//     refuses a page on another site. A request with no Origin is allowed
+//     here exactly as it is on TCP, because that is what a shell sends.
+//   - checkHost CANNOT RUN, because it is a statement about a TCP port.
+//     It compares the Host header against the port this server listens on,
+//     and a request that arrived on a socket did not come through any port:
+//     `curl --unix-socket` sends `Host: localhost`, which has no port at all.
+//     Requiring the TCP port in it would be asserting a fact that is not true
+//     of the channel, and every socket request would be refused -- which is
+//     not a stricter check, it is a channel that does not work.
+//
+// ONE FUNCTION FOR BOTH CALL SITES -- guard above and serveWS, which checks
+// the Host and lets coder/websocket answer the Origin -- because two copies of
+// "unless it came in on the socket" is two places for one of them to be
+// forgotten, which is this repository's journal-subdirectory rule.
+func hostOK(r *http.Request, port string) error {
+	if arrivedOnSocket(r.Context()) {
+		return nil
+	}
+	return checkHost(r.Host, port)
 }
 
 // checkHost refuses anything but loopback at this port.

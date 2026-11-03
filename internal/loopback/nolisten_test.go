@@ -5,13 +5,30 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// netListenFuncs are the package-level entry points in net that can publish a
-// port.
+// netListenFuncs are the package-level entry points in net that can publish an
+// address.
+//
+// AN ADDRESS AND NOT A PORT, which used to be the wording and became wrong the
+// day this package learned to make a unix socket. ListenUnix and
+// net.Listen("unix", …) publish a PATH, and a socket in a directory another
+// account can write to is a socket another account can unlink and replace with
+// their own -- so the CLI client would hand ember's requests, which can rent
+// GPUs, to whoever got there first. That is the same failure as a published
+// port with a filesystem in place of a network, which is why the ban on these
+// two did NOT loosen when loopback.ListenSocket was written: it narrowed to
+// "outside this package", exactly as the ban on net.Listen always was, and
+// StateSocket is the only thing that can name the path they are given.
+//
+// The map is keyed on the function name alone, so the network string is not
+// read and `net.Listen("unix", p)` is caught by the same entry as
+// `net.Listen("tcp", a)`. TestNoListenGuardCatchesEverySpelling is what proves
+// each of these is still reported rather than merely listed.
 var netListenFuncs = map[string]bool{
 	"Listen":       true,
 	"ListenTCP":    true,
@@ -105,42 +122,18 @@ func TestNoListenOutsideLoopback(t *testing.T) {
 		}
 		checked++
 
-		fset := token.NewFileSet()
-		f, perr := parser.ParseFile(fset, path, nil, 0)
+		src, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		found, perr := findListens(src)
 		if perr != nil {
 			return perr
 		}
-
-		// Variables bound to a type whose methods can bind an address, so
-		// lc.Listen(...) and srv.ListenAndServe() are caught as well as
-		// net.Listen(...) and http.ListenAndServe(...).
-		tracked := trackedVars(f)
-
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			qual, ok := sel.X.(*ast.Ident)
-			if !ok {
-				return true
-			}
-
-			name := sel.Sel.Name
-			bad := (qual.Name == "net" && netListenFuncs[name]) ||
-				(qual.Name == "http" && httpListenFuncs[name]) ||
-				listenMethods[tracked[qual.Name]][name]
-
-			if bad {
-				t.Errorf("%s:%d: %s.%s is called outside internal/loopback; route it through loopback.Listen so the address is proved to be loopback first",
-					rel, fset.Position(call.Pos()).Line, qual.Name, name)
-			}
-			return true
-		})
+		for _, f := range found {
+			t.Errorf("%s:%d: %s is called outside internal/loopback; route it through loopback.Listen or loopback.ListenSocket so the address is proved to be loopback -- or the socket's directory ember's -- first",
+				rel, f.line, f.call)
+		}
 		return nil
 	})
 	if err != nil {
@@ -150,6 +143,136 @@ func TestNoListenOutsideLoopback(t *testing.T) {
 	// A walk that found nothing would pass for the wrong reason.
 	if checked == 0 {
 		t.Fatal("inspected no files; the walk is broken, not the module")
+	}
+}
+
+// listen is one reported call: what it was and where.
+type listen struct {
+	call string
+	line int
+}
+
+// findListens is the whole of the rule, over one file's source.
+//
+// EXTRACTED FROM THE WALK SO THE GUARD CAN BE SHOWN TO FAIL. For the life of
+// this test the inspection called t.Errorf inline, so the only evidence it
+// worked was that the tree was clean -- which is also what a broken matcher
+// reports, and this repository has now found four gates that could not fail.
+// The walk above reports what this returns; TestNoListenGuardCatchesEverySpelling
+// hands it sources that must be caught and sources that must not.
+func findListens(src []byte) ([]listen, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "src.go", src, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	// Variables bound to a type whose methods can bind an address, so
+	// lc.Listen(...) and srv.ListenAndServe() are caught as well as
+	// net.Listen(...) and http.ListenAndServe(...).
+	tracked := trackedVars(f)
+
+	var out []listen
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		qual, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+
+		name := sel.Sel.Name
+		bad := (qual.Name == "net" && netListenFuncs[name]) ||
+			(qual.Name == "http" && httpListenFuncs[name]) ||
+			listenMethods[tracked[qual.Name]][name]
+
+		if bad {
+			out = append(out, listen{
+				call: qual.Name + "." + name,
+				line: fset.Position(call.Pos()).Line,
+			})
+		}
+		return true
+	})
+	return out, nil
+}
+
+// TestNoListenGuardCatchesEverySpelling is the exit code the walk above cannot
+// produce.
+//
+// THE POSITIVE HALF IS NOT THE INTERESTING ONE. Every refused spelling below
+// is also the spelling somebody reaching for a shortcut writes, and the two
+// that matter most are the unix ones: internal/loopback is allowed to make a
+// socket now, and the thing that must not have changed is that nothing else
+// can. So `net.ListenUnix` and `net.Listen("unix", …)` are pasted here --
+// which is what a package wanting its own socket "just for a moment" would
+// write -- and both have to come back reported.
+//
+// AND THE NEGATIVE CONTROL IS WHY THIS IS NOT A TEST THAT CANNOT FAIL. A
+// matcher that reported every selector called Listen would satisfy every case
+// above it and is exactly what the first version of this guard did: it flagged
+// loopback.Listen, the one call it exists to permit. So the correct spellings
+// are run through the same function and must come back clean -- a guard that
+// fires on correct code is a guard people learn to ignore, which is the same
+// failure as one that cannot fire at all.
+func TestNoListenGuardCatchesEverySpelling(t *testing.T) {
+	caught := []struct {
+		name, body, want string
+	}{
+		{"net.Listen", `net.Listen("tcp", ":8188")`, "net.Listen"},
+		{"net.Listen over a unix path", `net.Listen("unix", p)`, "net.Listen"},
+		{"net.ListenUnix", `net.ListenUnix("unix", a)`, "net.ListenUnix"},
+		{"net.ListenTCP", `net.ListenTCP("tcp", a)`, "net.ListenTCP"},
+		{"net.ListenIP", `net.ListenIP("ip", a)`, "net.ListenIP"},
+		{"net.ListenUDP", `net.ListenUDP("udp", a)`, "net.ListenUDP"},
+		{"net.ListenPacket", `net.ListenPacket("udp", ":0")`, "net.ListenPacket"},
+		{"http.ListenAndServe", `http.ListenAndServe(":7777", h)`, "http.ListenAndServe"},
+		{"http.ListenAndServeTLS", `http.ListenAndServeTLS(":7777", c, k, h)`, "http.ListenAndServeTLS"},
+		{"a tracked ListenConfig", "var lc net.ListenConfig\n\tlc.Listen(ctx, \"unix\", p)", "lc.Listen"},
+		{"a tracked http.Server", "srv := &http.Server{}\n\tsrv.ListenAndServe()", "srv.ListenAndServe"},
+	}
+	for _, c := range caught {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := findListens([]byte("package p\n\nfunc f() {\n\t" + c.body + "\n}\n"))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(got) != 1 || got[0].call != c.want {
+				t.Fatalf("findListens = %v, want exactly one %s", got, c.want)
+			}
+		})
+	}
+
+	clean := []struct{ name, body string }{
+		// The two calls this package exists to be, named on the package that
+		// owns them. The first version of this guard flagged the first of
+		// these.
+		{"loopback.Listen", `loopback.Listen(ctx, b)`},
+		{"loopback.ListenSocket", `loopback.ListenSocket(ctx, s)`},
+		// Serving a listener somebody else proved is the whole arrangement
+		// webapi and cmd/emberwl use.
+		{"a server serving a proved listener", "srv := &http.Server{}\n\tsrv.Serve(ln)"},
+		// A method called Listen on something that is not a listener type.
+		{"an unrelated Listen", `k.Listen(ctx)`},
+		// And a dial, which is outbound and not this package's business.
+		{"net.Dial", `net.Dial("unix", p)`},
+	}
+	for _, c := range clean {
+		t.Run("not "+c.name, func(t *testing.T) {
+			got, err := findListens([]byte("package p\n\nfunc f() {\n\t" + c.body + "\n}\n"))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("findListens reported %v on correct code", got)
+			}
+		})
 	}
 }
 

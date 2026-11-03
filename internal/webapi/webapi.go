@@ -30,6 +30,14 @@
 // connection-refused on a working server as a bug in ember. That rule has
 // been in AGENTS.md since the first port forward; this is the one feature an
 // actual browser opens, so it is the case it was written for.
+//
+// AND A SECOND CHANNEL, which is socket.go: a unix socket at 0600 serving the
+// same routes, where the operating system has already answered who is asking
+// and no token is required. It is additive -- the credential is still
+// mandatory and still the only answer on the port -- and the one property
+// worth knowing before reading any of this file is that "a request arrived on
+// the socket" is a value on the request's CONTEXT, set by one ConnContext on
+// one http.Server, so no header can claim it.
 package webapi
 
 import (
@@ -159,6 +167,22 @@ type Options struct {
 	// Port is the port this server answers for. The guard compares the Host
 	// header against it, so it has to be the real one.
 	Port uint16
+
+	// Socket is the local client channel: a unix socket at 0600 whose
+	// requests the operating system has already authenticated.
+	//
+	// THE ZERO VALUE IS A SERVER WITH NO SOCKET, which is the stricter
+	// configuration and therefore the right default -- every request then has
+	// to carry the token, which is what every handler test in this package
+	// wants and what it had before this existed. cmd_serve always supplies
+	// one, resolved from the state directory through loopback.StateSocket;
+	// ListenSocket refuses a zero value rather than inventing a path.
+	//
+	// It is a loopback.Socket and not a string for Bind's reason: the field
+	// is unexported in that package and StateSocket is its only constructor,
+	// so there is no path this server could be handed that ember did not
+	// place inside a directory it owns.
+	Socket loopback.Socket
 
 	// Dist serves the UI from disk instead of the embedded copy, for
 	// development. Empty uses what was built into the binary.
@@ -340,9 +364,22 @@ func (s *Server) Listen(ctx context.Context) ([]net.Listener, error) {
 // queue's own Run is what owns a rental's lifetime, and a caller must wait for
 // both -- waiting only for this one would exit while a node is alive, which is
 // the single most expensive bug available here. cmd_serve does both.
+//
+// THE PLAIN http.Server IS THE WHOLE DIFFERENCE FROM ServeSocket: no
+// ConnContext, so nothing a request arriving here can do marks it as
+// authenticated and the credential in auth.go is the only answer. The two are
+// two servers rather than one serving both kinds of listener precisely so
+// that this is a missing field rather than a condition.
 func (s *Server) Serve(ctx context.Context, lns []net.Listener) error {
-	srv := &http.Server{Handler: s.mux, ReadHeaderTimeout: readHeaderTimeout}
+	return serveOn(ctx, &http.Server{Handler: s.mux, ReadHeaderTimeout: readHeaderTimeout}, lns...)
+}
 
+// serveOn is the accept-drain-close shape both channels share.
+//
+// Factored out so the socket's server cannot come to shut down differently
+// from the port's: one process holding a rental has one correct shutdown
+// order, and two copies of it is one place for the expensive half to drift.
+func serveOn(ctx context.Context, srv *http.Server, lns ...net.Listener) error {
 	errs := make(chan error, len(lns))
 	var wg sync.WaitGroup
 	for _, ln := range lns {
