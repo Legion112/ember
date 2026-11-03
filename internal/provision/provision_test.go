@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -72,8 +73,13 @@ func TestWithNode_RunsTheClosureAndDestroysAfterwards(t *testing.T) {
 	var sawEndpoint string
 	err := withNode(t.Context(), p, spec(t), o, func(_ context.Context, s Session) error {
 		sawEndpoint = s.Node.Endpoint().String()
-		if s.Trust == nil {
-			t.Error("the session carries no host key policy")
+		// Compared against the zero Pin rather than against nil, which is
+		// what this line used to say. A nil Trust would have panicked in
+		// hostkey.Callback at the dial; a zero Pin refuses every key, so the
+		// unarmed case is now a refusal and the assertion is that the pin was
+		// armed at all.
+		if s.Trust == (hostkey.Pin{}) {
+			t.Error("the session carries an unarmed host key pin, which would refuse every key the node presents")
 		}
 		return nil
 	})
@@ -221,37 +227,112 @@ func TestWithNode_AMissingNodeDestroysCleanly(t *testing.T) {
 // RunPod reports nothing, and ember's first real cloud provision fell through
 // to trust-on-first-use against a brand-new IP -- the one case TOFU cannot
 // defend, and the exact thing minting the key exists to avoid.
+//
+// **The order of the two callbacks below is the whole assertion**, and getting
+// it wrong is how this test spent its life proving nothing (#111). It already
+// offered a key ember did not mint and required a refusal -- but it offered
+// the injected key *first*, and a trust-on-first-use trust accepts the first
+// key it is ever shown and then refuses every other. So both assertions held
+// against TOFU, and the only thing left looking at the difference was
+// `!strings.Contains(log, "first use")` over a string ember has never logged.
+// Reinstating the original defect kept this test, and a hundred labs, green.
+//
+// A pin refuses a key it does not hold from the first connection; TOFU cannot,
+// because accepting the first one is what it is. Offering the foreign key
+// before anything else has touched the trust is therefore a decision procedure
+// between the two mechanisms, and it needs no log line and no message to
+// match. The acceptance is asserted beside it on purpose: without it every
+// refusal would be consistent with a trust that refuses everything, which is
+// exactly what a zero hostkey.Pin is.
+//
+// **And it is run against a provider that reports nothing, which this fake
+// could not do.** The defect was reached through `reported.IsZero()`, so a
+// fake that echoes the injected key back -- which is what a provider
+// supporting injection does, and the right default -- never takes the branch
+// the bug is on. The old comment on RecordingProvider.HostKey said "leave it
+// zero to exercise the trust-on-first-use fallback" and zero meant echo, so
+// the unit half of #111 could not have caught the defect whatever it
+// asserted: not a dead assertion but a case the fake could not produce. That
+// is the AGENTS.md rule about `runpodfake` -- a fake tidier than the service
+// it stands in for tests a service that does not exist -- met one layer down.
 func TestWithNode_PinsTheKeyEmberMintedNotTheOneTheProviderReports(t *testing.T) {
-	p := providertest.NewRecordingProvider("test")
+	for _, tc := range []struct {
+		name        string
+		reportsNone bool
+	}{
+		// What the local provider does, on a container label.
+		{"the provider echoes the injected key back", false},
+		// What RunPod does, which is the shape the bug was found in.
+		{"the provider reports no host key at all", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := providertest.NewRecordingProvider("test")
+			p.ReportsNoHostKey = tc.reportsNone
 
-	var sawWarning bytes.Buffer
-	o := opts(t)
-	o.Log = slog.New(slog.NewTextHandler(&sawWarning, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			err := withNode(t.Context(), p, spec(t), opts(t), func(_ context.Context, s Session) error {
+				// First, before the trust has seen anything: a key ember did
+				// not mint. This must be refused, and refused as a mismatch
+				// rather than by some unrelated error, which is the only
+				// answer a pin can give and the one answer TOFU cannot.
+				other, mintErr := hostkey.Mint()
+				if mintErr != nil {
+					t.Fatal(mintErr)
+				}
+				cbErr := hostkey.Callback(s.Trust, "n1")("h", nil, other.Public)
+				if cbErr == nil {
+					t.Error("the first host key offered was accepted although ember did not mint it; " +
+						"that is trust-on-first-use, not a pin")
+				} else {
+					var mm *hostkey.MismatchError
+					if !errors.As(cbErr, &mm) {
+						t.Errorf("want a *hostkey.MismatchError for a key ember did not mint, got %T: %v", cbErr, cbErr)
+					}
+				}
 
-	err := withNode(t.Context(), p, spec(t), o, func(_ context.Context, s Session) error {
-		injected := p.InjectedKey("n1")
-		if injected.IsZero() {
-			t.Fatal("the fake recorded no injected key")
-		}
-		pub := parseHostKey(t, injected)
-
-		// The trust accepts the injected key and refuses any other, without
-		// ever having connected.
-		if cbErr := hostkey.Callback(s.Trust, "n1")("h", nil, pub); cbErr != nil {
-			t.Errorf("the injected key was refused: %v", cbErr)
-		}
-		other, _ := hostkey.Mint()
-		if cbErr := hostkey.Callback(s.Trust, "n1")("h", nil, other.Public); cbErr == nil {
-			t.Error("a different host key was accepted")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+				// And the key ember did inject is accepted, without ever
+				// having connected.
+				injected := p.InjectedKey("n1")
+				if injected.IsZero() {
+					t.Fatal("the fake recorded no injected key")
+				}
+				if cbErr := hostkey.Callback(s.Trust, "n1")("h", nil, parseHostKey(t, injected)); cbErr != nil {
+					t.Errorf("the injected key was refused: %v", cbErr)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
-	// And it is a pin, not trust-on-first-use.
-	if strings.Contains(sawWarning.String(), "first use") {
-		t.Errorf("ember fell back to TOFU despite minting a key:\n%s", sawWarning.String())
+}
+
+// TestSessionCarriesAPinAndNotAnArbitraryTrust is the seal the test above is
+// the backstop for.
+//
+// hostkey.Store.TrustOnFirstUse is a hostkey.Trust, so while trustFor returned
+// that interface the original defect was one line -- and the two tests named
+// for it both watched a log instead of the mechanism. Typing the return and
+// the field as the concrete hostkey.Pin makes that line a compile error.
+//
+// This asserts the typing itself, in the shape hostkey.TestTrustIsSealed uses:
+// widening either back to the interface is the one edit that reopens the hole
+// without touching any assertion, and the author who makes it should be told
+// here rather than discover it from a provider that reports no host key.
+func TestSessionCarriesAPinAndNotAnArbitraryTrust(t *testing.T) {
+	want := reflect.TypeOf(hostkey.Pin{})
+
+	f, ok := reflect.TypeOf(Session{}).FieldByName("Trust")
+	if !ok {
+		t.Fatal("Session has no Trust field; this guard cannot have looked at the thing it is about")
+	}
+	if f.Type != want {
+		t.Errorf("Session.Trust is %s, want %s; an interface there can hold "+
+			"hostkey.Store.TrustOnFirstUse, which is the defect #111 reinstated", f.Type, want)
+	}
+	if out := reflect.TypeOf(trustFor).Out(0); out != want {
+		t.Errorf("trustFor returns %s, want %s; the provision path must not be able to "+
+			"name a trust that is not a pin", out, want)
 	}
 }
 

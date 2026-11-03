@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Legion112/ember/internal/exposure"
+	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/internal/httpx"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
@@ -250,26 +251,58 @@ func TestRunPod_ToleratesThePlatformPortAlone(t *testing.T) {
 // a brand-new IP while a warning scrolled past -- and every unit test passed,
 // because the fake provider echoed a key back and the local provider really
 // does. This fake reports none, exactly like the real service.
+//
+// **It asserted the absence of a log line nothing emits, for its whole life.**
+// The warning is gone -- the fallback is a refusal now, which is right -- and
+// what went with it was the only thing this lab was looking at: `"first use"`
+// appears in no log call in any package at any level, so the assertion could
+// not fire, and reinstating the original defect as a one-line TOFU fallback in
+// provision.trustFor left this lab and the other ninety-nine green (#111).
+// The dial below could not see it either, and that is worth being precise
+// about: the node really does present the key ember injected, so a TOFU trust
+// records it and the handshake succeeds. A dial proves the key matches; it
+// cannot prove *which mechanism* decided it matched.
+//
+// So the assertion is the mechanism, and it is made before anything connects:
+// a pin refuses a key it does not hold from the first connection, and TOFU
+// accepts the first key it is ever shown. The refusal and the dial together
+// are the pair -- without the dial the refusal would be consistent with a
+// trust that refuses everything, which is what a zero hostkey.Pin is, and
+// without the refusal the dial is consistent with both mechanisms.
 func TestRunPod_PinsTheMintedKeyRatherThanTrustingOnFirstUse(t *testing.T) {
 	port := harness.FreePort(t)
 	p, _, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 
-	o := labOptions(t, l)
-	var logged strings.Builder
-	o.Log = testLogger(&logged)
-
-	err := withNode(t.Context(), p, runpodSpec(t, port), o,
+	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
 		func(ctx context.Context, s provision.Session) error {
-			// The dial itself is the proof: it verifies against the pinned
-			// key, and a mismatch would fail here rather than be recorded.
+			// Offered first, while the trust has seen nothing. Under TOFU
+			// this is accepted *and pinned*, so the dial below then fails
+			// too: the reinstated defect goes red twice rather than once.
+			foreign, err := hostkey.Mint()
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := s.Node.Handle().ID
+			cbErr := hostkey.Callback(s.Trust, id)("h", nil, foreign.Public)
+			if cbErr == nil {
+				t.Error("the first host key offered to this session was accepted although ember " +
+					"did not mint it; that is trust-on-first-use against an address RunPod reports " +
+					"no key for, which is the one case TOFU cannot defend")
+			} else {
+				var mm *hostkey.MismatchError
+				if !errors.As(cbErr, &mm) {
+					t.Errorf("want a *hostkey.MismatchError for a key ember did not mint, got %T: %v", cbErr, cbErr)
+				}
+			}
+
+			// And the real node, presenting the real injected key, through a
+			// real handshake: the acceptance half, over sshd rather than over
+			// a callback ember called itself.
 			client := dialSession(t, l, s)
 			return client.Close()
 		})
 	if err != nil {
 		t.Fatalf("provision: %v", err)
-	}
-	if strings.Contains(logged.String(), "first use") {
-		t.Errorf("ember fell back to trust-on-first-use:\n%s", logged.String())
 	}
 }
 

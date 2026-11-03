@@ -19,25 +19,50 @@ type Trust interface {
 	check(nodeID string, remote net.Addr, key ssh.PublicKey) error
 }
 
+// Pin verifies against a fingerprint ember already holds, and refuses every
+// other key from the very first connection.
+//
+// It is **exported and concrete**, which is the point. Trust being an
+// interface is what keeps ssh.InsecureIgnoreHostKey untypeable, and it is
+// also what let the only other implementation in this package -- Store's
+// trust-on-first-use -- be returned from provision.trustFor by a one-line
+// change. That was ember's quietest bug: RunPod reports no host key, so
+// reading the provider's answer first dropped the first real cloud provision
+// into TOFU against a brand-new IP, which is the one case TOFU cannot defend.
+// The regression tests written for it asserted that the log did not say
+// "first use", and nothing in ember logs that string, so reinstating the
+// defect kept a hundred labs and the whole unit suite green (#111).
+//
+// So trustFor and provision.Session.Trust are typed Pin rather than Trust:
+// a trust that is not a pin is now a compile error on the path the bug was
+// on, rather than a thing a test has to notice. Trust stays an interface
+// because its own seal -- one unexported method, no permissive
+// implementation -- is what makes the insecure callback unwritable, and
+// because the dial legitimately takes either.
+//
+// The zero Pin refuses every key. That is deliberate: Pinned's error return
+// used to hand back a nil Trust, which panics in Callback, and a caller who
+// drops the error now gets the strictest possible answer instead of a crash
+// -- the direction Caps.PublicSSH defaults in.
+type Pin struct{ fp Fingerprint }
+
 // Pinned verifies against a fingerprint ember already knows.
 //
 // This is the normal case, because ember mints the host key itself and injects
 // it at create time (see Mint): the first connection is already authenticated
 // and there is no trust-on-first-use window at all.
-func Pinned(fp Fingerprint) (Trust, error) {
+func Pinned(fp Fingerprint) (Pin, error) {
 	if fp.IsZero() {
 		// An unset fingerprint means the provider field was empty or the
 		// caller forgot. Either way there is nothing to verify against, and
 		// returning a Trust that accepts anything is how "pinned" becomes a
 		// synonym for "ignored".
-		return nil, fmt.Errorf("refusing to build a pinned trust from an unset fingerprint")
+		return Pin{}, fmt.Errorf("refusing to build a pinned trust from an unset fingerprint")
 	}
-	return pinned{fp: fp}, nil
+	return Pin{fp: fp}, nil
 }
 
-type pinned struct{ fp Fingerprint }
-
-func (p pinned) check(nodeID string, remote net.Addr, key ssh.PublicKey) error {
+func (p Pin) check(nodeID string, remote net.Addr, key ssh.PublicKey) error {
 	got := Of(key)
 	if p.fp.Equal(got) {
 		return nil

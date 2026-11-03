@@ -49,12 +49,25 @@ type RecordingProvider struct {
 	// that did this by default would make every test fail for the wrong
 	// reason.
 	//
-	// The old comment below is kept because it still describes the zero
-	// value's other role.
-	//
-	// HostKey is reported on a ready node. Leave it zero to exercise the
-	// trust-on-first-use fallback.
+	// It used to say "leave it zero to exercise the trust-on-first-use
+	// fallback", and that was false in the direction that mattered: zero
+	// means *echo*, so this fake could not report what RunPod reports, which
+	// is nothing. The one behaviour ember's quietest bug was about was
+	// therefore unreachable through it, and no assertion the unit tests
+	// carried could have seen the defect (#111). ReportsNoHostKey is that
+	// behaviour, named rather than spelled as a sentinel.
 	HostKey node.HostKey
+
+	// ReportsNoHostKey makes Inspect report no host key at all, which is what
+	// RunPod does: there is no label mechanism, so the create call accepts an
+	// injected key and the API never mentions it again.
+	//
+	// It is a flag and not the zero HostKey because the zero value already
+	// means "echo the injected key" -- the behaviour of a provider that
+	// supports injection, and the right default. A fake tidier than the
+	// service it stands in for tests a service that does not exist, and this
+	// is the field that stops it being tidier here.
+	ReportsNoHostKey bool
 
 	// Endpoint is reported once the node is ready. The zero value yields a
 	// usable one.
@@ -232,6 +245,11 @@ func (p *RecordingProvider) InjectedKey(id string) node.HostKey {
 // injection does: ember hands it over in the create call and the node adopts
 // it. An explicit HostKey overrides, for the tests that need a mismatch.
 func (p *RecordingProvider) hostKeyFor(h node.Handle) node.HostKey {
+	// Checked before the override, so "reports nothing" cannot be
+	// accidentally defeated by a HostKey left over from another case.
+	if p.ReportsNoHostKey {
+		return node.HostKey{}
+	}
 	if !p.HostKey.IsZero() {
 		return p.HostKey
 	}

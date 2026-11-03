@@ -641,6 +641,18 @@ that sentence made unrepresentable rather than merely tested.
   and the conformance suite now points the real provider at this fake instead,
   which is what that comment was asking for.
 
+  **The fake one layer down was tidier, and it said in words that it was
+  not.** `providertest.RecordingProvider` echoes the injected host key back,
+  which is what a provider supporting injection does and is the right default
+  -- and its comment read "leave it zero to exercise the trust-on-first-use
+  fallback", while zero *is* the echo. So the one RunPod behaviour ember's
+  quietest bug was about, reporting nothing, was unreachable through it, and
+  no assertion the `provision` unit tests carried could have caught the
+  reinstated defect: not a dead assertion but a case the fake could not
+  produce. `ReportsNoHostKey` is that behaviour, a named flag rather than a
+  sentinel, because the zero value already means something else. Measured: the
+  defect is green against every other case and red against this one.
+
   It was tidier in one place, and the conformance suite is what found it: a
   `DELETE` of a pod already deleted answered **200**, because the handler
   checked whether the pod was in its map and not whether it was gone. The
@@ -686,8 +698,22 @@ that sentence made unrepresentable rather than merely tested.
   added for it, so markup that changes breaks the test, which is the correct
   direction.
 - **A regression test that has never failed proves nothing.** Each of these
-  was checked by reinstating the bug and watching the lab go red. The
-  trust-on-first-use lab fails with the exact warning the live run printed.
+  was checked by reinstating the bug and watching the lab go red. **The one
+  claim in this list that was itself untrue said so about the most important
+  guard here**: "the trust-on-first-use lab fails with the exact warning the
+  live run printed" -- and it does not, because the warning is gone. The
+  fallback is a refusal now, which is right, and what went with it was the
+  only thing either regression test was looking at. Both
+  `TestRunPod_PinsTheMintedKeyRatherThanTrustingOnFirstUse` and
+  `TestWithNode_PinsTheKeyEmberMintedNotTheOneTheProviderReports` ended on
+  `!strings.Contains(log, "first use")`, a string that appears in no log call
+  in any package at any level, so reinstating the original RunPod defect kept
+  a hundred labs and the whole unit suite green. The only red light anywhere
+  was `TestNoProductionDeadCode` noticing `TrustOnFirstUse` had gained a
+  caller -- a stale-inventory check whose own failure text tells you to delete
+  the entry. The threat-model entry below is the fix; what this entry is for
+  is that a sentence in this file asserting a test goes red is worth exactly
+  as much as the exit code nobody checked.
 - **Clean up what you did not think to look for.** The lab harness removed
   containers and not the networks beside them. Nothing bills for a bridge
   network and no assertion mentioned one, so a leak stayed invisible until
@@ -894,13 +920,51 @@ that sentence made unrepresentable rather than merely tested.
   against a brand-new IP — the one case TOFU cannot defend, and the exact
   thing minting the key exists to avoid. It logged a warning, and a warning
   is not a security control.
+
+  **Neither was the test.** For the life of both regression tests the final
+  assertion was that the log did *not* contain `"first use"` -- and nothing in
+  ember has ever logged that string, so the assertion could not fire. The
+  positive half above it could not tell the two mechanisms apart either, and
+  the reason is an ordering nobody would look twice at: it offered the
+  *injected* key first and required acceptance, then a foreign key and
+  required refusal, and a trust-on-first-use trust accepts the first key it is
+  shown and refuses every other -- so it satisfied both. The lab's dial was no
+  better, because the node really does present the key ember injected: a dial
+  proves the key matched and cannot say which mechanism decided it.
+  Reinstating the one-line fallback -- TOFU when the provider reports no key,
+  every other guard in `trustFor` intact -- was green everywhere.
+
+  **So the mechanism is a type now, and the assertion is positive.**
+  `provision.trustFor` and `provision.Session.Trust` are `hostkey.Pin`, a
+  concrete type whose only constructor is `hostkey.Pinned`, so
+  `return o.Pins.TrustOnFirstUse(id), nil` on that path is a **compile error**
+  rather than a thing a test has to notice -- the shape `exposure.PortRequest`
+  and `loopback.Bind` already use. `hostkey.Trust` stays an interface, because
+  its own seal is what keeps `ssh.InsecureIgnoreHostKey` untypeable and the
+  dial legitimately takes either; `TrustOnFirstUse` stays, for a provider that
+  genuinely cannot accept an injected key, and is no longer reachable from the
+  path that rents machines. The honest limit: this seals `trustFor`, not every
+  conceivable dial, so both tests now assert the mechanism rather than a
+  message -- **a key ember did not mint, offered before anything else has
+  touched the trust, must be refused**. TOFU cannot refuse its first key; that
+  is what TOFU is. The acceptance is asserted beside the refusal, because a
+  refusal alone is consistent with a trust that refuses everything, which is
+  what a zero `Pin` is. A zero `Pin` refusing everything is itself the
+  decision: `Pinned`'s error used to hand back a nil `Trust`, which panics in
+  `Callback`, so a dropped error is now the strictest answer rather than a
+  crash. Checked by reinstating the original defect with the type widened back
+  -- both tests go red, the lab twice, because the foreign key it refuses
+  first is the key TOFU would have pinned.
 - **A provider reporting a key that differs from the injected one is a
   refusal.** It has substituted something, and continuing would pin the
   substitution.
-- **A node with no minted key is refused, not downgraded.** TOFU is
-  unreachable through `WithNode`, which mints for every node; reaching that
+- **A node with no minted key is refused, not downgraded.** Reaching that
   branch would mean ember had stopped injecting, which is worth a refusal
-  rather than a quiet fallback.
+  rather than a quiet fallback. This used to say TOFU "is unreachable through
+  `WithNode`, which mints for every node", and that was an argument about a
+  *branch* rather than about a seal: minting is why nothing took the fallback,
+  not why nobody could write one, and one line in `trustFor` reinstated it.
+  What makes it unreachable is the return type, two entries up.
 - **A provider may name public ports it adds unconditionally, and only
   those.** RunPod maps its web terminal port (19123/http) to every pod with no
   way to disable it — found when ember's first real provision refused the node
