@@ -917,7 +917,11 @@ func TestCreate_SendsNoCudaFieldAtAll(t *testing.T) {
 // provider's mapping.
 type conformanceNodes struct{}
 
-func (conformanceNodes) Start(string, string, string) (string, string, uint16) {
+// It ignores the mounts for the same reason it reports an address with nothing
+// behind it: a conformance run makes no store, so `mounts.network` is empty on
+// every create it sends, and a stub that bind-mounted something would be
+// providing storage for a volume nothing asked for.
+func (conformanceNodes) Start(runpodfake.Machine) (string, string, uint16) {
 	return "conformance-machine", "203.0.113.7", 40022
 }
 func (conformanceNodes) Stop(string) {}

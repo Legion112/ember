@@ -320,3 +320,52 @@ parameters, from one constant per endpoint; the fake refusing the pair it never
 sends costs nothing and guards the case where one of three call sites drops a
 parameter, which would otherwise surface as a catalogue with no capacity in it
 rather than as an error anybody sees.
+
+### What the fake reproduces of the volume route and the store endpoint (#145)
+
+Same gap one API over, and worse: `runpodfake` served no `/v2/network-volumes`
+route at all, so `ember store create`, `rm`, `push`, `sync`, `ls`, `verify`
+and `abort` were exercised against RunPod only by one-off httptest handlers —
+the canned handlers that package's doc comment was written to replace. The
+store pre-flight added in #142 was airtight rather than merely untested: every
+store lab runs on the local provider, whose stores report no region, and
+`CheckStoreAssets` skips on an empty region by design, so the whole lab suite
+could not tell that check from its own absence.
+
+A volume in the fake is **one host directory**. `Create` bind-mounts it into
+the container the way `mounts.network` attaches it on RunPod, and the S3
+endpoint serves object calls by reading that same directory — so "the sync
+filled the store" and "the pre-flight can see it" are one fact. Two in-memory
+maps would have agreed with each other whatever either half did.
+
+| behaviour | how it is known |
+|---|---|
+| `/v2/network-volumes`, hyphenated, and a 404 for anything else | **observed** — `/v2/networkvolumes` is a 404 and this is the live path |
+| `dataCenter` on the way in and on the way out, with `dataCenterId` refused `422 ["$: missing property 'dataCenter'", "$: additional properties 'dataCenterId' not allowed"]` | **observed**, as the live 422 for a create carrying the v1 spelling |
+| `422 "$.size: minimum: got 1, want 10"` | **observed** — the documented minimum is 0 and the server's is 10 |
+| the list is one page, `{"pagination":{"nextCursor":null,"hasNextPage":false}}` | **observed** — that is what the live `GET` returned on an empty account. The cursor loop is **not** exercised: ember asks for a thousand volumes a page and no lab creates a thousand stores, so paginating here would be a branch nothing could reach, and it is covered against canned bodies in `store_test.go` |
+| `mounts.network[].volumeId` and `path`, with `path` required | **observed** — the volume appeared at `/models` on the live run, and `path` has no default |
+| a mount naming a volume that does not exist is a 400 | **inferred.** Nobody has sent one. It is the direction that cannot let a lab pass over a container with nothing at the mount path |
+| DELETE of a volume that is gone is a 404 | **inferred**, by analogy with the pod route, where it is observed. `httpx.Delete` turns a 404 into success, which is what `StoreDestroy` wants, and it is the direction that cannot make destroy-is-idempotent pass with the not-found path never taken |
+| `disk` is **not** refused beside a mount | **observed** — the first live store run created a pod with both and RunPod honoured it. The schema's mutual exclusion is between `persistent` and `network`, and ember never sends `persistent`, so reproducing it would be a branch nothing reaches |
+| attaching a volume removes `/workspace` entirely | **not reproduced.** A bind mount can make a directory empty and cannot make it absent, and the node image creates `/workspace` itself now. The interaction is recorded above and nothing in the fake stands in for it |
+
+The S3 endpoint is the half with a real algorithm in it:
+
+| behaviour | how it is known |
+|---|---|
+| SigV4 is verified by **re-signing** — `awssig.Sign` is called on a reconstruction of the request and the whole `Authorization` header is compared | the signer's own code, so the endpoint cannot come to disagree with it about any of the four steps. A fake that accepted an unsigned request could not catch a signing regression, and a 403 with no detail is SigV4's only other feedback |
+| the reconstruction is filtered by `SignedHeaders` | **measured** — Go's transport adds `Accept-Encoding: gzip` after the client has signed, so a verifier that hashed every header it received rejects every correct request. It is also what a real server does |
+| the signing region is the **volume's** datacentre and never the caller's credential scope | the point of the scope: a signing key that leaks is useless in another region only if somebody checks |
+| `HEAD`, single `PUT`, `ListObjectsV2` with prefix, page size and continuation token, and `ListMultipartUploads` | the verbs `internal/s3` has. There is no object `GET` because that package has no download, and no multipart because ember only multiparts above 400 MB — moving that through an httptest server to exercise a sequence `s3_test.go` already drives with `PartSize` overridden is a bad trade. Anything else is a `501` naming the verb rather than a 404 that would reach a caller as "the object is not there" |
+| `ListMultipartUploads` answers an empty listing | the truthful answer for a store nothing has ever multiparted, and `ember store ls` asks it on every run — a 404 there would reach the caller as a failure to look |
+| a body that disagrees with its own `X-Amz-Content-Sha256` is refused and nothing is written | **inferred** — AWS's own `XAmzContentSHA256Mismatch`, not observed against RunPod. It is the check that would catch a truncated upload, which is what a store that can be written and not read back hides |
+| the `ETag` is a SHA-256 prefix, and is **omitted** for an object this process cannot read | `s3.Object.ETag`'s own comment: ember never treats a tag as a digest, because a single-part object's is an MD5 and a multipart one's is an MD5 of MD5s. `embernode fetch` runs as root in the container and chmods the asset 0600, so the test process can stat it and not read it — which is also why the lab asserts the content through ember's own digest check on the next node rather than by comparing bytes here |
+
+One thing worth stating about the directory. It lives under the test's own
+`t.TempDir()`, and the asset lands root-owned because a container wrote it.
+Unlinking a file needs write permission on its *directory* rather than
+ownership of the file, and the directory belongs to the test process — so the
+cleanup works for flat keys, which is every key ember writes here (`assets[].as`
+and a pushed file's base name). A nested key whose parent `embernode` created
+would be root-owned and would not come away.

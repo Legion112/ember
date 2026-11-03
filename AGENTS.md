@@ -770,6 +770,85 @@ that sentence made unrepresentable rather than merely tested.
   that one body rather than a second body. `internal/provider/runpod/testdata/README.md`
   says which of them were observed and which rest on the endpoint's own
   description.
+
+  **The same finding one API over, and that one was airtight rather than
+  merely untested: `ember store`'s seven subcommands and the store pre-flight
+  were paths no lab could reach.** There was no `/v2/network-volumes` route
+  either, so `store create`, `rm`, `push`, `sync`, `ls`, `verify` and `abort`
+  were exercised against RunPod only by the one-off canned handlers this
+  package exists to replace. The pre-flight is the sharper half, because
+  nothing about it was a coincidence: every store lab in the tree runs on the
+  **local** provider, `local.go` reports `Region: ""` for a Docker volume --
+  correctly, it is not in a datacentre -- and `CheckStoreAssets` skips on an
+  empty region by design. So it returned `Asked: false` on every lab there is,
+  and the suite could not tell the check from its own absence. Its unit tests
+  go red on reinstatement; the labs would not have noticed it being deleted.
+  Measured: with the pre-flight patched never to run, `go test ./...` and all
+  107 labs were green before this.
+
+  **A volume is one host DIRECTORY, and that is the whole point rather than an
+  implementation detail.** The thing the pre-flight turns on is a join: the
+  sync fills the store by running `embernode fetch` on a rented machine, over
+  SSH, into a mounted directory, and the next plan asks the store's own
+  endpoint whether that worked. Two in-memory maps -- which is what
+  `internal/queue`'s and `internal/cli`'s httptest stand-ins are -- agree with
+  each other whatever either half does, the closed loop `capabilities.model`
+  sat in. So `Create` honours `mounts.network` by bind-mounting that
+  directory, the S3 endpoint serves object calls by reading it, and the asset
+  the node downloads is the asset the endpoint lists. Widening the `Nodes`
+  seam to carry the mount is the same rule as the fake not being tidier than
+  the service: accepting `mounts.network` and starting a container with
+  nothing at that path would make a full store and an empty one the same lab.
+  **SigV4 is verified by re-signing** -- `awssig.Sign` over a reconstruction
+  of the request, the whole `Authorization` header compared -- because a fake
+  that accepted an unsigned request cannot catch a signing regression, and a
+  403 with no detail is the only other feedback that algorithm has. The
+  reconstruction is filtered by `SignedHeaders`, which is what a real server
+  does and is not optional: Go's transport adds `Accept-Encoding: gzip`
+  **after** the client has signed, so a verifier that hashed every header it
+  received rejects every correct request.
+  `internal/provider/runpod/testdata/README.md` has the per-behaviour table
+  and says which of them were observed, which are inferred, and the two that
+  are deliberately not reproduced.
+
+  **Two gaps the lab measured on its first run, both asserted rather than left
+  to be noticed.** `fillStore` calls `SyncAssets` with no sink and writes no
+  `genstore` row, so `ember history` and `ember spend` are blind to a rental
+  the queue started on its own initiative -- the ledger shows one rental where
+  two were paid for, against this file's own "a total that is missing part of
+  its history says so, every time". And `Queue.once` calls `fail` only when
+  `Planner.Plan` fails: the status is written inside `WithServed`'s closure by
+  `drain`, so **every** failure after the plan -- the create, the wait for
+  sshd, the gpu probe, the asset verify, the model load -- leaves the row with
+  the `running` `ClaimNext` wrote and no rental behind it. The queue table
+  shows it running for the life of the process and its cancel button reaches
+  the provisioning-window 409, whose message says the rental is coming up when
+  nothing is; `Run`'s `Interrupt` sweep clears it only at the next start. Both
+  are asserted the way `TestConformance_CannotCatchARederivedRunID` is -- a
+  limitation nobody can read out of the code is a limitation that will be
+  forgotten -- so a change that records either turns the lab red, which is the
+  moment to read the comment beside the assertion.
+
+  **It drives the queue in process, and that is forced rather than chosen.**
+  `app.Deps.CloudBaseURL` and `S3BaseURL` are Go fields, so the compiled
+  `ember` cannot be pointed at a fake provider -- which this file already
+  records as the reason the offers panel's error path has no lab. What the lab
+  builds is `cmd_serve.go`'s own wiring field for field: the same
+  `queue.Queue`, the same `queue.AppPlanner`, the same `genstore`. The one
+  thing it cannot reach is the `internal/cli` verbs themselves, because
+  `runStore` is unexported, so `store verify`'s and `store ls`'s own calls --
+  a HEAD per asset, `ListObjectsV2`, `ListMultipartUploads` -- are driven
+  through `s3.Client` instead.
+
+  **The asset server binds the Docker bridge gateway, which is the one
+  listener in these labs that cannot be loopback.** `embernode fetch` runs
+  INSIDE a container, where 127.0.0.1 is the container, and `httptest` binds
+  loopback -- so the address is the bridge's own gateway, read from the daemon
+  rather than assumed to be 172.17.0.1 (a daemon with another `bip` answers
+  something else, and a guessed address fails as a timeout naming nothing).
+  Measured before it was built: a container on the default bridge reaches a
+  host listener on that address, and the listener is reachable from nothing on
+  the LAN. `nolisten_test.go` exempts test files for exactly this.
 - **A UI has a class of bug no unit test can reach, so one lab drives a
   browser.** Three in this feature were invisible to the Go tests and to
   `cargo test` and obvious the moment a page loaded: a nil slice marshalled as
