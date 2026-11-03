@@ -132,7 +132,7 @@ func TestParseUSD_RefusalsSayWhatToWrite(t *testing.T) {
 	if err == nil {
 		t.Fatal("an amount past int64 microdollars was accepted")
 	}
-	for _, want := range []string{"out of range", "922337203685 dollars", "not cents or microdollars"} {
+	for _, want := range []string{"out of range", "922337203685 dollars", "a tenth of what an int64 of microdollars can hold", "not cents or microdollars"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("out-of-range error %q does not carry %q", err, want)
 		}

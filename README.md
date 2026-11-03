@@ -2031,8 +2031,8 @@ it, and for every spelling refused for its shape the message carries the
 accepted form rather than only the word "malformed":
 `max_hourly_usd: malformed price "$1,000": write a plain decimal number of
 dollars, optionally after a $ -- 1.79, 0.429, $2.49 -- with no thousands
-separator, sign, exponent, …`. An amount too large to hold as integer
-microdollars says what the limit is.
+separator, sign, exponent, …`. A whole part above 922337203685 dollars is
+refused as out of range, and the message states that bound.
 
 It also refuses a **positive amount below one microdollar** — `"0.0000001"`
 and anything smaller. Those used to truncate to zero and parse successfully,

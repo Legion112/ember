@@ -208,7 +208,7 @@ func ParseUSD(s string) (MicroUSD, error) {
 		}
 		cents = cents*10 + int64(c-'0')
 		if cents > maxWholeDollars {
-			return 0, fmt.Errorf("price %q is out of range: ember holds money as integer microdollars, so the whole part cannot exceed %d dollars -- check the figure is in dollars and not cents or microdollars", orig, int64(maxWholeDollars))
+			return 0, fmt.Errorf("price %q is out of range: the whole part cannot exceed %d dollars, a tenth of what an int64 of microdollars can hold -- check the figure is in dollars and not cents or microdollars", orig, int64(maxWholeDollars))
 		}
 	}
 	total := cents * micros
@@ -249,10 +249,18 @@ func ParseUSD(s string) (MicroUSD, error) {
 	return MicroUSD(total), nil
 }
 
-// maxWholeDollars is the largest whole part ParseUSD accepts: the most that
-// still fits an int64 of microdollars after a digit has been appended, which
-// is why it is a tenth of the plain quotient. Named so the check and the
-// message that quotes it cannot come apart.
+// maxWholeDollars is the largest whole part ParseUSD accepts. It is a
+// deliberately conservative tenth of what MicroUSD can represent (the exact
+// ceiling is 9223372036854 dollars, MaxInt64/micros), and money_fuzz_test.go's
+// oracle mirrors this bound rather than the representable one.
+//
+// Do not "correct" it to math.MaxInt64 / micros. The whole part alone would
+// fit, but the fractional digits are added afterwards: ParseUSD("9223372036854.999999")
+// then carries the total past MaxInt64 and returns a NEGATIVE amount with a
+// nil error -- a negative money ceiling, silently. Measured, not reasoned; the
+// tenth is the margin that keeps whole*micros + frac inside int64.
+//
+// Named so the check and the message that quotes it cannot come apart.
 const maxWholeDollars = math.MaxInt64 / micros / 10
 
 // malformedPrice is the one refusal for every spelling ParseUSD declines for
