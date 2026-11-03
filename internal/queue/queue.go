@@ -302,6 +302,12 @@ func (q *Queue) Run(ctx context.Context) error {
 
 	for {
 		if ctx.Err() != nil {
+			// A SUBMISSION THIS LOOP TOOK AND NEVER STARTED LEAVES THROUGH
+			// HERE, and it used to leave silently. Called unconditionally so
+			// the ordinary shutdown -- `pending` nil -- goes through the same
+			// line rather than through a condition that is almost always
+			// false.
+			q.dropPending(pending)
 			return nil
 		}
 
@@ -352,6 +358,15 @@ func (q *Queue) Run(ctx context.Context) error {
 			// top, find nothing parked yet, claim nothing, and come back here
 			// having already consumed the kick, so the run would start up to
 			// fifteen seconds later for no reason a reader could see.
+			//
+			// AND IT IS A SIBLING OF ctx.Done() ABOVE, which is the case
+			// dropPending exists for: both are ready at a shutdown that lands
+			// while a submission is parked, Go picks uniformly, and taking the
+			// handoff means the run is held across one more top-of-loop
+			// `ctx.Err()` that returns without starting it. Submit has already
+			// answered nil by then. See Submit's own comment for the
+			// measurement and for why that outcome is right and only its
+			// account was wrong.
 			pending = &d
 		case <-q.kicks():
 		case <-time.After(idlePoll):

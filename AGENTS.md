@@ -1597,6 +1597,29 @@ that sentence made unrepresentable rather than merely tested.
   because something remembered not to pass it along. A Ctrl-C *before* the 202
   cancels a submission, where nothing has been rented, and the row Adopt
   already wrote is ended with the reason rather than left reading `running`.
+  **A SHUTDOWN HAS TWO OUTCOMES AND `Submit`'s COMMENT CLAIMED ONE**, which is
+  this file's own rule turned on the paragraph that states it: it read "the
+  drain loop returns when `ember serve` is stopping and nothing will ever
+  receive", and that is true only of a submitter still PARKED. `Run`'s idle
+  select has `<-ctx.Done()` and `<-q.handoff()` as two cases of ONE select, so
+  a shutdown landing while a submission is parked makes both ready and Go
+  picks uniformly -- and if the handoff wins, the loop TAKES the run, reaches
+  the top-of-loop `ctx.Err()` and returns having started nothing, with
+  `Submit` already answered nil. Something did receive it. **Measured, because
+  the obvious shape reports it as unreachable**: with the send and the cancel
+  released from one closed channel, 3000 attempts gave 21 accepted
+  submissions, 2 of which ran and **19 taken and dropped**; the control --
+  park the send, then cancel, where `ctx.Done()` is not yet ready when the
+  handoff is -- gave 400 accepted of 400 and **400 ran, 0 dropped**. The
+  OUTCOME was right the whole time and only the account was wrong: nothing
+  rents but `Direct.Run`, so there is no money and no leak either way. What
+  was missing is that the drop was **silent**, so `Run` names the request in a
+  warn before that return and "swept to `interrupted` by the next start" is
+  something a reader can confirm rather than take on trust. A `done` channel
+  is still refused, and more firmly: it would make the taken case a refusal,
+  which is the same outcome with more state. The committed test is over the
+  LINE and not over the race, because a test that raced for 19-in-3000 is the
+  flake this change was already corrected for once.
   **What a test can see of "structural", because this file has been wrong about
   mechanisms before.** Three assertions, each ruling out a different wrong
   answer: `Submit` does not return while a queued rental is open, and the error
