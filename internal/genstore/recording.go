@@ -242,9 +242,12 @@ func (s *RecordingStore) ClaimNext(_ context.Context, runID string, c Compat) (R
 // ON THE TWO WRITES A TEARDOWN REACHES, and not on every method. Update is
 // called by Queue.finish, Queue.endIfUnfinished, Queue.fail and Recorder.set,
 // and AppendEvents by the flush that follows a generation -- all of them while
-// the context the rental used may already be cancelled. Nothing else in ember
-// reaches a store from one, so a check on the rest would be a guard with no
-// defect available to catch.
+// the context the rental used may already be cancelled, and all of them
+// recording a fact nothing else carries. The one other call that takes a
+// rental's context is Queue.once's PutCaps, and a caps cache that did not land
+// is logged and harmless: the next request is checked against a card instead
+// of against a cache. So a check on the rest would be a guard with no defect
+// available to catch.
 func began(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("begin: %w", err)

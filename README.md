@@ -2390,7 +2390,10 @@ column the watcher and `ember history` print. The sweep still covers what it
 was written for, a process that never got the chance to write: SIGKILL, an OOM
 kill, a closed laptop. Cancelled and not failed, because the operator pressed
 Ctrl-C or the node reached its deadline, and calling that a failed generation
-sends them looking for a bug that is not there. A write that cannot finish
+sends them looking for a bug that is not there — a provider that did not answer
+inside its own timeout reads `cancelled` too, which is one answer for three
+causes and is why the reason column is the thing to read rather than the
+status. A write that cannot finish
 inside its bound is abandoned and logged, because `ember serve` waits for the
 queue before it exits and a write that never returns is a server that never
 stops.

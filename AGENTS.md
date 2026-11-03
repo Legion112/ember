@@ -5715,7 +5715,16 @@ A leaked node bills by the hour in silence. These are not style preferences.
   unable to land too. It also wrote a literal `StatusFailed`, so detaching its
   context **without** routing it through `classify` would have traded a row
   with no reason for a row with a confident wrong one: a plan a money ceiling
-  refused is a failure and a plan the operator interrupted is not. There is one
+  refused is a failure and a plan the operator interrupted is not. **What that
+  consistency costs is written where the switch is**: `http.Client.Timeout`
+  expiring satisfies `errors.Is(err, context.DeadlineExceeded)` and
+  `internal/httpx` sets a 60s `DefaultTimeout` on every client, so a provider
+  that did not answer now reads `cancelled` on the row where `fail`'s literal
+  wrote `failed`. Recorded rather than repaired, because `finish` and
+  `endIfUnfinished` have answered that way since 001a0d3 -- so this makes the
+  third writer consistent rather than inventing the conflation -- and because
+  the discriminator is whether OUR context ended, which is the one input
+  `writeCtx`'s no-context-parameter design deliberately removes. There is one
   account of what Ctrl-C means in this package and it now has four callers,
   which is the reason `classify` was extracted in the first place.
 
@@ -5751,10 +5760,14 @@ A leaked node bills by the hour in silence. These are not style preferences.
   the sharp case: `TestQueue_ARentalEndedByCtrlCIsCancelledAndNotFailed` hands
   `once` a LIVE context and a `rentErr` of `context.Canceled`, so it asserted
   the classification over a write that could always land, and the real case has
-  both. The fake's check is on `Update` alone and that is stated rather than
-  silent: `Update` and `AppendEvents` are the two writes a teardown reaches,
-  nothing else in ember reaches a store from a cancelled context, and a check
-  on the rest would be a guard with no defect available to catch.
+  both. The fake's check is on two methods rather than on all of them, and
+  that is stated rather than silent: `Update` and `AppendEvents` are the writes
+  a teardown reaches, and a check on the rest would be a guard with no defect
+  available to catch. The one other call that takes a rental's context is
+  `once`'s `PutCaps`, and a caps cache that did not land is logged and harmless
+  -- the next request is checked against a card instead of against a cache,
+  which that call's own comment already says -- so it is left alone rather than
+  counted as a third.
   `TestWrite_ACancelledContextWritesNothing` is in the both-stores table, and
   asserts the row and the event rows are **untouched** as well as the errors,
   because an error alone is consistent with a store that wrote and then
@@ -5770,7 +5783,9 @@ A leaked node bills by the hour in silence. These are not style preferences.
   which ran on a bare `context.Background()`: detached, and **unbounded** --
   on the emitter's goroutine, which is the drain loop, so it is `runServed`'s
   bare `wait()` reached through an event rather than through an ssh session.
-  Both take `writeCtx` now, and `sink.flush` takes no context either.
+  Both take `writeCtx` now, and `sink.flush` takes no context either. The
+  second has a test, which the first wording of this entry said it could not;
+  see the paragraph on it below.
 
   **The cancellation arrives while the rental is up, through a hook, and not as
   a cancelled context handed to `once`.** `ClaimNext` takes the same context
@@ -5826,20 +5841,40 @@ A leaked node bills by the hour in silence. These are not style preferences.
 
   **Fourteen cases, judged on exit codes, controls at both ends, one backup per
   path taken once, and every case ending in a diff against the pristine copy
-  rather than in an exit code.** Eight red where expected: each of the three
+  rather than in an exit code.** Nine red where expected: each of the three
   writers on the caller's context, `fail` with a literal `StatusFailed`, the
   bound removed, `endIfUnfinished` writing unconditionally (which also turns
-  the pre-existing control red), the fake ignoring its context again, and
-  `generate`'s flush of the batch's tail. Six green where expected, each a
-  measurement rather than a gap: the bound removed with its own test taken out,
-  the whole historical arrangement, the duplicate classification, the urgent
-  flush left unbounded -- `context.Background()` never cancels and the fake
-  answers at once, so nothing in the tree can see that one, which is the
-  `subtle.ConstantTimeCompare` answer to "which of these has no exit code" --
-  and two reworded comments. One case reported ANCHOR-MISS rather than a
-  result, because a test this change renamed left its patch pointing at a name
-  the tree no longer has: the harness refusing to read a stale anchor as a
-  verdict, which is the first of the shapes below working rather than a sixth.
+  the pre-existing control red), the fake ignoring its context again,
+  `generate`'s flush of the batch's tail, and the urgent flush left unbounded.
+  Five green where expected, each a measurement rather than a gap: the bound
+  removed with its own test taken out, the whole historical arrangement, the
+  duplicate classification, and two reworded comments. One case reported
+  ANCHOR-MISS rather than a result, because a test this change renamed left its
+  patch pointing at a name the tree no longer has: the harness refusing to read
+  a stale anchor as a verdict, which is the first of the shapes below working
+  rather than a sixth.
+
+  **THE URGENT FLUSH'S BOUND IS IN THAT RED LIST BECAUSE A REVIEWER REFUSED AN
+  INFERENCE, AND THIS PARAGRAPH IS WHAT IT SAID BEFORE.** It read that nothing
+  in the tree *could* see that one -- `context.Background()` never cancels and
+  the fake answers at once -- and offered it as the
+  `subtle.ConstantTimeCompare` answer to "which of these has no exit code".
+  The **measurement** was right and reproduces: reinstate it and the suite is
+  exit 0. The **inference** was not, and it is the step this file has already
+  had to retract twice, about the trust-on-first-use lab and about
+  `runServed`'s own cap: "nothing here does see it" is not "nothing here can
+  see it". What sees it is forty lines in the shape the two cases above it
+  already used -- a `Recorder` whose store blocks `AppendEvents` until its
+  context is done, an `Emit` raced against the test's own deadline -- and it
+  costs no wall clock at all, because it shares the ten seconds the other
+  subtests were already spending. PASS at 10.01s on the repaired tree; with
+  `r.Flush(context.Background())` back, FAIL at 20.01s naming the write that
+  held. **Both halves of `Emit`'s condition** get a subtest, because `due` and
+  `urgent` reach one flush by different routes: `flushAfter` is 250ms against a
+  zero `last`, so the first event of a run is due whatever its kind. The thing
+  worth keeping is not the test but the order it was found in -- the claim was
+  written, measured, believed, and then disproved by somebody writing the test
+  the claim said could not exist.
 
   **A SIXTH HARNESS SHAPE, and it is the "cannot tell a build failure from a
   pass" trap inverted into a FALSE RED.** The first run of this pass reported

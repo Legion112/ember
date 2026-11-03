@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -259,17 +260,44 @@ func TestQueue_ACtrlCdTeardownStillLeavesADoneBatchDone(t *testing.T) {
 // The store blocks until the context it was handed is done, which is what a
 // store behind a connection nobody is answering does. With writeCtx's bound
 // the call returns at the bound; without it, it never returns at all.
+//
+// THE EMIT CASES ARE HERE BECAUSE AN INFERENCE WAS WRONG. The first version of
+// this change said the urgent flush's bound could not be caught -- `Emit` ran
+// on a bare context.Background(), which never cancels, and the fake answers at
+// once, so reinstating that is green across the suite. The measurement was
+// right and the inference from it was not: "nothing here does see it" is not
+// "nothing here can see it", and the step between them is what this repository
+// has already had to retract about the trust-on-first-use lab and about
+// `runServed`'s own cap. A store that blocks AppendEvents is the same shape as
+// the one two cases up, and it has an exit code. Both halves of Emit's
+// condition get one, because `due` and `urgent` reach the same flush by
+// different routes: flushAfter is 250ms against a zero `last`, so the FIRST
+// event of a run is due whatever its kind, and the urgent list is what carries
+// run_cost out of a teardown.
 func TestQueue_ARecordingWriteCannotOutliveItsBound(t *testing.T) {
 	// Each subtest spends the bound, so they run together: the same trade
 	// ws.go's ten-second write bound makes, where the parent context must
 	// have no deadline of its own or a bounded parent would pass against the
 	// defect as happily as against the fix.
-	writers := map[string]func(q *Queue, id genstore.ReqID){
-		"finish": func(q *Queue, id genstore.ReqID) {
-			q.finish(id, errors.New("the batch failed"))
+	writers := map[string]func(t *testing.T){
+		"finish": func(t *testing.T) {
+			q := &Queue{Store: &blockingUpdateStore{Store: genstore.NewRecordingStore()}, Outputs: t.TempDir()}
+			q.finish(genstore.ReqID("r1"), errors.New("the batch failed"))
 		},
-		"endIfUnfinished": func(q *Queue, id genstore.ReqID) {
-			q.endIfUnfinished(id, errors.New("the rental failed"))
+		"endIfUnfinished": func(t *testing.T) {
+			q := &Queue{Store: &blockingUpdateStore{Store: genstore.NewRecordingStore()}, Outputs: t.TempDir()}
+			q.endIfUnfinished(genstore.ReqID("r1"), errors.New("the rental failed"))
+		},
+		// server_starting is on urgent()'s list and reaches neither
+		// Recorder.set nor recordJob, so the flush is the only write it
+		// makes.
+		"emit an urgent event": func(t *testing.T) {
+			blockingRecorder(t).Emit(report.Event{Kind: report.KindServerStarting})
+		},
+		// A log line is on no list, which is the `due` half: the buffer's
+		// own clock makes the first event of any run flushable.
+		"emit a due event": func(t *testing.T) {
+			blockingRecorder(t).Emit(report.Event{Kind: report.KindLog, Text: "a line the node wrote"})
 		},
 	}
 
@@ -277,22 +305,35 @@ func TestQueue_ARecordingWriteCannotOutliveItsBound(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			st := &blockingUpdateStore{Store: genstore.NewRecordingStore()}
-			q := &Queue{Store: st, Outputs: t.TempDir()}
-
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				write(q, genstore.ReqID("r1"))
+				write(t)
 			}()
 
 			select {
 			case <-done:
 			case <-time.After(writeTimeout + 10*time.Second):
-				t.Fatalf("%s did not return: a write that records how a run ended is "+
+				t.Errorf("%s did not return: a write that records how a run ended is "+
 					"abandoned at its bound, or `ember serve` never exits", name)
 			}
 		})
+	}
+}
+
+// blockingRecorder is one run's recorder over a store that will not answer a
+// flush.
+//
+// Key stays nil so that an image event records no row: what is being asserted
+// is the flush's own bound, and a second blocking write would make a wedge
+// ambiguous about which one held.
+func blockingRecorder(t *testing.T) *Recorder {
+	t.Helper()
+	return &Recorder{
+		Store: &blockingAppendStore{Store: genstore.NewRecordingStore()},
+		Req:   genstore.ReqID("r1"),
+		Now:   time.Now,
+		Log:   slog.New(slog.DiscardHandler),
 	}
 }
 
@@ -316,6 +357,19 @@ type blockingUpdateStore struct {
 }
 
 func (s *blockingUpdateStore) Update(ctx context.Context, _ genstore.ReqID, _ func(*genstore.Request)) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// blockingAppendStore is the same for the write a flush makes.
+//
+// Two types rather than one with a flag, because each name says which call
+// will not answer -- and a wedge has to name the write that held.
+type blockingAppendStore struct {
+	genstore.Store
+}
+
+func (s *blockingAppendStore) AppendEvents(ctx context.Context, _ genstore.ReqID, _ []report.Event) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
