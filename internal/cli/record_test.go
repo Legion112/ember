@@ -342,15 +342,24 @@ func TestHistory_TheJoblessFootnoteCoversEveryCauseThereIsNow(t *testing.T) {
 	// patch turned out to be a no-op, which is the trap AGENTS.md records
 	// about a patch landing beside the live code.
 	//
+	// FLATTENED FIRST, because the two spellings below are phrases and a
+	// phrase can be WRAPPED. Measured: a footnote with the false claim
+	// restored and a newline inside it -- "records what it\nrented" -- comes
+	// back green against the raw text and red against this, and the correct
+	// footnote passes either way, so the flatten costs no false failure. It
+	// is only for the negative checks: the positive one below keeps its wrap
+	// on purpose, because a reflow there fails in the safe direction.
+	flat := strings.ReplaceAll(got, "\n", " ")
+
 	// The pair, which asserts the row is one of exactly two things:
-	if strings.Contains(got, "`ember up` forwarding ports, or running `cmds`,") {
+	if strings.Contains(flat, "`ember up` forwarding ports, or running `cmds`,") {
 		t.Errorf("the footnote still offers the operator a closed pair of causes, neither of "+
 			"which this row is:\n%s", got)
 	}
 	// And the claim attached to `ember up` as the subject. The corrected
 	// wording says "the rental is the whole record in each case", which is
 	// true of all three.
-	if strings.Contains(got, "records what it rented") {
+	if strings.Contains(flat, "records what it rented") {
 		t.Errorf("the footnote still says an `ember up` is what recorded this row:\n%s", got)
 	}
 	// The per-step clause stays scoped to `cmds`: a store fill has no per-step
