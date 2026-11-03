@@ -355,8 +355,10 @@ func cloneEnv(m map[string]string) map[string]string {
 // The parse is shared with ParseComputeCap, which is its live caller:
 // nvidia-smi prints a compute capability as "7.5", the same shape, and
 // compute.go says so beside the call. A comparison used to sit next to this
-// function, for the min_cuda key; it was deleted with the key, because no
-// provider could honour the key and gpu_probe is the mechanism that works --
+// function, for the min_cuda key. The key was removed first, and the comparison
+// went in a later commit of its own, because the waiver naming it lives in
+// cmd/check-coverage and had to be deleted in the same commit. It went because
+// no provider could honour the key and gpu_probe is the mechanism that works --
 // the node.RateFromFloat shape, a note where the function was.
 func ParseCUDAVersion(s string) (major, minor int, err error) {
 	maj, min, ok := strings.Cut(strings.TrimSpace(s), ".")
