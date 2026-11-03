@@ -1605,7 +1605,17 @@ that sentence made unrepresentable rather than merely tested.
   the maximum is one (so a goroutine beside the loop is red); and the run's own
   goroutine stack contains `(*Queue).Run` (so a goroutine with correct locking
   -- a counter with better manners, which is the shape somebody would reach
-  for -- is red even though the first two would pass it). The honest limit is
+  for -- is red even though the first two would pass it).
+  **That last clause is MEASURED against the answer it is for, which is the
+  only reason the third assertion is worth having.** The obvious
+  reinstatement -- a goroutine with no locking at all -- is caught by the first
+  two, so it proves nothing about a check. The one that does is a correctly
+  locked check: a context-aware semaphore shared with the drain loop, and the
+  run on a goroutine of its own. Reinstated, `Submit` still waits with the
+  caller's own deadline and the maximum number of open rentals is still one --
+  **both of the first two assertions pass** -- and
+  `TestSubmit_TheRunExecutesOnTheDrainLoopsOwnGoroutine` is what goes red.
+  The honest limit is
   that a stack is evidence about one goroutine: `cmd/check-coverage`'s
   `TestNothingRentsOutsideInternalApp` bounds the other half by asking which
   packages may name `provision.WithNode`, which is one.
@@ -4138,6 +4148,18 @@ A leaked node bills by the hour in silence. These are not style preferences.
   caught it: a pass whose last line is not the same green as its first line has
   not restored the tree, so **a reinstatement pass needs a control at both
   ends** and not only at the start. The backup is taken once per path now.
+  **And the OPENING control caught a flaky test of this change's own**, which
+  is the other thing a control at both ends buys.
+  `TestDirectRunner_StartAdoptsTheRowAndHandsTheRunToTheLoop` ran a drain loop
+  and then read the row's status, so a rental that failed fast against the
+  recording Docker engine wrote a terminal status before the assertion looked
+  -- intermittent, and invisible to any single run of the suite. It runs with
+  NO loop now, where Submit parks on the rendezvous and the row stays exactly
+  as Adopt wrote it; the parking and the abandoned-submission end are asserted
+  with it, and the test went from seconds to seven milliseconds. A flaky
+  assertion is worse than none, because it teaches people to re-run rather
+  than to read -- the `--- SKIP` problem's other half, which this repository
+  has already paid for once in the labs.
   **And one defect was caught by the lab alone, which is worth recording
   because it is the most expensive one in that change.** A submitted run that
   held the CLIENT's context instead of the drain loop's destroys the node when
