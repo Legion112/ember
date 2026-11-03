@@ -1113,6 +1113,42 @@ that sentence made unrepresentable rather than merely tested.
   empty answer and a nil answer are the same slice in Go and different values
   in JSON. The server sends `[]`, and the client tolerates `null` anyway,
   because the rule has to hold for a field somebody adds later.
+- **`omitempty` does nothing for a `time.Time`, and the tag read as though it
+  worked.** `encoding/json` has no empty value for a struct, so
+  `report.Event.Deadline` was on **every** event ember emits as
+  `"deadline":"0001-01-01T00:00:00Z"` -- on the websocket, in
+  `GET /api/requests/{id}/events`, and in every row of `events.body`, the
+  table that grows per step per job per rental: a FLUX.2 batch of eight at 28
+  steps is 224 progress rows each asserting a deadline of year one, in the
+  stream the rule above makes the source of truth and the columns a derived
+  index. A value that looks like a fact, which is the defect this file keeps
+  recording. `Rate` on the next line carries the same tag, is an `int64`, and
+  is correctly absent; `At` sixteen lines up carries none on purpose, because
+  `At` is always meaningful -- so the author knew the distinction, and two
+  tags on consecutive lines behaving differently is why nobody saw it.
+  **`omitzero`, and not a pointer or a `MarshalJSON`.** `*time.Time` is this
+  repository's answer where zero is a legitimate value -- `clip_skip`, `eta`,
+  `flow_shift` -- and the zero time is not a deadline anybody can mean, so a
+  pointer would buy nilness no reader wants and spend it on a struct carried
+  per progress frame. A hand-written `MarshalJSON` over thirty-odd fields is
+  worse: it is the comment that cannot catch the entry somebody forgets, with
+  a marshaller in the comment's place. `omitzero` calls `time.Time`'s own
+  `IsZero` and falls back to comparing the zero value for a type without one,
+  so it cannot silently never start the way `omitempty` silently never did.
+  **Nothing could tell the two tags apart, which is why the assertion is the
+  tags themselves.** `internal/report`'s tests assert on `Text`'s output,
+  which never reads `Deadline`; `web/` has no `deadline` field and serde
+  ignores unknown keys; `genstore` stores the body opaquely -- so no test in
+  either language had an opinion about the marshalled shape of this struct.
+  `TestEvent_AnOptionalFieldIsAbsentWhenNobodySetIt` reads Event's own tags
+  with `reflect` and walks `Kinds()`, derived from the tree on both axes, so
+  it catches the next field somebody adds with a tag that does not fire. It is
+  not sufficient alone: it proves a zero `Deadline` is absent from the wire
+  and says nothing about whether the field is zero on the kinds that do not
+  mean it, which is the gap `capabilities.model` and the unrecorded preview
+  frame both sat in -- so `TestLifecycle_OnlyTheEventThatMeansADeadlineCarriesOne`
+  marshals the events `internal/app` really constructs. No decode impact and
+  no README change: the page never read the key.
 - **A feature built end to end and never connected passes every test it
   has.** The preview frame was written to the run directory, the images table
   had a `preview` column, the handler answered `?preview=1` with

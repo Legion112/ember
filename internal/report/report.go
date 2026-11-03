@@ -243,7 +243,38 @@ type Event struct {
 	// per hour. Both belong to a node becoming ready: they are what an
 	// operator needs to know how long they have and what it is costing while
 	// they have it.
-	Deadline time.Time `json:"deadline,omitempty"`
+	//
+	// omitzero AND NOT omitempty, and the difference is the whole comment.
+	// omitempty has no effect on a struct -- encoding/json has no empty value
+	// for one -- so this field was on EVERY event ember emits, as
+	// "deadline":"0001-01-01T00:00:00Z": on the websocket, in
+	// GET /api/requests/{id}/events, and in every row of the events table,
+	// the one that grows per step per job per rental. A FLUX.2 batch of eight
+	// at 28 steps is 224 progress rows each asserting a deadline of year one,
+	// in the stream this repository treats as the source of truth and the
+	// columns as a derived index -- so a reader going there to settle
+	// something saw a field named `deadline` on a job_progress and had to
+	// already know it meant nothing. A value that looks like a fact.
+	//
+	// Rate, one line down, has the same tag, is an int64 underneath, and
+	// works: two tags on consecutive lines behaving differently is why
+	// nothing noticed. At sixteen lines up carries no omitempty deliberately,
+	// because At is always meaningful -- so the author knew the distinction
+	// and this was a slip rather than a decision.
+	//
+	// WHY NOT A POINTER OR A MarshalJSON. *time.Time is this repository's
+	// answer where zero is a legitimate value -- ClipSkip, Eta, FlowShift --
+	// and it is the wrong one here: the zero time is not a deadline anybody
+	// can mean, so a pointer would buy nilness ember has no use for and spend
+	// it at every reader of a struct carried on the hot path. A MarshalJSON
+	// on Event is worse: it is a hand-maintained list of thirty-odd fields,
+	// which is the "a comment that justifies the entry somebody remembered
+	// cannot catch the entry somebody forgets" failure with a marshaller in
+	// place of the comment. omitzero calls time.Time's own IsZero, needs no
+	// reader to change, and cannot silently stop working the way omitempty
+	// silently never started: for a type without IsZero it falls back to
+	// comparing the zero value, which is still the right answer.
+	Deadline time.Time `json:"deadline,omitzero"`
 	Rate     node.Rate `json:"rate_micro_usd_per_hour,omitempty"`
 
 	// Billable is the time a rental was charged for, which is not Elapsed: a
