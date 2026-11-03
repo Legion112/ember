@@ -634,6 +634,26 @@ func classify(cause error) (genstore.Status, string) {
 		// Not a failure. The operator pressed Ctrl-C, or the node reached its
 		// deadline; calling that a failed generation would send them looking
 		// for a bug that is not there.
+		//
+		// THERE IS A THIRD CAUSE AND IT IS CONFLATED WITH THE OTHER TWO.
+		// `http.Client.Timeout` expiring satisfies
+		// errors.Is(err, context.DeadlineExceeded), and internal/httpx sets a
+		// 60s DefaultTimeout on every client -- so a provider that did not
+		// answer inside app.NewPlan lands here, and the row then says the
+		// operator stopped a run the provider never started. That is the
+		// mirror of the confidently-wrong row the literal StatusFailed in
+		// fail used to write, and it is recorded rather than fixed here for
+		// two reasons: finish and endIfUnfinished have answered this way
+		// since 001a0d3, so routing fail through this function makes the
+		// third writer consistent rather than inventing the conflation, and
+		// requests.err carries the provider's own sentence either way.
+		//
+		// The discriminator that would separate them is whether OUR context
+		// ended, which is a different question from what the error wraps --
+		// and it is exactly the input writeCtx's no-context-parameter design
+		// removes from these writers on purpose. So telling the two apart is
+		// a change to what a writer is told rather than to this switch, and
+		// belongs to whoever takes it.
 		return genstore.StatusCancelled, cause.Error()
 	default:
 		return genstore.StatusFailed, cause.Error()
