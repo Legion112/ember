@@ -5333,9 +5333,10 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `internal/node`'s tests. Losing only the test is **0** under `go test
   ./cmd/check-coverage/` and **red** under `make cover-check` -- `internal/node`
   at 98.5% against its 100% floor, with the function at 0.0% -- so the test has
-  to go either way, and "green" is a claim about one command. The two judgements are a note on `ParseCUDAVersion`, the
-  `node.RateFromFloat` shape. The waiver's reason, "the evidence that the key is
-  unenforced", was stale the moment `min_cuda` went, and left with it.
+  to go either way, and "green" is a claim about one command. The two
+  judgements are a note on `ParseCUDAVersion`, the `node.RateFromFloat` shape.
+  The waiver's reason, "the evidence that the key is unenforced", was stale the
+  moment `min_cuda` went, and left with it.
 
 ## Style
 
