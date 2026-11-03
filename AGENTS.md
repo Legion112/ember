@@ -3135,15 +3135,24 @@ that sentence made unrepresentable rather than merely tested.
   `Socket` stored before the old one dropped -- was luck rather than a
   decision, and the epoch counter beside it is the guard that does not depend
   on it.
-  **`Envelope::next` GOES, and both halves of that were measured rather than
-  argued.** The issue's own terms were that it either gets a reader or goes,
-  and the first version of this change gave it one: `Progress::fold` took the
-  larger of the server's figure and the one `apply` derives from the events.
-  That is the `queue.Cost` shape -- two writers of one field, where a reader
-  of the code cannot tell which is the live one -- and the reinstatement pass
-  said so with an exit code: a `fold` that ignored `next` left every
-  `cargo test` green, because the two agree in **every envelope the server can
-  produce**. So the read bought no check at all.
+  **`Envelope::next` is not decoded, because it is fully derivable, and the
+  derivation is measured rather than argued.** The issue's terms were that it
+  either gets a reader or goes, and the first version of this change gave it
+  one: `Progress::fold` took the larger of the server's figure and the one
+  `apply` derives from the events. That is the `queue.Cost` shape -- two
+  writers of one field, where a reader of the code cannot tell which is live
+  -- and deleting the read left every `cargo test` green, which is the
+  measurement and not a hole. Driven over a real store afterwards to settle
+  WHY: `next` is the last event's own seq and not one past it, falling back to
+  the cursor the client sent on an empty envelope; `genstore` selects the
+  whole tail ascending with no limit; nothing filters the slice;
+  `AppendEvents` is `INSERT OR REPLACE` on `(request, seq)`, so a redelivery
+  overwrites in place rather than leaving a counted hole; urgent events travel
+  the same rows; and a prune leaves `next` at the maximum of what remains.
+  Seven event-set shapes times eight cursors, three of them above the
+  maximum, plus eight more after a prune: **64 envelopes, and in every one
+  `next == max(cursor sent, max seq in the envelope)`** -- with a deliberate
+  `+1` the harness goes red, so the figure is not vacuous.
   **And it is the less safe of the two in the one direction that matters.**
   The day this page tolerates an event it cannot decode by dropping it --
   which is exactly what `Rows` already does for a request it cannot read --
@@ -3151,14 +3160,40 @@ that sentence made unrepresentable rather than merely tested.
   again, while the server's figure is above it and the reconnect skips it in
   silence. A cursor too LOW costs a replay the fold discards; a cursor too
   HIGH costs the operator the events they never learn about, which is the
-  frozen row this whole feature is about. The two judgements are a note where
-  the field was, the `node.RateFromFloat` shape: take `max` and never an
-  assignment, and advance AFTER applying, because `apply` ignores anything at
+  frozen row this whole feature is about.
+  **The field's own doc comment argued the opposite and was BACKWARDS**, which
+  is the sharper half of why it went rather than being kept with a better
+  comment. It read "`fold` takes the larger of the two, so it can never move
+  past an event that was not folded" -- and `max` is precisely the operator
+  that can; `min` is the one that cannot. Harmless only because `next` never
+  exceeds the envelope's maximum on anything this server produces, which makes
+  it a comment wrong about why a seal holds: the thing that gets a seal
+  removed by somebody being helpful, and here it would have licensed the next
+  reader to KEEP the read believing it was a safeguard. So the two judgements
+  are a note where the field was, the `node.RateFromFloat` shape -- `min` and
+  never `max`, and advance AFTER applying, because `apply` ignores anything at
   or below the cursor and advancing first discards every event in the envelope
-  that set it -- the whole content of the first send after a reconnect. The Go
+  that set it, the whole content of the first send after a reconnect. The Go
   field stays, because `GET /api/requests/{id}/events` answers the same
   question to a client that would rather poll and `next` is its documented
   cursor.
+  **THIS ENTRY SHIPPED CLAIMING THE DELETION WHILE THE FIELD WAS STILL THERE
+  AND STILL READ, and the cause is the reinstatement harness rather than the
+  edit.** The browser pass and the fast pass shared one backup directory, and
+  the backup of `model.rs` was taken by the FAST pass -- before the deletion
+  -- so the first `restore_all` of the browser pass copied the pre-deletion
+  file back over it. That is this file's own fifth harness shape, a rollback
+  that restores a stale backup, reached ACROSS two passes rather than within
+  one: `backup()` takes one copy per path by design, which is right inside a
+  pass and is exactly wrong between two. What let it through to a commit is
+  that the control which catches it -- a closing control that is the same
+  green as the opening one -- *was* green, because the deletion's own case was
+  green either way, so nothing about the suite could tell a restored tree from
+  a repaired one. **A control at both ends is not sufficient when the change
+  under test is one no test reports**; the check that was missing is reading
+  the diff of every file the harness touched before committing, and the rule
+  is that a reinstatement pass that patched a file must hand back its diff and
+  not its exit code.
   **WHAT NO ASSERTION ON THE PAGE CAN SEE is which cursor the reconnect asked
   from**, because the fold is idempotent per sequence number: a client that
   replayed an hour of progress renders exactly what one that resumed correctly
@@ -3217,10 +3252,20 @@ that sentence made unrepresentable rather than merely tested.
   reconnect the lab exists for: a page that has learned its request ended
   stops retrying by design, and after a restart `queue.Run`'s sweep has ended
   it. So the lab asserts the sentence it DOES see is the reconnecting one and
-  **not** that one -- the `TestConformance_CannotCatchARederivedRunID`
-  arrangement, which goes red the day somebody shortens the bound past a hand
-  restart and sends the reader to `RETRY_ATTEMPTS`. The state itself is
-  `cargo test`'s alone.
+  **not** that one. What that assertion is NOT is a guard on the bound, and
+  the first wording of this entry claimed it was: "it goes red the day
+  somebody shortens the bound past a hand restart" was **measured and is
+  false** -- at `RETRY_ATTEMPTS = 1`, which is 250ms and fits no restart at
+  all, the lab is GREEN, because the lab's first `streamNote()` lands a
+  fraction of a millisecond after the close and so always reads the
+  reconnecting sentence, and `startServeOn` brings the second server up inside
+  that one attempt anyway. At 0 the lab does go red, and at the browser drop's
+  "the step never moved" assertion rather than at the note. The bound is
+  sealed by `cargo test` -- `the_retry_is_bounded_and_backs_off`, red at exit
+  101 with `RETRY_ATTEMPTS = 1` -- and that is the gate to credit. One more
+  instance of the thing this file keeps recording about itself: a sentence
+  here asserting that a test goes red is worth exactly the exit code nobody
+  checked, and this one was found by somebody checking it.
   **And one line has no exit code anywhere, which is said rather than papered
   over.** Resetting the retry counter from `onopen` rather than from
   `Socket::open` returning Ok is the difference between a bounded retry and a
@@ -3256,26 +3301,34 @@ that sentence made unrepresentable rather than merely tested.
   `context.WithoutCancel` rule this file states for a destroy, reached through
   a store write instead. Filed rather than repaired in a change about a
   websocket.
-  **Reinstated, judged on exit codes, with a control at both ends of both
-  passes.** Nine defects through `cargo test` and `go test`: the fold
-  advancing the cursor before applying its events, the note printed
+  **Reinstated, judged on exit codes, with a control at both ends of every
+  pass -- and, after the restore above, on the DIFF of every file each case
+  touched.** Through `cargo test` and `go test`, eight red: the note printed
   unconditionally, an unbounded retry, a terminal request retried, a flat
-  cadence in place of the backoff, `apply` losing its per-sequence
-  idempotence, the handler recording no cursor, and the handler recording a
-  constant one -- eight red, and the ninth is the `Envelope::next` read, green,
-  which is why the field is gone. Five through the browser: the resume from
-  zero (red on the cursor), nothing re-opening at all (red on the step that
-  never moved), the note printed unconditionally (red on both its halves),
-  `Socket::drop` keeping its handlers (green against the console assertion
-  that was already there, red against the page's own `error` handler), and the
-  retry counter reset by the constructor (green, the entry above). A reworded
-  comment was green in each pass, and the suite was green before the first
-  patch and after the last. The harness's own first run reported BUILD-ERROR
-  for six cases that had all gone red correctly, because `error: test failed`
-  is how cargo reports a red suite and the detector read it as a compile
-  failure -- the "cannot tell a build failure from a pass" trap inverted, and
-  the reason that detector now looks for `error[E...]` and
-  `could not compile` instead.
+  cadence in place of the backoff, `RETRY_ATTEMPTS` shortened to one,
+  `apply` losing its per-sequence idempotence, the handler recording no
+  cursor, and the handler recording a constant one. Two more that are the
+  `Envelope::next` read and are the point of it: **the read on its own is a
+  COMPILE ERROR** now the field is gone -- `error[E0609]: no field next on
+  type &model::Envelope` -- which is this file's own "prefer making a bug
+  unrepresentable over testing for it" landing where a red test would have
+  done; and **the whole first version put back, the field re-declared and the
+  fold reading it, is GREEN at exit 0**, said plainly because it is the
+  measurement rather than a gap. Nothing catches that shape and nothing can:
+  the figure is derivable, so what makes the deletion right is the derivation
+  and the backwards comment, not an exit code.
+  Five through the browser: the resume from zero (red on the cursor), nothing
+  re-opening at all (red on the step that never moved), the note printed
+  unconditionally (red on both its halves), `Socket::drop` keeping its
+  handlers (green against the console assertion that was already there, red
+  against the page's own `error` handler), and the retry counter reset by the
+  constructor (green, the entry above). A reworded comment was green in every
+  pass, and the suite was green before the first patch and after the last.
+  The harness's own first run reported BUILD-ERROR for six cases that had all
+  gone red correctly, because `error: test failed` is how cargo reports a red
+  suite and the detector read it as a compile failure -- the "cannot tell a
+  build failure from a pass" trap inverted, and the reason that detector now
+  looks for `error[E...]` and `could not compile` instead.
 
 ## Money
 

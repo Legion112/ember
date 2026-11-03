@@ -1036,23 +1036,49 @@ pub struct Event {
 /// What the socket sends.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Envelope {
-    /// The cursor the server has handed over, which is what a reconnect
-    /// resumes from.
-    ///
-    /// READ BY `Progress::fold` AND NOT BY NOTHING, which it was for the life
-    /// of the field: `Socket::open` took an `after`, its one caller passed
-    /// the literal `0`, and this number had no reader outside a test
-    /// assertion while three comments in this crate described the reconnect
-    /// it is for. It is the same figure `apply` derives from the events, and
-    /// the reason the cursor is taken from the SERVER's answer as well is
-    /// that `apply`'s own advance is a side effect of folding an event at
-    /// all: a reader who moved it inside a match arm would leave the cursor
-    /// standing still over any kind this page does not render, and a cursor
-    /// that means something other than its doc comment says is how a resume
-    /// silently starts asking for the wrong rows. `fold` takes the larger of
-    /// the two, so it can never move past an event that was not folded.
-    #[serde(default)]
-    pub next: i64,
+    // THE SERVER'S OWN `next` IS DELIBERATELY NOT DECODED, and the judgements
+    // that went with it are a note here because whoever reaches for it next
+    // makes them again.
+    //
+    // It is the sequence number the server has handed over, so it looked like
+    // the figure a reconnect should resume from -- and three comments in this
+    // crate described a reconnect that did not exist while the field had no
+    // reader outside one test assertion. It is FULLY DERIVABLE from what is
+    // in the envelope: measured over a real store across seven event-set
+    // shapes times eight cursors, three of them above the maximum, and again
+    // after a prune -- 64 envelopes, and in every one
+    // `next == max(cursor sent, max seq in the envelope)`. It is the last
+    // event's own seq and not one past it, it falls back to the cursor the
+    // client sent on an empty envelope, the tail is selected whole and
+    // ascending with no limit, nothing filters the slice, and
+    // `INSERT OR REPLACE` on `(request, seq)` means a redelivery overwrites
+    // in place rather than leaving a counted hole. So reading it was a SECOND
+    // WRITER of one field -- `queue.Cost`'s mistake, where a reader cannot
+    // tell which of two paths is live -- and deleting the read left every
+    // `cargo test` green, which is the measurement rather than a hole.
+    //
+    // And it is the LESS SAFE of the two in the one direction that matters.
+    // The day this page tolerates an event it cannot decode by dropping it --
+    // which is what `Rows` already does for a request it cannot read -- the
+    // client-derived cursor stays below that event and a reconnect asks for
+    // it again, while the server's figure is above it and the reconnect skips
+    // it in silence. A cursor too LOW costs a replay the fold discards; a
+    // cursor too HIGH costs the operator events they never learn about,
+    // which is the frozen row this whole feature is about.
+    //
+    // THE FIELD'S OWN DOC COMMENT USED TO ARGUE THE OPPOSITE and was
+    // backwards: it said `max` "can never move past an event that was not
+    // folded", and `max` is precisely the operator that can -- `min` is the
+    // one that cannot. Harmless only because `next` never exceeds the
+    // envelope's maximum on anything this server produces, which makes it a
+    // comment wrong about why a seal holds: the thing that gets a seal
+    // removed by somebody being helpful, and here it would have licensed the
+    // next reader to KEEP the read believing it was a safeguard.
+    //
+    // So if one is ever wanted: `min` of the two and never `max`, and advance
+    // AFTER applying, because `apply` ignores anything at or below the cursor
+    // and advancing first discards every event in the envelope that set it --
+    // the whole content of the first send after a reconnect.
     #[serde(default, deserialize_with = "nullable")]
     pub events: Vec<Event>,
     #[serde(default, deserialize_with = "nullable")]
@@ -1334,24 +1360,15 @@ pub struct Progress {
 const MAX_LOG: usize = 400;
 
 impl Progress {
-    /// fold takes one envelope: every event in it, and then the cursor the
-    /// server handed back.
+    /// fold takes one envelope.
     ///
-    /// THE ORDER IS LOAD-BEARING. `apply` ignores anything at or below the
-    /// cursor, so advancing it first would drop every event in the envelope
-    /// that set it -- which is the whole content of the first send after a
-    /// reconnect.
-    ///
-    /// `max` and not an assignment, so this can never move the cursor
-    /// BACKWARDS over a `force` send: the server echoes the client's own
-    /// `after` as `next` when it has no new events, which is the ordinary
-    /// shape of an envelope carrying only a changed request.
+    /// ONE PLACE AND NOT A LOOP INSIDE THE VIEW, which is where it was: what
+    /// this leaves behind is the cursor a reconnect resumes from, and a
+    /// decision that reaches the wire belongs where `cargo test` can see it.
+    /// `Envelope`'s own comment has why the server's `next` is not read here.
     pub fn fold(&mut self, env: &Envelope) {
         for e in &env.events {
             self.apply(e);
-        }
-        if env.next > self.cursor {
-            self.cursor = env.next;
         }
     }
 
@@ -1605,7 +1622,6 @@ mod tests {
         let mut cost = ev(2, "unit_cost");
         cost.spent_micro_usd = 30_000;
         let env = Envelope {
-            next: 3,
             events: vec![ev(1, "log"), cost, ev(3, "log")],
             ..Default::default()
         };
@@ -1624,37 +1640,30 @@ mod tests {
         );
     }
 
-    /// The cursor is the server's own `next`, which is the figure a reconnect
-    /// asks from.
+    /// The cursor a reconnect asks from is the largest sequence number this
+    /// page has FOLDED, and an envelope with nothing in it does not move it.
     ///
-    /// IT HAD NO READER AT ALL. `Socket::open` took an `after` and its one
-    /// caller passed `0`, so this number crossed the wire on every envelope
-    /// and was dropped. What the assertion is about is the ORDER inside
-    /// `fold`: advancing the cursor before applying would make `apply`'s own
-    /// "at or below the cursor" check throw away every event in the envelope
-    /// that carried it, which is the entire first send after a reconnect.
+    /// THE ONE THING `Socket::open`'s `after` MUST NOT DO is run ahead of
+    /// what was applied, because the server answers it with everything
+    /// STRICTLY after and a cursor one too high is an event the operator
+    /// never learns about. The server's own `next` would have been the
+    /// obvious source and is deliberately not decoded -- see `Envelope` for
+    /// the measurement and for which operator a future reader would need --
+    /// so this is the assertion that the number the socket carries is the one
+    /// the fold reached: a `force` send, which the server answers with no
+    /// events whenever only the request changed, leaves it where it was.
     #[test]
-    fn the_cursor_follows_the_servers_own_figure() {
+    fn the_cursor_is_what_was_folded() {
         let mut p = Progress::default();
         p.fold(&Envelope {
-            next: 7,
             events: vec![ev(7, "log")],
             ..Default::default()
         });
         assert_eq!(p.cursor, 7);
-        assert_eq!(
-            p.log.len(),
-            1,
-            "the event in the envelope that set the cursor was dropped"
-        );
+        assert_eq!(p.log.len(), 1, "the event in the envelope was dropped");
 
-        // A `force` send with nothing new echoes the client's own cursor
-        // back, which must not move it and must certainly not move it down.
-        p.fold(&Envelope {
-            next: 7,
-            ..Default::default()
-        });
-        assert_eq!(p.cursor, 7);
+        p.fold(&Envelope::default());
+        assert_eq!(p.cursor, 7, "an envelope with no events moved the cursor");
     }
 
     /// A stream that is open says nothing, and a stream that stopped says so.
@@ -2535,9 +2544,11 @@ mod tests {
     /// has to hold for a field somebody adds later too.
     #[test]
     fn a_null_list_is_an_empty_list() {
+        // `next` is in the body and is not a field of this type: the server
+        // sends it and this page does not decode it, so serde has to ignore
+        // it rather than refuse the envelope that carries it.
         let env: Envelope =
-            serde_json::from_str(r#"{"next":0,"events":null,"request":null}"#).unwrap();
-        assert_eq!(env.next, 0);
+            serde_json::from_str(r#"{"next":4,"events":null,"request":null}"#).unwrap();
         assert!(env.events.is_empty());
         assert!(env.request.is_none());
 
