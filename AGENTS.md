@@ -4865,11 +4865,12 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `ParseCUDAVersion`" and was wrong.** That is this file's own recurring defect
   committed by the change that is correcting one, and it was caught in review
   rather than by a test: the parser is **live**, through
-  `node.ParseComputeCap` and `local.Provider.Detect`, which is the
+  `node.ParseComputeCap` at `compute.go:234` and `local.Provider.Offers` at
+  `local.go:270`, which is the
   `compute_cap` path this very entry names as the mechanism that works. So the
   claim was false about the one function #91 settles on, the stated follow-up
   would not have compiled, and the same commit edited `compute.go`'s doc
-  comment in a file whose own line twenty lines above the call already said the
+  comment in a file whose own line three lines above the call already said the
   two share a parser. What makes it worth recording rather than quietly fixing
   is that `TestNoProductionDeadCode` had it right the whole time -- with the
   waiver removed it reports `internal/node.CUDAAtLeast ... (3 site(s))` and
@@ -4881,8 +4882,10 @@ A leaked node bills by the hour in silence. These are not style preferences.
   mechanism in `gpu_probe`, which are both halves of that precedent. It is
   still here because `cmd/check-coverage`'s `deadExcluded` names it and fails
   over an entry it stops reporting, so the function and its waiver have to be
-  deleted in one commit and that file was held by another change (#161). **Two
-  lines of deletion, not three.** The waiver's stated reason -- "deleting this
+  deleted in one commit and that file was held by another change (#161).
+  **Three edits, not three lines**: the function, the waiver, and
+  `TestCUDAAtLeast` at `spec_test.go:313`, which calls it at five sites and
+  must go with it or the package will not build. The waiver's stated reason -- "deleting this
   would remove the evidence that the key is unenforced" -- is **stale as of
   this commit**, because the evidence is now the refusal, the capture guard and
   `TestCreate_SendsNoCudaFieldAtAll`, none of which is that function. The two

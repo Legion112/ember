@@ -352,8 +352,8 @@ func cloneEnv(m map[string]string) map[string]string {
 // an earlier draft of this comment got wrong in the direction that costs a
 // reader their afternoon. It claimed both were callerless and that deleting
 // them was "three lines"; deleting this one does not compile, because
-// ParseComputeCap calls it twenty lines into compute.go and
-// local.Provider.Detect calls THAT -- the `compute_cap` path, which is the
+// ParseComputeCap calls it at compute.go:234 and local.Provider.Offers calls
+// THAT at local.go:270 -- the `compute_cap` path, which is the
 // mechanism #91 settled on as the one that works. The tree's own detector
 // classifies it live and always did; the comment was the only thing that
 // disagreed, two hundred lines from the call.
@@ -373,8 +373,10 @@ func cloneEnv(m map[string]string) map[string]string {
 // exists, which are the two halves of that precedent. It is NOT deleted here
 // only because cmd/check-coverage's deadExcluded names it and fails over a
 // waiver it stops reporting, so the function and its waiver have to be removed
-// in one commit and that file was held by another change (#161). TWO lines of
-// deletion, not three, and this function stays. The two judgements worth
+// in one commit and that file was held by another change (#161). THREE edits,
+// not three LINES: the function, the waiver, and TestCUDAAtLeast at
+// spec_test.go:313, which calls it at five sites and must go with it or the
+// package will not build. This function stays. The two judgements worth
 // keeping are the ones above, and they belong to the parser rather than to the
 // comparison: strings rather than a float, and compared as a pair of integers.
 func ParseCUDAVersion(s string) (major, minor int, err error) {
