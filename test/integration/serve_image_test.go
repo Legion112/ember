@@ -723,6 +723,179 @@ func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
 	}
 }
 
+// TestServe_UINamesWhyARequestFailed is the one assertion that crosses the
+// gap this defect sat in.
+//
+// `requestView.Error` was populated by Go on every request view -- both JSON
+// routes and the socket -- decoded by `web/src/model.rs`, and read by NO view.
+// Measured the only way that means anything: deleting the field from the Rust
+// wire type left the crate compiling and every `cargo test` green, because
+// serde drops a field nothing asks for. So the operator-visible state of a
+// failed generation was the word `failed` in one table cell and nothing else
+// -- while AGENTS.md claimed in prose that "a refused request carries the
+// reason, which the page shows".
+//
+// WHY A BROWSER, and it is the same argument as the greys lab above. Go now
+// has a test that the socket pushes the row, and `cargo test` has one that
+// `Request::reason` reads it. Both halves agreeing with themselves is exactly
+// the state this feature was already in, and the thing neither can see is
+// whether any line is drawn: the reason renders inside a `<For>` keyed on
+// `(id, status)`, which is the keyed list that once froze a progress row at
+// "starting" while the step advanced in the database.
+//
+// THE TRIGGER IS THE REAL ONE AND NOTHING IS RENTED. A card the local
+// provider does not offer is refused by `AppPlanner.Plan` before `Create` is
+// reached, so `queue.fail` writes `requests.err`, emits NOTHING -- there is
+// no sink for a rental that was never opened -- and no container, no image
+// pull and no money are involved. That is also the state the socket could not
+// report before `wsCursor`: a row that changed with no event behind it never
+// reached an open tab, so this lab loads the page FIRST and posts afterwards.
+//
+// AND THE NEGATIVE IS THE TRAP #103 NAMES. `Progress::failure`'s view prints
+// "THE NODE MAY STILL BE RUNNING AND BILLING -- check ember ls", which is true
+// of a destroy that failed and false of a request that never had a node. This
+// request never had one, so `p.fatal` must be absent -- and that assertion
+// really can fail: routing the reason through `report.KindRunFailed` into that
+// same field, which was the smaller change and the obvious one, is what makes
+// it appear.
+func TestServe_UINamesWhyARequestFailed(t *testing.T) {
+	requireChrome(t)
+	l := harness.New(t)
+	l.WriteConfig(nil)
+	l.AppendConfig(serveConfig)
+
+	cmd, srv, wait := startServe(t, l)
+	defer func() {
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Errorf("signalling ember: %v", err)
+			return
+		}
+		_ = wait()
+	}()
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Headless, chromedp.NoSandbox, chromedp.DisableGPU)
+	alloc, cancelAlloc := chromedp.NewExecAllocator(t.Context(), opts...)
+	defer cancelAlloc()
+	ctx, cancel := chromedp.NewContext(alloc)
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancelTimeout()
+
+	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
+	if err := chromedp.Do(ctx,
+		chromedp.Navigate(fmt.Sprintf("%s?t=%s", pageURL, srv.Token))); err != nil {
+		t.Fatalf("navigating to the one-time URL: %v", err)
+	}
+	console := watchConsole(t, ctx)
+	if err := shortWait(ctx, `h1`, 30*time.Second); err != nil {
+		t.Fatalf("the app never mounted: %v\n%s", err, console.text())
+	}
+
+	// Posted with the tab already open, so what is asserted below arrived
+	// while the page was watching rather than on a reload.
+	id := queueJobs(t, srv, `{"provider":"local","gpu":"h100","jobs":[
+		{"prompt":"a cat","width":64,"height":64,"steps":1,"seed":1,"output":"cat"}
+	]}`)
+	failed := waitForFailure(t, srv, id, 2*time.Minute)
+	if failed.Error == "" {
+		t.Fatalf("the row for %s is failed and carries no reason, so there is nothing for the "+
+			"page to show and this lab cannot say anything about the rendering", id)
+	}
+	t.Logf("the row says: %s", failed.Error)
+
+	// THE ROW NAMES IT. Read off the page's own structure -- the status cell
+	// of the row whose id button the page printed -- so markup that changes
+	// breaks this, which is the correct direction.
+	why := rowOf(id) + `//span[@class="why"]`
+	if err := shortWait(ctx, why, 30*time.Second); err != nil {
+		t.Fatalf("the failed row never showed a reason: %v\nthe queue panel says: %q\n%s",
+			err, panelText(ctx), console.text())
+	}
+	got, err := chromedp.Run(ctx, chromedp.Text(why))
+	if err != nil {
+		t.Fatalf("reading the reason off the row: %v\n%s", err, console.text())
+	}
+	if got != failed.Error {
+		t.Errorf("the row says %q and the request carries %q; the page must not paraphrase a "+
+			"refusal, because the sentence is the server's own and names the remediation",
+			got, failed.Error)
+	}
+
+	// AND THE WATCHER NAMES IT, which is the half with no event behind it: a
+	// request the planner refused has an empty stream, so a panel folding
+	// only events has nothing at all to say about it.
+	if err := chromedp.Do(ctx, chromedp.Click(rowOf(id)+`/td[1]/button`)); err != nil {
+		t.Fatalf("watching the failed request: %v\n%s", err, console.text())
+	}
+	if err := shortWait(ctx, `p.why`, 30*time.Second); err != nil {
+		t.Fatalf("the watcher never said why the request ended: %v\n%s", err, console.text())
+	}
+	watched, err := chromedp.Run(ctx, chromedp.Text(`p.why`))
+	if err != nil {
+		t.Fatalf("reading the watcher's reason: %v\n%s", err, console.text())
+	}
+	if !strings.Contains(watched, failed.Error) {
+		t.Errorf("the watcher says %q, which does not contain the row's reason %q",
+			watched, failed.Error)
+	}
+
+	// THE SENTENCE THAT MUST NOT BE HERE. Nothing was created, so there is no
+	// node to check and no bill accruing; printing the destroy warning over
+	// this would send an operator to `ember ls` for a machine that never
+	// existed, which is the false-"abandoned" mistake the holder check
+	// refuses to make.
+	fatal, ferr := chromedp.Run(ctx, chromedp.Evaluate[int](
+		`document.querySelectorAll('p.fatal').length`))
+	if ferr != nil {
+		t.Fatalf("counting the destroy warnings: %v\n%s", ferr, console.text())
+	}
+	if fatal != 0 {
+		t.Errorf("the page prints %d \"the node may still be running and billing\" line(s) over a "+
+			"request that never reached a provider", fatal)
+	}
+
+	if errs := console.errors(); errs != "" {
+		t.Errorf("the page logged errors:\n%s", errs)
+	}
+}
+
+// waitForFailure is waitForStatus' mirror: it waits for the one outcome that
+// one treats as fatal.
+//
+// A SEPARATE HELPER RATHER THAN A PARAMETER, because `waitForStatus` fails the
+// lab the moment it sees `failed` -- correctly, for every other lab here,
+// where a failure is the thing that went wrong. This one is about the failure,
+// and it needs the reason as well as the status, which `requestState` does not
+// carry.
+func waitForFailure(t *testing.T, srv served, id string, within time.Duration) failedState {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		resp := ask(t, "GET", srv, "/api/requests/"+id, "")
+		var r failedState
+		if err := json.Unmarshal(resp.Body, &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.Status == "failed" {
+			return r
+		}
+		if r.Status == "done" || r.Status == "cancelled" {
+			t.Fatalf("request %s ended as %s; it asked for a card the local provider does not "+
+				"offer, so the planner was supposed to refuse it", id, r.Status)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("request %s was %s after %v, want failed", id, r.Status, within)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+type failedState struct {
+	Status string `json:"status"`
+	Error  string `json:"error"`
+}
+
 // TestServe_UICancelSaysWhatTheServerAnswered presses the one button in the
 // page whose answer used to go nowhere.
 //

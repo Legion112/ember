@@ -1122,7 +1122,43 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                                             move |_| watching.set(id.clone())
                                         }>{r.id.chars().take(8).collect::<String>()}</button>
                                     </td>
-                                    <td class="status">{r.status.clone()}</td>
+                                    // THE REASON, IN THE ROW THAT HAS IT.
+                                    //
+                                    // `Request::error` reached this page on
+                                    // every route and the socket and was read
+                                    // by no view, so a request stopped by a
+                                    // money ceiling or by a sampler the caps
+                                    // do not list said `failed` and nothing
+                                    // else. The operator-visible state of a
+                                    // failed generation was one word.
+                                    //
+                                    // IN THE ROW AND NOT UNDER THE TABLE,
+                                    // which is where the panel's other two
+                                    // lines live. A listing can hold several
+                                    // failed requests at once and a panel
+                                    // line cannot say which one it is about;
+                                    // the cancel refusal can, because there
+                                    // is one ask in flight. It also keeps
+                                    // this out of `p.error`, the class the
+                                    // cancel lab counts as siblings of the
+                                    // table to assert a refusal is gone --
+                                    // and a reason that is still true is not
+                                    // a refusal anybody dismissed.
+                                    //
+                                    // A `title` as well as the text, because
+                                    // `queue.fail` writes whatever the
+                                    // planner said and some of those are long
+                                    // enough to wrap a cell.
+                                    <td class="status">{r.status.clone()}
+                                        {match r.reason() {
+                                            None => ().into_any(),
+                                            Some(why) => view! {
+                                                <span class="why" title=why.to_string()>
+                                                    {why.to_string()}
+                                                </span>
+                                            }.into_any(),
+                                        }}
+                                    </td>
                                     <td>{format!("{} job(s)", r.jobs.len())}</td>
                                     <td>{r.gpu.clone()}</td>
                                     <td class="price">
@@ -1432,12 +1468,49 @@ fn Watch(watching: RwSignal<String>) -> impl IntoView {
 
                 <Show when=move || !progress.get().failure.is_empty()>
                     // The one an operator must not miss.
+                    //
+                    // THIS SENTENCE IS ABOUT A DESTROY THAT FAILED AND
+                    // NOTHING ELSE, which is why the request's own reason is
+                    // a separate line below rather than another writer of
+                    // `Progress::failure`. `destroy_failed` is the one kind
+                    // folded into that field, and "the node may still be
+                    // running" is a claim about a node that was created: over
+                    // a request a money ceiling refused there was never one,
+                    // and a false alarm on the page an operator reads to
+                    // decide whether to check their bill is worse than
+                    // silence. Same shape as the `proj` caption that was true
+                    // of one preview mode and wrong for the other two.
                     <p class="fatal">
                         "THE NODE MAY STILL BE RUNNING AND BILLING: "
                         {move || progress.get().failure}
                         " — check " <code>"ember ls"</code>
                     </p>
                 </Show>
+
+                // WHY IT ENDED, which the watcher could not say at all.
+                //
+                // The reason is on the row, not in the stream: `queue.fail`
+                // writes `requests.err` for a request refused before a
+                // provider was reached and emits nothing, because there is no
+                // sink for a rental that was never opened. So this reads
+                // `Request::error` -- see `Request::reason` for why it is not
+                // gated on `failed`, and `wsCursor` in `internal/webapi` for
+                // the push that makes it arrive: the socket used to write an
+                // envelope only when an EVENT was new, so a row that changed
+                // with nothing behind it never reached an open tab.
+                //
+                // NO VERDICT AND NO REMEDIATION, deliberately. The server's
+                // own sentence already carries the remediation where there is
+                // one -- a ceiling names the figures, a refused sampler names
+                // the list -- and a line ember added about what to do next
+                // would be a guess over the only one of these states it
+                // cannot identify from here.
+                {move || match request.get().as_ref().and_then(Request::reason) {
+                    None => ().into_any(),
+                    Some(why) => view! {
+                        <p class="why">"this request ended early: " {why.to_string()}</p>
+                    }.into_any(),
+                }}
 
                 // A PLAIN MAP AND NOT <For>, and the difference is a bug
                 // that only a browser found. A keyed <For> re-renders a row

@@ -98,10 +98,13 @@ const (
 	KindPreviewFailed Kind = "preview_failed"
 
 	// The lifecycle kinds below are emitted for a UI and a database, and Text
-	// renders nothing for them, because the CLI already reports all four
-	// through its slog handler -- "node ready" at provision.go is what
+	// renders nothing for three of the four, because the CLI already reports
+	// those through its slog handler -- "node ready" at provision.go is what
 	// test/integration/lifecycle_test.go greps for. Printing them twice would
-	// change `ember up`'s output, and a lab asserts it has not.
+	// change `ember up`'s output, and a lab asserts it has not. The exception
+	// is node_memory, which no slog line ever carried and which Text
+	// therefore prints; the count was "four" while there were six of these,
+	// two of them emitted by nothing, which is the deletion recorded below.
 
 	// KindNodeReady is a node that is usable.
 	KindNodeReady Kind = "node_ready"
@@ -127,9 +130,41 @@ const (
 	// may still be running, and running means billing.
 	KindDestroyFailed Kind = "destroy_failed"
 
-	// KindRunFinished and KindRunFailed end a run.
-	KindRunFinished Kind = "run_finished"
-	KindRunFailed   Kind = "run_failed"
+	// THERE WAS A KindRunFinished AND A KindRunFailed HERE, declared, listed
+	// in Kinds(), rendered as deliberately silent by Text, and named in the
+	// queue's `urgent` list beside run_cost -- the list reserved for events
+	// that would be LOST rather than late. Nothing ever emitted either. The
+	// one consumer anywhere was `web/src/model.rs`'s
+	// `"destroy_failed" | "run_failed"` arm, which was therefore half
+	// unreachable, and the comment above said they "end a run" when nothing
+	// in the program ended one by saying so.
+	//
+	// DELETED RATHER THAN WIRED UP, which is the opposite of the call made
+	// for sdserver.Client.Cancel and the same one made for queue.Cost. The
+	// test is whether a second live mechanism exists for the fact. For Cancel
+	// there was none, so deleting it would have deleted the mechanism; here
+	// the fact is a request's status and its reason, which are COLUMNS --
+	// `requests.status` and `requests.err`, written by queue.fail for a
+	// request refused before anything was rented and by queue.finish for one
+	// that broke on a card. Both already reach every JSON route and the
+	// socket as `requestView.Status` and `requestView.Error`. An event for
+	// the same fact is the "two carriers of one figure" mistake, and it is
+	// the worse carrier of the two: current state survives a reconnect with
+	// no backlog to replay, which is exactly the case that made this visible.
+	//
+	// AND EMITTING run_failed WOULD HAVE PRINTED A FALSE ALARM. Its only
+	// renderer shares `Progress::failure` with destroy_failed, whose view
+	// says "THE NODE MAY STILL BE RUNNING AND BILLING -- check ember ls". A
+	// request a money ceiling refused never had a node, so that sentence over
+	// it is the caption that is true of one kind and wrong for the other --
+	// the `proj` preview caption, on the page an operator reads to decide
+	// whether to go and check their bill. Splitting the arm would have been
+	// possible and would still have been a second renderer for a reason
+	// `Request::error` already carries.
+	//
+	// What is NOT recorded by a column is "the stream is over", which is the
+	// only thing KindRunFinished could have meant. A terminal status is that
+	// answer and `Request::is_terminal` already reads it.
 )
 
 // Kinds is every kind, so a renderer can be checked for completeness rather
@@ -140,7 +175,6 @@ func Kinds() []Kind {
 		KindUnitStarted, KindJobProgress, KindJobImages, KindUnitCost,
 		KindJobCancelled, KindPreviewFailed,
 		KindNodeReady, KindNodeMemory, KindRunCost, KindDestroyFailed,
-		KindRunFinished, KindRunFailed,
 	}
 }
 

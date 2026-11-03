@@ -650,6 +650,52 @@ impl Request {
     pub fn results(&self) -> impl Iterator<Item = &ImageRef> {
         self.images.iter().filter(|i| !i.preview)
     }
+
+    /// Why it ended, when the row carries a reason.
+    ///
+    /// THE FIELD WAS DECODED BY NOBODY FOR THE LIFE OF THE PAGE. Go populates
+    /// it on every request view, on both JSON routes and the socket, from
+    /// `requests.err` -- which `queue.fail` writes for a request refused
+    /// before anything was rented and `queue.finish` writes for one that
+    /// broke on a card. Deleting `Request::error` from this type left the
+    /// crate compiling and all 28 tests green, because serde drops a field
+    /// the server sends without a word. So a request stopped by
+    /// `max_month_usd`, or by a sampler the cached capabilities do not list,
+    /// showed the word `failed` in one table cell and nothing else -- while
+    /// AGENTS.md claimed in prose that "a refused request carries the reason,
+    /// which the page shows".
+    ///
+    /// A METHOD AND NOT A CLOSURE IN THE VIEW, the reason `Progress::rental`
+    /// and `Progress::sampling` are: this is a decision and the view is a
+    /// layout, and a decision inside a view macro can only be checked by a
+    /// browser.
+    ///
+    /// NOT GATED ON `failed`, and that is the decision. A cancelled request
+    /// carries a reason too, and it is the one with money in it -- "job 3/8:
+    /// cannot be stopped, so it will finish and be paid for" is written to
+    /// this same column by `finish`, and hiding it behind a status check
+    /// would lose the sentence an operator pressed the button to read. Nor is
+    /// it gated on `is_terminal`: nothing writes this column without also
+    /// ending the request, so a guard for a live row with a reason would be a
+    /// branch nothing can reach, and a branch that can never be taken is a
+    /// branch nobody can show is right.
+    ///
+    /// IT IS NOT `Progress::failure`, which is the trap in the obvious fix.
+    /// That one is folded from `destroy_failed` and its view prints "THE NODE
+    /// MAY STILL BE RUNNING AND BILLING", which is true of a destroy that
+    /// failed and false of a request that never reached a provider. Routing
+    /// this reason through that field would print a false alarm about a node
+    /// that does not exist, over the one page an operator reads to decide
+    /// whether to go and check their bill -- the mirror of the false
+    /// "abandoned" the holder check refuses to report, and the same defect as
+    /// the preview caption that was true of one mode.
+    pub fn reason(&self) -> Option<&str> {
+        if self.error.is_empty() {
+            None
+        } else {
+            Some(self.error.as_str())
+        }
+    }
 }
 
 /// Rows is a listing that survives a row it cannot read.
@@ -1143,9 +1189,22 @@ impl Progress {
                 self.charged = true;
                 self.node = e.node.clone();
             }
-            "destroy_failed" | "run_failed" => {
+            "destroy_failed" => {
                 // THE ONE AN OPERATOR MUST NOT MISS: the node may still be
                 // running, and running means billing.
+                //
+                // THIS ARM USED TO BE `"destroy_failed" | "run_failed"` and
+                // the second half was unreachable: `report.KindRunFailed` was
+                // declared, listed and never emitted by anything in Go. It is
+                // deleted rather than wired up, and the reason is this view:
+                // `Progress::failure` is rendered as "THE NODE MAY STILL BE
+                // RUNNING AND BILLING -- check ember ls", which is a claim
+                // about a node that exists. Most failures have no node -- a
+                // money ceiling, a sampler the capabilities do not list, no
+                // capacity -- so a run_failed folded in here would print a
+                // false alarm on the page an operator reads to decide whether
+                // to check their bill. A request's own reason is
+                // `Request::reason`, which is a column and not an event.
                 self.failure = e.error.clone();
             }
             _ => {}
@@ -1725,6 +1784,60 @@ mod tests {
         e.node = "local/n1".into();
         p.apply(&e);
         assert_eq!(p.failure, "provider unreachable");
+    }
+
+    /// A failed request's reason is readable, and it does not travel through
+    /// `Progress::failure`.
+    ///
+    /// The field had no reader at all: deleting it left the crate compiling
+    /// and every test green, because serde drops what nothing asks for. What
+    /// this fixes in place is the two halves staying apart -- a request
+    /// refused by a money ceiling never had a node, so the destroy sentence
+    /// `Progress::failure` is rendered with must not be what carries it.
+    #[test]
+    fn a_requests_reason_is_its_own_and_not_the_destroy_sentence() {
+        let refused = Request {
+            status: "failed".into(),
+            error: "max_month_usd would be exceeded: $47.80 spent of $50 \
+                    and this rental projects $3.58"
+                .into(),
+            ..Default::default()
+        };
+        assert!(refused.reason().unwrap().contains("max_month_usd"));
+
+        // Nothing in the event stream put it there, which is the point: a
+        // request the planner refused has no sink and emits nothing, so a
+        // watcher folding only events has no reason to show.
+        let p = Progress::default();
+        assert!(
+            p.failure.is_empty(),
+            "the request's reason reached the field whose view says the node may still be billing"
+        );
+    }
+
+    /// Not gated on `failed`, because a cancelled request's reason is the one
+    /// with money in it.
+    ///
+    /// `queue.finish` writes this same column for a cancel, and the sentence
+    /// it writes is "the job in flight cannot be stopped, so it will finish
+    /// and be paid for". A status check here would hide exactly that.
+    #[test]
+    fn a_cancelled_request_still_has_a_reason() {
+        let stopped = Request {
+            status: "cancelled".into(),
+            error: "job 3/8: cannot be stopped, so it will finish and be paid for".into(),
+            ..Default::default()
+        };
+        assert!(stopped.reason().unwrap().contains("paid for"));
+
+        // And a request that ended with nothing to explain says nothing. An
+        // empty line under a `done` row would be the money row of zeros one
+        // panel over: a reader assumes a reason was withheld.
+        let done = Request {
+            status: "done".into(),
+            ..Default::default()
+        };
+        assert!(done.reason().is_none());
     }
 
     /// An unbounded log is a tab that grows until the browser stops: a `-v`

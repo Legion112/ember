@@ -133,6 +133,17 @@ label.denied input, label.denied select { cursor: not-allowed }
    rather than `.error`, which means "ember refused something you asked for"
    and which the cancel lab counts under the queue table. */
 .error, .unreadable { color: var(--bad); font-size: .85rem }
+/* `.why` is the request's OWN reason for ending, from `requests.err`: a money
+   ceiling, a sampler the capabilities do not list, a server that died. A third
+   class rather than `.error` or `.fatal`, and for the same reason `.unreadable`
+   is a third one: `.error` is "ember refused what you just asked for" and is
+   what the cancel lab counts under the queue table, and `.fatal` is the
+   destroy-failed sentence about a node that may still be billing -- which must
+   not print over a request that never reached a provider. In the table it sits
+   under the status word, on its own line, because the reason is a sentence and
+   the cell is one column wide. */
+.why { display: block; color: var(--bad); font-size: .78rem; font-weight: 400 }
+p.why { font-size: .85rem }
 .fatal {
   color: var(--bad);
   border: 1px solid var(--bad);

@@ -14,8 +14,8 @@ func TestStream_NumbersFromOne(t *testing.T) {
 	c := &collect{}
 	s := NewStream(nil, c)
 
-	s.Emit(Event{Kind: KindRunFinished})
-	s.Emit(Event{Kind: KindRunFinished})
+	s.Emit(Event{Kind: KindNodeReady})
+	s.Emit(Event{Kind: KindNodeReady})
 
 	if got := c.es[0].Seq; got != 1 {
 		t.Errorf("first event has Seq %d, want 1", got)
@@ -96,7 +96,7 @@ func TestDiscard(t *testing.T) {
 
 func TestSinkFunc(t *testing.T) {
 	var got Event
-	SinkFunc(func(e Event) { got = e }).Emit(Event{Kind: KindRunFailed, Err: "boom"})
+	SinkFunc(func(e Event) { got = e }).Emit(Event{Kind: KindDestroyFailed, Err: "boom"})
 	if got.Err != "boom" {
 		t.Errorf("Err = %q, want %q", got.Err, "boom")
 	}
