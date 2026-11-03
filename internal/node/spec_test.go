@@ -310,38 +310,6 @@ func TestParseCUDAVersion(t *testing.T) {
 	}
 }
 
-func TestCUDAAtLeast(t *testing.T) {
-	for _, tc := range []struct {
-		have, want string
-		ok         bool
-	}{
-		{"12.6", "12.6", true},
-		{"12.9", "12.6", true},
-		{"13.0", "12.9", true},
-		{"12.5", "12.6", false},
-		{"11.8", "12.0", false},
-		// The comparison that a float would get wrong.
-		{"12.10", "12.9", true},
-		{"12.9", "12.10", false},
-	} {
-		got, err := CUDAAtLeast(tc.have, tc.want)
-		if err != nil {
-			t.Errorf("CUDAAtLeast(%q, %q) = %v", tc.have, tc.want, err)
-			continue
-		}
-		if got != tc.ok {
-			t.Errorf("CUDAAtLeast(%q, %q) = %v, want %v", tc.have, tc.want, got, tc.ok)
-		}
-	}
-
-	if _, err := CUDAAtLeast("nonsense", "12.6"); err == nil {
-		t.Error("an unreadable 'have' was accepted")
-	}
-	if _, err := CUDAAtLeast("12.6", "nonsense"); err == nil {
-		t.Error("an unreadable 'want' was accepted")
-	}
-}
-
 // TestNewSpec_CmdAndCmdsAreTheSameThing: one command is a batch of one, so
 // everything downstream reads Cmds and nothing has to ask which spelling the
 // operator used.

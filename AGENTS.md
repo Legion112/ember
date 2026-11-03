@@ -5320,6 +5320,20 @@ A leaked node bills by the hour in silence. These are not style preferences.
   reported it on the first full run, exit 1, and the citation is gone. A guard
   whose first catch is the commit that was quoting it is the best evidence it
   was worth building.
+- **`node.CUDAAtLeast` is gone, and the one-commit constraint was measured
+  rather than argued (#161).** The function, its `deadExcluded` waiver and
+  `TestCUDAAtLeast` went together, and `ParseCUDAVersion` stayed because
+  `ParseComputeCap` calls it. Over the same tree, with `go build ./...` at exit
+  0 in every row: all three gone is `go test ./cmd/check-coverage/` **0**;
+  function and test gone with the waiver kept is **1** ("deadExcluded names
+  internal/node.CUDAAtLeast, which this guard no longer reports"); waiver and
+  test gone with the function kept is **1** ("nothing anywhere calls it");
+  waiver gone alone is **1** ("only test code calls it (3 site(s))"); and the
+  function gone with the test and waiver kept does not compile
+  `internal/node`'s tests. Losing only the test is green, so it was never the
+  load-bearing third. The two judgements are a note on `ParseCUDAVersion`, the
+  `node.RateFromFloat` shape. The waiver's reason, "the evidence that the key is
+  unenforced", was stale the moment `min_cuda` went, and left with it.
 
 ## Style
 
