@@ -1092,6 +1092,28 @@ type NodeSpec struct {
 
 	// RunID goes into the ember label. Empty derives one from Name.
 	RunID node.RunID
+
+	// Binds is host:container directory pairs to mount into the node.
+	//
+	// It exists for the one thing a control-plane fake cannot pretend: a
+	// store. `runpodfake` answers `mounts.network` by handing the directory
+	// backing that volume through here, so the node really has weights at
+	// /models and the S3 endpoint over the same directory really sees what
+	// `embernode fetch` wrote. A fake that accepted the mount and started a
+	// container with nothing at the path would make a full store and an empty
+	// one the same lab.
+	Binds []Bind
+}
+
+// Bind is one host directory mounted into a node.
+type Bind struct {
+	// Host is the directory on this machine. It is created by whoever owns
+	// it, never here: a helper that made the directory would own what it did
+	// not create, which is the rule CreateVolume follows from the other side.
+	Host string
+
+	// Path is where the container sees it.
+	Path string
 }
 
 // StartNode runs the lab image directly and returns its loopback SSH address.
@@ -1147,6 +1169,7 @@ func (l *Lab) StartNode(ctx context.Context, spec NodeSpec) (id, addr string) {
 			// Loopback, not Docker's 0.0.0.0 default: a lab must not publish
 			// a key-only sshd to the whole LAN for the length of a test run.
 			PortBindings: nat.PortMap{"22/tcp": []nat.PortBinding{{HostIP: "127.0.0.1"}}},
+			Binds:        binds(spec.Binds),
 		},
 		nil, nil, "")
 	if err != nil {
@@ -1170,6 +1193,48 @@ func (l *Lab) StartNode(ctx context.Context, spec NodeSpec) (id, addr string) {
 		l.t.Fatalf("the daemon published nothing for 22/tcp on %s", id[:12])
 	}
 	return id, net.JoinHostPort("127.0.0.1", bs[0].HostPort)
+}
+
+// binds renders the Docker Engine API's bind spelling.
+//
+// Read-write, because that is what a RunPod network volume is: the store is
+// writable by every node that mounts it, which is exactly why every asset is
+// verified by digest before any GPU time is spent on it. A read-only mount
+// here would make the control that stands in for one unreachable.
+func binds(bs []Bind) []string {
+	if len(bs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(bs))
+	for _, b := range bs {
+		out = append(out, b.Host+":"+b.Path)
+	}
+	return out
+}
+
+// BridgeGateway is this machine's address as a node container sees it.
+//
+// Read from the daemon rather than assumed to be 172.17.0.1, which is the
+// default and not a promise: a daemon configured with another `bip` answers
+// something else, and a lab serving an asset at a guessed address fails with
+// a connection timeout naming nothing.
+//
+// It is here because an asset fetch is the one lab traffic that originates
+// INSIDE a container. Every other server a lab stands up is reached by the
+// test process over loopback, which a container cannot see at all.
+func (l *Lab) BridgeGateway(ctx context.Context) string {
+	l.t.Helper()
+	n, err := l.cli.NetworkInspect(ctx, "bridge", network.InspectOptions{})
+	if err != nil {
+		l.t.Fatalf("inspect the default bridge network: %v", err)
+	}
+	for _, c := range n.IPAM.Config {
+		if c.Gateway != "" {
+			return c.Gateway
+		}
+	}
+	l.t.Fatalf("the default bridge network reports no gateway, so nothing in a container can reach this machine: %+v", n.IPAM)
+	return ""
 }
 
 // Remove destroys one node container.

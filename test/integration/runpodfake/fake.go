@@ -26,7 +26,11 @@
 //   - the catalogue endpoints refuse `include=AVAILABILITY` without
 //     `product`, and report no availability at all when it is not asked for,
 //     because `include` is the difference between a catalogue with capacity
-//     in it and one where every offer is filtered out as having none.
+//     in it and one where every offer is filtered out as having none;
+//   - a network volume is refused for the v1 field name and for a size below
+//     the measured minimum of ten, both of which are what the live v2 API
+//     answered 422 to -- see volumes.go, and s3.go for the endpoint over the
+//     directory each volume is backed by.
 //
 // The catalogue bodies are the provider's own committed fixtures rather than
 // copies kept here, and that is a decision worth stating because the rest of
@@ -45,7 +49,11 @@
 // The control plane is fake; the data plane is not. Create starts a real
 // container through the Nodes seam, so a lab above this does a real SSH
 // handshake against a real sshd using the key ember minted, forwards a real
-// port and pulls real bytes back. Only the JSON is pretend.
+// port and pulls real bytes back. Only the JSON is pretend. A store is part
+// of that data plane now: `mounts.network` is honoured by bind-mounting the
+// directory the volume route created, and the S3 endpoint reads that same
+// directory -- so "the sync filled the store" and "the pre-flight can see it"
+// are one fact rather than two fakes agreeing.
 package runpodfake
 
 import (
@@ -61,6 +69,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Legion112/ember/internal/awssig"
 )
 
 // WebTerminalPort is the mapping RunPod adds to every pod with no way to
@@ -102,12 +112,36 @@ const gpuHourlyUSD = 0.89
 // A seam rather than a direct Docker dependency, so the fake can be driven
 // without one when a lab only cares about the control plane.
 type Nodes interface {
-	// Start brings up a node carrying the operator's key and the host key
-	// ember minted, and reports where sshd can be reached.
-	Start(name, authorizedKey, hostKeyPEM string) (id, host string, port uint16)
+	// Start brings up a node carrying the operator's key, the host key ember
+	// minted and whatever storage the create asked for, and reports where
+	// sshd can be reached.
+	//
+	// A struct rather than four positional arguments, and the mounts are why:
+	// a fake that accepted `mounts.network` and started a container with
+	// nothing at that path would be tidier than the service it stands in for.
+	// The directory really is there on RunPod, and a workload that found it
+	// empty is the bug this exists to catch.
+	Start(m Machine) (id, host string, port uint16)
 
 	// Stop destroys it. Called for a pod ember deletes.
 	Stop(id string)
+}
+
+// Machine is one node for the data plane to bring up.
+type Machine struct {
+	// Name is the pod id, so a container can be traced back to the call that
+	// created it.
+	Name string
+
+	// AuthorizedKey is the operator's public key, in authorized_keys form.
+	AuthorizedKey string
+
+	// HostKeyPEM is the private host key ember minted. It travels in the
+	// create body and never in argv, as in production.
+	HostKeyPEM string
+
+	// Mounts is the storage `mounts.network` asked for.
+	Mounts []Mount
 }
 
 // Options tune the behaviours worth varying between labs.
@@ -142,6 +176,16 @@ type Options struct {
 	// catalogue on a different path with a price quoted per core rather than
 	// per machine. Empty serves the captured cpus.json.
 	CPUCatalogue []byte
+
+	// S3 is the key pair the store endpoint accepts. Zero accepts the pair
+	// S3Credentials returns, so a lab and the endpoint cannot disagree about
+	// them by each writing a literal.
+	//
+	// It is a field because the wrong-credential case is one a lab has to be
+	// able to produce: a fake that accepted any signature could not catch
+	// ember signing with the wrong key, the wrong region or the wrong
+	// header set, and a 403 with no detail is SigV4's only other feedback.
+	S3 awssig.Credentials
 }
 
 // Fake is a running stand-in.
@@ -149,15 +193,31 @@ type Fake struct {
 	// URL is the base to point a provider at.
 	URL string
 
+	// S3URL is the base to point app.Deps.S3BaseURL at.
+	//
+	// A second server rather than a second path prefix on the first, because
+	// they are separate services on separate hosts -- which is also why
+	// app.Deps carries two fields. One server would let a store call reach
+	// the pods API by writing the wrong path, which is a mistake the real
+	// deployment cannot make.
+	S3URL string
+
 	t     *testing.T
 	nodes Nodes
 	opts  Options
 	srv   *httptest.Server
+	s3srv *httptest.Server
 
-	mu       sync.Mutex
-	pods     map[string]*pod
-	nextID   int
-	requests []Request
+	// volRoot is the parent of every volume's directory, owned by the test
+	// process so what a container wrote as root still comes away.
+	volRoot string
+
+	mu         sync.Mutex
+	pods       map[string]*pod
+	volumes    map[string]*volume
+	nextID     int
+	nextVolume int
+	requests   []Request
 }
 
 // Request is one call ember made, for labs that assert on what was sent.
@@ -201,10 +261,24 @@ type pod struct {
 func New(t *testing.T, nodes Nodes, opts Options) *Fake {
 	t.Helper()
 
-	f := &Fake{t: t, nodes: nodes, opts: opts, pods: map[string]*pod{}}
+	f := &Fake{
+		t: t, nodes: nodes, opts: opts,
+		pods:    map[string]*pod{},
+		volumes: map[string]*volume{},
+		// t.TempDir and not os.MkdirTemp, so a directory this suite cannot
+		// clean up fails the test rather than accumulating in /tmp. What a
+		// container wrote as root is unlinkable because the directory above
+		// it belongs to this process -- see volumes.go on the one shape that
+		// is not.
+		volRoot: t.TempDir(),
+	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.route))
 	t.Cleanup(f.srv.Close)
 	f.URL = f.srv.URL
+
+	f.s3srv = httptest.NewServer(http.HandlerFunc(f.routeS3))
+	t.Cleanup(f.s3srv.Close)
+	f.S3URL = f.s3srv.URL
 	return f
 }
 
@@ -274,6 +348,15 @@ func (f *Fake) route(w http.ResponseWriter, r *http.Request) {
 		f.inspect(w, strings.TrimPrefix(r.URL.Path, "/v2/pods/"))
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v2/pods/"):
 		f.destroy(w, strings.TrimPrefix(r.URL.Path, "/v2/pods/"))
+	case r.Method == http.MethodGet && r.URL.Path == volumePath:
+		// The route `ember store` lives at, which this package did not serve
+		// at all -- so seven subcommands and the store pre-flight were paths
+		// no lab could reach.
+		f.listVolumes(w)
+	case r.Method == http.MethodPost && r.URL.Path == volumePath:
+		f.createVolume(w, body)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, volumePath+"/"):
+		f.destroyVolume(w, strings.TrimPrefix(r.URL.Path, volumePath+"/"))
 	default:
 		// The real API's shape for an unknown route, which is what caught
 		// ember's doubled /v2 prefix on the very first live call.
@@ -426,6 +509,23 @@ func (f *Fake) create(w http.ResponseWriter, body map[string]any) {
 		return
 	}
 
+	// The storage, read before the pod exists: a create naming a volume this
+	// account does not have cannot succeed, and answering 200 and then
+	// starting a container with nothing at the mount path would be the
+	// tidier-than-the-service failure -- a workload reading an empty
+	// directory and a lab that could not tell it from a full store.
+	//
+	// `disk` is NOT refused beside a mount. The schema says `persistent` and
+	// `network` are mutually exclusive and ember never sends `persistent`:
+	// the first live store run created a pod with both `disk` and
+	// `mounts.network` and RunPod honoured it, so a refusal here would make
+	// every store rental a 400 that the service does not answer.
+	mounts, err := f.mountsOf(body)
+	if err != nil {
+		f.fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	f.mu.Lock()
 	f.nextID++
 	id := fmt.Sprintf("fakepod%06d", f.nextID)
@@ -456,7 +556,12 @@ func (f *Fake) create(w http.ResponseWriter, body map[string]any) {
 	// create that the fake accepted is a machine that genuinely exists, so a
 	// lab cannot pass while the container failed to come up.
 	if nodes != nil {
-		nodeID, host, port := nodes.Start(id, p.Env["EMBER_AUTHORIZED_KEY"], p.Env["EMBER_HOST_KEY"])
+		nodeID, host, port := nodes.Start(Machine{
+			Name:          id,
+			AuthorizedKey: p.Env["EMBER_AUTHORIZED_KEY"],
+			HostKeyPEM:    p.Env["EMBER_HOST_KEY"],
+			Mounts:        mounts,
+		})
 		f.mu.Lock()
 		p.nodeID, p.sshHost, p.sshPort, p.started = nodeID, host, port, true
 		f.mu.Unlock()

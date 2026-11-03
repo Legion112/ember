@@ -32,12 +32,21 @@ type dockerNodes struct {
 	l *harness.Lab
 }
 
-func (d dockerNodes) Start(name, authorizedKey, hostKeyPEM string) (string, string, uint16) {
+func (d dockerNodes) Start(m runpodfake.Machine) (string, string, uint16) {
 	d.t.Helper()
+	// The mounts are carried across, and that is what makes a store part of
+	// the data plane rather than something the control plane only claims to
+	// have attached: `mounts.network` becomes a real bind, so the node writes
+	// its weights where the S3 endpoint will read them.
+	binds := make([]harness.Bind, 0, len(m.Mounts))
+	for _, mt := range m.Mounts {
+		binds = append(binds, harness.Bind{Host: mt.Host, Path: mt.Path})
+	}
 	id, addr := d.l.StartNode(d.t.Context(), harness.NodeSpec{
-		Name:          name,
-		AuthorizedKey: authorizedKey,
-		HostKeyPEM:    hostKeyPEM,
+		Name:          m.Name,
+		AuthorizedKey: m.AuthorizedKey,
+		HostKeyPEM:    m.HostKeyPEM,
+		Binds:         binds,
 	})
 	host, port := runpodfake.SplitAddr(d.t, addr)
 	return id, host, port
