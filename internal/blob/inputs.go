@@ -109,8 +109,19 @@ const MaxInputBytes = 8 << 20
 // declared geometry is available for free and the bound costs one comparison.
 //
 // 8192 is twice the largest generation dimension the captured capabilities
-// publish (limits.max_width is 4096), which is the only published number
-// anywhere near this and leaves room for an input larger than its output.
+// publish (limits.max_width is 4096), which leaves room for an input larger
+// than its output.
+//
+// THIS COMMENT USED TO CALL THAT "the only published number anywhere near
+// this", and it is not: `limits.max_upscale_width` and `max_upscale_height`
+// are 8192 in the same object, so the figure arrived at by doubling one
+// field is the other field exactly. The number is unchanged and better
+// founded -- it is published rather than derived -- and sdserver.MaxAxis,
+// which bounds the geometry a request ASKS for, is set from the same field
+// for the same reason. Two constants and not one, because this bounds what a
+// PNG header claims about bytes that have arrived and that one bounds what a
+// request asks a card to sample; they agree today and have no reason to be
+// forced to.
 const MaxInputAxis = 8192
 
 // refScheme prefixes a reference, so that a string in a stored job says what

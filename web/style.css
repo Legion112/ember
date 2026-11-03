@@ -127,7 +127,12 @@ td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
    them. */
 label.denied { opacity: .45 }
 label.denied input, label.denied select { cursor: not-allowed }
-.error { color: var(--bad); font-size: .85rem }
+/* `.unreadable` is a listing this page could not read in full: a row it
+   could not decode, or a fetch that did not arrive. Coloured like an error
+   because a queue table missing a request IS wrong -- but a class of its own
+   rather than `.error`, which means "ember refused something you asked for"
+   and which the cancel lab counts under the queue table. */
+.error, .unreadable { color: var(--bad); font-size: .85rem }
 .fatal {
   color: var(--bad);
   border: 1px solid var(--bad);

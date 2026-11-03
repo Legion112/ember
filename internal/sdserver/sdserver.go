@@ -497,10 +497,82 @@ func ValidateStatic(j Job, preview string, interval int) error {
 	if _, err := j.Body(preview, interval); err != nil {
 		return err
 	}
+	// THE GEOMETRY, which used to be checked only against a response. See
+	// MaxAxis: `limits.max_width` lives on the server's own capability list,
+	// so before this process's first rental there was no width ember would
+	// refuse at all.
+	if err := staticAxis("width", j.Width); err != nil {
+		return err
+	}
+	if err := staticAxis("height", j.Height); err != nil {
+		return err
+	}
 	if err := staticParams(j.Params); err != nil {
 		return err
 	}
 	return ValidateOutput(j.Output)
+}
+
+// MaxAxis bounds a generation's geometry with no cached capabilities.
+//
+// IT EXISTS BECAUSE THE CAPS-DEPENDENT HALF WAS THE ONLY GEOMETRY CHECK.
+// Validate applies limits.max_width and limits.max_height, and those are a
+// RESPONSE -- they exist only once a rental has loaded weights, and
+// webapi.validateJobs skips that half until then, which is the state
+// configView.Caps is a pointer to describe. So `POST /api/requests` answered
+// 202 to `width: 3000000000`, the row went to the store for good, and a card
+// was rented for a batch sd-server was always going to refuse. The browser
+// made it worse than a wasted rental: the listing decodes into an i32, so
+// that one row failed the whole envelope and took every healthy request
+// beside it, and `views::Queue`'s `if let Ok(l)` left the table reading
+// "nothing queued" for the life of the tab with no error anywhere.
+//
+// 8192 IS THE LARGEST GEOMETRY ANY CAPTURED RESPONSE PUBLISHES --
+// `limits.max_upscale_width` and `max_upscale_height` in
+// testdata/capabilities.json, against generation maxima of 4096 -- so this
+// cannot refuse a geometry an observed server accepts, and Validate applies
+// the tighter published figure exactly when the caps are cached. Read from a
+// response and not from a schema, which is the mistake `allowedCudaVersions`
+// and `capabilities.model` both were. blob.MaxInputAxis is the same number
+// for the neighbouring question, the declared geometry of bytes arriving, and
+// the two are deliberately not one constant: one bounds what a request asks
+// for and the other bounds what a PNG header claims.
+//
+// THE LIMIT, written down rather than left to be discovered: a future build
+// publishing a larger max_upscale_width would have a geometry refused here
+// before the caps that permit it were read. That is the trade any bound with
+// no live response behind it makes, and it is taken in this direction because
+// the alternative is the 202 above.
+//
+// IT REACHES FOUR FIELDS AND NOT TEN, and that is why the client half is
+// necessary rather than decorative. `steps`, `batch_count`, `hires.steps`,
+// `shifted_timestep`, `slg.layers[]`, the two vae tile sizes and
+// `upscale_tile_size` are the same Go `int` against the same Rust `i32`, and
+// no response publishes a maximum for any of them -- a ceiling invented for
+// `steps` would be the guess this constant is careful not to be. So a row
+// carrying an unrepresentable one of those can still be written, and what
+// stops it emptying the queue panel is model.rs's `Rows`, which drops and
+// counts the row rather than losing the envelope. Containment twice, by two
+// mechanisms, as the tar extractor is: neither half covers what the other
+// does.
+const MaxAxis = 8192
+
+// staticAxis refuses a width or a height that needs no server to be wrong.
+//
+// Zero is unset, as it is for `within` one layer up: a job that names no
+// geometry gets the server's own default, and that is most of them.
+func staticAxis(name string, v int) error {
+	if v == 0 {
+		return nil
+	}
+	if v < 0 {
+		return fmt.Errorf("%s %d is negative", name, v)
+	}
+	if v > MaxAxis {
+		return fmt.Errorf("%s %d is above %d, the largest geometry any sd-server here has "+
+			"published (limits.max_upscale_width); ask for a smaller one", name, v, MaxAxis)
+	}
+	return nil
 }
 
 // staticParams refuses the optional parameters that are wrong on their face.
@@ -535,6 +607,16 @@ func staticParams(p Params) error {
 	}
 	if p.Hires.Scale < 0 {
 		return fmt.Errorf("hires scale %g is negative", p.Hires.Scale)
+	}
+	// The hires target is a geometry and gets the geometry's bound, for the
+	// reason MaxAxis gives: validateParams checks it against
+	// limits.max_upscale_width, which is a response and therefore absent
+	// before the first rental.
+	if err := staticAxis("hires target_width", p.Hires.TargetWidth); err != nil {
+		return err
+	}
+	if err := staticAxis("hires target_height", p.Hires.TargetHeight); err != nil {
+		return err
 	}
 	if p.Hires.Steps < 0 {
 		return fmt.Errorf("hires steps %d is negative", p.Hires.Steps)

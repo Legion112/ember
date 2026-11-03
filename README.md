@@ -856,6 +856,18 @@ publishes, so a typo is refused before anything is rented. Everything else
 with a range — a denoising strength, a tiling overlap, a compression — is
 refused when the config is read.
 
+`width`, `height` and the `hires` target are refused above **8192** on each
+axis, and refused for being negative, without asking a server anything. That
+is the largest geometry any sd-server here has published —
+`limits.max_upscale_width` and `max_upscale_height` — so it cannot refuse a
+size a server would have taken, and the per-axis generation maxima
+(`limits.max_width`, 4096 on the captured build) are still applied on top of
+it the moment a rental has reported them. The bound is there because those
+maxima are a *response*: before the first rental of an `ember serve` there was
+nothing to check a geometry against, so `POST /api/requests` answered 202 to a
+width of three billion, kept the row, and rented a card for a batch sd-server
+was always going to refuse.
+
 **ember's names are not always upstream's.** Four are renamed on the way out,
 so when reading sd-server's `api.md` beside an `ember.yaml`:
 
@@ -1702,6 +1714,19 @@ least. Every field in the form explains itself on hover.
 | the `hires`, `vae_tiling` and `slg` blocks | `lora` |
 | an image it has already uploaded, by digest, and its `strength` | |
 | preview mode and interval | |
+
+**A request the page cannot read is named, and does not blank the table.** The
+queue listing crosses a language: a number is a Go `int` on the way out and an
+`i32` on the way in, so the server can say something the browser cannot hear —
+and one such row used to fail the whole envelope, taking every healthy request
+with it. The table then kept whatever it last showed, which on a fresh page is
+`nothing queued`, for the life of the tab, and nothing anywhere said why. The
+listing decodes row by row now: a row that will not decode is counted and
+printed under the table, and a listing that could not be fetched at all says
+the table is stale rather than leaving it to be believed. `sdserver.MaxAxis`
+above is the other half — the server stops sending the value — and neither
+half covers what the other does, because only four of those fields have a
+published maximum to bound them by.
 
 A request asking for a *higher* ceiling gets the config's, not a refusal: a UI
 offering a slider should not have to know every limit before it can offer

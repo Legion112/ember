@@ -1816,6 +1816,12 @@ func TestValidateStatic_RefusesParametersThatNeedNoServer(t *testing.T) {
 		{"rel_size_h negative", Params{VAETiling: VAETiling{RelSizeH: -1}}, "vae tiling rel_size_h -1 is outside 0 to 1"},
 		{"compression above 100", Params{OutputCompression: 101}, "output_compression 101 is outside 0 to 100"},
 		{"compression negative", Params{OutputCompression: -1}, "output_compression -1 is outside 0 to 100"},
+		// The hires target is a geometry, and the geometry's own bound was
+		// the thing that needed a response. See MaxAxis.
+		{"a hires target past the published upscale maximum",
+			Params{Hires: Hires{TargetWidth: MaxAxis + 1}}, "hires target_width 8193 is above 8192"},
+		{"a negative hires target height",
+			Params{Hires: Hires{TargetHeight: -64}}, "hires target_height -64 is negative"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ValidateStatic(Job{Prompt: "a cat", Output: "x", Params: tc.p}, PreviewNone, 0)
@@ -1888,5 +1894,66 @@ func TestPoll_ACancelledJobCarriesTheServersOwnExplanation(t *testing.T) {
 	}
 	if len(st.Images) != 0 {
 		t.Errorf("a cancelled job came back with %d image(s)", len(st.Images))
+	}
+}
+
+// A geometry no response could permit is refused with no response.
+//
+// THE DEFECT IS THE 202. `Validate` reads `limits.max_width`, which is a
+// capability list and therefore exists only once a rental has loaded weights
+// -- so `webapi.validateJobs` skips it before the first rental and a width of
+// 3,000,000,000 was queued, stored, and paid for with a card. The browser's
+// listing decodes into an `i32` and could not read the row, which took every
+// healthy request in the same envelope with it.
+//
+// THE PUBLISHED MAXIMUM IS ACCEPTED BESIDE EACH REFUSAL, because a bound that
+// refused every geometry would satisfy the refusals on its own -- and 8192 is
+// taken from `limits.max_upscale_width` precisely so that it cannot contradict
+// a server ember has observed. The captured generation maxima are 4096 and
+// `Validate` is what applies those; this one is the outer envelope.
+func TestValidateStatic_RefusesAGeometryNoResponsePublishes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		job  Job
+		want string
+	}{
+		{"a width an i32 cannot hold", Job{Width: 3000000000}, "width 3000000000 is above 8192"},
+		{"a height an i32 cannot hold", Job{Height: 3000000000}, "height 3000000000 is above 8192"},
+		{"one past the published upscale maximum", Job{Width: MaxAxis + 1}, "width 8193 is above 8192"},
+		{"a negative width", Job{Width: -1}, "width -1 is negative"},
+		{"a negative height", Job{Height: -1}, "height -1 is negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := tc.job
+			j.Prompt, j.Output = "a cat", "x"
+			err := ValidateStatic(j, PreviewNone, 0)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+
+	for _, j := range []Job{
+		{Prompt: "a cat", Output: "x", Width: MaxAxis, Height: MaxAxis},
+		// Zero is unset and stays unset: most jobs name no geometry at all
+		// and take the server's own default.
+		{Prompt: "a cat", Output: "x"},
+		{Prompt: "a cat", Output: "x", Params: Params{Hires: Hires{
+			TargetWidth: MaxAxis, TargetHeight: MaxAxis}}},
+	} {
+		if err := ValidateStatic(j, PreviewNone, 0); err != nil {
+			t.Errorf("%dx%d refused: %v; the bound IS limits.max_upscale_width, so a server "+
+				"ember has observed must be reachable through it", j.Width, j.Height, err)
+		}
+	}
+
+	// AND THE CAPS HALF STILL APPLIES THE TIGHTER FIGURE, which is what makes
+	// the static bound an envelope rather than a replacement: 8192 is a
+	// legitimate hires target and is twice what the captured server will
+	// generate at.
+	caps := testCaps(t)
+	err := Validate(Job{Prompt: "a cat", Width: MaxAxis, Height: 512}, caps)
+	if err == nil || !strings.Contains(err.Error(), "above this server's maximum") {
+		t.Errorf("err = %v, want the published limits.max_width to still refuse 8192", err)
 	}
 }
