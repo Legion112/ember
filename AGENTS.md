@@ -4664,14 +4664,19 @@ findings, or 3 on a usage error.
   asked for, and the key is the caller's.** `ParseUSD` is shared by four keys
   -- `max_hourly_usd`, `max_run_usd`, `max_day_usd`, `max_month_usd` -- so it
   cannot name one, and does not need to: every call site already wraps with
-  `%w` under their own key, and `TestBudgets_NameTheKeyAndWhatToWrite` holds
-  each wrapper to it. The parser carries the other half, in one
+  `%w` under its own key. `TestBudgets_NameTheKeyAndWhatToWrite` holds the
+  five in `internal/config` to key and wording; the two in
+  `internal/webapi/wire.go` are asserted for the key alone
+  (`TestPostRequest_RefusesWhatItCannotParse`), so gutting the wording leaves
+  the webapi suite green. The parser carries the other half, in one
   `malformedPrice` for all three places a wrong *shape* is refused -- the
   accepted form, copyable examples, the rules by name and the reason there is
   a rule -- rather than a message per rule, because the per-rule list is the
   fuzz corpus's and a second copy of it is how they drift. The original string
-  is still quoted as typed. `price out of range` got its own wording, about
-  integer overflow and naming the bound from the constant the check uses, and
+  is still quoted as typed. `price out of range` got its own wording,
+  naming the bound from the constant the check uses -- a conservative tenth of
+  what an int64 of microdollars holds, and the constant's comment records why
+  widening it yields a negative amount for `9223372036854.999999` -- and
   explicitly not a policy ceiling. `empty price` and `negative price` are
   unchanged: they are self-describing and the argument for a remediation is
   weakest there. **The classification is untouched and that is the claim worth
