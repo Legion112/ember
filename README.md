@@ -2393,10 +2393,9 @@ Ctrl-C or the node reached its deadline, and calling that a failed generation
 sends them looking for a bug that is not there — a provider that did not answer
 inside its own timeout reads `cancelled` too, which is one answer for three
 causes and is why the reason column is the thing to read rather than the
-status. A write that cannot finish
-inside its bound is abandoned and logged, because `ember serve` waits for the
-queue before it exits and a write that never returns is a server that never
-stops.
+status. A write that cannot finish inside its bound is abandoned and logged,
+because `ember serve` waits for the queue before it exits and a write that
+never returns is a server that never stops.
 
 A request that finished normally keeps the status its own generation wrote,
 even when the rental then failed to tear down. The teardown error is still

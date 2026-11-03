@@ -5724,7 +5724,9 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `endIfUnfinished` have answered that way since 001a0d3 -- so this makes the
   third writer consistent rather than inventing the conflation -- and because
   the discriminator is whether OUR context ended, which is the one input
-  `writeCtx`'s no-context-parameter design deliberately removes. There is one
+  `writeCtx`'s no-context-parameter design deliberately removes. That is
+  **#171**, cited by number because a pointer to an issue nobody can find is
+  the shape this file keeps correcting. There is one
   account of what Ctrl-C means in this package and it now has four callers,
   which is the reason `classify` was extracted in the first place.
 
@@ -5831,7 +5833,7 @@ A leaked node bills by the hour in silence. These are not style preferences.
   naming nothing a reviewer can act on -- so the thing being waited for is
   raced against the thing that means it will never happen, which is
   `orExited`'s rule as the browser labs spell it. The store blocks until the
-  context it was handed is done, the two writers run as parallel subtests, and
+  context it was handed is done, the four writers run as parallel subtests, and
   the pass costs ten seconds of wall clock for the same trade `ws.go`'s
   ten-second write bound already makes. Reinstated, each subtest is red at
   **20.0s** rather than hanging. And -- because belt and braces reads exactly
@@ -5869,12 +5871,32 @@ A leaked node bills by the hour in silence. These are not style preferences.
   costs no wall clock at all, because it shares the ten seconds the other
   subtests were already spending. PASS at 10.01s on the repaired tree; with
   `r.Flush(context.Background())` back, FAIL at 20.01s naming the write that
-  held. **Both halves of `Emit`'s condition** get a subtest, because `due` and
-  `urgent` reach one flush by different routes: `flushAfter` is 250ms against a
-  zero `last`, so the first event of a run is due whatever its kind. The thing
-  worth keeping is not the test but the order it was found in -- the claim was
-  written, measured, believed, and then disproved by somebody writing the test
-  the claim said could not exist.
+  held. The thing worth keeping is not the test but the order it was found in
+  -- the claim was written, measured, believed, and then disproved by somebody
+  writing the test the claim said could not exist.
+
+  **AND THE SAME SHAPE ONE LAYER IN, found by a reviewer taking that test's own
+  250ms claim seriously enough to follow it.** The entry above used to say both
+  halves of `Emit`'s condition got a subtest "because `due` and `urgent` reach
+  one flush by different routes: `flushAfter` is 250ms against a zero `last`,
+  so the first event of a run is due whatever its kind". Every clause of that
+  is true, and the conclusion is backwards: `due || urgent(e.Kind)`
+  **short-circuits**, so an urgent event on a fresh recorder is flushed by
+  `due` and the urgent arm is never evaluated -- the urgent-named subtest was
+  proving what the one beside it proved. Measured with the bound in place, so
+  that reaching the flush reads as 10s and not reaching it as 0s: with the
+  urgent arm deleted entirely the urgent subtest still sat at **10.00s**. The
+  **property** was covered either way, because both arms reach one call site
+  and one subtest bounds it; what was not covered is the **condition**, so
+  splitting that line into two call sites later could have left the urgent
+  branch unbounded with the suite green. One line fixes it -- `r.last =
+  time.Now()` on that recorder, which makes `due` false -- and the
+  discriminator then flips in both directions: full condition, urgent
+  **10.01s** and due **10.01s**; `if due` alone, urgent **0.00s** and due
+  10.01s; `if urgent(…)` alone, urgent 10.01s and due **0.00s**. "What would
+  this assertion say if the bug were present?" answered "the same thing the
+  subtest beside it says" is not an assertion about its own arm, which is the
+  retraction above arrived at from inside the test that fixed it.
 
   **A SIXTH HARNESS SHAPE, and it is the "cannot tell a build failure from a
   pass" trap inverted into a FALSE RED.** The first run of this pass reported

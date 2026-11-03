@@ -635,7 +635,8 @@ func classify(cause error) (genstore.Status, string) {
 		// deadline; calling that a failed generation would send them looking
 		// for a bug that is not there.
 		//
-		// THERE IS A THIRD CAUSE AND IT IS CONFLATED WITH THE OTHER TWO.
+		// THERE IS A THIRD CAUSE AND IT IS CONFLATED WITH THE OTHER TWO,
+		// which is #171.
 		// `http.Client.Timeout` expiring satisfies
 		// errors.Is(err, context.DeadlineExceeded), and internal/httpx sets a
 		// 60s DefaultTimeout on every client -- so a provider that did not
@@ -653,7 +654,9 @@ func classify(cause error) (genstore.Status, string) {
 		// and it is exactly the input writeCtx's no-context-parameter design
 		// removes from these writers on purpose. So telling the two apart is
 		// a change to what a writer is told rather than to this switch, and
-		// belongs to whoever takes it.
+		// belongs to whoever takes #171 -- cited by number because a pointer
+		// to an issue nobody can find is the shape this repository keeps
+		// correcting.
 		return genstore.StatusCancelled, cause.Error()
 	default:
 		return genstore.StatusFailed, cause.Error()
