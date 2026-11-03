@@ -163,9 +163,14 @@ func (s *SQLite) History(ctx context.Context, f Filter) ([]Entry, error) {
 // refuses a queued request with no jobs, so `jobs > 0` was true of every row
 // any reachable state could produce -- the dead half of a seal, which this
 // file already removed one of. Adopt makes it reachable, and the answer it
-// then gives is the right one: an `ember up` that forwarded ports, or one that
-// ran `cmds`, pays for a rental and reports no per-job figures at all, which
-// is precisely what this flag means. Both readers then print a dash rather
+// then gives is the right one: a rental that generates nothing -- an
+// `ember up` that forwarded ports or ran `cmds`, or the machine with no card
+// that fills a store -- pays for a node and reports no per-job figures at
+// all, which is precisely what this flag means. That list was the first two
+// alone while a store fill wrote no row, and it is three now; naming two of
+// three is the shape a `--all` on an `ember ls` cost this repository
+// eighteen times, where the argument persuades and the enumeration no longer
+// holds. Both readers then print a dash rather
 // than a zero and say how many rows they had to leave out, which is the
 // behaviour a column of zeros in a money ledger must never have.
 func unrecorded(ended, recorded int64) bool {
