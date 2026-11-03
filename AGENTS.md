@@ -1608,8 +1608,23 @@ that sentence made unrepresentable rather than merely tested.
   for -- is red even though the first two would pass it). The honest limit is
   that a stack is evidence about one goroutine: `cmd/check-coverage`'s
   `TestNothingRentsOutsideInternalApp` bounds the other half by asking which
-  packages may name `provision.WithNode`, which is one, and has been one since
-  that function was written.
+  packages may name `provision.WithNode`, which is one.
+  **That allow-list was measured and the first answer was wrong.** This entry
+  read "one, and has been one since that function was written" -- and over all
+  178 commits here, counting the CALL and not the name, `internal/cli` is in
+  **135** of them: `cmd_up.go` and `cmd_store.go` both called it directly until
+  346f10f, 86 commits ago. So the list would have needed exactly one edit, and
+  that edit was the commit that moved the rental into `internal/app` -- a
+  deliberate consolidation rather than the routine churn that makes an
+  exception list worse than no guard, which is still the argument for having
+  it. One more instance of the thing this file keeps recording about itself,
+  found by counting rather than by review, in a sentence nobody would have
+  doubted. The `-l` form of the same grep is why the guard is a parse: on
+  today's tree it reports `internal/cli`, `internal/queue` and `internal/logx`,
+  because three comments there name `provision.WithNode` as the thing their
+  invariant rests on -- a guard keyed on the spelling would fire on the
+  argument for the rule, which is `TestNoListenOutsideLoopback`'s own first
+  version flagging `loopback.Listen`.
 - **Every event is numbered, and nothing was numbering them.** `report.Stream`
   stamps the sequence, emitters do not, and the queue's sinks were not wrapped
   in one -- so every event arrived as `Seq` 0 and `genstore`'s

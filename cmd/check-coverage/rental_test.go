@@ -38,9 +38,26 @@ import (
 // SO THE ALLOW-LIST IS ONE PACKAGE, which is what makes this cheap enough to
 // be worth having. This repository refuses a guard whose exception list is the
 // whole difficulty -- the lowercase-error check was measured as needing nine
-// words and three edits in 164 commits -- and the measurement here is the
-// opposite: one entry, true since the function was written, and the thing it
-// would catch is a paste into a handler.
+// words and three edits in 164 commits -- so the list was measured here rather
+// than assumed, and the first answer was wrong.
+//
+// MEASURED OVER ALL 178 COMMITS IN THIS REPOSITORY'S HISTORY, reading the call
+// and not the name -- every line holding `provision.WithNode(` in a
+// non-test file, excluding the ones that are comments arguing for the rule.
+// `internal/cli` is in **135** of them: `cmd_up.go` and `cmd_store.go` both
+// called it directly until 346f10f, which is 86 commits ago. So this list
+// would have needed exactly ONE edit, and that edit was the commit that moved
+// the rental into internal/app -- a deliberate consolidation rather than the
+// routine churn that makes an exception list worse than no guard. True for the
+// last 86 commits and not since the function was written, which is the claim
+// that was in this comment before anybody counted.
+//
+// The `-l` version of the same grep is what makes that worth spelling out: it
+// reports internal/cli, internal/queue and internal/logx on today's tree,
+// because three comments in those packages name provision.WithNode as the
+// thing their invariant rests on. A guard keyed on the spelling would fire on
+// the argument for the rule, which is this repository's own
+// TestNoListenOutsideLoopback story.
 //
 // A PARSE AND NOT A GREP, for ParseBind's reason one layer up: `grep
 // WithNode` over this tree also matches the three comments in internal/queue
