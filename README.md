@@ -256,12 +256,28 @@ catch a published image whose `embernode` did not understand `embernode fetch`
 was not in it, so the one publish it existed to guard was the one place it
 never ran.
 
+**The list is checked against the tree, in both directions.** `go test -run`
+over an expression naming a test that does not exist prints at most a warning
+and exits 0, so a rename used to drop a lab out of the publish gate in
+silence and a typo used to drop all of them — with `docker tag` and
+`docker push` running afterwards either way.
+`TestPublishGateNamesEveryWorkloadImageLab` fails on a name the list has and
+the tree does not **and** on a `TestWorkloadImage_` lab the list does not
+name, a deliberate omission needing a written reason; and the target itself
+refuses to go on when `go test -list` selects fewer tests than the list names,
+before it touches Docker.
+
 **One image per architecture, built in parallel.** The workflow is a matrix:
 one job per architecture, each compiling for exactly one, so the wall clock is
 one compile rather than seven. The architecture list is not written in the
 YAML — a `plan` job asks `ember archs --json` for it, because a list in a
-workflow that drifts from the list it mirrors is the defect `PUBLISH_LABS`
-exists to prevent. `fail-fast` is off: one architecture failing must not cancel
+workflow that drifts from the list it mirrors is the defect naming the lab set
+once exists to prevent. That sentence used to say "the defect `PUBLISH_LABS`
+exists to prevent", which was true of two copies becoming one and silent about
+the copy that was left: one list, checked against nothing, selecting the labs
+that stand between a built image and a registry.
+
+`fail-fast` is off: one architecture failing must not cancel
 six that were fine, and a partial set is safe by construction, since ember
 refuses a card with no `images:` entry before it rents anything.
 

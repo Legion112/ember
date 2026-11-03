@@ -282,6 +282,36 @@ SERVE_LAB_LOG := $(LAB_LOG_DIR)/serve-lab.log
 # own, so it applies to itself.
 LAB_CHECK = rc=$$?; grep -q -- '--- SKIP' $(1); g=$$?; if [ $$g -eq 0 ]; then echo "a lab skipped itself"; rc=1; elif [ $$g -gt 1 ]; then echo "could not read $(1), so the --- SKIP check did not run"; rc=1; fi; exit $$rc
 
+# The head of every lab target: a -run expression that selects nothing is not
+# a pass. $(1) is the expression, $(2) the fewest tests it must select.
+#
+# `go test -run` over an expression matching fewer tests than intended prints
+# at most "warning: no tests to run" and **exits 0**, so the third gate in a
+# row that could not fail was this one: `make test-image-labs-publish
+# PUBLISH_LABS=TestWorkloadImage_ThisNameDoesNotExist` exited 0 having run
+# none of the five assertions that stop a bad workload image reaching a
+# registry, and `publish-sd-cuda` went on to `docker tag` and `docker push`.
+# The realistic case is worse because it is silent: one rename drops the list
+# from five names to four and nothing is printed at all.
+#
+# `pipefail` fixed "a lab failed and make said 0" and cannot touch "a lab was
+# never selected and make said 0" -- the same consequence with no symptom. So
+# the count is asserted, and it is asserted FIRST, before an image inspect or
+# a daemon lock, because `-list` needs no Docker, no image and no lock: it
+# compiles the test binary and prints the names. Push what is local and free
+# before what is remote and slow.
+#
+# `|| true` on the grep because `grep -c` exits 1 on a count of zero, which
+# under .SHELLFLAGS' pipefail would fail the line before the message that
+# explains it -- and zero is the answer this exists to report.
+LAB_SELECT = sel=$$($(GO) test -tags='$(LAB_TAGS)' -list $(1) ./test/integration/ 2>/dev/null | grep -c '^Test' || true); \
+	if [ "$$sel" -lt "$(2)" ]; then \
+		echo "-run $(1) selects $$sel test(s) in ./test/integration/, and this gate names $(2)."; \
+		echo "a lab renamed out of the expression is a lab the gate does not run, and go test -run exits 0 either way."; \
+		exit 1; \
+	fi; \
+	echo "selection: $$sel test(s) match $(1)"
+
 .PHONY: all build web web-check web-test test-serve-lab test test-race cover cover-check vet fmt lint docker-build test-integration reap-labs test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
 
 all: fmt vet test build
@@ -523,6 +553,7 @@ workload-sd-cuda-local:
 # ran.
 test-image-labs:
 	$(require-arch)
+	@$(call LAB_SELECT,'TestWorkloadImage_',1)
 	@docker image inspect $(SD_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(SD_IMAGE) is missing. Build it with:"; \
 		echo "  make workload-sd MODEL=/path/to/a.gguf"; exit 1; }
@@ -553,6 +584,7 @@ test-image-labs:
 # fixtures; see internal/sdserver/testdata/README.md for what promoting one
 # means.
 test-preview-lab:
+	@$(call LAB_SELECT,'TestPreview_',1)
 	@docker image inspect $(SD_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(SD_IMAGE) is missing. Build it with:"; \
 		echo "  make workload-sd MODEL=/path/to/a.gguf"; exit 1; }
@@ -579,6 +611,7 @@ test-preview-lab:
 # and teardown assertions, and they are the ones worth having on every pull
 # request.
 test-serve-lab: web
+	@$(call LAB_SELECT,'TestServe_',1)
 	@docker image inspect $(SD_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(SD_IMAGE) is missing. Build it with:"; \
 		echo "  make workload-sd MODEL=/path/to/a.gguf"; exit 1; }
@@ -611,11 +644,43 @@ test-serve-lab: web
 # pulled and the weights fetched, all of it billed, and the only place it can
 # be caught for free is before the push. It needs no GPU, no network and no
 # weights, so there is no reason for it to be outside the gate.
-PUBLISH_LABS := 'TestWorkloadImage_(ListensOnNothingButSSH|CarriesNoWeights|UnderstandsTheFetchCommand|CarriesOneArchitectureAndNoPTX|LinksNothingItDoesNotShip)'
+#
+# ShipsTheServerItAlreadyCompiles is here by that same sentence, and was
+# outside the gate until the list was checked against the tree: it is a
+# Dockerfile text assertion about the image being published, costing
+# milliseconds and needing nothing at all. Being free and about the published
+# artifact is the whole of the argument.
+#
+# **A list of names and not an alternation**, because the gate has to be able
+# to count what it selected: `$(words)` gives the number this expression
+# names, and the `-run` regex is derived from the same list rather than
+# written beside it. Three comments in this tree cite PUBLISH_LABS as the
+# precedent for not maintaining a list beside the thing it mirrors, while it
+# was exactly such a list, checked against nothing (#115).
+# cmd/check-coverage's TestPublishGateNamesEveryWorkloadImageLab checks it
+# against the tree in both directions; LAB_SELECT checks what it actually
+# selected, which is the half a Go test cannot see when the variable is
+# overridden on the command line.
+PUBLISH_LABS := \
+	TestWorkloadImage_ListensOnNothingButSSH \
+	TestWorkloadImage_CarriesNoWeights \
+	TestWorkloadImage_UnderstandsTheFetchCommand \
+	TestWorkloadImage_CarriesOneArchitectureAndNoPTX \
+	TestWorkloadImage_LinksNothingItDoesNotShip \
+	TestWorkloadImage_ShipsTheServerItAlreadyCompiles
+
+# One anchored alternation, derived. Anchored because an unanchored name is a
+# substring match: `-run TestWorkloadImage_CarriesNoWeights` would also select
+# a `..._CarriesNoWeightsAnyMore` added later, so the count could be satisfied
+# by a test nobody named. Recursive (=) so a PUBLISH_LABS set on the command
+# line is still the thing the expression is built from.
+labs_space := $(subst x,,x x)
+PUBLISH_LABS_RUN = '^($(subst $(labs_space),|,$(strip $(PUBLISH_LABS))))$$'
 
 # The subset of the image labs that needs only the CUDA image and ember:lab.
 test-image-labs-publish:
 	$(require-arch)
+	@$(call LAB_SELECT,$(PUBLISH_LABS_RUN),$(words $(PUBLISH_LABS)))
 	@docker image inspect $(SD_CUDA_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(SD_CUDA_IMAGE) is missing. Build it with:"; \
 		echo "  make workload-sd-cuda CUDA_ARCH=$(CUDA_ARCH)"; exit 1; }
@@ -625,7 +690,7 @@ test-image-labs-publish:
 	@mkdir -p $(LAB_LOG_DIR)
 	EMBER_SD_CUDA_IMAGE=$(SD_CUDA_IMAGE) EMBER_CUDA_ARCH=$(CUDA_ARCH) \
 	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v ./test/integration/... \
-		-run $(PUBLISH_LABS) | tee $(PUBLISH_LABS_LOG); \
+		-run $(PUBLISH_LABS_RUN) | tee $(PUBLISH_LABS_LOG); \
 	$(call LAB_CHECK,$(PUBLISH_LABS_LOG))
 
 # Publishing the CUDA image from this machine, as an equal of the CI workflow.
