@@ -5504,6 +5504,146 @@ A leaked node bills by the hour in silence. These are not style preferences.
   keeping one. The expectation it bears out is the one this file already
   states: the first round of a reinstatement pass is reliably incomplete, and
   that holds for the prose and not only for the suite.
+- **`GET /api/nodes` answered 501 in every `ember serve` there has ever been,
+  and it is WIRED UP rather than deleted because the browser has no second
+  mechanism for the one charge nothing ends (#105).** `webapi.Options` had no
+  `Scan` field, `New` never assigned the Server's `scan`, `cmd_serve` could not
+  have set it if it had wanted to, and the three assignments in the tree were
+  all in test files reaching past the constructor into an unexported field of
+  their own package -- so the suite could not tell "the production value is
+  missing" from "this test did not set it", which is exactly how it survived.
+  `web/` had no type for the answer either, which is why nobody had ever seen
+  the refusal. One more of the things here written, covered and connected to
+  nothing, and the first where the missing join is one struct field in the
+  package's own constructor.
+
+  **The test is this file's own and the answer is `sdserver.Client.Cancel`'s,
+  not `queue.Cost`'s.** `queue.Cost` went because `genstore.Spend` answered the
+  same question **to the same reader through the same command**; `RateFromFloat`
+  went because `Offer.Validate` was the live copy of its ceiling; `exposure.Probe`
+  went because the join was not available at all. Here the reader is a browser
+  and `ember ls` is a terminal command: there is no second path from the page to
+  "what is billing", and the join is one field and one closure. The sharp half
+  is that `ember ls` is *not* the second mechanism it looks like -- the one-time
+  token URL means the operator had a shell to get the page, but `ssh -L
+  7777:localhost:7777` is the deployment this file already argues about, and
+  that operator's shell is on the other machine.
+
+  **Wiring the Go half ALONE would have moved the defect rather than closed
+  it**, which is why the panel is in the same change: a route that answers, a
+  projection that is correct and nothing reading either is "a query layer with
+  no reader", one layer out. The issue offered the browser half as possibly its
+  own change and that is the one part of it refused.
+
+  **Three defects were found by connecting it, and the first is the whole
+  lesson in one line.** `viewFinding` wrote `Kind: string(f.Kind)` and
+  `reconcile.Kind` is a `uint8`, so the conversion took the numeric value as a
+  rune: every finding reached a client with a kind of `"\x03"` or `"\a"` rather
+  than `expired` or `store`. `go vet`'s `stringintconv` does not report it --
+  byte-to-string is a legal, ordinary conversion -- and no test could, because
+  nothing in either language had ever read the field. Second,
+  `nodesView` dropped `app.Scanned.Leftovers` entirely while its doc comment
+  said "`ember ls`'s answer" and `Attention` claimed to be "the number `ember
+  ls` exits 2 for": the projection was two of three slices and a count over
+  two, so a bridge network whose node is gone -- the finding whose cost is
+  every local run failing at once weeks later -- was absent from the UI, and
+  `viewFinding`'s id switch had no arm for one either, so it would have
+  arrived anonymous. Third, the 501 itself.
+
+  **`app.ScanWith` exists so the server does not re-read the authority.**
+  `app.Scan` takes a config PATH: it loads the file, reads the credentials and
+  builds a registry, every call. `runServe` reads that file once on purpose --
+  it is the ceiling, and "a request must never be able to name which file sets
+  its own limits" is why the path comes from a flag -- so a handler calling
+  `Scan` would have built the second pair `ember reap`'s own comment refuses,
+  where "the one that disagrees is the one that does not destroy the node". The
+  closure in `cmd_serve` is over the registry and the journal that process
+  already holds, and `Scan` is now `ScanWith` plus one config read, so there is
+  exactly one classifier.
+
+  **NOT CACHED, AND NOT POLLED, and those are two separate decisions.** Three
+  provider sweeps per call, on the HTTP request's own context, which is
+  `getOffers`' shape and `getOffers`' exposure. Memoising would be
+  `local.DetectGPU`'s defect pointed at money -- a cached "RunPod said nothing"
+  is precisely "I could not check RunPod" rendering as a clean bill of health,
+  and a cached listing of what is billing is a stale bill -- so the only lever
+  left is how often it is asked, and the panel is a button. No clock either:
+  `DetectGPU` refused to invent one ("a clock nobody here has measured") and
+  the request's context is the bound, as it is for the offers panel.
+
+  **An unreachable provider is a 200 and the 502 is for a sweep that could not
+  START.** `reconcile` emits a `KindUnreachable` finding per provider it could
+  not ask, so a sweep that reached the local daemon and not RunPod is complete
+  about the first and named about the second -- and losing the first to report
+  the second would hide what the daemon just said. What the 502 means is that
+  the journal of live nodes would not read, where every classification below it
+  compares a provider's answer against records that are not there.
+
+  **The `Line` field is deleted and the judgement is kept, which is the
+  `Envelope::next` shape.** `findingView` carried `reconcile.Finding.String()`
+  beside the parts it is built from, argued for as "an operator reading both
+  should see the same sentence in each" -- and that argument does not survive
+  contact with a browser: `String` is `%-14s %-28s %s` and HTML collapses runs
+  of whitespace, so the string in a page is not the sentence a terminal shows
+  unless the page also asks for `white-space: pre`, which would put a
+  terminal's column widths inside a table that has columns of its own. The
+  parts are what both channels can agree on, because Go still formats every
+  money figure exactly once. `Monthly` is added beside `Accrued` for
+  reconcile's own reason -- money already spent stops when the node is
+  destroyed and a standing charge does not -- and the test of the whole type is
+  now that **every field on it has a reader in `web/`**, which is the property
+  it did not have. `Provider` is the one that cannot be trimmed: an unreachable
+  finding has no node, no record, no store and no leftover, so its id is empty
+  by construction.
+
+  **`Attention` stays on the wire and is never derived in the page**, although
+  every kind needed to derive it is there. `Kind.NeedsAttention` is "a switch
+  rather than `k != KindOK`, so that a kind added later needs attention by
+  default", and a second copy of that switch in Rust is a copy whose author
+  will not be reading the Go one -- which is why `Money` crosses this wire
+  twice as well. It is an `i64` in the page because the Go field is an `int`
+  and this seam has already lost a whole table to a number the server could say
+  and the client could not hear.
+
+  **No per-row tolerance, and that is `Rows`' own rule rather than an
+  omission.** That entry says `requests` ONLY: it is the envelope where one bad
+  row costs the view of every good one and the one with somewhere to say so.
+  This envelope has an error of its own on the way in -- a 502 reaches the
+  panel as `api::reason`'s sentence -- and its numbers are a count and two
+  money figures rather than ten `i32`s a request can set.
+
+  **What a browser can check and what it cannot.** It can check the join:
+  whether the button fetches, whether Chrome's cookie reaches `/api/nodes`,
+  whether Go's bytes decode into `Nodes`, and whether the rows reach the DOM --
+  which is the `<For>` class this file has now been bitten by three times, and
+  the reason `findings_table` has no key at all. The first assertion is that
+  the panel says **nothing** before the first press: `Nodes::default()` has
+  three empty slices, so its verdict is "nothing is running and nothing was
+  left behind", and rendered unasked that is a clean bill of health over a scan
+  that never happened -- the signal is an `Option` for exactly that, which is
+  `AssetCheck.Asked`'s distinction one package over. What it cannot check is
+  the money: the local provider prices a Docker volume at nothing, so
+  `monthly_storage` is zero in every lab here and only its RENDERING is
+  assertable -- the same bound that stops a lab producing a non-zero
+  `requests.cost`. A non-zero standing charge needs a rented store.
+  `Nodes::verdict`'s unreachable clause has no lab either, for the reason the
+  offers panel's error path has none: `app.Deps.CloudBaseURL` is a Go field, so
+  a lab running `ember` as a subprocess cannot point a cloud provider at a
+  closed port. `cargo test` drives it instead, in both directions and over the
+  case where the store listing failed and the node listing did not.
+
+  **Reinstated, judged on exit codes, with a control at both ends.** Nine
+  defects, each red: the unassigned `scan` in `New` (the unit join red, the lab
+  red at the 501), `string(f.Kind)` back (red in three places at once), the
+  leftovers slice dropped from `viewNodes` (red), `Attention` summed over two
+  slices (red at 3-want-4), the leftover arm removed from `viewFinding`'s id
+  switch (red), a nil slice in place of each `[]` (red on the bytes), the
+  `unreachable()` scan narrowed to `findings` (red in `cargo test`), the
+  verdict's unreachable clause deleted (red), and the panel rendering
+  `Nodes::default()` with no `Option` (red in the browser on the pre-press
+  assertion). A reworded comment stayed green in every pass, and
+  `go test ./...` plus `cargo test` were green before the first patch and after
+  the last.
 
 ## Style
 

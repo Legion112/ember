@@ -115,6 +115,21 @@ td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
    and empty cells stay invisible. */
 .queue tr.watching { outline: 1px solid var(--accent); outline-offset: -1px }
 
+/* THE SWEEP'S OWN SENTENCE, and the one colour that matters here is the one
+   that says a person has to do something. `ember ls` says it with an exit
+   code; a page has to say it with a word, and the word is the same one. It is
+   not --bad unconditionally, because the clean answer is the usual one and a
+   panel that is always red is a panel nobody reads. */
+.verdict { margin: .6rem 0 .2rem; font-size: .85rem; color: var(--dim) }
+.verdict.bad { color: var(--bad); font-weight: 600 }
+
+/* NOT .offers: these rows are not clickable, and the hover and the pointer
+   cursor on that table are an invitation to pick a card. There is nothing to
+   pick here -- every remedy is a command, because a destroy from a browser
+   would be a side effect this server's threat model has never argued for. */
+.ledger { margin: .3rem 0 }
+.ledger td:first-child { white-space: nowrap }
+
 .hint { color: var(--dim); font-size: .78rem; margin: .4rem 0 }
 
 /* A CONTROL THE SERVER SAID NO TO, and it has to look unavailable rather than

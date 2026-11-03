@@ -1681,6 +1681,11 @@ It is the `sd.jobs` shape driven from a browser: pick a provider and a card
 from live offers, type a prompt and its parameters, push a batch, and watch the
 sampling steps and preview frames arrive while the images land on disk.
 
+There are five panels: four in the order the flow runs — what can be rented,
+what to generate, what is queued, what is happening — and a fifth,
+[what is billing](#what-the-billing-panel-shows), which is `ember ls` in a
+browser and is asked when pressed rather than on a timer.
+
 The five rows of the compose panel are the whole job on most runs; an
 **advanced** section below them holds the rest of what a generation can be
 told — clip skip, the sampler's eta and flow shift, the output format, a hires
@@ -1763,6 +1768,47 @@ again, the two-second poll re-fetched the right figure hundreds of times, and
 the row would not take it. A rider's zero is blank by design, so the opener's
 cell is the only place in that table a paid rental appears — which made an
 hour of an H100 show up as a queue of finished requests with no money in it.
+
+### What the billing panel shows
+
+Pressing **check what is running** asks every configured provider what is
+wearing ember's label and prices the stores. It is what
+`ember ls` prints, in a browser: the same sweep, the same
+classifier, the same words — `expired`, `orphan`, `untracked`,
+`destroy-failed`, `unreachable`, `leftover`, `store` — so an operator
+comparing the page and the command reads one vocabulary rather than two.
+
+It answers on a **press and never on a timer**, which is the one thing worth
+knowing before using it. The queue table beside it polls SQLite four times a
+minute; this reaches the providers — three sweeps per press, one for nodes, one
+for stores and one for what a destroyed node left behind — so a poll here would
+be an API call a second for every open tab. It also caches nothing: a cached
+listing of what is billing is a stale bill, and a cached "RunPod said nothing"
+is exactly `I could not check RunPod` rendering as a clean bill of health.
+
+Nothing is shown until that press. An empty panel means nobody has asked; the
+sentence `nothing is running and nothing was left behind` means ember asked and
+got that answer. A provider it could not reach is named, and the verdict then
+says *so this is not the whole picture* — the same distinction `ember ls` makes
+by exiting non-zero rather than printing a clean bill.
+
+Two of the rows are the point of the panel. A **store** bills by the
+gibibyte-month whether or not anything is attached to it: there is no deadline,
+no reaper and no Ctrl-C that ends it, so the run where every node is correctly
+destroyed is exactly the run in which a forgotten store is invisible, and the
+total is printed under the table. A **leftover** is a bridge network whose node
+is gone; nothing bills for one, and what it costs is every local run failing at
+once, weeks later, with `all predefined address pools have been fully
+subnetted`. Every remedy is a command — `ember reap`, `ember down`,
+`ember store rm` — and there are deliberately no buttons here: a destroy from a
+browser is a side effect this server's threat model has never argued for.
+
+`GET /api/nodes` is the route behind it, and until now it answered **501** in
+every `ember serve` there has ever been. The handler, the projection, the
+monthly storage total and the attention count were all written and all
+correct; nothing assigned the scanner they needed, no Rust type existed for
+the answer, so nobody had ever seen the refusal. An operator who only opened
+the browser had no path to the one charge nothing ever ends.
 
 ### How it fits together
 

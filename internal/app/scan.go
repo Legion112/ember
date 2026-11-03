@@ -73,7 +73,26 @@ func Scan(ctx context.Context, cfgPath string, d Deps) (Scanned, error) {
 	if err != nil {
 		return Scanned{}, err
 	}
+	return ScanWith(ctx, reg, store, cfg)
+}
 
+// ScanWith is Scan against a registry and a journal the caller already has.
+//
+// IT EXISTS BECAUSE `ember serve` HAS BOTH ALREADY, and a long-running process
+// must not re-read the authority on every request. `runServe` loads the config
+// once -- it is the ceiling, and "a request must never be able to name which
+// file sets its own limits" is why the path comes from a flag -- so a
+// /api/nodes handler calling Scan would load that file again per request,
+// against a registry built from a second credential read. That is the pair
+// `ember reap` is careful not to build: "two reads are two chances for the two
+// copies to disagree about which provider a finding belongs to, and the one
+// that disagrees is the one that does not destroy the node."
+//
+// There is still exactly one classifier. Scan is this function plus one
+// config read, so `ember ls`, `ember reap` and the web UI cannot come to
+// disagree about what a finding is -- which is the whole reason nodesView
+// projects reconcile's answer rather than scanning with rules of its own.
+func ScanWith(ctx context.Context, reg *provider.Registry, store *statestore.Store, cfg config.Config) (Scanned, error) {
 	records, err := store.List()
 	if err != nil {
 		return Scanned{}, err

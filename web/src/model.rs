@@ -318,6 +318,194 @@ pub struct Offers {
     pub listings: Vec<Listing>,
 }
 
+/// KIND_UNREACHABLE is the one `reconcile.Kind` this page compares against.
+///
+/// A STRING FROM THE OTHER SIDE, deliberately spelled once. The kinds are
+/// `reconcile.kindNames` and the page renders whichever one it is handed, so
+/// this is not a copy of that table -- it is the single name the precedence
+/// below turns on. The event kinds this module already matches on are the
+/// precedent.
+const KIND_UNREACHABLE: &str = "unreachable";
+
+/// One line of `ember ls`, in parts.
+///
+/// NOT THE RENDERED LINE. `reconcile.Finding.String` is `%-14s %-28s %s` with
+/// `[$x/month]` and `[$x so far]` appended, and HTML collapses runs of
+/// whitespace -- so a page printing it would show a terminal's column widths
+/// collapsed into single spaces, in a table that has columns of its own. The
+/// wire carried that string beside these parts for the life of the type and
+/// nothing read either, because nothing read this type at all.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Finding {
+    #[serde(default)]
+    pub kind: String,
+
+    /// Who this is about. The ONLY thing naming an unreachable provider: it
+    /// has no node, no record, no store and no leftover, so `id` is empty by
+    /// construction and a row built from `id` alone would say "I could not
+    /// ask" without saying whom.
+    #[serde(default)]
+    pub provider: String,
+
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub reason: String,
+
+    /// Money already spent, which stops when the node is destroyed.
+    #[serde(default)]
+    pub accrued: Option<Money>,
+
+    /// Money that keeps being spent until somebody removes the store. Two
+    /// fields and not one for the reason `reconcile.Finding` keeps them
+    /// apart: "$2.80" skimmed off a store row and off an orphan row are two
+    /// very different numbers.
+    #[serde(default)]
+    pub monthly: Option<Money>,
+}
+
+impl Finding {
+    /// Whether this is a provider ember could not ask.
+    pub fn unreachable(&self) -> bool {
+        self.kind == KIND_UNREACHABLE
+    }
+
+    /// What names this row on screen.
+    ///
+    /// The id where there is one and the provider where there is not, which
+    /// is `reconcile.Finding.String`'s own fallback -- it prints `-` for the
+    /// id of an unreachable finding and the provider is in the reason. Here
+    /// the provider goes in the name column instead, because a table whose
+    /// name column reads `-` is a table an operator cannot scan.
+    pub fn names(&self) -> String {
+        if self.id.is_empty() {
+            self.provider.clone()
+        } else {
+            self.id.clone()
+        }
+    }
+}
+
+/// What one sweep of every provider found: `GET /api/nodes`.
+///
+/// THE SAME ANSWER `ember ls` PRINTS, projected from `internal/reconcile` --
+/// never a second scan with rules of its own. For the life of this route there
+/// was no Rust type for it at all, and the route answered 501 in every shipped
+/// `ember serve`, so an operator in front of the browser had no path to the one
+/// charge no deadline, no reaper and no Ctrl-C ever ends.
+///
+/// THREE SLICES AND NOT ONE, because they are acted on differently: `ember
+/// reap` destroys an expired node, removes a leftover through another
+/// interface entirely, and must never be handed a store.
+///
+/// NO PER-ROW TOLERANCE HERE, which is a decision and not an omission.
+/// [`Rows`] drops and counts a request it cannot read because that envelope is
+/// the one where a single bad row costs the view of every good one and the one
+/// with somewhere to say so. This envelope has an `error` of its own on the
+/// way in -- a 502 reaches the panel as `api::reason`'s sentence -- and its
+/// numbers are a count and two money figures rather than ten `i32`s a request
+/// can set, so the eleventh-field hazard that rule was written for is not
+/// here.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Nodes {
+    #[serde(default, deserialize_with = "nullable")]
+    pub findings: Vec<Finding>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub leftovers: Vec<Finding>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub stores: Vec<Finding>,
+
+    /// What the stores cost every month, totalled by `reconcile.MonthlyTotal`.
+    #[serde(default)]
+    pub monthly_storage: Money,
+
+    /// How many findings need a person: the number `ember ls` exits 2 for.
+    ///
+    /// `i64` AND NOT `i32`, because the Go field is an `int` and this page has
+    /// already lost a whole table to a number the server could say and the
+    /// client could not hear. The count cannot realistically exceed an `i32`
+    /// -- it is bounded by what the providers listed -- and "realistically"
+    /// is exactly the word that was wrong last time.
+    ///
+    /// READ AND NEVER DERIVED, although every kind needed to derive it is on
+    /// the wire. `reconcile.Kind.NeedsAttention` is a switch written so that
+    /// a kind added later needs attention by default; a second copy of it
+    /// here is a copy whose author will not be reading the Go one, which is
+    /// why `Money` crosses this wire twice as well.
+    #[serde(default)]
+    pub attention: i64,
+}
+
+impl Nodes {
+    /// The providers ember could not ask, by name and without repeats.
+    ///
+    /// ALL THREE SLICES, because a provider can fail one listing and answer
+    /// another: `reconcile.ScanLeftovers` says so in as many words, and
+    /// `ScanStores` emits the same kind. A version of this that looked only
+    /// at `findings` would report a complete picture over a store listing
+    /// that never happened.
+    pub fn unreachable(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for f in self
+            .findings
+            .iter()
+            .chain(self.leftovers.iter())
+            .chain(self.stores.iter())
+        {
+            if f.unreachable() && !out.iter().any(|p| p == &f.provider) {
+                out.push(f.provider.clone());
+            }
+        }
+        out
+    }
+
+    /// Whether "nothing is running and nothing was left behind" is true,
+    /// which is NOT the same as the two tables being empty.
+    ///
+    /// The third clause is the one that matters and it is not redundant: a
+    /// store listing that failed puts its `unreachable` finding in `stores`,
+    /// so both of the first two can be empty over a sweep that does not know
+    /// what is running. "I could not check RunPod" must never render as a
+    /// clean bill of health -- the rule `ember ls` exits non-zero for -- and
+    /// without that clause this would print the clean sentence over it.
+    pub fn nothing_running(&self) -> bool {
+        self.findings.is_empty() && self.leftovers.is_empty() && self.unreachable().is_empty()
+    }
+
+    /// The sentence at the top of the panel.
+    ///
+    /// A METHOD AND NOT A CHAIN OF `if` INSIDE THE VIEW MACRO, which is
+    /// [`Listing::answer`]'s reason and [`Rows::note`]'s: the precedence is a
+    /// decision, and one written as a view branch can only be checked by a
+    /// browser.
+    ///
+    /// THE UNREACHABLE CLAUSE IS ADDITIVE AND NOT AN ALTERNATIVE. An expired
+    /// node here and an unreachable provider there are two facts and the
+    /// operator needs both -- so this is not an enum: a `Partial` arm would
+    /// have hidden the count, and a count alone would have read as the whole
+    /// picture.
+    pub fn verdict(&self) -> String {
+        let blind = self.unreachable();
+        if self.attention == 0 && self.nothing_running() {
+            return "nothing is running and nothing was left behind".into();
+        }
+        let mut s = if self.attention == 0 {
+            // Reachable: a sweep whose only findings are `ok` nodes and
+            // stores. `ember ls` prints those rows and exits 0.
+            "nothing needs attention".to_string()
+        } else {
+            format!("{} finding(s) need attention", self.attention)
+        };
+        if !blind.is_empty() {
+            s += &format!(
+                "; ember could not ask {}, so this is not the whole picture",
+                blind.join(", ")
+            );
+        }
+        s
+    }
+}
+
 /// One image to generate. The same shape ember accepts.
 ///
 /// There is no `extra`, and the absence is the point: that field reaches
@@ -2857,5 +3045,173 @@ mod tests {
         assert_eq!(human_duration(551_000_000), "551ms");
         assert_eq!(human_duration(6_040_000_000), "6.0s");
         assert_eq!(human_duration(140_800_000_000), "2m21s");
+    }
+
+    fn finding(kind: &str, provider: &str, id: &str) -> Finding {
+        Finding {
+            kind: kind.into(),
+            provider: provider.into(),
+            id: id.into(),
+            reason: "because".into(),
+            ..Default::default()
+        }
+    }
+
+    /// A sweep that found nothing says so, and it has to be ALLOWED to.
+    ///
+    /// The negative control for every assertion below: without it, a verdict
+    /// that said "not the whole picture" unconditionally would pass them all.
+    #[test]
+    fn a_clean_sweep_says_nothing_is_running() {
+        let n = Nodes::default();
+        assert!(n.nothing_running());
+        assert_eq!(
+            n.verdict(),
+            "nothing is running and nothing was left behind"
+        );
+        assert!(n.unreachable().is_empty());
+    }
+
+    /// "I could not check RunPod" must never render as a clean bill of health.
+    ///
+    /// The rule `ember ls` exits non-zero for, in the panel that is now the
+    /// only path a browser has to it. The offers panel has the same rule one
+    /// panel over and it was defeated there by a `<For>` key, which is why
+    /// the decision is a method with a test rather than a branch in a view.
+    #[test]
+    fn an_unreachable_provider_is_not_a_clean_bill_of_health() {
+        let n = Nodes {
+            findings: vec![finding("unreachable", "runpod", "")],
+            attention: 1,
+            ..Default::default()
+        };
+        assert!(
+            !n.nothing_running(),
+            "a sweep that could not ask a provider claimed nothing is running"
+        );
+        assert_eq!(n.unreachable(), vec!["runpod".to_string()]);
+        let v = n.verdict();
+        assert!(v.contains("runpod"), "the verdict does not name it: {v}");
+        assert!(
+            v.contains("not the whole picture"),
+            "the verdict reads as complete: {v}"
+        );
+
+        // AND IT IS NAMED IN THE ROW TOO. An unreachable finding has no node,
+        // no record, no store and no leftover, so its id is empty -- a table
+        // built from the id alone would say "could not be asked" without
+        // saying whom.
+        assert_eq!(n.findings[0].names(), "runpod");
+    }
+
+    /// A provider can fail one listing and answer another, and the store
+    /// listing is the one that holds the monthly charge.
+    ///
+    /// THE CASE THE FIRST VERSION OF `nothing_running` WOULD HAVE MISSED: a
+    /// sweep whose node listing came back empty and whose STORE listing
+    /// failed has nothing in `findings` and nothing in `leftovers`, so a
+    /// check over those two alone prints the clean sentence over a provider
+    /// ember never reached. `reconcile.ScanLeftovers` names this case in as
+    /// many words.
+    #[test]
+    fn a_failure_in_one_listing_is_not_silence_in_the_others() {
+        let n = Nodes {
+            stores: vec![finding("unreachable", "runpod", "")],
+            attention: 1,
+            ..Default::default()
+        };
+        assert!(n.findings.is_empty() && n.leftovers.is_empty());
+        assert!(
+            !n.nothing_running(),
+            "a failed store listing read as a clean sweep"
+        );
+        assert_eq!(n.unreachable(), vec!["runpod".to_string()]);
+    }
+
+    /// Both facts, because the operator needs both.
+    ///
+    /// An expired node here and an unreachable provider there are two things
+    /// to act on. An enum would have forced one of them off the screen, and
+    /// the count alone would have read as the whole picture.
+    #[test]
+    fn the_count_and_the_gap_are_both_said() {
+        let n = Nodes {
+            findings: vec![
+                finding("expired", "local", "local/n1"),
+                finding("unreachable", "runpod", ""),
+            ],
+            attention: 2,
+            ..Default::default()
+        };
+        let v = n.verdict();
+        assert!(v.contains('2'), "the count is missing: {v}");
+        assert!(v.contains("runpod"), "the gap is missing: {v}");
+    }
+
+    /// A provider that failed two listings is named once.
+    #[test]
+    fn a_provider_is_named_once_however_many_listings_it_failed() {
+        let n = Nodes {
+            findings: vec![finding("unreachable", "runpod", "")],
+            leftovers: vec![finding("unreachable", "runpod", "")],
+            stores: vec![finding("unreachable", "runpod", "")],
+            attention: 3,
+            ..Default::default()
+        };
+        assert_eq!(n.unreachable(), vec!["runpod".to_string()]);
+    }
+
+    /// A node that is behaving and a store that exists are rows with nothing
+    /// to act on.
+    ///
+    /// `reconcile.Kind.NeedsAttention` exempts exactly those two, because
+    /// making every store exit non-zero would teach the operator to ignore
+    /// the count. The panel must not then print the clean sentence, because
+    /// there IS a node running -- it is simply fine.
+    #[test]
+    fn a_healthy_node_is_listed_without_being_a_finding() {
+        let n = Nodes {
+            findings: vec![finding("ok", "local", "local/n1")],
+            stores: vec![finding("store", "runpod", "runpod/vol1")],
+            attention: 0,
+            ..Default::default()
+        };
+        assert!(!n.nothing_running());
+        assert_eq!(n.verdict(), "nothing needs attention");
+    }
+
+    /// `null` is not an empty list, and three slices here means three chances.
+    ///
+    /// Go marshals a nil slice as `null`, `#[serde(default)]` covers a field
+    /// that is MISSING rather than one that is present and null, and this
+    /// page has already lost a whole websocket envelope to exactly that. The
+    /// server sends `[]`; this is the other half, because the rule has to
+    /// hold for a field somebody adds later.
+    #[test]
+    fn a_null_list_decodes_as_an_empty_one() {
+        let n: Nodes = serde_json::from_str(
+            r#"{"findings":null,"leftovers":null,"stores":null,
+                "monthly_storage":{"micro_usd":0,"display":"$0"},"attention":0}"#,
+        )
+        .expect("an envelope of nulls decodes");
+        assert!(n.findings.is_empty() && n.leftovers.is_empty() && n.stores.is_empty());
+        assert!(n.nothing_running());
+    }
+
+    /// The money the panel exists for, read and never formatted here.
+    #[test]
+    fn the_standing_charge_is_the_servers_own_rendering() {
+        let n: Nodes = serde_json::from_str(
+            r#"{"findings":[],"leftovers":[],
+                "stores":[{"kind":"store","provider":"runpod","id":"runpod/vol1",
+                           "reason":"a store","monthly":{"micro_usd":7000000,"display":"$7"}}],
+                "monthly_storage":{"micro_usd":7000000,"display":"$7"},"attention":0}"#,
+        )
+        .expect("a priced store decodes");
+        assert_eq!(n.monthly_storage.text(), "$7");
+        assert_eq!(n.stores[0].monthly.as_ref().expect("priced").text(), "$7");
+        // Accrued and monthly are different claims. A store has the second
+        // and not the first.
+        assert!(n.stores[0].accrued.is_none());
     }
 }
