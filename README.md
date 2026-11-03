@@ -172,6 +172,13 @@ never look like "nothing is running". Each record also names the process
 holding its node, so a run killed with `SIGKILL` is reported as billing with
 nobody watching instead of printing `ok`.
 
+One exception, and it is the one worth reading twice: an `ember up` **submitted
+to a running `ember serve`** detaches on Ctrl-C instead of destroying, because
+the run is in that process and not in your terminal. The deadline is then the
+whole of what stops the bill, which is why the client prints it as it detaches.
+See ["`ember up` is that channel's first
+client"](#ember-up-is-that-channels-first-client).
+
 **A destroy that succeeded can still leave something behind.** On the local
 provider a node is two objects — the container and the bridge network it sits
 on — and `Destroy` used to find the network by reading the run id off the
@@ -2134,6 +2141,92 @@ describes as authenticated and cannot authenticate.
 What this is **not**: a reason to bind off loopback. The TCP listener is still
 `127.0.0.1` and `[::1]` only.
 
+#### `ember up` is that channel's first client
+
+**With an `ember serve` running on this machine, `ember up` hands the run to it
+and streams the result. With none, it rents here, exactly as it always has.**
+Two code paths, deliberately, and the differences are below rather than left to
+be discovered.
+
+```
+$ ember serve --allow-paid &
+$ ember up --gpu rtx4090 --ttl 2h
+submitted to the ember serve on /home/you/.local/state/ember/socket/serve.sock as 7f3a1c…
+rented runpod/abc123 at 10.0.0.4:22; it destroys itself at 2026-11-03T18:40:00Z (1h59m58s from now)
+running: sd-cli …
+^C
+detached from 7f3a1c…. THE RUN IS STILL GOING and the node is still billing.
+  it destroys itself at 2026-11-03T18:40:00Z (1h59m52s from now), whether or not ember is running.
+  ember ls           what is billing, asked of every provider and not of the daemon
+  ember down runpod/abc123  destroy it now
+  ember history      what this run came to
+```
+
+**Ctrl-C detaches; it does not destroy.** That is the resilience this is for —
+the run survives the terminal that started it — and it removes the thing that
+used to guarantee no leak when you walk away. What is left is the **TTL**,
+which is mandatory and enforced in three independent places including the
+node's own self-destruct timer, so **the `ttl` you chose is now the real
+exposure** rather than a ceiling Ctrl-C usually beat. The notice above says so
+with the deadline in it, because that is the one fact an operator needs at the
+moment they walk away. The daemon's own shutdown still destroys the rental:
+`ember serve` waits for the queue's goroutine, and that is unchanged.
+
+**One rental at a time is unchanged, and it is still structural.** A submitted
+run does not start beside the queue — it is handed to the same single goroutine
+a queued request's rental lives in, over an unbuffered channel only that
+goroutine reads from. So a run asked for while the queue is mid-rental **waits**
+for it; it is not refused, and it cannot become a second GPU, because there is
+nowhere else for a rental to start. `ember up` blocks (and says what it is
+doing) for exactly as long as the daemon is busy.
+
+**The config path travels, and that is a deliberate reversal.** Everywhere else
+in `ember serve` the config is read once at startup and never from a request —
+*"or the browser would be naming which file sets its own limits"*. This route
+accepts one, and `--max-hourly-usd`, `--ttl`, `--image`, `--gpu`, `--provider`,
+`--port` and `--cmd` **replace** the file's values rather than narrowing them,
+which is what they do in your own shell. The reversal is sound for one reason
+only: the route is on the **socket's** route table and not the port's, so the
+caller is an account `connect(2)` has already proved is yours, with the same
+authority as typing the command. A page, a `curl` on port 7777 and anything
+reaching an `ssh -L` forward — token or no token — reach no handler at all,
+because none is registered there.
+
+**`--allow-paid` still bounds it**, and this is the one place the socket is not
+simply your own shell. An `ember serve` you left running without the flag is a
+process you have said must not spend money, and a channel that spent anyway
+would make the flag mean "unless you came in the other door". So a paid
+provider submitted to a daemon started without it is refused, naming the flag —
+while the same command with no daemon running spends, because then you are at
+the keyboard. The flag is a property of the long-running process.
+
+Three smaller differences worth knowing:
+
+- **`--dry-run` never asks a daemon.** It rents nothing and prints what a
+  rental would be, so making the cheapest thing in ember depend on a process
+  being up would be a poor trade.
+- **The node's own output arrives as events** rather than straight onto your
+  terminal, so `ember history` has it and a client that reattaches can read it.
+  The rendering is the same function on both paths, so what is printed is the
+  same; what differs is that a submitted run's log is also in the database, and
+  `ember history rm` is what removes it.
+- **`--log-level` on a submitted run reaches nothing.** A submitted run's own
+  log lines are written by the daemon, at the level `ember serve` was started
+  with, to the daemon's terminal — so `ember up --log-level debug` through a
+  daemon still refuses a bad level and changes nothing about the run. Carrying
+  the level over the socket would only make a terminal you are not reading
+  noisier. Turn it up on `ember serve`.
+
+**Recording is unchanged.** Either path writes one row through the same
+`Adopt`, and `ember history`, `ember spend --by gpu|day|provider|model` and
+every per-job column see both. The row is `running` from the moment it is
+written and never `queued`, because a queued row is exactly what the drain loop
+claims — an `ember serve` in another terminal would otherwise rent a second
+card and generate the batch again from the record of the run still happening.
+
+**Auto-starting a daemon is not offered.** A background process that can spend
+money, started because somebody typed `ember up`, is not a thing ember does.
+
 ### Where the state goes
 
 The queue and the history are a SQLite database beside the node journal, under
@@ -2237,6 +2330,16 @@ live in a request, so draining connections would say nothing about a node.
 
 Cancelling a request is a button whether it is **queued** or **generating**.
 `POST /api/requests/{id}/cancel` takes both.
+
+**It does not take a run submitted by `ember up`.** Such a row is `running`
+from the moment it is adopted and never becomes *generating* — there is no
+sd-server job to stop, because the only way to end an `ember up` is to destroy
+the node — so the cancel route answers the provisioning-window 409, whose "ask
+again once it is generating" is a promise it cannot keep there. `ember down
+<node>` is the command that ends one, and the detach notice names it. Telling
+the two states apart needs a fourth answer from the queue, which belongs with
+`ember down` over the socket rather than here; a test asserts the current
+answer, so the day it changes somebody reads the comment beside it.
 
 Cancelling a generating one stops its current image and drops the jobs behind
 it; the rental is left alone, so anything else queued onto it keeps running on

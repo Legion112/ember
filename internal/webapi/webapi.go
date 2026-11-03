@@ -184,6 +184,16 @@ type Options struct {
 	// place inside a directory it owns.
 	Socket loopback.Socket
 
+	// Runs starts a run the way `ember up` does, on the one goroutine that can
+	// rent.
+	//
+	// IT IS REACHABLE FROM THE SOCKET'S MUX AND FROM NOWHERE ELSE, which is
+	// the whole shape of run.go: the route carries a config path and ceilings
+	// that replace rather than narrow, so it must not exist on a channel a
+	// browser or a forwarded port can reach. Nil is every handler test and a
+	// server with no loop; the route answers 501.
+	Runs Runs
+
 	// Dist serves the UI from disk instead of the embedded copy, for
 	// development. Empty uses what was built into the binary.
 	Dist string
@@ -196,6 +206,19 @@ type Server struct {
 	opts Options
 	mux  *http.ServeMux
 	port string
+
+	// sockMux is the loopback mux plus the routes only the operator's own
+	// account may reach.
+	//
+	// TWO MUXES AND NOT ONE WITH A CONDITION IN IT. The difference between the
+	// channels is a missing registration, exactly as the difference between
+	// the two http.Servers is a missing ConnContext -- so the privileged route
+	// is absent from the port rather than refused on it, and nothing a request
+	// on the port can be composed of reaches a handler that does not exist for
+	// it. It delegates `/` to s.mux rather than re-registering the API, so
+	// there is one route table and a route added later is on both channels
+	// without anybody remembering.
+	sockMux *http.ServeMux
 
 	// tokenDigest is what every presented credential is compared against.
 	//
@@ -232,6 +255,7 @@ func New(o Options) (*Server, error) {
 	s := &Server{
 		opts:        o,
 		mux:         http.NewServeMux(),
+		sockMux:     http.NewServeMux(),
 		port:        strconv.Itoa(int(o.Port)),
 		tokenDigest: sha256.Sum256(o.Token.Bytes()),
 	}
@@ -298,6 +322,16 @@ func (s *Server) routes() {
 
 	// The UI itself, last, so it does not shadow an API route.
 	s.mux.Handle("/", s.static())
+
+	// AND THE SOCKET'S OWN TABLE: everything above, plus what only the
+	// operator's own account may ask for.
+	//
+	// The delegation comes first in this function and the privileged pattern
+	// second, which is not an ordering ServeMux cares about -- it prefers the
+	// more specific pattern whichever order they were registered in -- but
+	// reads in the order the channels differ: one table, plus one route.
+	s.sockMux.Handle("/", s.mux)
+	s.sockMux.HandleFunc("POST "+RunPath, s.guarded(s.postRun))
 }
 
 // guarded wraps a handler in the Host and Origin checks and the credential.

@@ -504,8 +504,20 @@ func (l *Lab) execEmber(ctx context.Context, before func(*exec.Cmd), full []stri
 // it. The returned stop function kills the process and collects its output.
 func (l *Lab) Start(ctx context.Context, args ...string) (*exec.Cmd, func() string) {
 	l.t.Helper()
+	return l.StartRaw(ctx, append([]string{args[0], "--config", l.ConfigPath}, args[1:]...)...)
+}
 
-	full := append([]string{args[0], "--config", l.ConfigPath}, args[1:]...)
+// StartRaw launches ember with exactly these arguments, inserting no --config.
+//
+// RunSub's reason, for a long-running command: Start inserts the lab's own
+// config path, which is right for every lab that reads the one file and wrong
+// for the one whose subject is a client naming a DIFFERENT one -- `ember up`
+// over the socket, where the config path travels to the daemon. Passing both
+// and relying on the last flag winning would work and would be a lab asserting
+// a property of the standard flag package.
+func (l *Lab) StartRaw(ctx context.Context, full ...string) (*exec.Cmd, func() string) {
+	l.t.Helper()
+
 	cmd := exec.CommandContext(ctx, l.Bin, full...)
 	cmd.Dir = l.Dir
 	cmd.Env = append(os.Environ(), "HOME="+l.Dir)
@@ -515,7 +527,7 @@ func (l *Lab) Start(ctx context.Context, args ...string) (*exec.Cmd, func() stri
 	cmd.Stderr = &buf
 
 	if err := cmd.Start(); err != nil {
-		l.t.Fatalf("start ember %v: %v", args, err)
+		l.t.Fatalf("start ember %v: %v", full, err)
 	}
 	l.last = &buf
 	return cmd, func() string {

@@ -509,6 +509,21 @@ moment it imports a sibling, the sibling's dependencies become its own.
   price out of the captured RunPod catalogue, every one of which survives
   `int64(f * 1e6)` -- so it could not tell `node.RateFromUSD` from a
   multiplication, and uses $2.01, which truncates to 2009999.
+
+  **Two more, in a pass whose other eleven defects all went red, and both were
+  found by the reinstatement rather than by review.**
+  `TestSubmit_TakesASubmittedRunBeforeAClaim` asserts the ORDER the drain loop
+  takes two kinds of work in, and only the submitted run recorded into the
+  channel it compares -- so the channel held exactly one value whichever order
+  the loop chose, and the assertion passed against a loop that reads the
+  handoff only when idle, which is the one defect it exists for. Both sides
+  write the sequence now. And
+  `TestFollowRun_CtrlCDetachesAndSaysWhatThatCosts` looked for "it destroys
+  itself at" over the whole of what the client printed -- which `clientSays`
+  also prints the moment the node is ready, sixteen lines earlier -- so taking
+  the deadline out of the detach notice was GREEN. It reads the span after
+  "detached from" now, which is the "a marker matching a second, unpatched
+  line" trap in an assertion instead of in a harness.
 - **The hand-built fixture is missing the row the bug reads.**
   `TestOpen_MigratesAVersionFourFile` built a version-4 database statement by
   statement and left out the cached `caps` row that `PutCaps` writes on every
@@ -1512,6 +1527,37 @@ that sentence made unrepresentable rather than merely tested.
   receives a `provision.Budget` it has no way to widen. The config path comes
   from the `serve` flag and is never accepted over HTTP, or the browser would
   be naming which file sets its own limits.
+
+  **The config path IS accepted on the unix socket, and that sentence is
+  amended rather than left to be contradicted by the code.** `POST /api/runs`
+  carries one, and the overrides on it REPLACE rather than narrow, because it
+  is `ember up`'s command line. What makes that sound is not a check: the route
+  is registered on `s.sockMux` and the loopback port's `s.mux` never learns the
+  pattern, so a page, a `curl` on 7777 and anything reaching an `ssh -L`
+  forward -- token or no token -- reach no handler at all. The two muxes differ
+  by one registration, as the two `http.Server`s differ by one `ConnContext`,
+  and `sockMux` delegates `/` to `s.mux` so there is ONE route table plus one
+  route rather than two tables that can drift. A runtime check on
+  `arrivedOnSocket` was the one-line alternative and is the wrong shape: it
+  makes the route exist, and a route that exists is one somebody can make
+  reachable by moving a condition. On an OS-authenticated socket the caller is
+  the operator, with the same authority as typing the command in their own
+  shell -- which is the only reason the reversal is available at all, and it is
+  written at `app.RunAsk` where it happens.
+  **The two rules are one function each now**, which is the half that was a
+  hazard before any of this: "a flag replaces" was `cli.applyFlags`,
+  unexported, so the socket route would have grown a second copy -- a second
+  copy of a money rule, with the opposite rule four files away. It is
+  `app.Overrides.Apply`, and both callers call it.
+  **One thing on that channel is NOT the operator's own shell, and it is
+  `--allow-paid`.** An `ember serve` left running without it is a process the
+  operator has said must not spend, so a door that spent anyway would make the
+  flag mean "unless you came in the other way" -- which is the thing
+  `refusePaid` is checked twice to prevent. So `queue.DirectRunner` calls the
+  same `refusePaid` the drain loop does, and the honest cost is written in
+  `README.md`: the identical command spends with no daemon and is refused
+  through one, because the flag is a property of the long-running process and
+  not of the request.
 - **A request names a provider, a card and a batch of jobs, and nothing else.**
   No image, no store, no mount, no ports, no serve argv, no gpu probe, no
   assets, no `extra`. Those stay in `ember.yaml`, which is what keeps every
@@ -1530,6 +1576,40 @@ that sentence made unrepresentable rather than merely tested.
   has, so waiting for one goroutine is waiting for the node to be gone.
   `http.Server.Shutdown` drains requests, and a rental does not live in a
   request -- `ember serve` waits for both.
+
+  **There are two kinds of work on that goroutine now and still one place it
+  runs.** `ember up` submitted over the socket is not a queued request -- the
+  four reasons it cannot be one are the entry below -- so it does not arrive
+  through `ClaimNext`. It arrives through `Queue.Submit`, which is a
+  **rendezvous on an unbuffered channel only the drain loop receives from**: a
+  send succeeds exactly when the loop is between iterations, so `Submit`
+  returning means the loop owns the run, and the loop then runs it inline where
+  a claimed request's rental lives. A submission offered while a rental is in
+  flight **waits**, which is the honest third answer to "rent now" from a
+  process that is already renting -- refusing would be a message where a wait
+  is the fact, queueing it is not what `up` means, and renting is the second
+  GPU. The buffer is what would have made it a counter: "accepted, and it will
+  start some time" needs somebody to know how many are already waiting.
+  **The context split is the detach story and it is structural.** `Submit`
+  takes the CLIENT's context and bounds only the wait; `Direct.Run` takes the
+  LOOP's and bounds the rental. So a Ctrl-C after the 202 cannot reach the
+  node, because the rental never held anything the client owned -- rather than
+  because something remembered not to pass it along. A Ctrl-C *before* the 202
+  cancels a submission, where nothing has been rented, and the row Adopt
+  already wrote is ended with the reason rather than left reading `running`.
+  **What a test can see of "structural", because this file has been wrong about
+  mechanisms before.** Three assertions, each ruling out a different wrong
+  answer: `Submit` does not return while a queued rental is open, and the error
+  when it gives up is the caller's own DEADLINE rather than a refusal (so a 409
+  implementation is red); the fake counts open rentals across both kinds and
+  the maximum is one (so a goroutine beside the loop is red); and the run's own
+  goroutine stack contains `(*Queue).Run` (so a goroutine with correct locking
+  -- a counter with better manners, which is the shape somebody would reach
+  for -- is red even though the first two would pass it). The honest limit is
+  that a stack is evidence about one goroutine: `cmd/check-coverage`'s
+  `TestNothingRentsOutsideInternalApp` bounds the other half by asking which
+  packages may name `provision.WithNode`, which is one, and has been one since
+  that function was written.
 - **Every event is numbered, and nothing was numbering them.** `report.Stream`
   stamps the sequence, emitters do not, and the queue's sinks were not wrapped
   in one -- so every event arrived as `Seq` 0 and `genstore`'s
@@ -2286,6 +2366,58 @@ that sentence made unrepresentable rather than merely tested.
   of `Queue` into `queue.Recorder` and both callers use it. One rental at a time
   is untouched by any of it: that is structural because a rental lives inside
   one iteration of one drain goroutine, and `up` never enters the loop.
+
+  **`up` DOES enter the loop now, and the four reasons above are why it is a
+  separate route rather than why it cannot be a client.** #146 reads as a
+  transport change and for `ls`, `history` and `spend` it is; for `up` it is a
+  change to what the command means, against a decision written down with
+  reasons. So `POST /api/runs` is not `POST /api/requests` with a different
+  body: it runs `up`'s own pipeline, `app.NewPlan` then `app.Plan.Do`, inside
+  the daemon. Reasons **2** and **4** then stop being problems the moment it is
+  a different route -- there is no `Enqueue` to refuse a jobless run, and
+  `app.Overrides.Apply` is the function `up` itself uses -- and **1** and **3**
+  do not arise because nothing is claimed. What had to be designed rather than
+  reused is the fifth, which the issue half-named: a run started beside the
+  drain loop is a second rental. `Queue.Submit` is the answer and the entry in
+  the Threat model above has it.
+  **`genstore.Adopt` is still the write, and still for the reason beside it**:
+  `Enqueue` writes `StatusQueued` whatever the caller said, and a queued row is
+  exactly what `ClaimNext` takes -- so an `ember serve` in another terminal, or
+  this one's own loop, would claim it, rent a SECOND card and generate the batch
+  again from the record of the run still happening. The adopt and the recorder
+  are one function for both callers now, `queue.AdoptRun`, because two copies
+  of the row would drift the first time one gained a column.
+  **And `report.Writer` has a production caller at last.** It was in
+  `TestNoProductionDeadCode`'s baseline with the reason "node byte streams
+  reach the operator another way", which was true of both callers it had: `up`
+  prints them to the terminal it is attached to, and the queue to `ember
+  serve`'s. A SUBMITTED run has an operator at neither -- they are on the far
+  side of a socket reading the event stream -- so the adapter whose own doc
+  comment says it exists "so that the packages which only print need no change
+  to reach a UI" is the mechanism. Wired up rather than deleted, which is
+  `sdserver.Client.Cancel`'s precedent and not `queue.Cost`'s: there is no
+  second way for a node's bytes to reach a client that is not this process. The
+  waiver is gone, which the guard insisted on -- an entry it stops reporting
+  fails. What it costs is written down rather than discovered: a chatty
+  workload's output is rows in `events`, one per line, and `ember history rm`
+  is what removes them.
+  **`report.Text` is silent about three kinds and that silence does not hold
+  here.** `KindNodeReady`, `KindRunCost` and `KindDestroyFailed` render as
+  nothing, and the comment says why: "the CLI already reports all three through
+  its slog handler". The slog handler for a submitted run is the DAEMON's, so
+  on this path the three reach a terminal nobody is watching for them and the
+  operator who typed `ember up` gets nothing at all between "submitted" and the
+  workload's first byte -- which on a real rental is minutes. So the client
+  prints those three itself, in `clientSays`, and that is the FIRST spelling on
+  this channel rather than a second one: the deadline is the whole of what stops
+  the bill after a detach, the cost is the figure the run was for, and
+  destroy_failed is the one event an operator must not miss. Everything else
+  goes through `report.Text` unchanged, which is what keeps the rendered run
+  byte-for-byte what `ember up` prints -- asserted by rendering the same events
+  both ways and comparing, and by walking `Kinds()` to require silence on every
+  other one. Found by a lab: the first run of the detach assertion reported "no
+  node has been reported yet" because nothing had told the client there was
+  one.
 - **A queued row for a run already in flight is two GPUs.** `Enqueue` writes
   `StatusQueued` whatever the caller said -- it is how a request *enters* a
   queue -- and a queued row is exactly what `ClaimNext` takes. An `ember serve`
@@ -2948,6 +3080,41 @@ A leaked node bills by the hour in silence. These are not style preferences.
 - **Destroy runs on `context.WithoutCancel`.** Ctrl-C cancels the context the
   run was using, and a destroy call on that context fails instantly — the
   single most likely way to leak a GPU.
+- **Ctrl-C on a SUBMITTED `ember up` detaches, so the `ttl` stops being a
+  ceiling and becomes the exposure.** The entry above is about the process that
+  holds the rental, and on the submitted path that is `ember serve` rather than
+  the terminal: the run takes the drain loop's context, so there is nothing for
+  the client's cancellation to destroy. That is the resilience #146 opens with
+  and it removes the thing that used to guarantee no leak when you walk away.
+  What is left is the TTL -- mandatory, derived in one place, written into the
+  provider's label, the local record and the node's own self-destruct timer --
+  so **the default ttl is now the bill an operator is exposed to**, where
+  before Ctrl-C usually beat it. Said at the moment of detaching rather than
+  left to an invoice: the client prints the deadline it read off `node_ready`,
+  `ember ls` (which needs no daemon), `ember down <node>` and `ember history`.
+  Exit **0**, because detaching is what was asked for and a non-zero status
+  would say something failed. The daemon's own shutdown is untouched and still
+  destroys: `ember serve` waits for `queue.Run`, which does not return until
+  the deferred destroy has.
+- **No daemon means `up` rents here, and the two code paths are written down
+  rather than discovered.** #146's own comment argued for a refusal, correctly,
+  for a NEW verb -- "a direct fallback is two code paths for a command that
+  does not exist yet". `up` exists, every measurement in `README.md` was taken
+  with it, and a version that refused unless a server happened to be up would
+  break all of those for nothing. Auto-starting one is the answer that is not
+  available at all: a background process that can spend money, started because
+  somebody typed `up`, is not a thing ember does. So there are two paths and
+  `README.md` carries the table of what differs -- Ctrl-C, `--allow-paid`,
+  where the node's bytes go, and that `--dry-run` never asks a daemon because
+  it rents nothing and would need the route to answer with a plan.
+  **The "no daemon" probe is silent in one case and that is a conclusion
+  rather than a shrug.** `loopback.StateSocket` refuses a path longer than
+  bind(2) accepts, and `ember serve` resolves the same path through the same
+  constructor -- so a state directory too long is one no daemon can have
+  started under, and "there is no daemon" is the ordinary case rather than a
+  finding. Printing it would put a line about a channel nobody asked for on
+  every `ember up` in a deeply nested checkout, and that output is a contract
+  this repository greps.
 - **The intent record is written before the create call.** The window between
   the request and reading the response is where an orphan with no local record
   is born.
@@ -3934,6 +4101,39 @@ A leaked node bills by the hour in silence. These are not style preferences.
   thing the whole exercise turns on -- the passes that added a negative
   control caught their own broken patches at once, and the ones that did not
   reported them as clean runs.
+
+  **A fourth shape, and it is the inverse of the "beside the live code" one: a
+  patch that ADDS a line cannot be checked by asserting the old text is gone.**
+  The harness for the socket run route asserts three things per patch -- the
+  marker it introduces is present, the text it replaced is absent, and the tree
+  still compiles -- and the second of those is exactly wrong for an additive
+  defect, which is what "the privileged route is ALSO registered on the port's
+  mux" is. It stopped the pass on its first case, correctly from its own point
+  of view, so an additive patch now says so rather than having the check
+  quietly relaxed for everything. Three of the twelve patches also reported
+  BUILD-ERROR on their first attempt -- a missing import each time -- which is
+  the harness refusing to read a non-compiling tree as a failing suite rather
+  than three false REDs.
+  **And a fifth, in the ROLLBACK rather than in the patch, which is the one
+  that makes every later case worthless.** One defect needed two edits to the
+  same file, and the harness kept one backup per path and copied on every edit
+  -- so the second edit backed up the half-patched file over the pristine one,
+  and the restore left a tree that did not compile. Every case after it, and
+  the closing control, reported BUILD-ERROR. The closing control is what
+  caught it: a pass whose last line is not the same green as its first line has
+  not restored the tree, so **a reinstatement pass needs a control at both
+  ends** and not only at the start. The backup is taken once per path now.
+  **And one defect was caught by the lab alone, which is worth recording
+  because it is the most expensive one in that change.** A submitted run that
+  held the CLIENT's context instead of the drain loop's destroys the node when
+  the operator presses Ctrl-C -- the opposite of the detach the feature is for
+  -- and `go test ./internal/...` is entirely green over it: the unit tests
+  drive `Submit` and `Direct.Run` directly, where the context is whatever the
+  caller passed, so the defect lives in one line of `DirectRunner.Start` that
+  only a real client interrupting a real rental can observe. The deterministic
+  version of it is the lab's twelve-second `sleep`. This is PR 151's own
+  finding one slice later: the most expensive defect available in a change is
+  not reliably the one the unit suite can see.
 - **Nothing creates the run's output directory on a served path.** The
   fetching paths get it from `transfer.Fetch`'s own `MkdirAll`, and a served
   run never calls Fetch because the images arrive in the HTTP response instead
@@ -4227,6 +4427,22 @@ A leaked node bills by the hour in silence. These are not style preferences.
   red), an unconditional write (the negative-control test red, the lab green,
   which is the correct asymmetry), Ctrl-C classified as a failure (red), and a
   reworded comment that stayed green.
+- **A run submitted by `ember up` reaches the provisioning-window 409 and that
+  message is wrong for it, which is asserted rather than left to be noticed.**
+  Its row is `running` from `Adopt` and `Queue.Holding` is true, so
+  `cancelRequest` picks the gentler of the two 409s -- "ask again once it is
+  generating" -- and such a run never becomes `Running`, because there is no
+  sd-server job to stop: the only way to end an `ember up` is to destroy the
+  node, which is `ember down`. So the promise cannot be kept. It is NOT fixed
+  here, and the reason is the shape of the fix rather than its size: telling
+  the two apart needs a FOURTH answer from the queue, and a fourth answer is a
+  change to `webapi.Drain` that belongs with `ember down` over the socket --
+  the slice that makes a cancel of a submitted run mean something. Asserting
+  the current answer is the `TestConformance_CannotCatchARederivedRunID`
+  arrangement: a limitation nobody can read out of the code is a limitation
+  that will be forgotten, so the day somebody fixes it the test goes red and
+  they read the comment beside it. The detach notice names `ember down`, which
+  is the command that does work.
 - **The queue records how a cancelled generation ended; the handler does
   not.** A queued request has no rental and nothing to tell, so the handler
   makes it terminal. A running one is still generating when the handler

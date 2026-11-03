@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -49,6 +50,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	fs.Usage = func() {
 		outf(out, "ember up rents a node, forwards its ports to loopback, and destroys it.\n\n")
 		outf(out, "Every forwarded port is bound to 127.0.0.1 and reached over SSH.\nNothing ember creates is reachable from the internet.\n\n")
+		outf(out, "WITH AN ember serve RUNNING, this submits the run to it over its unix socket\nand streams the result, so the run survives this terminal -- and Ctrl-C then\nDETACHES rather than destroying, which makes the ttl the only thing that stops\nthe bill. With no ember serve, it rents here and Ctrl-C destroys the node, as\nit always has. A paid provider needs that ember serve to have been started\nwith --allow-paid; --dry-run never asks one.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -59,6 +61,16 @@ func runUp(args []string, out io.Writer, d deps) error {
 	// command line and should not cost a file open -- the order
 	// internal/s3's push already follows: check what is local and free
 	// before what is remote and slow.
+	//
+	// IT IS STILL RESOLVED ON THE SUBMITTED PATH AND REACHES NOTHING THERE,
+	// which is a gap said out loud rather than left to be noticed. A submitted
+	// run's own log lines are written by the DAEMON, at the level `ember serve`
+	// was started with, to the daemon's terminal -- so `ember up --log-level
+	// debug` through a daemon still refuses a bad level here and changes
+	// nothing about the run. Carrying the level on the wire was the
+	// alternative and buys nothing: the extra lines would go to a terminal
+	// this client cannot read. What the client does get either way is the
+	// node's own bytes, which are events on this path.
 	logOpts, err := logs.resolve()
 	if err != nil {
 		return err
@@ -68,10 +80,51 @@ func runUp(args []string, out io.Writer, d deps) error {
 	if err != nil {
 		return err
 	}
-	applyFlags(&cfg, *providerName, *image, *gpu, *maxHourly, *ttl, ports)
-	if len(cmdArgs) > 0 {
-		cfg.Cmd = cmdArgs
+	ov := app.Overrides{
+		Provider:     *providerName,
+		Image:        *image,
+		GPU:          *gpu,
+		MaxHourlyUSD: *maxHourly,
+		TTL:          *ttl,
+		Ports:        ports,
+		Cmd:          cmdArgs,
 	}
+
+	// A RUNNING `ember serve` IS ASKED TO DO THIS INSTEAD, and a dry run never
+	// is.
+	//
+	// The dry run rents nothing and prints what a rental would be, so routing
+	// it through a daemon would make the cheapest thing in ember depend on a
+	// process being up -- and it would have to answer with a plan rather than
+	// a request id, which is a second shape on the route for no gain. See
+	// upclient.go for the two paths and what differs between them.
+	if !*dryRun {
+		// The paths come from the file as written, before any override:
+		// nothing on the command line names a state directory, and the socket
+		// is under it. This is the ONLY thing the client reads the config for
+		// -- the daemon reads the same file for everything else, which is the
+		// reversal app.RunAsk documents.
+		ps, perr := app.ResolvePaths(cfg, d)
+		if perr != nil {
+			return perr
+		}
+		if sock, ok := serveSocket(configPaths{State: ps.State}); ok {
+			abs, aerr := filepath.Abs(*cfgPath)
+			if aerr != nil {
+				return aerr
+			}
+			// Its own signal context, and Ctrl-C here DETACHES: the run is in
+			// the daemon, on the daemon's context, so there is nothing for
+			// this cancellation to destroy. detached() says what that costs.
+			sctx, sstop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer sstop()
+			return upOverSocket(sctx, out, sock, app.RunAsk{
+				Config: abs, Overrides: ov, Hold: *holdFor,
+			})
+		}
+	}
+
+	ov.Apply(&cfg)
 
 	// Everything that can be refused for free happens in NewPlan: the store,
 	// the offer, the image for the card that offer names, the jobs, the spec.
@@ -145,6 +198,13 @@ func runUp(args []string, out io.Writer, d deps) error {
 // billed without ever becoming ready. The node's own handle is written through
 // from node_ready, so the join to `ember ls` survives; what is left empty is
 // run_id, which neither reader prints.
+// THE ADOPT AND THE RECORDER ARE queue.AdoptRun's, SHARED WITH THE SUBMITTED
+// PATH. This function is the shell's half of it: open the store, hand
+// report.Text in as an extra sink so the operator's terminal gets the lines,
+// and close the store when the run ends. A second copy of the row and the
+// recorder would be two things to keep in step the first time one gained a
+// column -- which is the reason the recorder moved out of Queue in the first
+// place, met again one layer up.
 func recordUp(out io.Writer, plan app.Plan) (report.Sink, func(error)) {
 	text := report.Text(out)
 	decline := func(err error) (report.Sink, func(error)) {
@@ -157,106 +217,16 @@ func recordUp(out io.Writer, plan app.Plan) (report.Sink, func(error)) {
 		return decline(err)
 	}
 
-	// WHAT WAS ASKED FOR, and nothing about what it produced. Adopt's INSERT
-	// names no more columns than Enqueue's, so the cost, the node, the memory
-	// figures and the model cannot be set here even by mistake: they are
-	// written through from the events the run emits.
-	//
-	// The ceilings come from the resolved Options rather than from the config
-	// strings, because a flag beats the file for `ember up` -- applyFlags
-	// REPLACES -- and the number that bounded this run is the one worth
-	// recording.
-	id, err := store.Adopt(context.Background(), genstore.Request{
-		Provider: string(plan.Provider.Name()),
-
-		// THE CARD THAT WAS RENTED, NOT THE ONE THE FILTER NAMED, and the
-		// difference is the whole of what `ember spend --by gpu` is for. A
-		// queued request has only a selection to record, because it is stored
-		// before an offer exists; `ember up` has already chosen one by the
-		// time this runs -- and most measurement runs name no `gpu:` at all,
-		// so recording the filter would group every one of them under a dash
-		// in the column that exists to tell cards apart. Empty here means a
-		// machine with no card, which is what `ember store sync` rents.
-		//
-		// It is the provider's own normalised name, the same spelling
-		// node.Filter.Matches compares against, so `ember history --gpu
-		// rtx4090` finds these rows.
-		GPU:       upGPU(plan),
-		Offer:     string(plan.Offer.Token),
-		TTL:       plan.Spec.TTL,
-		MaxHourly: plan.Options.Budget.MaxRate,
-		MaxRun:    plan.Options.Budget.MaxRun,
-
-		Preview:         plan.Jobs.Preview,
-		PreviewInterval: plan.Jobs.PreviewInterval,
-		Jobs:            upJobs(plan),
-	})
+	_, sink, finish, err := queue.AdoptRun(context.Background(), store, plan,
+		plan.Options.Log, time.Now, text)
 	if err != nil {
 		_ = store.Close()
 		return decline(err)
 	}
-
-	rec := &queue.Recorder{
-		Store: store, Req: id, Now: time.Now, Log: plan.Options.Log,
-		// Key stays nil: `ember up` writes into a timestamped run directory
-		// it tells the operator about, which no gallery serves and which
-		// `ember history rm` must not offer to remove. The image counts and
-		// bytes are recorded regardless -- they are columns on the job, which
-		// is what the ledger and the aggregate read. See Recorder.Key.
-	}
-
-	// WRAPPED IN A Stream, which is not decoration: emitters do not number
-	// events, and an unnumbered one arrives as Seq 0 -- where genstore's
-	// INSERT OR REPLACE on (request, seq) makes every event overwrite the
-	// last, leaving one row for a whole generation. That was a real bug in
-	// the queue, found by reading the database rather than by a test. Text
-	// ignores Seq, so `ember up`'s output is byte-for-byte what it was.
-	return report.NewStream(time.Now, text, rec), func(runErr error) {
-		// WithoutCancel, because the ordinary way to end `ember up` is
-		// Ctrl-C: the context this run used is already cancelled by the time
-		// there is an outcome to record, and the row is the only lasting
-		// record of what the rental cost.
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), recordTimeout)
-		defer cancel()
-		rec.Finish(ctx, runErr)
+	return sink, func(runErr error) {
+		finish(runErr)
 		_ = store.Close()
 	}
-}
-
-// recordTimeout bounds the last write, so a wedged database cannot hold a
-// finished command open.
-const recordTimeout = 10 * time.Second
-
-// upGPU is the card that was rented, or empty for a machine with none.
-//
-// THROUGH HasGPU AND NOT STRAIGHT OFF THE OFFER, because the local provider
-// spells a machine with no card `node.GPUNone` -- the literal "none" -- while
-// a queued request with no selection stores the empty string. Both mean "no
-// card", and two spellings of it in one column is what keyOr exists to avoid:
-// the reader would print a dash for one and the word "none" for the other, in
-// a report whose whole point is telling cards apart. HasGPU is the one
-// function that decides what counts as a card, so asking it keeps the answer
-// in one place. Found by reading the output of a local run.
-func upGPU(plan app.Plan) string {
-	if !plan.Offer.HasGPU() {
-		return ""
-	}
-	return string(plan.Offer.GPU)
-}
-
-// upJobs is the batch as the history records it.
-//
-// Only the served shape has any. A `cmds` run's steps and a plain forwarded
-// session are recorded as the request row and its events and as no job rows at
-// all -- see internal/queue/record.go, which argues it: a step is not a job,
-// and the figures the jobs table exists for (images, passes, steps per second)
-// are not things an `ffmpeg` invocation has.
-func upJobs(plan app.Plan) []genstore.Job {
-	jobs := make([]genstore.Job, 0, len(plan.Jobs.Jobs))
-	for _, j := range plan.Jobs.Jobs {
-		jobs = append(jobs, genstore.FromSD(j))
-	}
-	return jobs
 }
 
 // dryRunUp prints what would happen and creates nothing.
@@ -294,36 +264,24 @@ func dryRunUp(out io.Writer, plan app.Plan) error {
 
 // applyFlags lets a flag beat the config file.
 //
-// It REPLACES rather than narrows, deliberately: `ember up --max-hourly-usd
-// 999` raises the ceiling, because the operator typing it is the operator who
-// set the ceiling. Anything that accepts a request from somewhere else -- a
-// web handler -- must not reuse this, and must narrow against the config's
-// own values instead.
+// IT IS app.Overrides NOW, and the move is the point rather than tidiness. It
+// REPLACES rather than narrows, deliberately: `ember up --max-hourly-usd 999`
+// raises the ceiling, because the operator typing it is the operator who set
+// the ceiling -- and queue.Narrow takes the smaller of the two because a
+// queued request arrives from somewhere the operator is not. Two rules that
+// opposite in one program is exactly the thing that gets copied to the wrong
+// place, so there is one implementation of each and the privileged socket
+// route CALLS this one rather than growing a second copy. See
+// app.Overrides, which has the whole argument.
 func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, ttl time.Duration, ports multiFlag) {
-	if providerName != "" {
-		cfg.Provider = providerName
-	}
-	if image != "" {
-		cfg.Image = image
-		// And the map goes with it. An operator pinning one image for one run
-		// is the first thing anybody reaches for when a run misbehaves, and
-		// leaving the map in place would mean -image silently did nothing on
-		// every config that has one. One field holds the answer, so there is
-		// no "which wins" rule at the decision site.
-		cfg.Images = nil
-	}
-	if gpu != "" {
-		cfg.GPU = gpu
-	}
-	if maxHourly != "" {
-		cfg.MaxHourlyUSD = maxHourly
-	}
-	if ttl > 0 {
-		cfg.TTL = ttl
-	}
-	if len(ports) > 0 {
-		cfg.Ports = ports
-	}
+	app.Overrides{
+		Provider:     providerName,
+		Image:        image,
+		GPU:          gpu,
+		MaxHourlyUSD: maxHourly,
+		TTL:          ttl,
+		Ports:        ports,
+	}.Apply(cfg)
 }
 
 // multiFlag collects a repeatable string flag.

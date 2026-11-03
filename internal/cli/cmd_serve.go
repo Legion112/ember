@@ -199,10 +199,22 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		return err
 	}
 
+	// AND THE PRIVILEGED CHANNEL'S ONE CAPABILITY.
+	//
+	// It is reachable from the socket's mux alone -- see internal/webapi/run.go
+	// -- and what it does is run `ember up`'s own pipeline on the one goroutine
+	// that can rent. It is wired here rather than inside webapi because webapi
+	// must have no way to name a plan, a provider or a rental: the seam is one
+	// interface with one method, and the implementation lives beside the drain
+	// loop whose single-rental invariant is what makes it safe.
+	runs := queue.DirectRunner{
+		Deps: d, Store: store, Queue: q, AllowPaid: o.AllowPaid, Out: out, Log: o.Log,
+	}
+
 	srv, err := webapi.New(webapi.Options{
 		Config: cfg, Registry: reg, Store: store, Blobs: blobs, Inputs: inputs, Queue: q,
 		AllowPaid: o.AllowPaid, Port: o.Port, Dist: o.Dist, Log: logger,
-		Token: token, Socket: sock,
+		Token: token, Socket: sock, Runs: runs,
 	})
 	if err != nil {
 		return err
