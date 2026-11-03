@@ -2438,6 +2438,36 @@ that sentence made unrepresentable rather than merely tested.
   frozen progress display costs the operator their belief that ember is
   working. Only a browser could find this, which is the argument for the
   chromedp lab.
+  **This entry read as a sweep of the page and was a repair of one list.**
+  Two more `<For>`s were sitting on the same defect when it was written, and
+  the second of them is eight lines above the comment that states the rule.
+  The offers panel was keyed on the **provider's name**, which does not
+  change between two queries of one provider -- so narrowing the card filter
+  and pressing the button again rendered the first answer, and a server
+  answering zero offers plus `dial tcp: lookup rest.runpod.io: no such host`
+  left an H100 at $2.49 in US-KS-2 on screen with no error at all. That is
+  the thing the component's own comment forbids ("I could not reach RunPod
+  must never render as RunPod has nothing"), defeated by the key two lines
+  above it, and the real behaviour is worse than the comment's wording: not
+  "RunPod has nothing" but "RunPod has this card at this price". The fix is
+  a plain map over the signal and no key at all -- for the outer list and for
+  the inner one over a provider's offers, because leaving the inner `<For>`
+  keyed on an offer token would have put the same frozen row one level down.
+  **Not a key that encodes the row, which is the other answer and the worse
+  one**: a key is stable identity, so one built out of the data rebuilds the
+  DOM for a price change and leaves the next field somebody adds in the same
+  hole. Reading inside the closure keeps the key honest, and here there was
+  no identity worth keeping across two queries at all.
+  **The decision moved to `Listing::answer`**, which is where `Rows::note`
+  and `Request::reason` live and the reason both are methods: a precedence
+  written as a chain of `if` inside a view macro can only be checked by a
+  browser, and the error-wins-over-the-offers-beside-it rule now has a
+  `cargo test` instead of a comment. The error path is the half no lab can
+  reach -- `CloudBaseURL` is a Go field on `app.Deps` and not an environment
+  variable, so a lab that runs `ember` as a subprocess cannot point a cloud
+  provider at a closed port -- so the browser asserts the rows in both
+  directions across three presses and `cargo test` asserts the precedence,
+  which is the pair rather than either alone.
 - **The remote end of a forward is built by `tunnel.RemoteLoopback(port)` and
   never parsed from input.** `direct-tcpip` connects anywhere the node can
   reach, including the provider's metadata service; a free-form remote host
