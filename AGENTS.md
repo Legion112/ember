@@ -2468,6 +2468,43 @@ that sentence made unrepresentable rather than merely tested.
   provider at a closed port -- so the browser asserts the rows in both
   directions across three presses and `cargo test` asserts the precedence,
   which is the pair rather than either alone.
+  **The third was the queue table's price column, and that one is money.**
+  Its key is `(id, status)` -- the status is in the key *precisely* so that a
+  status change rebuilds the row -- and `requests.cost` is written **after**
+  the status is terminal: `finish` writes done/failed/cancelled and
+  `Recorder` writes the cost through from `provision.WithNode`'s **deferred**
+  teardown, which is the ordering `queue.go` states in words. So the key
+  `(id, "done")` is created with a zero and can never change again, and the
+  two-second poll re-fetched the right figure hundreds of times into a row
+  that would not take it. A rider's zero is blank by design, so the opener's
+  cell is the **only** place in that table a paid rental appears -- which
+  means an `ember serve` session that rented an H100 for an hour showed a
+  queue of finished requests with no money in it at all, and nothing said the
+  column was incomplete. The same row one panel over had already been fixed
+  for the same reason, and `Progress::rental`'s own doc comment quotes it.
+  **The fix is the closure and NOT `(id, status, cost)`**: a key that carries
+  the money rebuilds the DOM for a price change and leaves the next field
+  somebody adds in the same hole. `Rows::price` is the decision and
+  `price_cell` is the read, and the comment now names which fields in that
+  row can move on their own -- `status` is in the key, `jobs` and `gpu` are
+  written at enqueue, `reason` is written *with* the status, and `cost` is the
+  one written after the key is fixed. `class:running` was read outside its
+  closure too and is swept: it can only be stale for one poll and it is a CSS
+  highlight, so it was not the defect, but one read outside the closure left
+  in the row whose other one was leaves the next reader to work out which is
+  which.
+  **No lab here can produce a non-zero `requests.cost`, and the lab is
+  therefore a mid-run seed.** Every lab rents from the local provider, whose
+  price is zero -- the same reason `Progress::rental`'s `Accruing` and its
+  non-free `Charged` are unreachable from one -- so a lab that rented would
+  assert a blank cell against a blank cell and pass against the defect. And
+  the seed has to land while the page is ALREADY OPEN, because a page loaded
+  after the write shows the figure either way: that is the reload the issue's
+  own negative control used to prove the bytes were arriving. Two writers on
+  one SQLite file is what `genstore.OpenFile`'s `journal_mode(WAL)` and
+  `busy_timeout(5000)` are for, and nothing is rented: the seeded row is
+  `running` only for the instant between `Adopt` and the `Update` that ends
+  it, and `ClaimNext` takes queued rows alone.
 - **The remote end of a forward is built by `tunnel.RemoteLoopback(port)` and
   never parsed from input.** `direct-tcpip` connects anywhere the node can
   reach, including the provider's metadata service; a free-form remote host

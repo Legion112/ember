@@ -1653,6 +1653,25 @@ card-time figure: `JobRun.Cost` is kept off the posted `Job` on purpose, so
 the figure an operator is billed against is not settable by the thing being
 billed. [`ember history`](#which-run-was-it) is where that column lives.
 
+### What the queue table's price column shows
+
+The queue panel's price column is the **rental**, charged to the request that
+opened it. A blank cell means there is no figure for that row — a request that
+has not run, one that rode a rental somebody else opened, or a rental that was
+genuinely free — and a figure appears there when the rental is torn down and
+its cost is recorded, **without reloading the page**.
+
+It used to appear only on a reload, and for most sessions that meant never.
+The rows were keyed on `(id, status)`, which is right for the status — the key
+moves when the status does, so the row is rebuilt — and wrong for the money,
+because `requests.cost` is written *after* the status is terminal: the rental's
+cost comes from the deferred teardown, which runs once the request has already
+ended. So the key `(id, "done")` was created with a zero and never changed
+again, the two-second poll re-fetched the right figure hundreds of times, and
+the row would not take it. A rider's zero is blank by design, so the opener's
+cell is the only place in that table a paid rental appears — which made an
+hour of an H100 show up as a queue of finished requests with no money in it.
+
 ### How it fits together
 
 Everything below the dashed line is what `ember up` already did; `ember serve`

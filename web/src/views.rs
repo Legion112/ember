@@ -1048,6 +1048,28 @@ fn AdvancedForm(config: RwSignal<Config>, draft: RwSignal<Job>) -> impl IntoView
     }
 }
 
+/// The queue table's price cell for one request, read from the listing every
+/// time it is drawn.
+///
+/// A NAMED FUNCTION OVER THE SIGNAL, for the reason `listed` is one: this is
+/// the half `cargo test` can hold, and the reactive capture is the defect. It
+/// is the shape the two cells below it already use for `stopping`, eight
+/// lines under the comment that states the rule -- which the price cell did
+/// not follow.
+///
+/// WHAT MOVES ON ITS OWN IN THIS ROW, said out loud rather than left to be
+/// discovered one field at a time. `status` is in the key, so a change to it
+/// rebuilds the row; `jobs` and `gpu` are written at enqueue and never again;
+/// `reason` is written by `fail`/`finish` WITH the status, so the key moves
+/// with it. `cost` is the one field written after the key can no longer
+/// change, because `requests.cost` comes from `provision.WithNode`'s deferred
+/// teardown and `finish` has already ended the request -- so it is the one
+/// cell that must read the signal, and the next field somebody adds has to be
+/// asked the same question.
+fn price_cell(list: RwSignal<RequestList>, id: String) -> impl Fn() -> String {
+    move || list.get().requests.price(&id)
+}
+
 /// Queue is what is waiting, running and finished.
 #[component]
 fn Queue(watching: RwSignal<String>) -> impl IntoView {
@@ -1145,13 +1167,26 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                     <For each=move || list.get().requests.items key=|r| (r.id.clone(), r.status.clone()) let:r>
                         {
                             let id = r.id.clone();
-                            let running = list.get().running == r.id;
+                            let running_id = r.id.clone();
                             let cancellable = r.is_cancellable();
                             let cancel_id = r.id.clone();
                             let asked_id = r.id.clone();
                             let pending_id = r.id.clone();
                             view! {
-                                <tr class:running=running
+                                // BOTH CLASSES READ THE SIGNAL, and the first
+                                // one did not. `list.get().running` was read
+                                // at row-render time, so the highlight on the
+                                // request being generated could only be as
+                                // fresh as the last change to `(id, status)`
+                                // -- a row claimed from `queued` does get
+                                // rebuilt, so the stale window is one poll
+                                // and the cost is a misplaced highlight
+                                // rather than a wrong figure. Swept anyway,
+                                // because leaving one read outside the
+                                // closure in a row whose other one was the
+                                // defect is leaving the next reader to work
+                                // out which is which.
+                                <tr class:running=move || list.get().running == running_id
                                     class:watching=move || watching.get() == id>
                                     <td>
                                         <button class="link" on:click={
@@ -1198,10 +1233,7 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                                     </td>
                                     <td>{format!("{} job(s)", r.jobs.len())}</td>
                                     <td>{r.gpu.clone()}</td>
-                                    <td class="price">
-                                        {if r.cost.is_free() { String::new() }
-                                         else { r.cost.text().to_string() }}
-                                    </td>
+                                    <td class="price">{price_cell(list, r.id.clone())}</td>
                                     <td class="stop">
                                         // READ INSIDE A CLOSURE, which is the
                                         // keyed-list rule this page has paid
@@ -1800,8 +1832,8 @@ fn urlish(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{listed, urlish};
-    use crate::model::{Answer, Listing, Offer, Offers};
+    use super::{listed, price_cell, urlish};
+    use crate::model::{Answer, Listing, Offer, Offers, RequestList};
     use leptos::prelude::*;
 
     fn one(provider: &str, offers: Vec<Offer>, error: &str) -> Offers {
@@ -1889,6 +1921,68 @@ mod tests {
             }
             other => panic!("the failure did not reach the page: {other:?}"),
         }
+    }
+
+    /// THE RENTAL'S COST AFTER THE STATUS CAN NO LONGER MOVE, which is #131.
+    ///
+    /// The status is `done` in both listings and the only thing that changes
+    /// is the money, which is the exact sequence the Go side produces:
+    /// `finish` writes the terminal status and `Recorder` writes the cost
+    /// through afterwards, out of `provision.WithNode`'s deferred teardown.
+    /// So the key `(id, "done")` is the same string before and after, and a
+    /// cell built from the row it was handed showed the pre-teardown zero for
+    /// the life of the tab.
+    #[test]
+    fn the_price_cell_reads_the_listing_and_not_the_row_it_was_built_from() {
+        let sig = RwSignal::new(listing_of("req-open", "done", 0, ""));
+        let cell = price_cell(sig, "req-open".to_string());
+        assert_eq!(cell(), "", "a rental that has not been priced is blank");
+
+        // The teardown's figure, with the status untouched.
+        sig.set(listing_of("req-open", "done", 1_240_000, "$1.24"));
+        assert_eq!(
+            cell(),
+            "$1.24",
+            "the cost written after the status was terminal never reached the cell"
+        );
+    }
+
+    /// A rider's zero is blank BY DESIGN, and that is why the cell cannot be
+    /// gated on "is there a figure at all": the rental is charged to the
+    /// request that opened it and to no other, so most rows are legitimately
+    /// empty and the opener's is the only one with money in it.
+    #[test]
+    fn a_free_rental_and_a_rider_are_both_blank() {
+        let sig = RwSignal::new(listing_of("rider", "done", 0, "$0"));
+        assert_eq!(price_cell(sig, "rider".to_string())(), "");
+    }
+
+    /// A row that has left the listing says nothing rather than keeping what
+    /// it last said. The cell is on screen because the row is, so this is the
+    /// half-step where a listing has been replaced and the row has not been
+    /// dropped yet -- and the honest answer there is the blank one, not a
+    /// price belonging to a request that is gone.
+    #[test]
+    fn a_row_that_left_the_listing_prices_nothing() {
+        let sig = RwSignal::new(listing_of("req-open", "done", 1_240_000, "$1.24"));
+        let cell = price_cell(sig, "req-open".to_string());
+        assert_eq!(cell(), "$1.24");
+        sig.set(RequestList::default());
+        assert_eq!(cell(), "");
+    }
+
+    fn listing_of(id: &str, status: &str, micro: i64, display: &str) -> RequestList {
+        let json = serde_json::json!({
+            "requests": [{
+                "id": id,
+                "status": status,
+                "gpu": "h100-80g",
+                "jobs": [{"prompt": "a paper boat"}],
+                "cost": {"micro_usd": micro, "display": display},
+            }],
+            "running": "",
+        });
+        serde_json::from_value(json).expect("the listing decodes")
     }
 
     /// The precedence `Listing::answer` exists for, asserted on the one shape
