@@ -3468,6 +3468,32 @@ that sentence made unrepresentable rather than merely tested.
   waiver beside it -- `node.(HostKeySource).Authenticated`, excused as "ls
   reports the source itself" -- is wrong in the same way, is older than this
   change, and is left for whoever reads this.
+  **And "no writer any more" was too generous to the constant: nothing has ever
+  produced it, which makes it this list's first instance in a CONSTANT rather
+  than a function.** The first wording in `ssh.go` blamed the deleted
+  trust-on-first-use for having been its writer, and TOFU was not: it wrote a
+  `Fingerprint` into its own map and never touched a `HostKey.Source`.
+  `git log --all -G 'HostKeyPinned'` returns six commits -- the initial one,
+  `b42130d`, `e08c99a`, `54393b1` and this change's two -- and at every one of
+  them the only non-test appearances are the `const`, the `String()` map entry
+  and, from `b42130d` to `54393b1`, a comment in `hostkey/store.go` reading "so
+  callers record node.HostKeyPinned". No `Source: HostKeyPinned` assignment
+  exists anywhere in that history outside a test file. The sharper measurement
+  is that the instruction was unfollowable by the file holding it:
+  **`store.go` never imported `internal/node`**, for the whole life of the file
+  and not merely at a sampled commit -- `git log --all -G 'internal/node' --
+  internal/hostkey/store.go` is **empty**, and that file has exactly two
+  commits, `b42130d` creating it and `fae8b7a` deleting it. So the comment
+  asked for something the file it sat in could not write, which is the scope
+  that matters because `tofu` is declared there; the **package** could, and
+  `mint.go` four files over imports `internal/node` and uses
+  `node.HostKeyMinted`. That is the `ember ls --all` class in miniature -- an
+  argument that persuades about a mechanism nobody wired -- and what #120
+  deleted was the comment ASKING for the record, not a writer of it. So the running count above gains an instance whose kind the detector is
+  **structurally** unable to report: `TestNoProductionDeadCode` loads functions,
+  and the entry for it in this file already says fields and types are out of
+  scope and why. A declared constant, printed by a `String()` nothing calls on
+  it, asserted by its own test, is the same closed loop one declaration smaller.
 
 ## Money
 
