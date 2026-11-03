@@ -2,13 +2,11 @@ package queue
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"path"
 	"sync"
 	"time"
 
-	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/report"
 )
@@ -293,7 +291,15 @@ func (r *Recorder) Emit(e report.Event) {
 	}
 
 	if due || urgent(e.Kind) {
-		r.Flush(context.Background())
+		// writeCtx and not a bare Background: this runs on the emitter's
+		// goroutine, which is the drain loop, so an unbounded write here is a
+		// rental that cannot finish -- `runServed`'s bare wait() reached
+		// through an event. Detached for the other half of the same reason:
+		// the last urgent event of a run is emitted by a teardown whose
+		// context is already cancelled.
+		ctx, cancel := writeCtx()
+		defer cancel()
+		r.Flush(ctx)
 	}
 }
 
@@ -344,7 +350,7 @@ func (r *Recorder) recordJob(idx int, fn func(*genstore.JobRun)) {
 	if idx <= 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), writeTimeout)
+	ctx, cancel := writeCtx()
 	defer cancel()
 	if err := r.Store.UpdateJob(ctx, r.Req, idx, fn); err != nil {
 		r.log().Warn("could not record what a job did",
@@ -357,7 +363,7 @@ func (r *Recorder) recordJob(idx int, fn func(*genstore.JobRun)) {
 // WithoutCancel: this runs from a teardown whose context is already cancelled
 // on Ctrl-C, and the row is the only record of what the rental cost.
 func (r *Recorder) set(fn func(*genstore.Request)) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), writeTimeout)
+	ctx, cancel := writeCtx()
 	defer cancel()
 	if err := r.Store.Update(ctx, r.Req, fn); err != nil {
 		r.log().Error("could not record a rental's lifecycle", "request", r.Req, "err", err)
@@ -367,6 +373,44 @@ func (r *Recorder) set(fn func(*genstore.Request)) {
 // writeTimeout bounds a write made off the event path, where the caller's own
 // context may already be cancelled.
 const writeTimeout = 10 * time.Second
+
+// writeCtx is the context every write that records how something ENDED travels
+// on: detached from the caller's, and bounded.
+//
+// BOTH HALVES, and neither is optional.
+//
+// Detached, for provision's destroy reason -- "Ctrl-C cancels the context the
+// run was using, and a destroy call on that context fails instantly" -- with a
+// store write in place of the destroy call. Ctrl-C is likewise the most likely
+// way to reach these writes: stopping `ember serve` is what produces the error
+// being recorded, so the context the rental used is already done by the time
+// there is an outcome to write. #159 is what that cost -- Queue.finish and
+// Queue.endIfUnfinished both wrote through the drain loop's own context, the
+// write answered `begin: context canceled`, the row kept the `running`
+// ClaimNext wrote, and the next start's Interrupt sweep turned it into
+// `interrupted` with requests.err empty. The whole of #103's argument --
+// that the expensive failures all happen after money has been committed, so an
+// operator has to be able to see why -- was unreachable on the one path an
+// operator takes every time they stop the server.
+//
+// Bounded, because an unbounded write on a detached context is the second
+// defect wearing the first one's clothes: `runServed`'s bare `wait()` wedged
+// for twenty-three minutes after SIGTERM and never printed the error it was in
+// the middle of returning, so the run looked like a hang with no diagnosis.
+// `ember serve` waits for queue.Run before it exits, so a write that cannot
+// complete is a server that will not stop -- in the code whose job is to
+// record why the last one did not. A write that cannot land inside the bound is
+// abandoned and the failure logged, which is the honest trade: a figure lost
+// against a shutdown that never finishes.
+//
+// One function rather than a copy per call site, which is this repository's
+// "one name for a path, not one per call site" rule met in a context: ten
+// writes take it, where there were five inline spellings of it and one site
+// that had the detachment and no bound at all. A copy per call site is a place
+// for one of them to lose a half, and one of them had.
+func writeCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(context.Background()), writeTimeout)
+}
 
 // Flush writes what is buffered.
 func (r *Recorder) Flush(ctx context.Context) {
@@ -393,7 +437,7 @@ func (r *Recorder) Flush(ctx context.Context) {
 // row saying "done" above events that never arrived.
 func (r *Recorder) Finish(ctx context.Context, cause error) {
 	r.Flush(ctx)
-	status, msg := statusOf(cause)
+	status, msg := classify(cause)
 	r.set(func(q *genstore.Request) {
 		q.Status = status
 		q.Err = msg
@@ -401,28 +445,19 @@ func (r *Recorder) Finish(ctx context.Context, cause error) {
 	})
 }
 
-// statusOf is how a run ended, as a status and the message that goes with it.
+// statusOf is gone: it was a second copy of classify, in the same package.
 //
-// One spelling for the queue and for `ember up`, because the interesting
-// classification is the same in both and is not obvious: a cancelled context
-// is NOT a failure. The operator pressed Ctrl-C, or the node reached its
-// deadline, and calling that a failed generation sends them looking for a bug
-// that is not there.
-func statusOf(cause error) (genstore.Status, string) {
-	switch {
-	case cause == nil:
-		return genstore.StatusDone, ""
-	case errors.Is(cause, app.ErrCancelled):
-		// The operator asked for this one. Recorded with its reason, which
-		// names how far it got and whether the job in flight could be
-		// stopped -- the event stream has the detail, and the row is what
-		// `ember ls` and the queue table read.
-		return genstore.StatusCancelled, cause.Error()
-	case errors.Is(cause, context.Canceled), errors.Is(cause, context.DeadlineExceeded):
-		return genstore.StatusCancelled, cause.Error()
-	}
-	return genstore.StatusFailed, cause.Error()
-}
+// Deleted rather than kept, because the two were the same switch with the same
+// answers and each carried a comment claiming to be the only one -- this one
+// said "one spelling for the queue and for `ember up`", and queue.go's said
+// "two copies of this switch would be two accounts of what Ctrl-C means, which
+// is why there is one". By `git log -S`, this one came FIRST (cbd3f14, the
+// recorder `ember up` writes through) and classify was extracted four files
+// over by 001a0d3, the commit whose whole argument is that there must be one:
+// the change that wrote the rule created the second copy of it. Nothing
+// reported it, because a copy with a caller is a live function to every
+// detector here. The surviving name is classify, which is the one AGENTS.md
+// and both issues cite, and its doc carries this one's claim.
 
 // recordImages joins the files a job wrote to the request that asked for them.
 //
@@ -436,7 +471,7 @@ func statusOf(cause error) (genstore.Status, string) {
 // every distinct step, so one row per job tracks the file for the whole
 // generation.
 func (r *Recorder) recordImages(e report.Event, preview bool) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), writeTimeout)
+	ctx, cancel := writeCtx()
 	defer cancel()
 
 	for i, f := range e.Wrote {

@@ -89,6 +89,17 @@ type fakeRental struct {
 	mu          *sync.Mutex
 	// block is closed by a test that wants to observe a rental in flight.
 	block chan struct{}
+
+	// onRented is called once the node exists and before anything else,
+	// which is where a SIGINT lands in the case #159 is about.
+	//
+	// A HOOK RATHER THAN A CANCELLED CONTEXT HANDED TO once, because
+	// ClaimNext takes the same context and the real store refuses a claim on
+	// a cancelled one -- so a test that cancelled first would be driving a
+	// state the program cannot be in. The cancellation has to arrive while
+	// the rental is up, which is exactly what stopping `ember serve` mid
+	// generation does.
+	onRented func()
 }
 
 func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
@@ -105,6 +116,9 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 		r.mu.Unlock()
 	}()
 
+	if r.onRented != nil {
+		r.onRented()
+	}
 	if r.rentErr != nil {
 		return r.rentErr
 	}
@@ -143,6 +157,7 @@ type fakePlanner struct {
 	teardownErr error
 	block       chan struct{}
 	planned     []genstore.Request
+	onRented    func()
 }
 
 func (p *fakePlanner) Plan(_ context.Context, r genstore.Request) (Rental, error) {
@@ -156,6 +171,7 @@ func (p *fakePlanner) Plan(_ context.Context, r genstore.Request) (Rental, error
 	return fakeRental{
 		served: p.served, rentals: &p.rentals, destroyed: &p.destroyed,
 		rentErr: p.rentErr, teardownErr: p.teardownErr, mu: &p.mu, block: p.block,
+		onRented: p.onRented,
 	}, nil
 }
 

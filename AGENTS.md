@@ -5686,6 +5686,176 @@ A leaked node bills by the hour in silence. These are not style preferences.
   controls green at both ends of all four passes, and `git diff` empty over
   every file the harness touched -- which is the check added after a pass
   shipped claiming a deletion that a stale backup had put back.
+- **A Ctrl-C'd rental's request carried no reason, because every write that
+  records how a request ended travelled on the context the signal had just
+  cancelled (#159).** The entry in **Threat model** that filed this -- the
+  websocket lab's first version, which spent twelve minutes waiting for a
+  reason that was never going to appear -- is the record of what it was; this
+  is the repair. `Queue.finish` and `Queue.endIfUnfinished` both wrote through
+  `Store.Update` on the drain loop's own context, which is the context
+  `ember serve` cancels on SIGINT and therefore the context that produced most
+  of the errors they were recording: `database/sql` checks it when a
+  connection is taken, so the write answered `begin: context canceled` before
+  SQLite was reached, the row kept the `running` `ClaimNext` wrote, and the
+  next start's `Interrupt` sweep -- one statement that sets a status and an end
+  time and nothing else -- turned it into `interrupted` with `requests.err`
+  **empty**. So the whole of #103's argument, that the expensive failures all
+  happen after money has been committed and an operator has to be able to see
+  why, was unreachable on the one path an operator takes every time they stop
+  the server. It is the same defect as "a rental that failed after the node
+  existed left the request reading `running`", one layer further out: there the
+  write was missing, here it was made and refused.
+
+  **THREE WRITERS AND NOT TWO, which the sweep found rather than the issue.**
+  `Queue.fail` is the third, and its own call site made the claim that was
+  false of it -- "nothing was rented, so nothing is billing; the request
+  carries the reason, which is the whole point of resolving before renting" --
+  because `Planner.Plan` takes the same context, so a SIGINT landing during
+  the offer listing, the store pre-flight or the period ceiling left that write
+  unable to land too. It also wrote a literal `StatusFailed`, so detaching its
+  context **without** routing it through `classify` would have traded a row
+  with no reason for a row with a confident wrong one: a plan a money ceiling
+  refused is a failure and a plan the operator interrupted is not. There is one
+  account of what Ctrl-C means in this package and it now has four callers,
+  which is the reason `classify` was extracted in the first place.
+
+  **BOTH HALVES, and the bound is not optional.** Detached for the `provision`
+  destroy's reason -- "Ctrl-C cancels the context the run was using, and a
+  destroy call on that context fails instantly" -- with a store write in place
+  of the destroy call. Bounded because an unbounded write on a detached context
+  is the second defect wearing the first one's clothes: `runServed`'s bare
+  `wait()` wedged for twenty-three minutes after SIGTERM and never printed the
+  error it was in the middle of returning, and `ember serve` waits for
+  `queue.Run` before it exits, so a write that cannot complete is a server that
+  will not stop -- in the code whose job is to record why the last one did not.
+  Neither half is new: `Recorder.set`, `recordJob`, `recordImages`,
+  `Queue.set` and `DirectRunner`'s own teardown write were all already
+  `WithTimeout(WithoutCancel(...), writeTimeout)`, and the three writers this
+  is about were the three that were not. They are one `writeCtx()` now, with
+  ten callers where there were five inline spellings and one site that had the
+  detachment and no bound: a copy per call site is a place for one of them to
+  lose a half, and one of them had -- the "one name for a path, not one per
+  call site" rule met in a context. And all three writers take
+  **no context parameter at all**, which is "prefer making a bug
+  unrepresentable over testing for it": the drain loop's context is not a thing
+  a caller can hand them.
+
+  **WHY NOTHING IN THE TREE SAW IT: `genstore.RecordingStore.Update` ignored
+  its context, which is the seventh fake here tidier than the thing it stands
+  in for.** Measured both ways rather than argued. Teaching the fake to answer
+  `begin: context canceled` left `go test ./...` at **exit 0** across the whole
+  tree, which is the proof that nothing anywhere had ever handed it a cancelled
+  context. And the historical arrangement -- the fake as it was, all three
+  writers back on the caller's context, this change's own tests taken out --
+  is **exit 0** over `go test ./...` as well. The existing regression test was
+  the sharp case: `TestQueue_ARentalEndedByCtrlCIsCancelledAndNotFailed` hands
+  `once` a LIVE context and a `rentErr` of `context.Canceled`, so it asserted
+  the classification over a write that could always land, and the real case has
+  both. The fake's check is on `Update` alone and that is stated rather than
+  silent: `Update` and `AppendEvents` are the two writes a teardown reaches,
+  nothing else in ember reaches a store from a cancelled context, and a check
+  on the rest would be a guard with no defect available to catch.
+  `TestWrite_ACancelledContextWritesNothing` is in the both-stores table, and
+  asserts the row and the event rows are **untouched** as well as the errors,
+  because an error alone is consistent with a store that wrote and then
+  complained.
+
+  **AppendEvents is in that list because the sweep found two more writes, and
+  the event stream is the half this file calls the truth.** `generate` flushed
+  what the batch had buffered AFTER `s.Generate` returned, on the same
+  cancelled context -- so the last progress an operator watched go by was the
+  one the database never got, and the columns are a derived index of exactly
+  those rows. A progress frame is not `urgent`, so that flush is the only thing
+  that can write it. The other is the urgent flush inside `Recorder.Emit`,
+  which ran on a bare `context.Background()`: detached, and **unbounded** --
+  on the emitter's goroutine, which is the drain loop, so it is `runServed`'s
+  bare `wait()` reached through an event rather than through an ssh session.
+  Both take `writeCtx` now, and `sink.flush` takes no context either.
+
+  **The cancellation arrives while the rental is up, through a hook, and not as
+  a cancelled context handed to `once`.** `ClaimNext` takes the same context
+  and the real store refuses a claim on a cancelled one, so a test that
+  cancelled first would be asserting about a state the program cannot be in.
+  `fakeRental.onRented` fires once the node exists, which is where a SIGINT
+  lands.
+
+  **The batch-side assertion is the SENTENCE and not the status, because the
+  two writers cover each other on that path.** With `finish` writing through
+  the cancelled context its write is lost, the row is left non-terminal, and
+  `endIfUnfinished` -- now detached -- writes the status itself, so an
+  assertion on `cancelled` alone would pass against the defect. What
+  `endIfUnfinished` cannot write is the same reason: `drain` wraps the batch's
+  error as `request <id>: …` before returning it, so the string on the row says
+  which writer landed.
+
+  **AND THERE WERE TWO CLASSIFICATIONS, in one package, each under a comment
+  saying there was one.** The issue's own terms are that `classify` must be the
+  single account of what Ctrl-C means, which is what sent somebody to read it
+  -- and `record.go` held `statusOf`, the same switch returning the same
+  answers for every input, used by `Recorder.Finish`, which is how `ember up`
+  and a submitted run record the same fact. `git log -S` settles the order and
+  it is the embarrassing one: `statusOf` came first, in cbd3f14, saying "one
+  spelling for the queue and for `ember up`", and **001a0d3 -- the commit whose
+  entire argument is that two copies would be two accounts -- extracted
+  `classify` four files away from it**. So the change that wrote the rule
+  created the second copy of it, in the same package, and the sentence in this
+  file that quotes the rule has been standing over two copies ever since.
+  `statusOf` is deleted and `Finish` calls `classify`. **Nothing could have
+  reported it and that is stated rather than papered over**: both copies had
+  callers, so `unused` and `TestNoProductionDeadCode` are both correct to stay
+  quiet, and no assertion can fail over two functions that agree -- reinstated,
+  the duplicate is **exit 0** over `go test ./...`. What the duplication risked
+  is a divergence, and the two paths are covered either side of the deletion
+  (`TestRecorder_FinishClassifiesHowARunEnded` and the queue's own), so one
+  function is what makes them unable to disagree rather than a test being what
+  notices. The `node.Memory` shape with both halves alive.
+
+  **The bound's test carries its own deadline, because A WEDGE PRINTS NO
+  `--- FAIL`.** CI reads `go test`'s status and greps for `--- SKIP`, and a
+  hang is invisible to both until the binary's own `-timeout` dumps goroutines
+  naming nothing a reviewer can act on -- so the thing being waited for is
+  raced against the thing that means it will never happen, which is
+  `orExited`'s rule as the browser labs spell it. The store blocks until the
+  context it was handed is done, the two writers run as parallel subtests, and
+  the pass costs ten seconds of wall clock for the same trade `ws.go`'s
+  ten-second write bound already makes. Reinstated, each subtest is red at
+  **20.0s** rather than hanging. And -- because belt and braces reads exactly
+  like a dead gate -- the bound was deleted with that test renamed out of the
+  suite: `go test ./...` is **exit 0**, so nothing else in the tree reports an
+  unbounded write.
+
+  **Fourteen cases, judged on exit codes, controls at both ends, one backup per
+  path taken once, and every case ending in a diff against the pristine copy
+  rather than in an exit code.** Eight red where expected: each of the three
+  writers on the caller's context, `fail` with a literal `StatusFailed`, the
+  bound removed, `endIfUnfinished` writing unconditionally (which also turns
+  the pre-existing control red), the fake ignoring its context again, and
+  `generate`'s flush of the batch's tail. Six green where expected, each a
+  measurement rather than a gap: the bound removed with its own test taken out,
+  the whole historical arrangement, the duplicate classification, the urgent
+  flush left unbounded -- `context.Background()` never cancels and the fake
+  answers at once, so nothing in the tree can see that one, which is the
+  `subtle.ConstantTimeCompare` answer to "which of these has no exit code" --
+  and two reworded comments. One case reported ANCHOR-MISS rather than a
+  result, because a test this change renamed left its patch pointing at a name
+  the tree no longer has: the harness refusing to read a stale anchor as a
+  verdict, which is the first of the shapes below working rather than a sixth.
+
+  **A SIXTH HARNESS SHAPE, and it is the "cannot tell a build failure from a
+  pass" trap inverted into a FALSE RED.** The first run of this pass reported
+  A, B and H as red, and two of the three were a test package that did not
+  compile: the defect is a restored `ctx` parameter, the bound test calls those
+  two writers directly, and the harness build-checked with `go build ./...` --
+  which does not compile `_test.go` files at all. So a signature change reads
+  as a caught defect, in the one direction a harness cannot be caught out
+  safely, since a false red is indistinguishable from the thing being looked
+  for. The check is `go vet` on the two packages now, which compiles their
+  tests, and the A and B patches move the bound test's own call sites with the
+  signature so that what the suite reports is an assertion rather than a
+  compiler. It was found by asking why H had gone red when it was written as a
+  measurement expected to be green -- the "ask why a case went the way it did
+  rather than accepting it" rule, which has now caught a harness defect from
+  both directions.
 
 ## Style
 

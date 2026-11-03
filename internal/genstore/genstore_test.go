@@ -403,6 +403,63 @@ func TestUpdate_MissingIsNotFound(t *testing.T) {
 	})
 }
 
+// TestWrite_ACancelledContextWritesNothing is #159's measurement, held
+// against both stores and over both writes a teardown reaches.
+//
+// The sqlite store is `database/sql`: the context is checked when a connection
+// is taken, so the write answers `begin: context canceled` BEFORE SQLite is
+// reached -- there is no partial write and no version of it that depends on
+// timing. The recording store ignored its context entirely, which is why that
+// defect was invisible to every test in the tree: three writers of a terminal
+// status wrote through the context SIGINT had already cancelled, the row kept
+// the `running` ClaimNext wrote, and the next start's Interrupt sweep turned it
+// into `interrupted` with requests.err empty.
+//
+// BOTH HALVES ARE ASSERTED, and the second is the one that matters: an error
+// alone is consistent with a store that wrote the row and then complained,
+// which would leave the queue's writers nothing to be wrong about.
+func TestWrite_ACancelledContextWritesNothing(t *testing.T) {
+	each(t, func(t *testing.T, s Store) {
+		id, err := s.Enqueue(t.Context(), req("a paper boat"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		if err := s.Update(ctx, id, func(r *Request) {
+			r.Status = StatusFailed
+			r.Err = "the rental broke"
+		}); !errors.Is(err, context.Canceled) {
+			t.Errorf("Update err = %v, want it to wrap context.Canceled: a write that reports "+
+				"success on a cancelled context is a terminal status nobody can see is missing", err)
+		}
+
+		es := []report.Event{{Kind: report.KindJobProgress, Seq: 1, Step: 3, TotalSteps: 4}}
+		if err := s.AppendEvents(ctx, id, es); !errors.Is(err, context.Canceled) {
+			t.Errorf("AppendEvents err = %v, want it to wrap context.Canceled: the flush that "+
+				"follows a generation takes a context SIGINT may already have cancelled", err)
+		}
+
+		got, err := s.Get(t.Context(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != StatusQueued || got.Err != "" {
+			t.Errorf("the row was written on a cancelled context: status %q, err %q",
+				got.Status, got.Err)
+		}
+		stored, err := s.Events(t.Context(), id, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(stored) != 0 {
+			t.Errorf("%d event(s) were written on a cancelled context", len(stored))
+		}
+	})
+}
+
 // TestEvents_TheCursorIsWhatMakesAReconnectLossless.
 //
 // A browser says "I have seen up to 41" and gets everything since, whether it

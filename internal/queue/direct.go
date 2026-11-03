@@ -488,7 +488,7 @@ func AdoptRun(
 		// other -- so the context the run used is already done by the time
 		// there is an outcome to record, and the row is the only lasting
 		// record of what the rental cost.
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), writeTimeout)
+		ctx, cancel := writeCtx()
 		defer cancel()
 		rec.Finish(ctx, runErr)
 	}, nil
