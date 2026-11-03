@@ -81,11 +81,21 @@ type AppPlanner struct {
 	// and cannot enqueue or claim one.
 	//
 	// NIL IS A REFUSAL TO FILL THE STORE, not a sync that goes unrecorded.
-	// That is refuseOverPeriod's rule applied to a write: an unrecorded rental
-	// is precisely the defect this field exists to fix, and a ledger that
-	// silently misses one is worse than one that was never wired -- so a
-	// planner that cannot record what it is about to rent does not rent it.
-	// `ember serve` always wires it.
+	//
+	// THE RULE IS out()'s AND NOT refuseOverPeriod's, which this comment used
+	// to cite and which is the weaker of the two: that one refuses a nil
+	// ledger only when a ceiling is CONFIGURED, because what it honours is an
+	// operator who wrote max_month_usd. This keys on wiring rather than on
+	// configuration, and the reason it can is the same as out()'s -- a nil
+	// interface here is a crash. The first call recordSync makes is Adopt, so
+	// the panic lands in the drain goroutine before the sync's node exists:
+	// it takes `ember serve` down rather than leaving a machine running, and
+	// a panic unwinds provision.WithNode's deferred destroy on the way out in
+	// any case. Answering it is therefore cheap and the answer is the useful
+	// one: an unrecorded rental is precisely the defect this field exists to
+	// fix, so a planner that cannot record what it is about to rent does not
+	// rent it. `ember serve` always wires it, so nothing an operator can type
+	// reaches this -- it guards the shape.
 	Runs RunStore
 
 	// Now is injected because a ceiling is a question about a calendar
@@ -232,9 +242,12 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 func (p AppPlanner) fillStore(ctx context.Context, cfg config.Config, missing *app.AssetsMissingError) error {
 	// FIRST, AND BEFORE THE PLAN, because it is free and because a rental
 	// ember cannot account for is the thing this whole path is bounded by. The
-	// refusals below each cost a catalogue read; this one costs nothing and
-	// answers the same question refuseOverPeriod's nil Ledger does: an
-	// unattended process that cannot write down what it spent must not spend.
+	// refusals below each cost a catalogue read; this one costs nothing, and
+	// what it answers is out()'s question rather than refuseOverPeriod's --
+	// see the field, where the difference is written down: a nil here is a
+	// crash in the drain goroutine, and the answer worth giving it is that an
+	// unattended process which cannot write down what it spent must not
+	// spend.
 	if p.Runs == nil {
 		return fmt.Errorf("the store %q is missing %d asset(s) and nothing here can record what a "+
 			"machine rented to fetch them would cost, so none is rented: ember serve wires the "+
@@ -320,9 +333,10 @@ func (p AppPlanner) fillStore(ctx context.Context, cfg config.Config, missing *a
 // because ember could not take notes would be ember declining to do the thing
 // it is for. This rental nobody asked for, it happens with nobody watching,
 // and its whole justification is that a queue drains unattended -- so the
-// nil-recorder refusal above and this one are the same answer to the same
-// question, and the request fails with the reason rather than quietly paying
-// for a machine no ledger will remember.
+// request fails with the reason rather than quietly paying for a machine no
+// ledger will remember. It is also before the create call, so nothing has
+// been rented when it fires, which is what makes refusing cheap enough to be
+// the obvious answer rather than a trade.
 func (p AppPlanner) recordSync(ctx context.Context, sync app.Plan, store string) error {
 	// logx.New over the same two inputs `cmd_serve` builds the queue's logger
 	// from, rather than a third copy carried on this struct: Out is that

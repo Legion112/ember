@@ -1355,9 +1355,12 @@ has, and it is counted once on its own row rather than folded into the cost of
 the request that triggered it: that column is one rental's cost, and the
 requests after the first get the filled store for free. Nothing records which
 request caused it. `ember store sync` is recorded the same way, because it is
-the same rental typed by hand. If a configured `ember serve` has no generation
-history to write to, it refuses to fill the store rather than renting a machine
-it cannot account for.
+the same rental typed by hand — its output is byte-for-byte what it was when
+the history opens, and it says so on the one line it prints when it cannot.
+A planner with no generation history to write to refuses to fill a store
+rather than renting a machine it cannot account for, which `ember serve`
+cannot reach: it always wires one, so that refusal guards the shape rather
+than anything an operator can type.
 
 It does not check digests, for the reason `ember store verify` does not: that
 would mean reading every object back through this process to re-derive a number
@@ -2535,7 +2538,9 @@ deliberate:
 
 The last two have no jobs, so their per-job columns are a **dash** and never a
 zero, and both readers say how many rows they had to leave out. A column of
-zeros in a money ledger reads as free.
+zeros in a money ledger reads as free. They are no longer the only jobless
+rows: the machine with no card that fills a store has none either, and the
+footnote names all three because nothing in a row says which it was.
 
 Two things are not recorded and are worth naming. A run refused **before** the
 create call — an unpinned image, a budget that would not admit the offer, a
@@ -2592,9 +2597,12 @@ request paid for it to exist.
 1 request(s) finished with no per-job figures -- from before ember recorded
 them, or without a job completing -- so their images and card time are a dash
 rather than zero. Nothing backfills them.
-1 request(s) have no jobs: `ember up` forwarding ports, or running `cmds`,
-records what it rented and what that cost and has no per-job figures to
-report. A `cmds` run's per-step costs are in its event stream.
+1 request(s) have no jobs, so their per-job columns are a dash rather than
+zero: there was never anything to report. That is an `ember up` forwarding
+ports or running `cmds`, and the machine with no card that fills a store --
+which `ember serve` rents on its own initiative and `ember store sync` rents
+by hand. The rental is the whole record in each case; a `cmds` run's
+per-step costs are the one thing beyond it, in its event stream.
 1 request(s) have no model: they never reached a node, or they ran before
 ember recorded which model served a request. Nothing backfills them -- the only
 stored copy of a past model is a cached capability row the next rental

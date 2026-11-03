@@ -70,7 +70,7 @@ func runHistoryList(args []string, out io.Writer, d deps) error {
 	)
 	fs.Usage = func() {
 		outf(out, "ember history lists the generations ember has run.\n\n")
-		outf(out, "Out of the database both `ember serve` and `ember up` write to, so a\nrental is in here however it was started. What differs is the jobs: a\nqueued generation has them, an `ember up` that forwarded ports or ran\n`cmds` has none, and its per-job columns are a dash rather than zero\nbecause there was never anything to report -- see README.\n\n")
+		outf(out, "Out of the database both `ember serve` and `ember up` write to, so a\nrental is in here however it was started. What differs is the jobs: a\nqueued generation has them, and a rental that generates nothing has none --\nan `ember up` forwarding ports or running `cmds`, or the machine with no\ncard that fills a store. Their per-job columns are a dash rather than zero\nbecause there was never anything to report -- see README.\n\n")
 		outf(out, "Two cost columns. rental is what the provider charged for the node;\ncard time is what this request's own jobs took. A rental serves every\nqueued request it can, so the rental is charged to the request that\nopened it and a dash means this one rode along on somebody else's.\n\n")
 		outf(out, "The model column is what the generation server reported when the weights\nwent resident, not what `sd.serve` names today -- a dash means nobody read\nit, which is a request that never reached a node or one from before ember\nrecorded it. `ember spend --by model` groups on the same value.\n\n")
 		outf(out, "Dates are UTC and the period is half-open -- --since includes, --until\nexcludes -- the same rule `ember spend` uses, so the two tile alike.\n\n")
@@ -277,12 +277,15 @@ func printHistory(out io.Writer, rows []genstore.Entry) {
 			imgs, cardTime = "-", "-"
 			// COUNTED APART, because the two have nothing in common but the
 			// dash. A request with jobs that never reported is a gap; a
-			// request with no jobs is an `ember up` that forwarded ports or
-			// ran `cmds`, where there was never a per-job figure to lose.
-			// One footnote covering both would have had to say "or" three
-			// times and would have been wrong about whichever run the reader
-			// was looking at -- the caption that is true of one mode and
-			// wrong for the others, which reads as working.
+			// request with no jobs is one that generates nothing -- an
+			// `ember up` that forwarded ports or ran `cmds`, or the machine
+			// with no card that fills a store -- where there was never a
+			// per-job figure to lose. One footnote covering both would have
+			// had to say "or" three times and would have been wrong about
+			// whichever run the reader was looking at -- the caption that is
+			// true of one mode and wrong for the others, which reads as
+			// working. The jobless footnote below names the causes of ITS own
+			// fact, which is a different thing from merging two facts.
 			if e.Jobs == 0 {
 				jobless++
 			} else {
@@ -354,14 +357,39 @@ func printHistory(out io.Writer, rows []genstore.Entry) {
 	}
 	if jobless > 0 {
 		// The rental is the whole record, and that is the honest answer
-		// rather than a gap. `ember up` records what it rented and what it
-		// cost for every shape it has; only the served shape has jobs, so
-		// the per-job columns of the other two are a dash because there was
-		// nothing to put in them. The per-step costs of a `cmds` run are in
-		// the event stream -- see README on why a step is not a job row.
-		outf(out, "%d request(s) have no jobs: `ember up` forwarding ports, or running `cmds`,\n"+
-			"records what it rented and what that cost and has no per-job figures to\n"+
-			"report. A `cmds` run's per-step costs are in its event stream.\n", jobless)
+		// rather than a gap. Only the served shape has jobs, so the per-job
+		// columns of every other one are a dash because there was nothing to
+		// put in them.
+		//
+		// IT NAMES THREE CAUSES NOW, AND THAT IS A PREMISE CHANGE RATHER THAN
+		// A LOOSENING. It read "`ember up` forwarding ports, or running
+		// `cmds`" and those two were EXHAUSTIVE, because the machine with no
+		// card that fills a store wrote no row at all -- which was #148, the
+		// rental in no ledger. Now that it has one, that wording tells an
+		// operator who has never typed `ember up` that their unexplained
+		// $0.06 line is an `ember up`: the caption that is true of one mode
+		// and wrong for the others, in the footnote whose own comment above
+		// argues against exactly that.
+		//
+		// COVERED AND NOT DISTINGUISHED, because distinguishing is not
+		// available: nothing in the row says which it was. A store fill is
+		// `Jobs == 0` with no card, and so is an `ember up` that forwarded a
+		// port on a machine with none, so the only discriminator would be a
+		// column -- which is the migration recordSync refuses for naming the
+		// request that caused it, for the same reason. What the three share
+		// is the fact this line is about, that there was never a per-job
+		// figure to lose, so one sentence is honest about all three where the
+		// old one was precise about two.
+		//
+		// The `cmds` clause stays SCOPED TO `cmds`. A store fill has no
+		// per-step costs either, so a bare "the per-step costs are in the
+		// event stream" would be the same mistake one sentence further down.
+		outf(out, "%d request(s) have no jobs, so their per-job columns are a dash rather than\n"+
+			"zero: there was never anything to report. That is an `ember up` forwarding\n"+
+			"ports or running `cmds`, and the machine with no card that fills a store --\n"+
+			"which `ember serve` rents on its own initiative and `ember store sync` rents\n"+
+			"by hand. The rental is the whole record in each case; a `cmds` run's\n"+
+			"per-step costs are the one thing beyond it, in its event stream.\n", jobless)
 	}
 	if nameless > 0 {
 		// Said out loud for the reason the unrecorded line is: a column of
