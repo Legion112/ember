@@ -2005,10 +2005,11 @@ money row saying the rental is not priced yet rather than printing a `$0`, and
 an image that decodes.
 
 A second browser lab presses **cancel** in both directions on one request: once
-while the rental is still being provisioned, where the row reads `running` and
-the queue has nothing to signal, and the page has to print the 409's own
-`restart ember serve`; then once it really is generating, where the page has to
-say `cancelling` before the next poll and take the button away. A lab that
+while the rental is still being provisioned, where the row reads `running`, the
+queue has nothing to signal, and the page has to print the 409 that says the
+rental is coming up — *and not* the one that asks for a restart; then once it
+really is generating, where the page has to say `cancelling` before the next
+poll and take the button away. A lab that
 asserted only the accepted path would pass against a page that swallows every
 refusal, which is what it did. That lab's config gives `gpu_probe` a sleep, so
 the first window is twenty-five deterministic seconds rather than a race
@@ -2066,11 +2067,25 @@ dropped"*. Refusing instead would leave an operator who is trying to stop
 spending with no lever but stopping `ember serve`, which destroys the rental
 and takes every other request on it.
 
-A cancel reaches **one** request. Cancelling a request that is not the one
-generating — a row left as running by a restart, say — answers 409 and records
-nothing: "I could not stop it" and "it is stopped" are different answers, and
-the first must not render as the second over a card that may still be
-billing.
+A cancel reaches **one** request. Cancelling a request the queue is not
+generating answers 409 and records nothing: "I could not stop it" and "it is
+stopped" are different answers, and the first must not render as the second
+over a card that may still be billing.
+
+**Two different things reach that 409 and they get different sentences**,
+because one of the remediations is destructive in the other's state. A row
+reads `running` from the moment it is claimed and the queue can only signal a
+batch that has started generating, so clicking cancel while the node is still
+coming up — the plan, the create, the `gpu_probe`, the asset verify, the model
+load — lands in a window where a rental *is* in this process and is seconds
+from running. That answer says the rental is coming up, to ask again, and
+explicitly **not** to restart `ember serve`, which would destroy the rental
+the request is waiting for. The other case is a row left `running` by an ember
+that is gone, which nothing here holds and which a restart really does
+reconcile (`queue.Run` marks what it finds in flight as `interrupted`); that
+one keeps the restart advice. ember can tell them apart without a counter
+because there is one drain goroutine and a rental lives inside one iteration
+of its loop.
 
 **The page says which of the three happened**, and until recently it said none
 of them: the answer was decoded into a dynamic value and the whole `Result`
@@ -2079,9 +2094,9 @@ thrown away, so a refused cancel left a row that still read `running` with a
 registered, which is what sent an operator clicking again over a card that may
 still be billing.
 
-- A **refused** one prints the server's own sentence, in full, including the
-  `restart ember serve` the 409 names. The button comes back, because nothing
-  was stopped and a retry after that restart is the right move.
+- A **refused** one prints the server's own sentence, in full — which of the
+  two 409s it was, and therefore whether the right move is to ask again or to
+  restart. The button comes back, because nothing was stopped.
 - An **accepted** one on a generating request says `cancelling` beside a status
   that still honestly reads `running` — the queue is polling sd-server for the
   job's own answer and is the one that records how the batch ended, so the

@@ -104,6 +104,30 @@ type Queue struct {
 	mu      sync.Mutex
 	current genstore.ReqID
 
+	// held is the request this loop has CLAIMED, which is not the same as
+	// the one it is generating.
+	//
+	// THE GAP BETWEEN THE TWO IS A 409'S REMEDIATION. `current` is set by
+	// generate, so it is empty for the whole of provisioning -- the plan,
+	// the create, the wait for sshd, the gpu probe, the asset verify and the
+	// model load -- while the row has read `running` since ClaimNext. A
+	// cancel arriving in that window reaches a queue with nothing to signal,
+	// and webapi answered it by telling the operator to restart
+	// `ember serve`: the one action that destroys the rental they are paying
+	// for, in order to reconcile a request that was seconds from generating.
+	// This field is what tells that window from the state the message is
+	// true of -- a row left `running` by a process that is gone, which Run's
+	// Interrupt sweep clears on the next start.
+	//
+	// ONE VALUE AND NOT A SET, for the reason `stop` is one channel: there
+	// is one drain goroutine and a rental lives inside one iteration of its
+	// loop, so "the request this process holds" is a single value and a
+	// counter that could be wrong is not needed. Set at each claim and
+	// cleared when `once` returns, so it covers the teardown as well: a
+	// request whose destroy is still running has not been handed back to
+	// anybody.
+	held genstore.ReqID
+
 	// stop is closed to cancel `current`, and nil once it has been.
 	//
 	// ONE CHANNEL AND NOT A MAP, for the reason there is one drain
@@ -174,6 +198,28 @@ func (q *Queue) Running() (genstore.ReqID, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.current, q.current != ""
+}
+
+// Holding reports whether this process has claimed that request -- anywhere
+// between the claim and the end of its batch, generating or not.
+//
+// IT IS NOT Running. The two differ for exactly as long as a rental takes to
+// come up, and that difference is the only thing that can tell a cancel
+// arriving during provisioning -- where a rental IS in this process and is
+// about to generate -- from a row left `running` by an ember that is gone.
+// Telling those apart is the whole of webapi's two 409s, because the
+// remediation for the second destroys the rental in the first.
+func (q *Queue) Holding(id genstore.ReqID) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return id != "" && q.held == id
+}
+
+// hold records which request this loop is responsible for; "" is none.
+func (q *Queue) hold(id genstore.ReqID) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.held = id
 }
 
 // Cancel stops the generation of one request and reports whether it reached
@@ -262,6 +308,15 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
+	// HELD FROM THE CLAIM AND NOT FROM THE GENERATION. Everything between
+	// here and drain's first iteration is provisioning, and the row has read
+	// `running` since the statement above -- so this is the window a cancel
+	// used to be answered in with "restart ember serve". Cleared when this
+	// returns, which is after the deferred destroy: a request whose rental is
+	// still being torn down is still this process's.
+	q.hold(first.ID)
+	defer q.hold("")
+
 	rental, err := q.Planner.Plan(ctx, first)
 	if err != nil {
 		// Nothing was rented, so nothing is billing. The request carries the
@@ -299,6 +354,12 @@ func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat ge
 	req := first
 	for {
 		*served = append(*served, req.ID)
+		// A rider is held too, from the moment it is claimed: the claim at
+		// the bottom of this loop writes `running` to its row, and there is
+		// a real gap before generate registers its stop channel -- the model
+		// is resident by now, so it is short, and a short window answered
+		// with a destructive remediation is still answered wrongly.
+		q.hold(req.ID)
 		// WHICH MODEL SERVED THIS REQUEST, recorded before it generates and
 		// to EVERY request on the rental rather than only to the opener.
 		//

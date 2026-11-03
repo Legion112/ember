@@ -72,9 +72,15 @@ type harness struct {
 // Caps.PublicSSH makes: the uninformative answer is the safe one. A fake that
 // said "yes, I stopped it" without being told would make every cancel test
 // pass against a handler that never called Cancel at all.
+//
+// `holding` IS ITS OWN FIELD AND NOT DERIVED FROM `running`, because the
+// state this package's two 409s turn on is exactly the one where they differ:
+// a rental claimed and provisioning is held and not generating. A fake that
+// computed one from the other could not produce it.
 type RecordingDrain struct {
 	Calls   []string
 	running genstore.ReqID
+	holding genstore.ReqID
 	reached bool
 }
 
@@ -88,6 +94,11 @@ func (d *RecordingDrain) Running() (genstore.ReqID, bool) {
 func (d *RecordingDrain) Cancel(id genstore.ReqID) bool {
 	d.Calls = append(d.Calls, "Cancel "+string(id))
 	return d.reached && id == d.running
+}
+
+func (d *RecordingDrain) Holding(id genstore.ReqID) bool {
+	d.Calls = append(d.Calls, "Holding "+string(id))
+	return d.holding != "" && id == d.holding
 }
 
 func newHarness(t *testing.T, mut ...func(*Options)) *harness {
@@ -778,6 +789,90 @@ func TestCancel_WillNotClaimToHaveStoppedWhatItCouldNotReach(t *testing.T) {
 		})
 	}
 }
+
+// A cancel during provisioning is refused and must NOT name a restart.
+//
+// THE REMEDIATION WAS WORSE THAN THE PROBLEM. One message covered both ways
+// of reaching this 409, and this is the ordinary one: the row reads `running`
+// from ClaimNext and the queue registers its stop channel in `generate`, so
+// clicking cancel while a node is coming up lands in a window where a rental
+// IS in this process and is about to generate. Telling that operator to
+// restart `ember serve` destroys the rental they are paying for in order to
+// reconcile a request that was seconds from running.
+//
+// THE ASSERTION THAT THE TWO ANSWERS DIFFER IS WHAT STOPS THEM BEING MERGED
+// BACK TOGETHER, and it is here rather than only in the lab because the lab
+// can reach one of the two states and not the other: a row left running by a
+// process that is gone cannot be produced without writing it behind the
+// queue's back, and queue.Run's Interrupt sweep clears it at startup.
+func TestCancel_SaysTheRentalIsComingUpRatherThanAskingForARestart(t *testing.T) {
+	queued := func(t *testing.T, drain *RecordingDrain) (*harness, string) {
+		t.Helper()
+		h := newHarness(t, func(o *Options) { o.Queue = drain })
+		id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
+		if _, ok, err := h.store.ClaimNext(t.Context(), "lease", genstore.Compat{}); err != nil || !ok {
+			t.Fatalf("setup: ok=%v err=%v", ok, err)
+		}
+		drain.holding = genstore.ReqID(id)
+		return h, id
+	}
+
+	// Claimed, held, not yet generating: `Running` is empty and `Cancel`
+	// has nothing to signal.
+	drain := &RecordingDrain{}
+	h, id := queued(t, drain)
+	w := h.do(t, "POST", "/api/requests/"+id+"/cancel", "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: nothing was stopped", w.Code)
+	}
+	provisioning := decode[map[string]string](t, w)["error"]
+	if !strings.Contains(provisioning, "coming up") || !strings.Contains(provisioning, "ask again") {
+		t.Errorf("error = %q, want it to say the rental is coming up and to ask again",
+			provisioning)
+	}
+	if !strings.Contains(provisioning, "do not restart ember serve") {
+		t.Errorf("error = %q; the operator's instinct here is the old message's advice, and "+
+			"a restart during provisioning destroys the rental the request is waiting for",
+			provisioning)
+	}
+	if got, err := h.store.Get(t.Context(), genstore.ReqID(id)); err != nil {
+		t.Fatal(err)
+	} else if got.Status != genstore.StatusRunning {
+		t.Errorf("status = %q; a cancel that could not be delivered must not record one",
+			got.Status)
+	}
+
+	// The state the restart IS true of: nothing in this process holds it.
+	stale := &RecordingDrain{}
+	h2 := newHarness(t, func(o *Options) { o.Queue = stale })
+	id2 := decode[map[string]string](t, h2.do(t, "POST", "/api/requests", oneJob))["id"]
+	if _, ok, err := h2.store.ClaimNext(t.Context(), "lease", genstore.Compat{}); err != nil || !ok {
+		t.Fatalf("setup: ok=%v err=%v", ok, err)
+	}
+	w2 := h2.do(t, "POST", "/api/requests/"+id2+"/cancel", "")
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w2.Code)
+	}
+	orphan := decode[map[string]string](t, w2)["error"]
+	if !strings.Contains(orphan, "restart ember serve") {
+		t.Errorf("error = %q, want the restart advice kept for the state it is true of", orphan)
+	}
+
+	// AND THEY ARE DIFFERENT SENTENCES. Both are 409s over a request the row
+	// calls running, so a single message satisfies every status assertion
+	// above -- which is how the two came to be one in the first place.
+	if same(provisioning, id) == same(orphan, id2) {
+		t.Errorf("both 409s say the same thing; provisioning: %s / stale row: %s",
+			provisioning, orphan)
+	}
+	if strings.Contains(provisioning, "restart ember serve to have the queue reconcile it") {
+		t.Errorf("the provisioning refusal still names the restart: %s", provisioning)
+	}
+}
+
+// same strips the request id, which is the only part of the two refusals that
+// is legitimately different.
+func same(msg, id string) string { return strings.ReplaceAll(msg, id, "<id>") }
 
 func containsCall(calls []string, want string) bool {
 	for _, c := range calls {
