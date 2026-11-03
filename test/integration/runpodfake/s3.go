@@ -250,7 +250,12 @@ func (f *Fake) headObject(w http.ResponseWriter, v *volume, key string) {
 	}
 	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
 	w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
-	w.Header().Set("ETag", `"`+etagOf(v.Dir, key)+`"`)
+	// OMITTED rather than sent empty when there is no tag to compute, because
+	// `""` is a value that looks like a fact: `normalizeETag` strips the
+	// quotes and the caller cannot tell it from a store that reports none.
+	if tag := etagOf(v.Dir, key); tag != "" {
+		w.Header().Set("ETag", `"`+tag+`"`)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -337,12 +342,11 @@ func (f *Fake) listObjects(w http.ResponseWriter, v *volume, q url.Values) {
 		if err != nil {
 			continue
 		}
-		res.Contents = append(res.Contents, listEntry{
-			Key:          k,
-			Size:         fi.Size(),
-			LastModified: s3Time(fi.ModTime()),
-			ETag:         `"` + etagOf(v.Dir, k) + `"`,
-		})
+		e := listEntry{Key: k, Size: fi.Size(), LastModified: s3Time(fi.ModTime())}
+		if tag := etagOf(v.Dir, k); tag != "" {
+			e.ETag = `"` + tag + `"`
+		}
+		res.Contents = append(res.Contents, e)
 	}
 	res.KeyCount = len(res.Contents)
 	f.s3XML(w, res)
@@ -409,7 +413,7 @@ type listEntry struct {
 	Key          string `xml:"Key"`
 	Size         int64  `xml:"Size"`
 	LastModified string `xml:"LastModified"`
-	ETag         string `xml:"ETag"`
+	ETag         string `xml:"ETag,omitempty"`
 }
 
 type listUploadsResult struct {
