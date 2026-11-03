@@ -660,6 +660,94 @@ pub struct RequestList {
     pub running: String,
 }
 
+/// What `POST /api/requests/{id}/cancel` answered.
+///
+/// A NAMED TYPE AND NOT `serde_json::Value`, which is how `cancelling` came
+/// to be a field with a writer, a wire name, a comment explaining it and no
+/// reader at all. The call site decoded into a dynamic value and threw the
+/// whole `Result` away with `let _ =`, so the handler's 409 -- the one whose
+/// message names the remediation -- reached the page and was dropped one
+/// frame later, and the operator's only feedback over a card that may still
+/// be billing was a row that still said `running` with a `cancel` button
+/// still on it. Every other route on this seam has a named type here for the
+/// same reason: a field added to the handler must reach something, or nobody
+/// finds out it did not.
+/// THE ANSWER'S OWN `id` IS NOT ON IT, and that is the same rule rather than
+/// an exception to it: the page knows which row it clicked, `Stopping` is
+/// keyed on that, and keying on the id the server echoed would mean an answer
+/// that arrived without one put the cancel button back under a stop that is
+/// already travelling. A field this page cannot act on is a field it does not
+/// decode.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Cancelled {
+    /// The status the row holds, which for a generating request is still
+    /// `running` and is honest: the queue is polling sd-server for the job's
+    /// own answer and is the one that records how it ended.
+    #[serde(default)]
+    pub status: String,
+    /// Whether a stop is on its way to a rental.
+    ///
+    /// True only on the generating path, where the handler signalled
+    /// `queue.Cancel` and returned while the batch is still running. The
+    /// queued path has no rental to signal, so the handler makes the row
+    /// terminal itself and answers without this.
+    #[serde(default)]
+    pub cancelling: bool,
+}
+
+impl Cancelled {
+    /// What the row says between this answer and the next poll.
+    ///
+    /// THE DISTINCTION IS THE POINT, and it is the one the Go side is careful
+    /// to keep: a request whose remaining jobs were dropped while the job in
+    /// flight finishes and is paid for, and a request that had no rental at
+    /// all, are different answers. Without the flag the only thing the page
+    /// could say is the status, which on the generating path is `running` --
+    /// so an accepted cancel would read exactly like a click that did not
+    /// register, which is what sent an operator clicking again.
+    ///
+    /// AN ANSWER WITH NO STATUS IN IT reads as the flag being set, which is
+    /// the safe direction for a response this page cannot interpret: claiming
+    /// a request ended when it did not is the error that leaves a card
+    /// billing unwatched. It is not the state before the server answers --
+    /// that one is `Stopping` and has a word of its own, deliberately.
+    pub fn label(&self) -> &str {
+        if self.cancelling || self.status.is_empty() {
+            return "cancelling";
+        }
+        self.status.as_str()
+    }
+}
+
+/// Stopping is one cancel this page has asked for and the row has not caught
+/// up with.
+///
+/// THE ASK AND THE ANSWER ARE DIFFERENT STATES, and giving them one word is
+/// what would make this untestable from a browser. The page marks a request
+/// the moment it asks -- the round trip must not be a window in which the
+/// button is still there -- so if that placeholder said "cancelling" too,
+/// then a page that went back to ignoring the response body would show
+/// exactly the same cell, and the only check that could tell them apart would
+/// be a Rust unit test of a page agreeing with itself. They are also honestly
+/// different: "asking" is this page having sent a request, and "cancelling"
+/// is the server having accepted one and a stop being on its way to a rental.
+#[derive(Clone, Debug)]
+pub struct Stopping {
+    pub id: String,
+    /// None until the server answers, and never reset once it has.
+    pub answer: Option<Cancelled>,
+}
+
+impl Stopping {
+    /// What the row's stop cell says.
+    pub fn label(&self) -> &str {
+        match &self.answer {
+            None => "asking",
+            Some(c) => c.label(),
+        }
+    }
+}
+
 /// One event, as `internal/report` writes it.
 ///
 /// Flat, with everything optional, because that is how it crosses the wire:
@@ -1335,6 +1423,78 @@ mod tests {
             Rental::Accruing,
             "card time has been charged and the rental has not been priced"
         );
+    }
+
+    /// The two bodies the cancel route answers, verbatim, and the one word
+    /// each gets.
+    ///
+    /// `webapi.go` builds them by hand, and they are different shapes on
+    /// purpose: a generating request keeps the status the row holds and
+    /// carries `cancelling`, because the queue is the one that records how
+    /// the batch ended; a queued request has no rental, so the handler makes
+    /// it terminal itself and answers with the final status and no flag.
+    /// Decoding both into one type is what makes the page able to tell them
+    /// apart -- `serde_json::Value` and `let _ =` could not.
+    #[test]
+    fn a_cancel_answer_says_whether_a_stop_is_still_travelling() {
+        let generating: Cancelled =
+            serde_json::from_str(r#"{"id":"req-1","status":"running","cancelling":true}"#)
+                .expect("the generating answer decodes");
+        assert_eq!(
+            generating.label(),
+            "cancelling",
+            "the row's own status is still `running` and saying that would read as a \
+             click that did not register"
+        );
+
+        let queued: Cancelled = serde_json::from_str(r#"{"id":"req-1","status":"cancelled"}"#)
+            .expect("the queued answer decodes");
+        assert!(
+            !queued.cancelling,
+            "a queued request has no rental, so there was nothing to signal"
+        );
+        assert_eq!(
+            queued.label(),
+            "cancelled",
+            "the handler already ended it, and the server's own word reaches the \
+             operator before the two-second poll does"
+        );
+
+        // AND THE THREE WORDS THE CELL CAN SAY, which are three states and
+        // not two: an empty cell between the click and the answer reads as
+        // nothing having happened, and a placeholder spelled the same as the
+        // accepted answer would make the two indistinguishable from outside --
+        // so a page that stopped reading the body would still look right.
+        assert_eq!(
+            Stopping {
+                id: "req-1".into(),
+                answer: None
+            }
+            .label(),
+            "asking",
+            "this page has asked and the server has not answered"
+        );
+        assert_eq!(
+            Stopping {
+                id: "req-1".into(),
+                answer: Some(generating)
+            }
+            .label(),
+            "cancelling"
+        );
+        assert_eq!(
+            Stopping {
+                id: "req-1".into(),
+                answer: Some(queued)
+            }
+            .label(),
+            "cancelled"
+        );
+
+        // A 200 THAT SAYS NOTHING reads as the flag being set, because
+        // claiming a request ended when it did not is the error that leaves a
+        // card billing unwatched.
+        assert_eq!(Cancelled::default().label(), "cancelling");
     }
 
     /// A cancel marks the job it reached and says how many never started.
