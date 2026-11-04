@@ -6261,10 +6261,12 @@ A leaked node bills by the hour in silence. These are not style preferences.
   if-statement initialiser, the parameter's address taken, a copy through a
   second `:=`, **a field write that zeroes exactly the two ceilings**, a nested
   field write, a write through an index, a write through a parenthesised
-  dereference, a compound-assign to a field, and a field write inside a closure
-  with the construction outside it. Its greens: a closure that takes the
-  config, an identifier from `config.Load`, the fields reordered, and the one
-  documented bound -- a config handed across a call.
+  dereference, a compound-assign to a field, a field write inside a closure
+  with the construction outside it, **a range clause assigning into a ceiling
+  field**, a range clause assigning the whole variable, and an inc/dec of a
+  field. Its greens: a closure that takes the config, an identifier from
+  `config.Load`, the fields reordered, **a legitimate `:=` range loop beside
+  the wiring**, and the one documented bound -- a config handed across a call.
   **And the per-arm verdict is the proof the free-rental pair discriminates**:
   with `Binds` reverted to `IsZero`, the PAID arm and the no-ceiling arm stay
   **PASS** and only the FREE arm goes **FAIL**, so the free arm is doing the
@@ -6386,27 +6388,37 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `TestNoProductionDeadCode` already loads the tree through it.
   **A WRITE is the one thing identity cannot answer and it is REFUSED rather
   than analysed**: `cfg = config.Config{}` and `cfg.MaxDayUSD = ""` both leave
-  the object alone and change what is in it, which is dataflow -- so an object
-  the function WROTE TO is no longer accepted, and the message says which way.
-  Written to means assigned to whole, written through a FIELD or an element, or
-  had its address taken. That is the allow-list direction, a refusal rather
-  than an analysis, and it costs no false positive today: no production
-  function here that builds a `DirectRunner` does any of them, and
-  `internal/config` declares no pointer-receiver method on `Config`, so there
-  is no mutating method call to catch either.
-  **AND THAT SENTENCE OVER-CLAIMED A FOURTH TIME -- "assigned to ... anywhere
-  in the function", while the code looked only for a bare identifier on the
-  left.** So `cfg.MaxDayUSD = ""` was skipped: the object stayed accepted, and
-  two lines that read as normalisation and zero exactly the two ceiling fields
-  were green across `go build`, `go vet`, `golangci-lint` and `go test ./...`
-  while `Tightest` composed a zero. It is the MOST plausible of the four
-  walkarounds and the least contrived -- no shadow, no closure, no
-  reassignment of the variable -- and it is the fourth consecutive round in
-  which this guard's prose described more than its code. The fix is a `rootIdent`
-  that peels selectors, indices, dereferences and parentheses off an assignment
-  target, so the thing recorded is the variable being written to however many
-  of them stand in front of it; what the prose is allowed to say is now what
-  seven measured forms do.
+  the object alone and change what is in it, which is dataflow -- so **an
+  object the function wrote to is no longer accepted**, and the message says
+  which way. That is the allow-list direction, a refusal rather than an
+  analysis, and it costs no false positive today: no production function here
+  that builds a `DirectRunner` writes to its config, and `internal/config`
+  declares no pointer-receiver method on `Config`, so there is no mutating
+  method call to catch either.
+  **THAT SENTENCE NOW HAS NO QUALIFYING CLAUSE, AND IT TOOK FIVE REVISIONS AND
+  FOUR WRONG ONES -- which is the entry's own lesson rather than a note about a
+  test.** v2's prose said "bound to a config.Config" over a set of NAMES. Its
+  fix said "assigned to ... anywhere in the function" while the code looked
+  only for a bare identifier on the left, so `cfg.MaxDayUSD = ""` stayed
+  accepted: two lines that read as normalisation and zero exactly the two
+  ceiling fields, green across `go build`, `go vet`, `golangci-lint` and
+  `go test ./...` while `Tightest` composed a zero -- the most plausible
+  walkaround of the lot, with no shadow, no closure and no reassignment of the
+  variable. And *that* fix still missed the two write forms which are not an
+  `*ast.AssignStmt` at all: a range clause with `token.ASSIGN`, where
+  `for _, cfg.MaxDayUSD = range []string{""} {}` zeroed a ceiling with the
+  guard green, and `*ast.IncDecStmt`, which cannot zero either ceiling because
+  both are strings.
+  **The last step was a choice between two `case` arms and a sixth attempt at
+  wording a bound, and the code is the cheaper and more durable answer.** Go
+  has exactly three statement nodes that write to an existing variable --
+  `AssignStmt`, `RangeStmt` with `token.ASSIGN`, `IncDecStmt` -- plus `&x`, and
+  all four go through one `rootIdent`, whose six forms are *exhaustive* over
+  Go's assignable expressions rather than merely safe. A `token.DEFINE` range
+  binds a new object and stays acceptable, which the bound check already
+  handles. So the inc/dec arm exists for the RULE and not for an exploit: a
+  sentence with no clause in it is a sentence nobody has to be trusted to have
+  stated correctly, and this one was mis-stated four times out of five.
   **The bound is now one thing instead of three, and the inline form was
   closable and deliberately left**: any function or closure that TAKES a
   `config.Config` is accepted whatever its callers pass, so a config handed
