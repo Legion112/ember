@@ -6263,10 +6263,14 @@ A leaked node bills by the hour in silence. These are not style preferences.
   field write, a write through an index, a write through a parenthesised
   dereference, a compound-assign to a field, a field write inside a closure
   with the construction outside it, **a range clause assigning into a ceiling
-  field**, a range clause assigning the whole variable, and an inc/dec of a
-  field. Its greens: a closure that takes the config, an identifier from
-  `config.Load`, the fields reordered, **a legitimate `:=` range loop beside
-  the wiring**, and the one documented bound -- a config handed across a call.
+  field**, a range clause assigning the whole variable, a range clause
+  assigning into the KEY position, an assignment inside a `select` clause, and
+  an inc/dec of a field. Its greens: a closure that takes the config, an
+  identifier from `config.Load`, the fields reordered, **two legitimate `:=`
+  range loops beside the wiring**, and the one documented bound -- a config
+  handed across a call. And one green that is a FINDING rather than a pass,
+  which is the entry above: a pointer-receiver method mutating the config, now
+  covered by a second guard instead of by that one.
   **And the per-arm verdict is the proof the free-rental pair discriminates**:
   with `Binds` reverted to `IsZero`, the PAID arm and the no-ceiling arm stay
   **PASS** and only the FREE arm goes **FAIL**, so the free arm is doing the
@@ -6389,12 +6393,11 @@ A leaked node bills by the hour in silence. These are not style preferences.
   **A WRITE is the one thing identity cannot answer and it is REFUSED rather
   than analysed**: `cfg = config.Config{}` and `cfg.MaxDayUSD = ""` both leave
   the object alone and change what is in it, which is dataflow -- so **an
-  object the function wrote to is no longer accepted**, and the message says
-  which way. That is the allow-list direction, a refusal rather than an
-  analysis, and it costs no false positive today: no production function here
-  that builds a `DirectRunner` writes to its config, and `internal/config`
-  declares no pointer-receiver method on `Config`, so there is no mutating
-  method call to catch either.
+  object the function wrote to BY ANY STATEMENT is no longer accepted**, and
+  the message says which way. That is the allow-list direction, a refusal
+  rather than an analysis, and it costs no false positive today: no production
+  function here that builds a `DirectRunner` writes to its config by any of
+  them.
   **THAT SENTENCE NOW HAS NO QUALIFYING CLAUSE, AND IT TOOK FIVE REVISIONS AND
   FOUR WRONG ONES -- which is the entry's own lesson rather than a note about a
   test.** v2's prose said "bound to a config.Config" over a set of NAMES. Its
@@ -6417,8 +6420,40 @@ A leaked node bills by the hour in silence. These are not style preferences.
   Go's assignable expressions rather than merely safe. A `token.DEFINE` range
   binds a new object and stays acceptable, which the bound check already
   handles. So the inc/dec arm exists for the RULE and not for an exploit: a
-  sentence with no clause in it is a sentence nobody has to be trusted to have
-  stated correctly, and this one was mis-stated four times out of five.
+  sentence nobody has to be trusted to have stated correctly is worth two
+  `case` arms, and this one was mis-stated five times out of six.
+  **AND "NO QUALIFYING CLAUSE" WAS THE FIFTH WRONG WORDING, WHICH IS THE
+  BOAST OVER-REACHING RATHER THAN THE CODE.** A write can reach the object
+  through an EXPRESSION instead of a statement: a pointer-receiver method takes
+  the address of its receiver implicitly, so `cfg.ZeroCeilings()` mutates the
+  config with no `&` and no assignment anywhere in the AST. Measured -- a
+  `func (c *Config) ZeroCeilings()` added to `internal/config` and called above
+  the wiring leaves the guard GREEN and the whole tree with it, both ceilings
+  zeroed. The claim was *vacuous* rather than wrong, because that package
+  declares no such method; what was wrong was asserting more than the code
+  does, for the fifth time in one sentence.
+  **So the clause is "by any statement" AND the property it rests on is an
+  exit code now.** `TestConfig_DeclaresNoPointerReceiverMethodOnConfig` walks
+  `internal/config` through the type checker and fails on a pointer receiver on
+  `Config`, with a floor -- `Config` has value-receiver methods, so finding
+  none means the load resolved nothing -- and a message naming which guard goes
+  quiet and the two ways out. It is in `internal/cli` and not in the config
+  package, because the rule is this GUARD's bound and not a fact about that
+  package's design: a failure there would read as "you may not add a
+  pointer-receiver method", which is not the rule. Made to fail before it was
+  believed, which is the half that matters: with the probe method present it is
+  **exit 1** naming `ZeroCeilings`, and with the method AND the call present
+  the wiring guard is **exit 0** while this one is **exit 1** -- which is the
+  whole arrangement, since the thing being guarded is a guard going silent. An
+  unenforced dependency that is cheap to break and reports nothing is what
+  `AssertNoStray` was; this is ten lines and a floor.
+  **The third option was taken and rejected rather than overlooked**: recording
+  a write when a pointer-receiver method is called on a tracked root is about
+  the same size and uses type info the guard already has -- and it makes the
+  NEW code the thing that needs walking around, where this makes an existing
+  claim checkable. The bound stays stated either way, so the cheaper half to
+  trust is the one that is a property of another package rather than another
+  branch in the walk.
   **The bound is now one thing instead of three, and the inline form was
   closable and deliberately left**: any function or closure that TAKES a
   `config.Config` is accepted whatever its callers pass, so a config handed
