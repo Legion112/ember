@@ -362,10 +362,11 @@ func (p AppPlanner) recordSync(ctx context.Context, sync app.Plan, store string)
 // max_month_usd gate: its config, its ledger and its clock.
 //
 // THE RULE ITSELF IS RefuseOverPeriod's, and it is a package function rather
-// than a method here because four other rental paths need the same one --
-// `ember up` in a shell, `ember up` over the socket, `ember store sync`, and
-// the store fill below. A copy per caller is a copy of a money rule, and the
-// one thing this repository records about those is that the copies drift.
+// than a method here because three other rental paths need the same one --
+// `ember up` in a shell, `ember up` over the socket and `ember store sync`.
+// This method serves two of the five: Plan's own rental, and the store fill
+// above. A copy per caller is a copy of a money rule, and the one thing this
+// repository records about those is that the copies drift.
 func (p AppPlanner) refuseOverPeriod(ctx context.Context, ttl time.Duration, price node.Rate) error {
 	cs, err := CeilingsOf(p.Config)
 	if err != nil {

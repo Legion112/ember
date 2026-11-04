@@ -6139,11 +6139,12 @@ A leaked node bills by the hour in silence. These are not style preferences.
   operator reads about the keys rather than left to be discovered from an exit
   code.
 
-  **ONE FUNCTION AND NOT FIVE COPIES.** `queue.RefuseOverPeriod` and
-  `queue.CeilingsOf` are package functions with five and three callers, where
-  there was one method on `AppPlanner`; the announcement in `cmd_serve` reads
-  the key through `CeilingsOf` too, so the gate and the print cannot come to
-  disagree about what `max_day_usd` means. The price and the TTL are
+  **ONE FUNCTION AND NOT FIVE COPIES.** `queue.RefuseOverPeriod` is the rule,
+  reached from three call sites covering all five paths, where there was one
+  method on `AppPlanner`; `queue.CeilingsOf` is the parse, and it is the **one
+  non-test caller of `config.PeriodCeilings` there is** -- the announcement in
+  `cmd_serve` reads the key through it too, so the gate and the print cannot
+  come to disagree about what `max_day_usd` means. The price and the TTL are
   **parameters** rather than fields read inside, because #157 measured both
   halves as gates that cannot fail when either is a literal zero, and a copy
   per call site is a place for one of them to pass a zero.
