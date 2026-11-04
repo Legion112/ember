@@ -660,6 +660,37 @@ moment it imports a sibling, the sibling's dependencies become its own.
   in a nested checkout, `TestNoHandlerOutsideLogx` goes red naming the nested
   path -- so what a future widener needs is the prune, which is what the
   warning should be read as asking for.
+- **A MERGE PROBE GREPPED FOR CONFLICT MARKERS AND REPORTED A CLEAN MERGE OVER
+  TWELVE CONFLICTED FILES, and the command it asked is one whose exit code
+  counts nothing either.** The probe was the three-argument
+  `merge-tree <base> <ours> <theirs>` piped into `grep -c '^<<<<<<<'`, run to
+  decide whether bringing master into a branch needed authorisation, and it
+  answered **0**. Measured on the pair it was run against: that form spells a
+  marker `+<<<<<<< .our`, with a leading `+` from its diff-like output, so the
+  anchored pattern matches **none of the 60** that are there -- and it exits
+  **0** over a merge that conflicts in twelve files, so "judge it on the exit
+  code" fails here as well, which is the one qualification this file's own
+  favourite rule has collected. **A matcher anchored wrong reports exactly
+  what a clean run reports**, which is `TestCIGofmtStepAsksMakeForThePaths`'s
+  first version firing on CI's own error message, and
+  `AssertNoStray`-could-not-fail reached through a probe rather than through a
+  cleanup order.
+  **The modern two-argument form is the answer and a marker grep cannot read
+  that one either**, which is why the rule is about the question rather than
+  about the pattern: two arguments and no base exits **1** and names every
+  conflicted path with its kind -- `CONFLICT (add/add)`, `CONFLICT (content)`
+  -- and contains **no marker at all**, so the same grep answers 0 against the
+  correct invocation too. **Ask a trial merge whether it conflicted; never ask
+  its output what it looks like.**
+  **No guard, because there is nothing committed to guard.** It was one
+  ad-hoc command in a session rather than a gate in the tree, so what is
+  recorded is the shape and not a test -- and the shape is the half worth
+  keeping, because the conclusion drawn from the false 0 (surface the
+  divergence rather than resolve it) happened to be the right one, so nothing
+  about the outcome said the evidence was wrong. **A probe that is wrong and
+  agrees with you is the hardest kind to notice**, and what found this one was
+  re-running it afterwards and asking why a clean answer had been followed by
+  twelve staged resolutions.
 - **The seven committed configurations were 71% comment, and the guard that
   stopped one of them rotting was keyed on a directory (#144).** They were
   1,158 lines of which 329 were configuration -- `ember.code-model.example.yaml`
