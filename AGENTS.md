@@ -7,7 +7,10 @@ This project is **Go-first**, like `go-tun`, `transcription` and `sms-gateway`.
   declaration just because a system package updated.
 - Prefer the standard library and the dependencies already here over new ones.
   The list is `golang.org/x/crypto`, `github.com/docker/docker`,
-  `gopkg.in/yaml.v3`, `golang.org/x/tools` (the coverage gate) and
+  `gopkg.in/yaml.v3`, `golang.org/x/tools` (the coverage gate, and since #165
+  the wiring guard in `internal/cli`, which needs `go/packages` because its
+  subject is which VARIABLE a struct field was handed and that is a question
+  about `types.Object` identity rather than about a spelling) and
   `modernc.org/sqlite`. **Adding one needs a reason written down**, which is
   what the rest of this bullet is.
 
@@ -6213,18 +6216,20 @@ A leaked node bills by the hour in silence. These are not style preferences.
   failing on a literal this guard cannot classify is reading past the one that
   matters.
 
-  **Thirty reinstatements across two passes, every one RED where expected,
-  five controls GREEN, controls at both ends of each, and every case ended in a
-  `git diff` against HEAD rather than in an exit code** -- HEAD being the
-  pristine copy, taken once, which is the fifth harness trap removed rather
-  than guarded. Twenty-three are the gate pass below; seven are the walkaround
-  pass on the wiring guard, whose three legitimate shapes are green beside
-  them.
-  (The first wording of this sentence and of the first commit message both
-  said SIXTEEN, over a list of seventeen written three lines below it -- which
-  is this file's own rule about a running total in prose, committed by the
-  paragraph that counts the cases. A count over an enumerated list is at least
-  checkable, which is why it is corrected rather than dropped, twice now.)
+  **THIS PARAGRAPH CARRIES NO TOTAL, AND THAT IS THE THIRD CORRECTION RATHER
+  THAN A FOURTH COUNT.** It said SIXTEEN over a list of seventeen; corrected to
+  seventeen; then THIRTY over two passes, where the gate pass was right at
+  twenty-three and the walkaround pass's enumeration was missing one of its own
+  reds -- so the total was right and the list was short, which is the same
+  defect in the other direction and no more defensible. Three consecutive
+  wrong statements about its own arithmetic, in the file whose rule is that a
+  running total in prose is the thing it has been wrong about before. So the
+  lists below are the record and nothing sums them: every case is named, every
+  case has a verdict, and a reader who wants a number can count the names.
+  **Every case RED where expected, every control GREEN, controls at both ends
+  of each pass, and every case ended in a `git diff` against HEAD rather than
+  in an exit code** -- HEAD being the pristine copy, taken once, which is the
+  fifth harness trap removed rather than guarded.
   Red: the
   submitted gate deleted; its projection over the DAEMON's ttl; the same
   taking the LONGER of the two ttls; the daemon's ceiling alone; the run's
@@ -6241,6 +6246,22 @@ A leaked node bills by the hour in silence. These are not style preferences.
   price half; `Binds` forgetting the ceiling half, which refuses where nothing
   is configured; the submitted run not re-checked on the loop; and
   `UnreadableLedger` printing its cause with `%v` instead of wrapping it.
+  **One more green, which is a measurement rather than a gap**: `Allow`'s
+  deleted `c.IsZero()` disjunct put back is exit 0, because it was redundant
+  with the loop below it and not merely unreachable -- see `Allow`, where the
+  measurement is written beside the code.
+  **The walkaround pass is what proves the wiring guard**, and two of its
+  clauses have no defect available on the pristine tree at all: the `moved`
+  refusal and the positional-field fatal fire only on code somebody would have
+  to write, which is what the walkaround pass writes. Its reds: a zero
+  composite literal, a non-zero one, a `var` of the right type, the field
+  dropped, a struct selector, a conversion, a closure with no config parameter,
+  **a reassignment of the parameter one line above the wiring**, **a shadow in
+  an inner block**, a shadow through a range clause, a shadow through an
+  if-statement initialiser, the parameter's address taken, and a copy through a
+  second `:=`. Its greens: a closure that takes the config, an identifier from
+  `config.Load`, the fields reordered, and the one documented bound -- a config
+  handed across a call.
   **And the per-arm verdict is the proof the free-rental pair discriminates**:
   with `Binds` reverted to `IsZero`, the PAID arm and the no-ceiling arm stay
   **PASS** and only the FREE arm goes **FAIL**, so the free arm is doing the
@@ -6340,26 +6361,48 @@ A leaked node bills by the hour in silence. These are not style preferences.
   generic-receiver hole one guard over: a guard that can be walked around is
   worse than none, and this one claimed its own completeness in this file
   before anybody had tried.
-  **The value must now be an identifier the enclosing function BOUND to a
-  config.Config**, which is `declaredFlags`' rule one type over -- a
-  `config.Config` parameter, or a `:=` from `config.Load`, and nothing else.
-  Walked around on purpose afterwards, each case diff-clean: a zero composite
-  literal, a non-zero one, a `var` of the right type, the field dropped, a
-  struct selector and a conversion are **all exit 1**; the parameter route, a
-  closure taking the config, and an identifier from `config.Load` are **all
-  exit 0**, so there is no false positive on a rename or on the two refactors
-  somebody would write. The closure case was a false positive on the first
-  attempt and is why `*ast.FuncLit` parameters count -- accepting a top-level
-  helper and refusing the closure form would have been one rule answering two
-  ways.
-  **The bound is the function and it is stated rather than chased**: this
-  cannot follow a config ACROSS a call, so a helper handed a zero at its call
-  site passes. Closing that means type-checked dataflow, a different tool; what
-  is closed is the one-step version written at the construction site, which is
-  the walkaround review measured. **A pointer field refused as nil in `Start`
-  was weighed and rejected**: it is this package's own shape for a dependency
-  that must be wired, and it catches strictly less -- a nil says "nobody wired
-  it" and says nothing about a zero handed over deliberately.
+  **AND THE SECOND VERSION OVER-CLAIMED IN ITS PROSE TOO, which is this same
+  failure committed by the paragraph correcting it.** v2 required the value to
+  be an identifier the enclosing function "bound to a config.Config" and
+  implemented that as a set of NAMES -- a name-plus-type check wearing a value
+  check's prose. Review measured three more greens: `cfg = config.Config{}` one
+  line above the wiring, because the parameter's own name still covered it; an
+  inner block shadowing it with `cfg := config.Config{}`; and an
+  immediately-invoked `func(cfg config.Config){...}(config.Config{})`. Only the
+  last is the bound v2's prose claimed. The other two write the zero INSIDE the
+  function the guard analyses, one line from the construction site -- and the
+  shadow is the one with teeth, because `standing` reads the OUTER `cfg`, so
+  the startup banner would print the real ceilings while the gate got a zero.
+  **So v3 asks the type checker and the shadow stops being a heuristic.** The
+  value's `types.Object` must BE the object a `config.Config` parameter bound,
+  or the one a `:= config.Load` defined, so a shadow is a different object by
+  construction -- and the guard never has to know what a block, a range clause,
+  an if-statement initialiser or a nested closure is, which is the whack-a-mole
+  a name-keyed fix would have chased one syntax form at a time.
+  `golang.org/x/tools/go/packages` is already a direct requirement and
+  `TestNoProductionDeadCode` already loads the tree through it.
+  **Reassignment is the one thing identity cannot answer and it is REFUSED
+  rather than analysed**: `cfg = config.Config{}` leaves the object alone and
+  changes its value, which is dataflow -- so an object that is assigned to, or
+  whose address is taken, anywhere in the function is no longer accepted, and
+  the message says which. That is the allow-list direction, it is a refusal
+  rather than an analysis, and it costs no false positive today: no production
+  function here that builds a `DirectRunner` does either.
+  **The bound is now one thing instead of three, and the inline form was
+  closable and deliberately left**: any function or closure that TAKES a
+  `config.Config` is accepted whatever its callers pass, so a config handed
+  across a call is green -- through a named helper, which needs dataflow, and
+  through an immediately-invoked closure, whose arguments are right there to
+  read in about fifteen lines. Reading them would make the guard refuse
+  `func(c config.Config){…}(zero)` and accept `helper(zero)` where `helper` is
+  identical, which is one rule answering two ways and the same reason a
+  closure's parameters are accepted at all. "The function" is a bound somebody
+  can hold in their head; "the function, except when the call happens to be
+  visible" is not.
+  **A pointer field refused as nil in `Start` was weighed and rejected**: it is
+  this package's own shape for a dependency that must be wired, and it catches
+  strictly less -- a nil says "nobody wired it" and says nothing about any of
+  these, every one of which hands over a zero rather than nothing.
 
   **AND THE SUBMITTED RUN'S GATE READ A TOTAL THAT COULD GO STALE IN THE WINDOW
   IT WAS WAITING THROUGH, which is now checked twice.** `Start`'s gate runs on
@@ -6382,6 +6425,14 @@ A leaked node bills by the hour in silence. These are not style preferences.
   leaving a phantom reading `running`: `finish` routes through `classify`, the
   reason lands on `requests.err`, and `runOutcome` is what prints it to a
   client still following the stream.
+  **THE CLIENT HALF IS TWO TESTS MEETING AT A COLUMN, which is said rather
+  than implied.** The queue's test asserts the row the refusal writes, and
+  `TestFollowRun_ARunThatFailedIsThisCommandsExitStatus` asserts what the
+  client renders from such a row against a `fakeServe`. Nothing takes a real
+  daemon's re-check refusal to a real client, so the join is `requests.err`
+  rather than a driven path -- ordinary seam discipline here, and the reason to
+  write it down is that "the client prints the reason" reads like one test
+  having proved it end to end.
   **ITS TEST WAS A FLAKE ON THE FIRST ATTEMPT, AND `make cover-check` IS WHAT
   CAUGHT IT.** That version started the drain loop AFTER the row was adopted --
   which is the only way to make `Submit` park without a rental in flight -- so
@@ -6391,9 +6442,26 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `go test ./...` was green; `make cover` runs the suite slower and turned it
   red. That is the frequency this file already records as the worst a flake can
   have, found because the full command set is run rather than the one command
-  the change was about -- and the sweep's interaction with `Adopt` is a
-  documented one that **production never has in that order**, since `ember
-  serve` sweeps once at startup, long before a client submits.
+  the change was about.
+  **"PRODUCTION NEVER HAS THAT ORDER" WAS THE NEXT OVER-CLAIM, AND IT IS
+  CORRECTED RATHER THAN ENFORCED.** `serveUntil` starts `srv.Serve`,
+  `srv.ServeSocket` and `q.Run` as three goroutines over listeners that are
+  ALREADY BOUND, and `Interrupt` is `Run`'s first statement -- so a submission
+  accepted inside that scheduling gap is adopted as `running` and then swept to
+  `interrupted`, which is a terminal row over a live rental: the phantom class
+  inverted. Unreachable in practice and **not by ordering**, because the client
+  has to get through a config load, an `app.NewPlan` with a catalogue call and
+  possibly an S3 HEAD per asset, and two SQLite reads, all inside one gap.
+  **Reordering the goroutines does not close it**, which is why it was not
+  taken: starting `q.Run` first schedules a goroutine, it does not run
+  `Interrupt`, so the window narrows and the sentence would still be false --
+  a fresh over-claim of exactly this class. Sweeping synchronously before the
+  listeners accept only moves the window to between the two sweeps, unless
+  `Run` stops sweeping, which every other caller needs. The honest close is
+  refusing to sweep an ADOPTED row, and that is the per-row holder and liveness
+  check `genstore.Adopt`'s own comment already declines, with the reason that
+  this direction is transient and self-correcting. So it is left as it is and
+  said as what it is -- and the test no longer rests on it either way.
   **So the test is the real scenario now rather than a simulated one**: the
   loop starts FIRST, over an empty history, and is made busy with a queued
   request whose `fakeRental` blocks -- so `Submit` parks because the one
