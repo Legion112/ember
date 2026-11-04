@@ -1071,6 +1071,106 @@ negative `preview_interval` is refused rather than clamped, because upstream
 clamps a non-positive value to 1: writing `-1` to mean "off" would buy the most
 expensive setting there is.
 
+### Text to speech
+
+`sd:` is not the only typed workload. `tts:` runs **piper** — a C++ speech
+synthesiser with onnxruntime beside it, no Python and nothing compiled on
+arrival — and brings each utterance home as a `.wav`.
+
+```yaml
+provider: local
+image: ember:tts
+ttl: 10m
+tts:
+  jobs:
+    - text: "Hello from ember. This is the first utterance."
+      output: greeting
+    - text: "And this one is a little slower."
+      length_scale: 1.1
+```
+
+```
+$ make workload-tts          # seconds: a pinned binary and a pinned voice
+$ ember up
+speaking: "Hello from ember. This is the first utterance." -> greeting.wav
+fetched greeting-01.wav, 185 KiB
+```
+
+Each utterance is one file, numbered — `greeting-01.wav`, `greeting-02.wav` —
+so two jobs that happen to name the same `output` cannot overwrite each other.
+A job that names no `output` is numbered from `speech`. The results land in
+`output_dir` beside any images, are recorded in `ember history`, and are served
+by the web UI's artifact route as `audio/wav` rather than as a PNG.
+
+`voice` and `espeak_data` name files **on the node**, and both default to what
+ember's own speech image carries, so a configuration using `ember:tts` needs
+neither:
+
+```yaml
+tts:
+  voice: /opt/voices/en_US-lessac-medium.onnx
+  espeak_data: /opt/piper/espeak-ng-data
+```
+
+Everything else is per utterance, and every one of them is a flag piper
+publishes. All are optional; leaving one out sends nothing, so piper's own
+default applies rather than a copy of it ember could come to disagree with:
+
+```yaml
+    - text: "anything"
+      output: name                # the filename stem, without .wav
+      speaker: 0                  # a multi-speaker voice's speaker id
+      length_scale: 1.0           # phoneme length: above 1 is slower
+      noise_scale: 0.667          # generator noise
+      noise_w: 0.8                # phoneme-width noise
+      sentence_silence: 0.2       # seconds of silence after each sentence
+```
+
+`speaker: 0` is a real speaker and `sentence_silence: 0` is a real setting, so
+all five are pointers all the way down: an omitted key and a key set to zero
+are different requests.
+
+Use `cmd`, `cmds`, `sd.jobs` **or** `tts.jobs` — never two. A config naming two
+is refused before anything is rented, because a run with two answers to "what
+does this node run" is one where an operator watches the wrong thing execute.
+
+#### There is no CUDA variant, and there is no server
+
+Both are measurements rather than omissions.
+
+**No card.** piper's released binary links onnxruntime's CPU execution
+provider only, so a GPU would do nothing for it. There is no
+`<tag>-sm<arch>` image, nothing for `images:` to key on, and the honest place
+to run speech is the cheapest machine that will take it — which on the local
+provider is free.
+
+**No resident model**, which is the opposite of `sd:`. piper has no server
+mode: every one of its input flags reads text from **stdin**, so holding one
+process open means holding its stdin open, and ember's remote-command seam
+does not have one. What that costs, measured here on
+`en_US-lessac-medium` — eight utterances of about 4.6 s of audio each, in one
+container:
+
+| | eight utterances | each |
+|---|---|---|
+| one piper process per utterance | 4740 ms | 592 ms |
+| one process for all eight | 1822 ms | 185 ms load + ~205 ms |
+
+So a fresh process costs about **400 ms** of fixed overhead against inference
+of 170–220 ms, and a resident driver would be worth about 2.9x per utterance —
+crossing over at **two**, not the ~5 the sd15 figures predicted. ember runs
+one-shot anyway, because 400 ms per utterance is noise against the ~27 s of
+per-rental overhead a rental already pays, and the resident version needs a
+production interface widened for one driver. The numbers are in
+`internal/tts` so that the trade can be re-made rather than re-guessed.
+
+**And there is no progress within an utterance.** piper emits nothing at all
+between the start of one and its completion, and then one line carrying the
+audio's duration and what inference took. So the unit of progress for speech
+is the job, not a step inside it: a batch of eight reports eight starts, eight
+artifacts and eight costs, and no bar. `ember history` records the two figures
+piper printed.
+
 ### Generating on this machine's GPU
 
 A model that does not fit in VRAM is not a model that cannot run. sd-cli will

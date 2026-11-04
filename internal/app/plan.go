@@ -16,6 +16,7 @@ import (
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 	"github.com/Legion112/ember/internal/workload"
 )
 
@@ -107,6 +108,20 @@ type Plan struct {
 	// beside the Spec rather than on it because internal/node imports
 	// nothing else in this module and TestNodeImportsNothing enforces that.
 	Jobs sdserver.Run
+
+	// Spoken is the speech batch, empty for every other shape, and it travels
+	// here for the identical reason Jobs does.
+	//
+	// TWO TYPED FIELDS AND NOT ONE `any`, which is the shape a reader would
+	// reasonably expect to find collapsed. They are separate because they are
+	// READ separately by things outside this package that are about one kind:
+	// internal/queue/direct.go projects Jobs into genstore rows and reads its
+	// preview settings, and `ember up --dry-run` prints each job's own
+	// description. An interface value there would make every one of those a
+	// type assertion, which is the dispatch this change exists to remove
+	// rather than move. What IS one value is the dispatch itself -- batchOf,
+	// which is the only thing that has to know a run has exactly one kind.
+	Spoken tts.Run
 
 	Options provision.Options
 	Paths   Paths
@@ -296,6 +311,7 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	// probe, so parsing the jobs would validate a batch this rental will
 	// never send and print it in the dry run.
 	var run sdserver.Run
+	var spoken tts.Run
 	switch {
 	case req.CPUOnly:
 		// Nothing: this rental runs `embernode fetch`.
@@ -309,6 +325,10 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 		if err != nil {
 			return Plan{}, Usage(err)
 		}
+		spoken, err = cfg.ParseTTS()
+		if err != nil {
+			return Plan{}, Usage(err)
+		}
 	}
 
 	spec, err := BuildSpec(cfg, Resolved{
@@ -316,6 +336,28 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	})
 	if err != nil {
 		return Plan{}, Usage(err)
+	}
+
+	// ONE KIND, NEVER TWO, AND HERE RATHER THAN IN node.NewSpec.
+	//
+	// That function already refuses any two of `cmd`, `cmds` and `sd.serve`,
+	// through namedWorkloads, with the right argument: a config with two has
+	// two answers to "what does this node run", and picking one silently is
+	// how an operator watches the wrong thing execute. It cannot see this one,
+	// because `node.Spec` HAS NO SPEECH FIELD -- and that is the seal rather
+	// than a gap. A spec field is a thing a request could one day be consulted
+	// about; the typed batch travels beside the spec for the same reason
+	// Plan.Jobs does, and internal/node importing nothing else in this module
+	// is what TestNodeImportsNothing holds.
+	//
+	// So the refusal is a layer up, which is where the two kinds are both in
+	// scope. Without it `Plan.serve` would reach `len(p.Spec.Cmds) > 0` first
+	// and run the commands, leaving an operator who wrote both with a rental
+	// that said nothing and no line anywhere saying why.
+	if len(spoken.Jobs) > 0 {
+		if other := spec.Workload(); other != "" {
+			return Plan{}, Usage(fmt.Errorf("tts.jobs and %s are both set; use one", other))
+		}
 	}
 
 	if req.CPUOnly {
@@ -330,6 +372,7 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 		Offer:     offer,
 		Spec:      spec,
 		Jobs:      run,
+		Spoken:    spoken,
 		Options:   opts,
 		Paths:     ps,
 		ImageFrom: from,

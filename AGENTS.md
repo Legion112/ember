@@ -7359,6 +7359,228 @@ A leaked node bills by the hour in silence. These are not style preferences.
   this configuration instead", and is `ember reap`'s refusal of a second pair
   reached from the other side. The honest statement is that `--config` names
   the ceiling as well as the run.
+- **ember has a second typed workload, the seam it needed is ONE method, and
+  every number below was measured before any of the design (#190, #36).** #36
+  asks whether a second typed integration is worth its cost and says the
+  crossover "should come before the design"; #190 supersedes its framing with
+  "`cmds` stays the mechanism and stops being the interface". Both are
+  answered here for speech, and the sentence this file already carries --
+  "`cmds` stays as the general mechanism, because a typed sd path cannot run
+  `ffmpeg`" -- is **unchanged**: what changed is that `cmds` is no longer the
+  only answer for anything that is not stable diffusion.
+
+  **THE BINARY IS piper AND THE PIN IS NOT MERELY AGAINST DRIFT.**
+  `2023.11.14-2` is the last release that ships a self-contained C++ binary
+  with onnxruntime beside it; the repository has since been rewritten into a
+  Python package (`piper1-gpl`), so a later tag would carry an interpreter and
+  break this project's own rule -- "a runtime that compiles or interprets on
+  arrival is buying a compiler with GPU time". The image lab asserts there is
+  no `python3` on it, which is the only thing that would catch a bump.
+
+  **THE CROSSOVER, which is #36's decision 1.** en_US-lessac-medium, eight
+  utterances of about 4.6 s of audio each, one container on this machine:
+
+  | | eight utterances | each |
+  |---|---|---|
+  | one piper process per utterance | 4740 ms | 592 ms |
+  | one process for all eight | 1822 ms | 185 ms load + ~205 ms |
+
+  A fresh process is ~400 ms of fixed overhead -- 185 ms of it the voice load
+  -- against 170-220 ms of inference, so the resident shape is worth about
+  **2.9x per utterance and crosses over at TWO**, not the ~5 the sd15 run
+  predicted: piper's fixed cost is a sixth of sd15's and its per-job work a
+  tenth. #36 guessed "probably the bigger win proportionally" and was right.
+
+  **IT IS ONE-SHOT ANYWAY, AND THE REASON IS A SEAM RATHER THAN THE NUMBER.**
+  piper has **no server mode**: the pinned release's own `--help` lists
+  `--output_file`, `--output_dir`, `--output_raw` and `--json-input`, and every
+  one of them reads its text from **stdin**. So resident means holding a
+  process's stdin open, and `sshx.Runner` hands back stdout, stderr and a wait
+  and has none -- the interface this file records as not widened for a test's
+  convenience, which would here be widened for one driver. And 400 ms per
+  utterance is noise against the **~27 s of per-rental overhead** already
+  measured. The honest order is to take the one-shot measurement on a real
+  batch first, which is why the figures live in `internal/tts` rather than in
+  a commit message.
+
+  **PROGRESS IS THE JOB AND THERE IS NONE INSIDE ONE, which is #190's open
+  question 3 answered by measurement.** piper emits nothing at all between the
+  start of an utterance and its completion, then one line:
+  `Real-time factor: 0.0367 (infer=0.173 sec, audio=4.713 sec)`. No step, no
+  pass, no percentage -- a TTS job is atomic. So the unit is `report.UnitJob`,
+  which already exists, and the two figures travel on the artifact event
+  because they are the artifact's own duration and what it cost to make: the
+  closest thing speech has to a step count, and derivable from nothing else
+  ember sees. **Those figures are CUMULATIVE within a process and per-job
+  across one**, measured on the eight-utterance run -- `audio=` walked 4.71,
+  9.18, 13.68 ... 36.58 and `infer=` 0.173, 0.311, 0.507 ... 1.530. One
+  process per job is therefore the shape in which that line means what it
+  reads as, and a future resident driver has to subtract; `spokenReport` takes
+  the LAST match for that reason rather than the first, which is cheaper to be
+  right about now than to find later.
+  **It is a parse of a LOG and that is the one place this driver is weaker
+  than the sd one**, stated rather than hidden: sd-server answers a JSON
+  object with a status in it. The status here is the exit code, which is what
+  decides whether the job worked -- the rule this file records about reading a
+  status and not a log -- so a line upstream rewords costs the two figures and
+  nothing else.
+
+  **THE SEAM IS ONE METHOD, AND A WIDER ONE WOULD HAVE BEEN THE MISTAKE IT
+  LOOKS LIKE IT AVOIDS.** #190 asks for a kind to supply five things: how to
+  start its server, how to submit a job, how to read progress, what parameters
+  are typed, and what a result is. **Four are already where a kind owns
+  them** -- the typed parameters are its own config block and its own job
+  type, starting a server is `node.Spec.Serve` plus the kind's argv builder,
+  submit and poll are the kind's package, and a result reaches every reader as
+  a `report.Event`. What was nowhere was the **dispatch**: one line in
+  `Plan.serve` reading `if len(p.Spec.Serve) > 0`, which is a question about
+  sd-server's argv standing in for "which kind is this run" -- correct while
+  there was one kind and no answer at all for a second. So `app.batch` is
+  `Run` plus `Describe`, `servedBatch` is a four-line adapter over the
+  existing `runServed`, and `spokenBatch` is the second implementation that
+  makes the interface honest rather than a guess. A readiness/submit/poll
+  interface would have been designed from sd-server's shape and then had to be
+  satisfied by a program with no server, which is the
+  driver-interface-from-one-example mistake committed while appearing to avoid
+  it. `Describe` is why it is an interface and not a func type: a refusal that
+  cannot name its kind is one an operator has to work out.
+  **`runServed`'s body did NOT move**, deliberately: it is 300 lines with a
+  server process, a forward, a poll loop and a cancel channel in it, and
+  rewriting it to fit an interface in the commit that introduces the interface
+  would mean the seam and its first implementation were verified by the same
+  tests at once.
+
+  **`node.Spec` GAINS NO FIELD, AND THAT IS WHY THE ONE-KIND REFUSAL MOVED UP
+  A LAYER.** The typed batch travels beside the spec, as `Plan.Jobs` already
+  does, so a request can never be consulted about a voice -- the seal this
+  file states as "a request names a provider, a card and a batch of jobs, and
+  nothing else" holds with nothing added to it. The consequence is that
+  `node.NewSpec`'s `namedWorkloads` **cannot see** this kind, and without a
+  refusal in `app.NewPlan` a config naming both would reach
+  `len(p.Spec.Cmds) > 0` first and run the commands -- an operator who wrote
+  both with a rental that said nothing and no line anywhere saying why.
+  `node.Spec.Workload` is what lets that message name the other key, and it
+  collapses `cmd` and `cmds` into one answer on purpose: `NewSpec` folds the
+  first into the second, so naming one of the two would name the wrong key for
+  half of all configs, and an operator looking for a key that is not in their
+  file concludes the message is about somebody else's.
+
+  **THE ARTIFACT PATH WAS A LITERAL, which is #36's fifth decision.**
+  `getImage` declared `image/png` unconditionally -- true of everything ember
+  produced until a second kind made a wav, and with `nosniff` beside it a
+  browser will not play that file and **cannot be talked into** playing it,
+  which is the failure #36 predicts in words. It is derived from the key's
+  extension now, through a **closed switch and not `mime.TypeByExtension`**:
+  that function reads `/etc/mime.types`, so what ember declares about bytes a
+  rented machine produced would depend on which packages are installed on the
+  operator's laptop, and it answers for every extension there is where the set
+  ember writes is two. An extension no writer here produces is a **500** and
+  not an octet-stream, because the row is ember's own: a writer and that
+  switch having come apart is a defect, and a download prompt for an image
+  reads as ember being broken in a way that points nowhere.
+  **`internal/blob` needed nothing**, which is worth saying because #36 lists
+  it: it is byte-generic already and the key carries the extension, so there
+  is no migration, no stored type and nothing derived -- the `images` table's
+  name is left alone and recorded as a name rather than renamed, since it is a
+  key already in operators' databases.
+  **And the measurement is why the wav test can fail where the PNG one could
+  not.** `http.DetectContentType` answers **`audio/wave`** for a RIFF/WAVE
+  header -- a *different* spelling from the `audio/wav` ember declares -- so a
+  declaration that went missing shows up as the wrong spelling rather than as
+  the right answer. For a PNG it sniffs to `image/png`, which is exactly why
+  `TestImage_ServedWithItsTypeDeclaredAndNotSniffed` passed with its property
+  destroyed and why that assertion lives over a real listener.
+  **One defect is NAMED AND NOT FIXED**: `sdserver.WriteImages` names every
+  file it writes `.png` whatever `output_format` asked for, so a jpg is
+  already served as a PNG today. That is this same defect one driver over, it
+  predates this change, and the name is a key already stored -- so
+  `artifactType`'s comment says so where the next reader will be.
+
+  **WHAT IS NOT BUILT, said rather than left to be found.** There is **no
+  catalogue**: #190's entry-id shape is the right answer for a browser, this
+  change is the server side, and `internal/catalogue` is already the GPU
+  availability history, so the name is taken as well. The request wire type is
+  untouched -- a request names no speech at all yet, so it still names no
+  image, no argv and no assets. Nothing in `web/src/` is touched. `ember
+  serve` **cannot queue an utterance**: `queue` builds an `sdserver.Run` from a
+  stored request, and widening that -- plus `genstore.Job`'s columns, the
+  compose panel and a per-kind parameter schema -- is the browser half, which
+  is #190's questions 2 and 4 and #139's page split. The resident driver is
+  the entry above, with its number.
+
+  **TWO LABS FOUND TWO THINGS ON THEIR FIRST RUN, and one of them was the
+  lab.** The image lab asserted piper's flags through `harness.ExecOut`, which
+  returns **stdout alone** -- and piper writes its usage to **stderr**, so the
+  call came back EMPTY and every assertion reported a missing flag against a
+  binary that publishes all of them. The failure of a check reading the wrong
+  stream reads exactly like the failure it was written for, which is
+  `LAB_LOG_DIR`'s defect through a file descriptor instead of a path.
+  And the speed assertion's first version grepped `ember up`'s output for
+  `--length_scale 1.1` and **went red against correct code**, because `sayOne`
+  prints the utterance and not the argv: an assertion about a mechanism nobody
+  had run, which is the `chromedp.SetValue` entry's shape one layer out. It is
+  the image lab's own rule now -- same text, same voice, two arms differing
+  only in `length_scale`, and the second file has to be LONGER -- so a flag
+  ember dropped makes two wavs of one length, which every other assertion in
+  that lab passes over.
+  **The bound is measured and the first one was a flake.** The curve for this
+  voice and this sentence, in sample frames off the wav header: 1.0 -> 65652,
+  1.2 -> 76404, 1.4 -> 82036, 1.6 -> 89716, 2.0 -> 103284 -- so `length_scale`
+  is **not** a linear multiplier on the duration, 1.4 buys 1.25x and 2.0 buys
+  1.57x. 1.4 against a 1.15 bound measured **1.16**: a one-percent margin over
+  a figure that moves by three, because `noise_scale` is generator noise and
+  nothing here seeds it. 2.0 against 1.3 measures **1.67**, which moves the
+  signal rather than narrowing the bound -- the right direction when a
+  measurement is tight, and the opposite of what relaxing the bound would have
+  been.
+
+  **TWELVE REINSTATEMENTS, CONTROLS AT BOTH ENDS, ONE BACKUP PER PATH TAKEN
+  ONCE, AND EVERY CASE ENDING ON A DIFF AGAINST HEAD RATHER THAN ON AN EXIT
+  CODE -- AND THE ONE THAT CAME BACK GREEN IS THE FINDING.** Ten red where
+  expected and two negative controls green: `artifactType` answering
+  `image/png` for a wav, the two-kinds refusal deleted, `Command` sending a
+  default ember invented, the text interpolated into the script body,
+  `spokenReport` taking the first line, `SpokenStem` not numbering a named
+  job, `ParseTTS` dropping `length_scale`, the artifact event not emitted, and
+  the fetch skipped.
+  **The eleventh -- the dispatch reverted to `len(p.Spec.Serve) > 0`, which is
+  the defect this whole seam exists to make impossible -- is `go test ./...`
+  exit 0.** Every `runSpoken` test drives the driver or its adapter directly,
+  where the dispatch is not consulted at all, so the defect lives in one line
+  of `Plan.serve` that only a real rental reaches: a speech run falls through
+  to `session.Serve`, holds the node until its deadline and says nothing. The
+  lab is what reports it, at **exit 2** on "the output does not mention
+  `speaking:`" and "no greeting-01.wav among []". That is this file's own "the
+  most expensive defect available in a change is not reliably the one the unit
+  suite can see", met again -- and the reason the lab exists rather than being
+  coverage.
+  **Its failure takes TEN MINUTES, and that is ember being right rather than
+  the lab being slow**: the fall-through is the interactive branch, which holds
+  the session open by design, so the run is bounded by the config's `ttl` and
+  the lab by its own `-timeout`. Worth writing down because a ten-minute red
+  reads like a wedge, which this file records as the report that names nothing
+  a reviewer can act on -- here it names both.
+
+  **THE VOICE IS BAKED IN, WHICH IS THE OPPOSITE OF THE RULE FOR A
+  CHECKPOINT.** This file's measurement is that a `COPY`'d model gets a layer
+  digest that is ours alone and can never hit a shared cache -- true, and it
+  was 51% of ember-sd at 2.2 GB. This voice is **60 MiB in a 286 MB image**,
+  and what baking buys is that a local run needs no store, no mount and no
+  sync, which is the whole point of the local provider. The digest is still
+  checked, one layer earlier, by `ADD --checksum`, and the image lab
+  re-verifies it with `sha256sum` **over SSH** rather than trusting the
+  Dockerfile -- because an image's `ENV` does not reach anything sshd starts
+  and neither does a build-time check. **The .onnx digest is confirmed
+  twice** -- Hugging Face publishes it as the LFS object id and a `sha256sum`
+  of the download agrees -- which is the calibration habit
+  `internal/provider/runpod/testdata/README.md` set. **The `.json` has ONE
+  confirmation**, because it is under the LFS threshold and Hugging Face
+  publishes no sha256 for it; said in the Dockerfile rather than left to read
+  as equal evidence.
+  **There is no CUDA variant and that is a measurement too**: piper's released
+  binary links onnxruntime's CPU execution provider only, so there is no
+  kernel for a card to be wrong about, nothing for `images:` to key on, and
+  the wrong-architecture abort this file records cannot happen to it.
 
 ## Style
 

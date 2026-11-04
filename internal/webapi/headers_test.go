@@ -276,3 +276,112 @@ func (h *harness) unauth(t *testing.T, srv *httptest.Server, path string) answer
 	}
 	return answer{Status: resp.StatusCode, Header: resp.Header, Body: body}
 }
+
+// TestHeaders_AWavIsServedAsAudioAndNotAsAPNG.
+//
+// THE DEFECT THIS IS WRITTEN AGAINST IS A LITERAL. getImage declared
+// `image/png` unconditionally, which was true of everything ember produced
+// until a second workload kind made a wav -- and a .wav labelled as a PNG is a
+// file a browser will not play and, with nosniff beside it, cannot be talked
+// into playing. #36 predicted it in words: "audio served through that route is
+// labelled as an image and, correctly, will not play."
+//
+// OVER A REAL LISTENER AND NOT A RECORDER, because this is an assertion about
+// a header net/http could have discarded: ResponseRecorder reads the live
+// header map, so a Content-Type set after http.ServeContent still reports
+// correctly through one while the wire has lost it. That is the rule this
+// file exists for.
+//
+// The bytes are a real RIFF/WAVE header, so the assertion is not satisfied by
+// Go's own sniffing agreeing by accident: net/http sniffs RIFF....WAVE to
+// `audio/wave`, which is a DIFFERENT spelling from the one ember declares --
+// so a declaration that went missing would show up as `audio/wave` here
+// rather than as the right answer, which is the half that could not be
+// checked with a PNG.
+func TestHeaders_AWavIsServedAsAudioAndNotAsAPNG(t *testing.T) {
+	h := newHarness(t)
+	srv := live(t, h)
+	id := h.wireID(t, srv)
+
+	key := id + "/hello-01.wav"
+	wav := []byte("RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
+	if err := h.blobs.Put(t.Context(), key, wav); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.AddImage(t.Context(), genstore.Image{
+		Req: genstore.ReqID(id), Job: 1, Index: 0, Key: key, Bytes: int64(len(wav)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res := h.wire(t, srv, "GET", "/api/requests/"+id+"/images/1/0", "", nil)
+	declared(t, res, http.StatusOK, "audio/wav")
+	// A result never changes, whatever kind of result it is.
+	if got := res.Header.Get("Cache-Control"); !strings.Contains(got, "immutable") {
+		t.Errorf("cache-control = %q, want a result to be cacheable", got)
+	}
+	if !bytes.Equal(res.Body, wav) {
+		t.Errorf("body is %d bytes, want the %d the store holds", len(res.Body), len(wav))
+	}
+}
+
+// TestHeaders_AnArtifactEmberDoesNotTypeIsRefusedRatherThanGuessed.
+//
+// A browser must never be left to guess what a rented machine produced, so an
+// extension no writer here produces is a 500 and not an octet-stream. It is
+// reachable only through a row ember did not write -- which is exactly the
+// state a future driver that forgot to extend artifactType would create.
+func TestHeaders_AnArtifactEmberDoesNotTypeIsRefusedRatherThanGuessed(t *testing.T) {
+	h := newHarness(t)
+	srv := live(t, h)
+	id := h.wireID(t, srv)
+
+	key := id + "/mystery.bin"
+	if err := h.blobs.Put(t.Context(), key, []byte("bytes")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.AddImage(t.Context(), genstore.Image{
+		Req: genstore.ReqID(id), Job: 1, Index: 0, Key: key, Bytes: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res := h.wire(t, srv, "GET", "/api/requests/"+id+"/images/1/0", "", nil)
+	if res.Status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 for an extension ember declares no type for", res.Status)
+	}
+	if !strings.Contains(string(res.Body), "does not declare a type for") {
+		t.Errorf("body = %q, want it to say ember has no type for the extension", res.Body)
+	}
+}
+
+// TestArtifactType_IsAClosedSetOfWhatEmberWrites. A unit assertion beside the
+// two over the wire, because the SET is the decision: mime.TypeByExtension
+// would answer for every extension there is, including the ones an attacker
+// would pick, and its answers depend on which packages are installed on the
+// operator's laptop.
+func TestArtifactType_IsAClosedSetOfWhatEmberWrites(t *testing.T) {
+	for key, want := range map[string]string{
+		"r/cat-00.png":     "image/png",
+		"r/CAT-00.PNG":     "image/png",
+		"r/hello-01.wav":   "audio/wav",
+		"r/hello-01.WAV":   "audio/wav",
+		"r/a.b.c/x-00.wav": "audio/wav",
+	} {
+		got, err := artifactType(key)
+		if err != nil {
+			t.Errorf("artifactType(%q): %v", key, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("artifactType(%q) = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{
+		"r/x.jpg", "r/x.svg", "r/x.html", "r/x", "r/x.", "", "r/x.mp3", "r/x.wav.html",
+	} {
+		if got, err := artifactType(key); err == nil {
+			t.Errorf("artifactType(%q) = %q, want a refusal", key, got)
+		}
+	}
+}
