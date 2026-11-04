@@ -7194,6 +7194,39 @@ A leaked node bills by the hour in silence. These are not style preferences.
   the right answer. For a PNG it sniffs to `image/png`, which is exactly why
   `TestImage_ServedWithItsTypeDeclaredAndNotSniffed` passed with its property
   destroyed and why that assertion lives over a real listener.
+  **THAT MEASUREMENT WAS RIGHT ABOUT THE ANSWER AND WRONG ABOUT THE FALLBACK,
+  AND THE ASSERTION COULD NOT FAIL FOR A WHOLE RELEASE OF THIS BRANCH.**
+  `http.ServeContent`'s FIRST fallback is `mime.TypeByExtension` and not
+  sniffing -- and the route passed `path.Base(key)`, so the name carried
+  `.wav`, and on a box with `/etc/mime.types` that answers `audio/wav`: the
+  identical spelling. Deleting the `Set` left EVERY header assertion on that
+  route green, so `http.DetectContentType` was never reached and the entry
+  above described a fallback the code could not get to.
+  **It was worse than a dead assertion because it was
+  ENVIRONMENT-DEPENDENT.** `.wav` is not in Go's builtin mime table, so the
+  same defect is red on a slim CI container and green on a developer's laptop
+  -- a verdict about a defect that depends on which packages are installed,
+  which is precisely the dependency `artifactType`'s closed switch exists to
+  refuse, reintroduced through the TEST's fallback path rather than through
+  the production one.
+  **One token fixes it and the production code was always correct**:
+  `http.ServeContent(w, r, "", …)`. The name is read only for type guessing
+  and a declaration is always present -- the switch is closed and its unknown
+  path 500s -- so the empty name costs this route nothing, and the assertion
+  is then RED at `content-type = "audio/wave"`. What is still true is the
+  asymmetry, and it is now measured in both directions rather than inferred:
+  with the name empty, deleting the declaration turns the **wav** arm red and
+  leaves the **PNG** arm green, because Go sniffs `\x89PNG` to the same
+  answer whichever route it took. So the PNG test's live subject remains the
+  ORDERING and the `nosniff` it was moved to a real listener for, and the wav
+  arm is the only one of the two that can see a lost `Content-Type`.
+  **Reinstated three ways rather than one, which is what separated the two
+  halves**: the declaration alone (red), the name alone with the declaration
+  present (green, so the token costs nothing), and BOTH -- the historical pair
+  -- which is **green** and is the state the fix was worth making for. The
+  first attempt at the first of those stubbed `artifactType` as well and
+  turned a second, unrelated assertion red, which is the "ask why a case went
+  the way it did" rule catching a patch that was about the wrong thing.
   **One defect is NAMED AND NOT FIXED**: `sdserver.WriteImages` names every
   file it writes `.png` whatever `output_format` asked for, so a jpg is
   already served as a PNG today. That is this same defect one driver over, it
@@ -7248,16 +7281,28 @@ A leaked node bills by the hour in silence. These are not style preferences.
   job, `ParseTTS` dropping `length_scale`, the artifact event not emitted, and
   the fetch skipped.
   **The eleventh -- the dispatch reverted to `len(p.Spec.Serve) > 0`, which is
-  the defect this whole seam exists to make impossible -- is `go test ./...`
-  exit 0.** Every `runSpoken` test drives the driver or its adapter directly,
-  where the dispatch is not consulted at all, so the defect lives in one line
-  of `Plan.serve` that only a real rental reaches: a speech run falls through
-  to `session.Serve`, holds the node until its deadline and says nothing. The
-  lab is what reports it, at **exit 2** on "the output does not mention
-  `speaking:`" and "no greeting-01.wav among []". That is this file's own "the
-  most expensive defect available in a change is not reliably the one the unit
-  suite can see", met again -- and the reason the lab exists rather than being
-  coverage.
+  the defect this whole seam exists to make impossible -- is reported by NO
+  ASSERTION ABOUT THE BEHAVIOUR.** Every `runSpoken` test drives the driver or
+  its adapter directly, where the dispatch is not consulted at all, so the
+  defect lives in one line of `Plan.serve` that only a real rental reaches: a
+  speech run falls through to `session.Serve`, holds the node until its
+  deadline and says nothing. The lab is what reports it, at **exit 2** on "the
+  output does not mention `speaking:`" and "no greeting-01.wav among []". That
+  is this file's own "the most expensive defect available in a change is not
+  reliably the one the unit suite can see", met again -- and the reason the lab
+  exists rather than being coverage.
+  **THE FIRST WORDING SAID `go test ./...` EXIT 0 AND THAT IS WRONG BY ONE
+  GUARD, which is a correction rather than a retraction.** It is exit **1**,
+  because `TestNoProductionDeadCode` fires on `internal/app.(Plan).batchOf`
+  having no production caller the moment the branch stops calling it.
+  Excluding that one guard the tree is exit 0 across forty packages, so the
+  claim holds in full -- and the guard is the `TrustOnFirstUse` shape this file
+  already records and already judges: a stale-inventory check whose failure
+  text tells you to delete a function, which says nothing at all about speech
+  runs being dispatched to an sd-server. Found by an independent reading, and
+  recorded because "the suite is green over it" and "no assertion about the
+  behaviour reports it" are different sentences and this file's rule is that
+  the exit code is the one that counts.
   **Its failure takes TEN MINUTES, and that is ember being right rather than
   the lab being slow**: the fall-through is the interactive branch, which holds
   the session open by design, so the run is bounded by the config's `ttl` and

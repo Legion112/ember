@@ -1012,11 +1012,27 @@ func (s *Server) getImage(w http.ResponseWriter, r *http.Request) {
 		// twenty images should not re-fetch them on every render.
 		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	}
-	// The key's own basename, and not the key with ".png" stuck on the end.
-	// ServeContent reads the name only to guess a type when none is declared,
-	// and one is -- so what this changes is nothing on the wire and
-	// everything about what a reader of the line believes it does.
-	http.ServeContent(w, r, path.Base(key), time.Time{}, f)
+	// AN EMPTY NAME, AND THAT IS WHAT MAKES THE HEADER ASSERTION ABLE TO FAIL.
+	//
+	// ServeContent reads the name ONLY to guess a type when none is declared,
+	// and one always is here -- the switch above is closed and its unknown
+	// path 500s -- so passing nothing costs this route nothing. What passing
+	// `path.Base(key)` cost was the TEST: with the declaration deleted,
+	// ServeContent's FIRST fallback is `mime.TypeByExtension` and not
+	// sniffing, and on a box with /etc/mime.types that answers `audio/wav` --
+	// the identical spelling -- so every header assertion on this route
+	// passed over a lost Content-Type.
+	//
+	// IT WAS WORSE THAN A DEAD ASSERTION BECAUSE IT WAS ENVIRONMENT-DEPENDENT.
+	// `.wav` is not in Go's builtin mime table, so the same defect goes red on
+	// a slim CI container and green on a developer's laptop: a verdict that
+	// depends on which packages are installed, which is precisely the
+	// dependency the closed switch above exists to refuse, reintroduced
+	// through the test's fallback path. With the name empty and the
+	// declaration deleted it fails at `content-type = "audio/wave"`, which is
+	// `http.DetectContentType`'s answer for a RIFF header and the signal the
+	// assertion was designed for.
+	http.ServeContent(w, r, "", time.Time{}, f)
 }
 
 // artifactType is what ember declares the bytes under a key to be.

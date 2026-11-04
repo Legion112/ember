@@ -79,11 +79,24 @@ func (b spokenBatch) Run(ctx context.Context, out io.Writer, sink report.Sink, _
 // runSpoken says each utterance in turn and brings its wav home before the
 // next one starts.
 //
-// NO FORWARDS, which is why this ignores the dialer. A `cmds` run holds
-// `ports:` open because a workload may want to reach a service on the node and
-// a ComfyUI run is exactly that; piper reads stdin and writes a file, so a
-// forward here would be a listener opened for nothing -- and the rule that
-// every listener is loopback is a rule about listeners that exist.
+// IT IGNORES TWO OF THE PARAMETERS THE SEAM CARRIES, and both omissions are
+// decisions rather than oversights.
+//
+// THE DIALER: no forwards. A `cmds` run holds `ports:` open because a workload
+// may want to reach a service on the node and a ComfyUI run is exactly that;
+// piper reads stdin and writes a file, so a forward here would be a listener
+// opened for nothing -- and the rule that every listener is loopback is a rule
+// about listeners that exist.
+//
+// THE SPEC: nothing on it describes a speech run. `Serve` and `ServeTimeout`
+// are sd-server's, `Cmds` is the opaque-argv path, `Ports` is the forward this
+// does not open, and `Outputs` is the `outputs:` fetch -- which this path
+// deliberately does not use, because ember composed each filename and fetches
+// them one at a time. That absence is the same seal `Plan.Spoken` rests on:
+// `node.Spec` has no speech field, so a request can never be consulted about
+// one, and a parameter read here would be the first step towards giving it
+// one. The seam carries it because `servedBatch` needs it, which is what an
+// interface with two implementations looks like.
 func runSpoken(
 	ctx context.Context,
 	out io.Writer,
