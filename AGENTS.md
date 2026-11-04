@@ -1353,7 +1353,14 @@ that sentence made unrepresentable rather than merely tested.
   ran, the row was keyed `.wav`, the route declared `audio/wav` rather than
   the `image/png` it declared unconditionally until a second kind existed, and
   `nosniff` beside that declaration did not stop Chrome playing it. Measured
-  on this tree: **3.523s** of audio, from `/api/requests/{id}/images/1/0`.
+  on this tree across five runs of one sentence: **3.37s to 3.52s** of audio,
+  from `/api/requests/{id}/images/1/0`. **The spread is unexplained and is
+  recorded as unexplained**: either piper's own sampling is not deterministic
+  at its default `noise_scale`, or `duration` under `preload="metadata"` is a
+  progressive estimate and the poll returns on the first value above zero.
+  Nothing here distinguishes them, which is why the assertion is a floor under
+  the sentence rather than an equality -- a figure this lab cannot explain is
+  not a figure to compare against.
   **A media error is conclusive and is not waited out**, which is `orExited`'s
   rule as the browser labs spell it and which this file already records
   costing one run fourteen minutes: a 404 or a refused type is exactly what
