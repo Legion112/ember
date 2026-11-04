@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -812,25 +814,64 @@ func committedConfigs(t *testing.T, root string) []string {
 	all = append(all, fencedConfigs(t, filepath.Join(root, "docs"), extracted)...)
 
 	var fromRoot, fromDocs int
+	docs := map[string]bool{}
 	for _, p := range all {
-		if filepath.Dir(p) == extracted {
-			fromDocs++
+		if filepath.Dir(p) != extracted {
+			fromRoot++
 			continue
 		}
-		fromRoot++
+		fromDocs++
+		// The extractor names each file <document>-line<N>.yaml, so the
+		// document that contributed it is readable off the answer -- which is
+		// what keeps this floor over the answer like the other two.
+		base := filepath.Base(p)
+		if i := strings.LastIndex(base, "-line"); i > 0 {
+			base = base[:i]
+		}
+		docs[base] = true
 	}
 	if fromRoot < 3 {
 		t.Fatalf("%d of the %d configuration(s) came from an ember*.yaml at the "+
 			"repository root, want at least 3; this test is checking nothing if "+
 			"that glob is wrong or its result is not read", fromRoot, len(all))
 	}
-	if fromDocs < 1 {
+	if fromDocs < 2 {
 		t.Fatalf("%d of the %d configuration(s) came from a ```yaml fence under "+
-			"docs/, want at least 1; the two configurations #144 demoted out of "+
+			"docs/, want at least 2; the two configurations #144 demoted out of "+
 			"the root live there, and an extractor that finds none -- or a result "+
 			"nothing reads -- is checking nothing", fromDocs, len(all))
 	}
+	// AT LEAST TWO DOCUMENTS, AND THAT IS THE FLOOR THE FIRST VERSION GOT
+	// WRONG. It asked for one fenced configuration, which
+	// docs/long-video-is-a-pipeline.md satisfies on its own -- so moving
+	// docs/configurations.md to docs/reference/configurations.md left this
+	// test at EXIT 0 with 6 of 8 configurations loaded and both demoted
+	// blocks unread, which is the whole property the guard exists for,
+	// silently undone by a file move. Measured, not reasoned.
+	//
+	// The *mdx reinstatement could not see it because that one zeroed the
+	// count: a narrowing that still finds something is invisible to a floor
+	// no single source can fail to satisfy. So the floor is "no one document
+	// carries it" rather than a census of blocks, which would be the
+	// hand-maintained list this guard's own comment argues against.
+	if len(docs) < 2 {
+		t.Fatalf("every fenced configuration came from %v, want at least 2 "+
+			"documents under docs/; one document satisfying this floor on its "+
+			"own is how a file move leaves the demoted configurations unread "+
+			"with this test green", keysOf(docs))
+	}
 	return all
+}
+
+// keysOf names the documents a floor failed over, because "want at least 2"
+// without saying which one answered sends the reader to count fences.
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // fencedConfigs writes every ```yaml block under dir into tmp and returns the
@@ -848,10 +889,39 @@ func committedConfigs(t *testing.T, root string) []string {
 // remainder of the document would be handed to the YAML decoder as one
 // configuration. Everything else -- ```bash, ```, ```text -- is left alone,
 // which is what keeps a captured log or a curl command out of the set.
+//
+// A WALK AND NOT A GLOB, because a glob is a pattern and a pattern narrows.
+// filepath.Glob(dir, "*.md") is not recursive, so moving this document to
+// docs/reference/ left the guard green with both demoted configurations
+// unread -- and narrowing the same pattern to "l*.md" does it too. There is
+// no pattern left here to narrow except the .md suffix, and dropping that
+// finds nothing at all, which every floor in the caller reports.
+//
+// WHAT THIS RULE NARROWS, written beside it rather than left to be
+// discovered: it reads docs/ and NOT README.md, which holds 14 yaml fences of
+// its own -- 12 of which would pass unchanged, including the starter
+// `# ember.yaml` block that is the first thing anybody copies. So the rule as
+// stated ("every ember configuration this repository commits") is wider than
+// the rule as implemented ("every ```yaml fence under docs/"), and the
+// difference is README. That is the imagelabs shape in miniature, which is
+// why it is a sentence here instead of a surprise: widening it is cheap and
+// the only reason it was not done with #144 is that README's fences are
+// partial by design -- a two-line `cmd:`/`ports:` illustration is not a
+// configuration, and deciding which of the 14 are would be the
+// hand-maintained list this guard exists not to be.
 func fencedConfigs(t *testing.T, dir, tmp string) []string {
 	t.Helper()
 
-	docs, err := filepath.Glob(filepath.Join(dir, "*.md"))
+	var docs []string
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") {
+			docs = append(docs, p)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

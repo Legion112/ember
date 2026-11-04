@@ -692,16 +692,50 @@ moment it imports a sibling, the sibling's dependencies become its own.
   could have returned `paths` alone, green. `committedConfigs` counts over the
   list it hands back, telling the two apart by whether the path is one of the
   temp files the extractor wrote, so dropping **either** source is red.
+  **AND A GLOB IS A PATTERN, SO A GLOB NARROWS: the first floor could be
+  satisfied with the 85 lines it exists for UNREAD.** It asked for one fenced
+  configuration, which `docs/long-video-is-a-pipeline.md` answers on its own,
+  and `filepath.Glob(dir, "*.md")` is not recursive -- so **measured**, moving
+  `docs/configurations.md` to `docs/reference/configurations.md` left the test
+  at **exit 0** with 6 of 8 configurations loaded and both demoted blocks
+  unread, and narrowing the same pattern to `l*.md` does it too. A file move
+  silently undoing the one property the guard was built for. The `*.mdx`
+  reinstatement could not see it, and that is the lesson rather than the
+  defect: it **zeroed** the count, and a floor no single source can fail to
+  satisfy is blind to a NARROWING while catching a BREAKING -- which is the
+  `AssertNoStray`-could-not-fail shape reached through a floor instead of a
+  cleanup order. It is `filepath.WalkDir` now, which closes the
+  sub-directory hole and the pattern together because there is no pattern left
+  but the `.md` suffix, and the floor is **at least two DOCUMENTS** rather than
+  a census of blocks -- "no one document carries it", read off the answer,
+  since the extractor names each file `<document>-line<N>.yaml`. Reinstated
+  three ways, each red: the suffix test broken (nothing found), the walk
+  narrowed to one document (the document floor), and the document floor
+  relaxed back to one with the walk still narrowed (the two-configuration
+  floor). And the sub-directory move is now **green**, which is the half that
+  says the walk is doing the work.
+  **THE RULE AS STATED IS WIDER THAN THE RULE AS IMPLEMENTED, and the
+  difference is `README.md`.** "Every ember configuration this repository
+  commits" is the sentence; "every ```yaml fence under `docs/`" is the code,
+  and `README.md` holds **14** fences of its own, **12** of which would pass
+  unchanged -- including the starter `# ember.yaml` block that is the first
+  thing anybody copies. Written down beside the rule rather than left to be
+  found, because an undocumented narrowing is the `imagelabs` shape this
+  guard's own comment invokes against itself. Not widened with #144 for a
+  stated reason: README's fences are partial by design, a two-line
+  `cmd:`/`ports:` illustration is not a configuration, and deciding which of
+  the 14 are would be the hand-maintained list this guard exists not to be.
   **`TestExampleConfigs_CanSyncTheirOwnStore` was NOT widened to the two
   blocks, and that narrowing loses nothing measurable**: `ember store sync` on
   the video one fails at `ParseAssets` over the placeholder digest and on the
   code-model one at `ValidateImage` over an untagged sentence, so the
   assertion was already resolving an image for a sync that could never happen.
   Its comment says so rather than keeping a subject it no longer has.
-  **Seven reinstatements, each red, two negative controls green, controls at
+  **Nine reinstatements, each red, two negative controls green, controls at
   both ends, and every case ended in a diff against one backup taken once per
-  path**: a typo in each demoted block, the extractor's glob pointed at
-  `*.mdx`, the fenced source dropped from the return, the root source dropped
+  path**: a typo in each demoted block, the walk's suffix test broken, the
+  walk narrowed to one document, the document floor relaxed with the walk
+  narrowed, the fenced source dropped from the return, the root source dropped
   from the return, a foreign `kind: Deployment` fence, and an unclosed fence.
   The negative control's first anchor missed and the harness reported
   ANCHOR-MISS rather than a verdict, which is that trap working. And -- because
@@ -716,6 +750,15 @@ moment it imports a sibling, the sibling's dependencies become its own.
   because it is a change to the README guards' own file and this change was
   about the configurations; what stands in its place is that every relative
   link in both documents was checked once, by script, and resolves.
+  **The scope call stands and the "cheap" is now a measurement rather than an
+  estimate: review wrote that guard in about thirty lines of shell over
+  `README.md`, `AGENTS.md` and `docs/`, and its FIRST RUN found the
+  `ember.local.yaml` defect.** A guard whose first run finds a real defect is
+  this repository's own strongest argument for keeping one -- the same
+  sentence `TestComments_CiteNoFlagThatNoFlagSetDeclares` earned when its
+  first catch was the commit quoting it. So the thing to notice is not the
+  decision but that the script existed and was thrown away twice: it is filed
+  rather than re-derived a third time.
 
 ## Threat model
 
@@ -3837,15 +3880,17 @@ A leaked node bills by the hour in silence. These are not style preferences.
   of ember is to measure what a model costs and how long it takes, and two runs
   a week apart that both say `:latest` may not have run the same software.
 - **A placeholder in a committed config is a sentence whose refusal quotes
-  it.** `ember.video.example.yaml` carries `REPLACE_WITH_THE_DIGEST_PUSH_PRINTS`
+  it.** The video configuration (in `docs/configurations.md` since #144, and
+  `ember.video.example.yaml` when this was written) carries
+  `REPLACE_WITH_THE_DIGEST_PUSH_PRINTS`
   where a digest goes, which is #18: it refuses, correctly, but it reads as a
-  configuration with a typo in it rather than as a template. So
-  `ember.code-model.example.yaml`'s one missing value -- there is no ember
+  configuration with a typo in it rather than as a template. So the
+  code-model configuration (same document)'s one missing value -- there is no ember
   workload image carrying an LLM server, because an image has to carry
   `embernode` and sshd and this repository builds none -- is written as
   `EMBER-HAS-NO-LLM-WORKLOAD-IMAGE-SEE-THIS-FILES-HEADER`, with no tag, so the
   existing pin rule refuses it and the error *is* the instruction. Everything
-  else in that file is real, and the split is stated in its header: `store
+  else in it is real, and the split is stated beside it: `store
   create`, `store push`, `store ls` and `store verify` need no node and no
   image, so the half that can be run today is runnable and the half that
   cannot refuses by name. The weights' digest came from Hugging Face's own
@@ -5974,11 +6019,14 @@ A leaked node bills by the hour in silence. These are not style preferences.
   both directions.
 - **Every measurement that was only in a config file's header is in
   `docs/configurations.md` now, and the entry above about the placeholders
-  cites two files that no longer exist (#144).** That entry -- "a placeholder
-  in a committed config is a sentence whose refusal quotes it" -- is left as
-  it stands, because it is the record of #18's lesson and the refusals it
-  describes are unchanged; what moved is where the two configurations are
-  written down, which is the Testing entry at the end of that section. The
+  named two files that no longer exist and is REPOINTED rather than left
+  (#144).** Leaving it was argued for first, as the record of #18's lesson --
+  and the standing practice in this situation is to repoint, which the same
+  change applied to `imagelab_test.go` and `served_test.go`, so leaving this
+  one was inconsistent with its own commit. One phrase each keeps the #18
+  record intact and stops a reader following a filename to nothing: the
+  refusals that entry describes are unchanged, and what moved is only where
+  the two configurations are written down. The
   numbers that had no second home anywhere in the tree, listed because the
   one unacceptable outcome of that change was losing one: the 70 GiB store's
   standing charge (**$0.0067/hr, $0.16/day, $4.90/month**, which `ember ls`
