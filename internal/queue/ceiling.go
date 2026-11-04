@@ -309,15 +309,31 @@ func (e *CeilingError) key() string { return "max_" + string(e.Period) + "_usd" 
 // the same arithmetic provision.Budget.Allow uses for max_run_usd, so the two
 // cannot disagree about what a rental may come to.
 //
-// A FREE RENTAL IS NEVER REFUSED. The local provider's price is zero, so its
-// projection is zero and it adds nothing to any period -- and refusing one
-// because a paid month is spent would stop the one kind of run that costs
-// nothing, which is the opposite of what the ceiling is for.
+// THIS IS NOT THE AUTHORITY ON THE FREE-RENTAL RULE AND IT USED TO READ LIKE
+// ONE. `Binds` is what the gate asks, before it decides whether to read a
+// ledger at all; the `projected <= 0` below is this function's own floor for a
+// DIRECT caller, because `Allow` is reachable with a ceiling already
+// overspent, where `spent + 0 > ceiling` would refuse a rental that costs
+// nothing. The two cannot disagree -- they are the same comparison on the same
+// figure -- and the division of labour is that one decides whether the
+// question is worth asking and the other answers it. Measured: deleting this
+// one turns `TestCeilings_NeverRefuseAFreeRental` red, so it is live rather
+// than a second copy kept for symmetry.
+//
+// THE `c.IsZero()` DISJUNCT IS GONE, and it was redundant with the loop below
+// rather than merely unreachable -- which is the stronger reason and is why it
+// could go without a behaviour change. With no ceiling set, `p.ceiling <= 0`
+// skips both periods and nothing is read; measured, with the disjunct deleted,
+// `go test ./...` is exit 0 AND `TestCeilings_NoCeilingReadsNothing` still
+// passes, so the "an unconfigured ceiling reads the store" property was never
+// resting on it. It was also dead from the only production caller once `Binds`
+// landed in front of it, which review found and nothing reported: the line
+// executes and is simply never true, so no coverage gate can see it.
 //
 // The periods are checked tightest first, because a day is the one an operator
 // hits before a month and is the more useful thing to be told about.
 func (c Ceilings) Allow(ctx context.Context, s Spender, now time.Time, projected node.MicroUSD) error {
-	if projected <= 0 || c.IsZero() {
+	if projected <= 0 {
 		return nil
 	}
 	for _, p := range []struct {

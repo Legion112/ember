@@ -467,8 +467,14 @@ func TestDirectRunner_TheTTLItProjectsOverIsTheRunsAndNotTheDaemons(t *testing.T
 // slower, and not by any ordinary run -- which is the frequency AGENTS.md
 // records as the worst a flake can have. The sweep is a real and documented
 // interaction with `Adopt` and it only happens in that ORDER, which production
-// never has: `ember serve` sweeps once at startup, long before a client
-// submits.
+// is overwhelmingly unlikely to reach and **does not enforce**: `serveUntil`
+// starts the two servers and `q.Run` as three goroutines over listeners that
+// are already bound, and `Interrupt` is `Run`'s first statement, so a
+// submission accepted inside that scheduling gap would be swept too. What
+// makes it unreachable is the work in between -- a config load, an
+// `app.NewPlan` with a catalogue call, two SQLite reads -- and not the order.
+// AGENTS.md has why reordering the goroutines would not close it and why the
+// close that would is one `genstore.Adopt` already declines.
 //
 // So the loop is started FIRST, before anything is adopted, and is made busy
 // the way the scenario says it is: a queued request, claimed, whose rental

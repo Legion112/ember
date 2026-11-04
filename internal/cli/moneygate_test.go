@@ -3,13 +3,15 @@ package cli
 import (
 	"bytes"
 	"go/ast"
-	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/tools/go/packages"
 
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/dockerengine"
@@ -426,90 +428,113 @@ func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhatACeilingCouldRefuse(t *testing.
 // check and no type can tell "nobody wired it" from "nothing is configured",
 // which is #105's own sentence about why its defect survived.
 //
-// A PARSE AND NOT A GREP. The subject is "every production construction of
-// this type is handed the daemon's own config", which `go/parser` answers and
-// `grep` cannot: a POSITIONAL literal has no field names at all and is a fatal
-// here rather than a skip, because the alternative to failing on a literal this
-// guard cannot read is reading straight past the one that matters --
-// TestFlagTablesClassifyEveryFlagSetMethod's rule. The floor is the other
-// half: a walk that found no construction passes every assertion.
+// THREE VERSIONS, AND THE FIRST TWO BOTH OVER-CLAIMED IN THEIR PROSE -- which
+// is the failure this PR corrected once and then committed again, so the
+// history is the useful part.
 //
-// IT CHECKS THE VALUE AND NOT ONLY THE FIELD'S NAME, which the first version
-// did not, and review walked around it: `Config: config.Config{}` substituted
-// for `Config: cfg` left `go build`, `go vet`, `golangci-lint` and
-// `go test ./...` all at exit 0 -- this guard among them -- while the daemon's
-// ceilings reached the submitted-run gate nowhere and `Tightest` composed a
-// ZERO against the run's config, which is #165's own defect with the test
-// claiming to refuse it in advance. The precedent for fixing rather than
-// documenting is `TestTrustHasOneImplementationAndItIsPin`, whose first version
-// skipped a generic receiver.
+// v1 checked that the literal NAMED `Config` and said nothing about what it
+// held: `Config: config.Config{}` was green across `go build`, `go vet`,
+// `golangci-lint` and `go test ./...`, the guard included.
 //
-// SO THE VALUE MUST BE AN IDENTIFIER THE ENCLOSING FUNCTION BOUND TO A
-// config.Config, which is `declaredFlags`' rule one type over: there, a call
-// counts only when the identifier it is called on was bound to a
-// `*flag.FlagSet` in that function. Two ways to be bound are accepted, which
-// are the two this package uses -- a `config.Config` PARAMETER (`serveUntil`'s
-// `cfg`) and a `:=` from `config.Load` (`runUp`'s and `runStoreSync`'s shape,
-// where a DirectRunner could plausibly move). Nothing else is: a composite
-// literal, a selector, a call and a `var` of the type all fail, because none of
-// them is the file `ember serve` read.
+// v2 required the value to be an identifier the enclosing function "bound to a
+// config.Config" -- and implemented that as a set of NAMES, so it was a
+// name-plus-type check wearing a value check's prose. Three more walkarounds
+// were green: `cfg = config.Config{}` one line above the wiring, because the
+// parameter's own name still covered it; an inner block shadowing it with
+// `cfg := config.Config{}`; and an immediately-invoked
+// `func(cfg config.Config){...}(config.Config{})`. Only the last of those is
+// the bound v2's prose claimed -- the other two write the zero INSIDE the
+// function the guard analyses, one line from the construction site.
 //
-// WHAT IT GIVES UP, so the next reader does not have to find out: an identifier
-// COPIED from an accepted one (`d := cfg`) fails although it is correct. That
-// is a shape nobody writes, the message says what to write instead, and
-// widening it would mean a dataflow pass for a false positive this package
-// cannot currently produce. A RENAME is safe, which is the refactor that
-// actually happens -- the rule is the binding and never the spelling `cfg`.
+// SO v3 ASKS THE TYPE CHECKER, and the shadow stops being a heuristic. The
+// value's `types.Object` must BE the object a `config.Config` parameter bound,
+// or the one a `:= config.Load` defined. A shadow is a different object by
+// construction, so it fails without this guard knowing what a block, a range
+// clause, a type switch or a nested closure is -- which is the whack-a-mole
+// that a name-keyed version would have had to chase one syntax form at a time.
+// `go/packages` is already a direct dependency and `TestNoProductionDeadCode`
+// already loads the tree through it, so this is the tool the repository
+// reaches for when a question is about identity rather than spelling.
+//
+// AND REASSIGNMENT IS THE ONE THING IDENTITY CANNOT ANSWER, because `cfg =
+// config.Config{}` leaves the object alone and changes its value -- which is
+// dataflow. It is refused rather than reasoned about: an object that is
+// ASSIGNED TO anywhere in the function, or whose ADDRESS is taken, is no
+// longer accepted, and the failure says so. That is the allow-list direction
+// and it is a refusal rather than an analysis, which is what keeps it from
+// becoming the scope-aware dataflow pass that would be the wrong tool here.
+// Measured: no production function in this package that builds a DirectRunner
+// does either, so it costs no false positive today.
+//
+// WHAT IS STILL OPEN, and it is now the bound the prose claims rather than two
+// more: a config handed ACROSS A CALL. Any function or closure that TAKES a
+// `config.Config` and builds a DirectRunner is accepted, whatever its callers
+// pass -- so `func(c config.Config){ ... }(config.Config{})` is green, and so
+// is the same thing through a named helper. This guard stops at the function
+// boundary, as `declaredFlags` does.
+//
+// THE INLINE FORM COULD BE CLOSED AND DELIBERATELY IS NOT, because an
+// immediately-invoked closure is the one call whose arguments are right there
+// to read -- about fifteen lines. It is declined because it would make the
+// guard refuse `func(c config.Config){ ... }(zero)` and accept `helper(zero)`
+// where `helper` is identical, which is one rule answering two ways: the same
+// reason a closure's parameters are accepted at all. The bound is the function
+// in both forms, which is a bound somebody can hold in their head; "the
+// function, except when the call happens to be visible" is not. Measured both
+// ways rather than argued: the inline form is green and every same-function
+// walkaround below it is red.
+//
+// What IS closed is every one-step version: a zero at the construction site, a
+// zero assigned into the parameter, a pointer taken to it, and a shadow in any
+// scope -- a block, a range clause, an if-statement initialiser or a closure
+// with no config parameter, none of which this guard has to know the syntax of,
+// because a shadow is a different object.
+//
+// A POSITIONAL literal is a FATAL rather than a skip, because the alternative
+// to failing on a literal this guard cannot read is reading straight past the
+// one that matters -- TestFlagTablesClassifyEveryFlagSetMethod's rule. The
+// floor is the other half: a walk that found no construction passes every
+// assertion.
 //
 // A POINTER FIELD REFUSED AS NIL IN Start WAS WEIGHED AND IS NOT THE ANSWER.
 // It is this package's own shape for a dependency that must be wired -- Start
 // already refuses a nil Queue and a nil Store -- and it catches strictly less:
-// a nil says "nobody wired it" and says nothing about the measured walkaround,
-// which hands over a zero rather than nothing. Adding it beside this guard
-// would be a second mechanism for a property this one already holds.
+// a nil says "nobody wired it" and says nothing about any of the walkarounds
+// above, every one of which hands over a zero rather than nothing.
 func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	pkgs, err := packages.Load(&packages.Config{
+		// Syntax and type info for THIS package's production files. Tests are
+		// left out deliberately: the subject is what `ember serve` wires, and
+		// every test in the tree sets the field itself, which is the whole
+		// reason this guard exists.
+		Mode: packages.NeedName | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
+	}, ".")
 	if err != nil {
-		t.Fatalf("read internal/cli: %v", err)
+		t.Fatalf("load internal/cli: %v", err)
+	}
+	if n := packages.PrintErrors(pkgs); n > 0 {
+		t.Fatalf("internal/cli does not type-check (%d error(s)), so this guard cannot read it", n)
 	}
 
-	fset := token.NewFileSet()
 	found := 0
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, perr := parser.ParseFile(fset, name, nil, 0)
-		if perr != nil {
-			t.Fatalf("parse %s: %v", name, perr)
-		}
-		for _, d := range f.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Syntax {
+			for _, d := range f.Decls {
+				fn, ok := d.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				c := configObjects(pkg.TypesInfo, fn)
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					lit, ok := n.(*ast.CompositeLit)
+					if !ok || !isDirectRunner(lit) {
+						return true
+					}
+					found++
+					checkDirectRunnerConfig(t, pkg.Fset, pkg.TypesInfo, lit, c)
+					return true
+				})
 			}
-			// The identifiers THIS function bound to a config.Config, which is
-			// what makes the check about the daemon's own file rather than
-			// about the spelling of a variable.
-			daemon := configIdents(fn)
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				lit, ok := n.(*ast.CompositeLit)
-				if !ok {
-					return true
-				}
-				sel, ok := lit.Type.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "DirectRunner" {
-					return true
-				}
-				pkg, ok := sel.X.(*ast.Ident)
-				if !ok || pkg.Name != "queue" {
-					return true
-				}
-				found++
-				checkDirectRunnerConfig(t, fset, lit, daemon)
-				return true
-			})
 		}
 	}
 	if found == 0 {
@@ -517,9 +542,138 @@ func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
 	}
 }
 
+// isDirectRunner reports whether a literal builds a queue.DirectRunner.
+func isDirectRunner(lit *ast.CompositeLit) bool {
+	sel, ok := lit.Type.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "DirectRunner" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "queue"
+}
+
+// configBindings is what one function did with the daemon's config: which
+// objects are one, and which of those stopped being trustworthy.
+type configBindings struct {
+	// bound is every object the function bound to a config.Config, by identity
+	// and not by name.
+	bound map[types.Object]bool
+
+	// moved is every object that is assigned to, or whose address is taken,
+	// anywhere in the function. An object in here is not accepted even if it
+	// is bound: identity says which variable it is and says nothing about what
+	// is in it, so the honest answer to a variable that was written to is a
+	// refusal rather than a guess.
+	moved map[types.Object]string
+}
+
+// configObjects reads what fn bound to a config.Config, and what it then did
+// to those bindings.
+//
+// Two bindings are accepted, which are the two this package uses: a parameter
+// of that type -- `serveUntil`'s `cfg`, and any closure's, because accepting a
+// top-level helper and refusing the closure form would be one rule answering
+// two ways -- and a `:=` whose right-hand side is `config.Load`, which is
+// `runUp`'s and `runStoreSync`'s shape and where a DirectRunner could
+// plausibly move.
+//
+// The type is compared through the type checker rather than by matching the
+// spelling `config.Config`, so a dot-import or an alias cannot slip past.
+func configObjects(info *types.Info, fn *ast.FuncDecl) configBindings {
+	c := configBindings{bound: map[types.Object]bool{}, moved: map[types.Object]string{}}
+
+	params := func(fl *ast.FieldList) {
+		if fl == nil {
+			return
+		}
+		for _, p := range fl.List {
+			if !isConfigConfig(info.TypeOf(p.Type)) {
+				continue
+			}
+			for _, n := range p.Names {
+				if obj := info.Defs[n]; obj != nil {
+					c.bound[obj] = true
+				}
+			}
+		}
+	}
+
+	params(fn.Type.Params)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.FuncLit:
+			params(v.Type.Params)
+		case *ast.UnaryExpr:
+			// &cfg hands a writer to something this guard cannot see into.
+			if v.Op == token.AND {
+				if id, ok := v.X.(*ast.Ident); ok {
+					if obj := info.Uses[id]; obj != nil {
+						c.moved[obj] = "its address is taken"
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			if v.Tok == token.DEFINE {
+				if len(v.Lhs) > 0 && len(v.Rhs) == 1 && isConfigLoad(v.Rhs[0]) {
+					if id, ok := v.Lhs[0].(*ast.Ident); ok {
+						if obj := info.Defs[id]; obj != nil {
+							c.bound[obj] = true
+						}
+					}
+				}
+				return true
+			}
+			// Anything that is not a definition WRITES to what is already
+			// there, which is the one walkaround identity cannot see.
+			for _, l := range v.Lhs {
+				id, ok := l.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				if obj := info.Uses[id]; obj != nil {
+					c.moved[obj] = "it is assigned to"
+				}
+			}
+		}
+		return true
+	})
+	return c
+}
+
+// isConfigConfig reports whether t is internal/config.Config.
+func isConfigConfig(t types.Type) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj != nil && obj.Name() == "Config" &&
+		obj.Pkg() != nil && obj.Pkg().Path() == "github.com/Legion112/ember/internal/config"
+}
+
+// isConfigLoad reports whether e is a call to config.Load.
+func isConfigLoad(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Load" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "config"
+}
+
 // checkDirectRunnerConfig is the per-literal half, so the walk above reads as
 // the walk and this reads as the rule.
-func checkDirectRunnerConfig(t *testing.T, fset *token.FileSet, lit *ast.CompositeLit, daemon map[string]bool) {
+func checkDirectRunnerConfig(
+	t *testing.T,
+	fset *token.FileSet,
+	info *types.Info,
+	lit *ast.CompositeLit,
+	c configBindings,
+) {
 	t.Helper()
 	for _, el := range lit.Elts {
 		kv, ok := el.(*ast.KeyValueExpr)
@@ -541,12 +695,25 @@ func checkDirectRunnerConfig(t *testing.T, fset *token.FileSet, lit *ast.Composi
 				fset.Position(kv.Value.Pos()), kv.Value)
 			return
 		}
-		if !daemon[val.Name] {
-			t.Errorf("%s: Config is set from %q, which this function did not bind to a "+
-				"config.Config -- a config.Config parameter, or a := from config.Load. So "+
-				"this may not be the file ember serve read, and max_day_usd would go back "+
-				"to bounding the queue alone (#165)",
-				fset.Position(kv.Value.Pos()), val.Name)
+		obj := info.Uses[val]
+		if obj == nil {
+			t.Fatalf("%s: the type checker has no object for %q, which this guard cannot read "+
+				"past", fset.Position(val.Pos()), val.Name)
+		}
+		if why, bad := c.moved[obj]; bad {
+			t.Errorf("%s: Config is set from %q and %s in the same function, so this guard "+
+				"cannot say it still holds the file ember serve read -- which is #165. Pass "+
+				"the config through without writing to it",
+				fset.Position(val.Pos()), val.Name, why)
+			return
+		}
+		if !c.bound[obj] {
+			t.Errorf("%s: Config is set from %q, which is not an object this function bound to "+
+				"a config.Config -- a config.Config parameter, or a := from config.Load. A "+
+				"SHADOW of the right name is a different variable and lands here. So this may "+
+				"not be the file ember serve read, and max_day_usd would go back to bounding "+
+				"the queue alone (#165)",
+				fset.Position(val.Pos()), val.Name)
 		}
 		return
 	}
@@ -554,80 +721,6 @@ func checkDirectRunnerConfig(t *testing.T, fset *token.FileSet, lit *ast.Composi
 		"the socket is bounded by the config it named and not by the one ember serve "+
 		"read -- which is #165, and max_day_usd goes back to bounding the queue alone",
 		fset.Position(lit.Pos()))
-}
-
-// configIdents is every identifier fn bound to a config.Config.
-//
-// Two bindings, which are the two this package uses: a parameter of that type,
-// and a `:=` whose right-hand side is config.Load. Anything else is not the
-// file `ember serve` read, and the guard above says so rather than guessing.
-//
-// A CLOSURE'S PARAMETERS COUNT TOO, and that was measured rather than assumed:
-// the first version walked `*ast.FuncDecl` parameters alone, so a DirectRunner
-// built inside a `func(cfg config.Config) { ... }` was reported although it is
-// correct -- a false positive on a refactor somebody could plausibly write.
-// A top-level helper taking the config is accepted for the same reason, so
-// refusing the closure form would have been the same rule answering two ways.
-//
-// THE BOUND IS THE FUNCTION, which is `declaredFlags`' bound and is stated
-// rather than chased: this cannot follow a config ACROSS a call, so a helper
-// that takes `config.Config` and is handed a zero at its call site passes.
-// Closing that means type-checked dataflow, which is a different tool; what is
-// closed is the one-step version -- a zero written at the construction site --
-// which is the walkaround review measured and the only one anybody writes by
-// accident.
-func configIdents(fn *ast.FuncDecl) map[string]bool {
-	out := map[string]bool{}
-
-	isConfigType := func(e ast.Expr) bool {
-		sel, ok := e.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Config" {
-			return false
-		}
-		pkg, ok := sel.X.(*ast.Ident)
-		return ok && pkg.Name == "config"
-	}
-	params := func(fl *ast.FieldList) {
-		if fl == nil {
-			return
-		}
-		for _, p := range fl.List {
-			if !isConfigType(p.Type) {
-				continue
-			}
-			for _, n := range p.Names {
-				out[n.Name] = true
-			}
-		}
-	}
-
-	params(fn.Type.Params)
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch v := n.(type) {
-		case *ast.FuncLit:
-			params(v.Type.Params)
-		case *ast.AssignStmt:
-			if len(v.Lhs) == 0 || len(v.Rhs) != 1 {
-				return true
-			}
-			call, ok := v.Rhs[0].(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Load" {
-				return true
-			}
-			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "config" {
-				return true
-			}
-			if id, ok := v.Lhs[0].(*ast.Ident); ok {
-				out[id.Name] = true
-			}
-		}
-		return true
-	})
-	return out
 }
 
 // TestStoreSync_ProjectsTheCheapMachineAgainstThePeriodCeilings.
