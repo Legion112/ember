@@ -295,9 +295,28 @@ func (h *harness) unauth(t *testing.T, srv *httptest.Server, path string) answer
 // The bytes are a real RIFF/WAVE header, so the assertion is not satisfied by
 // Go's own sniffing agreeing by accident: net/http sniffs RIFF....WAVE to
 // `audio/wave`, which is a DIFFERENT spelling from the one ember declares --
-// so a declaration that went missing would show up as `audio/wave` here
-// rather than as the right answer, which is the half that could not be
-// checked with a PNG.
+// so a declaration that went missing shows up as `audio/wave` here rather
+// than as the right answer. Measured: delete the Set and this is RED at
+// `content-type = "audio/wave", want "audio/wav"`.
+//
+// THAT ONLY BECAME TRUE WHEN THE ROUTE STOPPED NAMING THE FILE, which is
+// worth the lines because the first version of this test COULD NOT FAIL.
+// `http.ServeContent`'s first fallback is `mime.TypeByExtension` and not
+// sniffing -- so while the route passed `path.Base(key)`, a `.wav` name plus
+// an /etc/mime.types on the box answered `audio/wav`, the identical spelling,
+// and every header assertion here passed over a lost declaration. Worse than
+// dead: `.wav` is not in Go's builtin table, so the same defect was red on a
+// slim container and green on a laptop -- a verdict depending on installed
+// packages, which is the dependency `artifactType`'s closed switch exists to
+// refuse.
+//
+// AND THE PNG ARM STILL CANNOT FAIL THAT WAY, measured and stated rather than
+// left to be assumed symmetric: deleting the Set leaves
+// TestHeaders_AnImageIsServedWithItsTypeDeclaredAndNotSniffed GREEN, because
+// Go sniffs \x89PNG to `image/png` and lands on the same answer whichever
+// route it took. What that one does catch is the ORDERING -- the nosniff
+// header, which cannot be guessed -- which is the half it was moved here for.
+// The wav arm is the only one of the two that can see a lost Content-Type.
 func TestHeaders_AWavIsServedAsAudioAndNotAsAPNG(t *testing.T) {
 	h := newHarness(t)
 	srv := live(t, h)

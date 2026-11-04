@@ -166,7 +166,8 @@ func TestTTS_AnUtteranceComesHomeAsAPlayableWav(t *testing.T) {
 	// of this lab grepped `ember up`'s output for `--length_scale 1.1`
 	// instead and went red against correct code, because sayOne prints the
 	// utterance and not the argv -- an assertion about a mechanism nobody had
-	// run.
+	// run. The value is 2.0 and the bound 1.3; the paragraph beside the
+	// assertion below has the measured curve those two came off.
 	//
 	// The second names no output, so the unnamed branch of SpokenStem is
 	// driven by the real pipeline rather than only by a unit test.
