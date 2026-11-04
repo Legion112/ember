@@ -4,12 +4,28 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ember</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="/style.css">
 <!--
   Served by `ember serve` from loopback, beside ember.js and ember_bg.wasm,
   which `make web` produces. No CDN and no remote font: this page has to work
   on a machine with no internet, and a script from somewhere else would be a
   third party in a tool whose whole posture is that only sshd is reachable.
+
+  EVERY REFERENCE HERE IS ROOT-RELATIVE, and the leading slash is the whole
+  of it. One page is served on every route the app owns -- `/`, `/queue`,
+  `/requests/abc` -- and a browser resolves a relative reference against the
+  DOCUMENT's own directory, which is `/` for the first two and `/requests/`
+  for the third. `style.css` and `./ember.js` therefore worked at the root
+  and 404'd everywhere below it, and the failure was silent in the worst way:
+  a module specifier that 404s throws before the catch below is installed, so
+  the result was a 200 with a blank body and no message -- indistinguishable
+  from a server that is not answering. The page is only ever served from this
+  one origin's root, so there is nothing a leading slash can be wrong about.
+
+  ember_bg.wasm is NOT referenced here and needs no slash: wasm-bindgen's
+  glue asks for `new URL('ember_bg.wasm', import.meta.url)`, which resolves
+  against the module's own URL rather than the document's -- so it follows
+  ember.js wherever that loaded from.
 -->
 </head>
 <body>
@@ -18,7 +34,7 @@
      The JSON API under <code>/api/</code> works without it.</p>
 </noscript>
 <script type="module">
-  import init from './ember.js';
+  import init from '/ember.js';
   init().catch((e) => {
     // A failed init is a blank page, which looks exactly like a server that
     // is not answering -- so it says which it is.

@@ -1914,6 +1914,19 @@ overlap, because folding an event is idempotent on its sequence number, and
 `ember serve --log-level debug` records the cursor each watcher resumed from —
 the one thing about a reconnect that is otherwise invisible from either end.
 
+**One page is served on every route the app owns**, so a reload on a path the
+app made up gets the app rather than a 404 — which is any path whose last
+segment holds no dot. Every asset that page references is therefore
+**root-relative**, and the leading slash is load-bearing: a browser resolves a
+relative reference against the *document's own directory*, so `style.css` and
+`./ember.js` asked for `/style.css` and `/ember.js` on `/` and on `/queue`,
+and for `/requests/style.css` and `/requests/ember.js` — both 404s — on any
+path below the root, such as `/requests/{id}`. The page arrived and could not
+load itself, and the failure was silent: a module specifier that 404s throws while
+the module script is being *loaded*, before that page's own `init().catch` is
+installed, so the result was a 200 with a blank body and no message — which is
+the one outcome that handler exists to prevent.
+
 The frontend is Rust compiled to WebAssembly, in [`web/`](web). It needs
 `cargo`, the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` at the
 version [`web/Cargo.toml`](web/Cargo.toml) pins — `make web` checks all three

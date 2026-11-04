@@ -781,6 +781,75 @@ moment it imports a sibling, the sibling's dependencies become its own.
   first catch was the commit quoting it. So the thing to notice is not the
   decision but that the script existed and was thrown away twice: it is filed
   rather than re-derived a third time.
+- **A page answered on every route could not load itself below the root, and a
+  status code is what could not see it (#139 slice 1).** `ember serve` serves
+  the app's HTML on any path whose last segment holds no dot -- which is what
+  makes a reload on `/requests/{id}` the app rather than a 404 -- and
+  `web/index.html` referenced `style.css` and `./ember.js` **relatively**. A
+  browser resolves a relative reference against the DOCUMENT's own directory,
+  so one page asked for `/style.css` on `/` and `/queue` and for
+  `/requests/style.css` on `/requests/abc`: single-segment routes worked and
+  everything deeper served a page whose every asset 404'd. The example
+  `static.go`'s own comment names is the one that did not work. Measured
+  before it was fixed, through the handler, and the fix is two tokens.
+  **And it was silent, so the page's own error handling could not report it.**
+  A module specifier that 404s throws while the module script is being
+  LOADED, before the `init().catch` in that script's body is installed -- so
+  the one line written to turn a failed start into a sentence never ran, and
+  what arrived was a 200 with an empty body: indistinguishable from a server
+  that is not answering, which is the failure that handler exists to prevent.
+  **`TestStatic_AClientRenderedRouteGetsTheApp` is the trap and it is still
+  correct.** It asserts the page arrives on `/requests/abc`, which it did
+  throughout: a test about a status code and a `<title>` cannot see the step
+  after. So the Go half resolves the page's own references with `net/url` --
+  `ResolveReference`, the browser's rule rather than a hand-rolled join -- and
+  asks the file server for each one at four depths, over a `Dist` the test
+  writes from the committed `web/index.html` so the answer does not depend on
+  whether anybody ran `make web`. **The references are PARSED OUT OF the file
+  rather than listed beside it**, which is the `LAB_TAGS` rule one surface
+  over: a list passes unchanged the day somebody adds a favicon relatively,
+  and a reinstated `<link rel="icon" href="favicon.ico">` is red. Both floors
+  are over the answer, because a regex that matched nothing would turn both
+  tests green over an unread page -- so a page naming no stylesheet and a page
+  naming no module each fail, reinstated separately. A regex and not a parse,
+  stated where it is: the standard library has no HTML parser and
+  `x/net/html` is a module this list would have to be amended for, over a
+  thirty-line page this repository writes itself.
+  **The browser half is what the Go half cannot claim**, and it is the mount
+  rather than the document. `<h1>` and `.posture` are in none of the HTML the
+  server sends -- the wasm renders both -- so either one present means the
+  module loaded, `ember_bg.wasm` resolved beside it and the mount ran; and
+  that blob is a reference no Go test can see, because wasm-bindgen's glue
+  asks for `new URL('ember_bg.wasm', import.meta.url)` and so follows
+  `ember.js` rather than the page. `/` is asserted FIRST and is the
+  discriminator rather than padding: an app that mounts nowhere fails the same
+  assertion in the same place, so without it the lab could not say the failure
+  was about DEPTH.
+  **THE STYLESHEET ASSERTION'S FIRST MECHANISM COULD NOT FAIL, AND THE
+  REINSTATEMENT IS WHAT SAID SO.** It compared the page's
+  `<link rel=stylesheet>` count against `document.styleSheets`, on the reading
+  that a link whose fetch failed produces no CSSOM entry. Reinstated -- the
+  href back to relative with the module left absolute, so the app mounts over
+  a 404'd sheet -- that comparison was **GREEN**: measured, 1 link, 1 entry,
+  and **0 parsed**, so Chrome keeps an entry for the link whatever the fetch
+  answered. It counts `cssRules` now and is red on the same defect, with all
+  three numbers in the message because "the link is not in the DOM" and "it is
+  and it did nothing" are different repairs. The half-fix is why that
+  assertion exists at all: making only the module absolute leaves the page
+  unstyled and mounting perfectly, which is this entry's own status-code trap
+  one layer down.
+  **Thirteen reinstatements over three passes, each judged on an exit code,
+  with a control at both ends of every pass, three negative controls green,
+  and every case ending in a diff against one backup taken once per path.**
+  Eleven red: the stylesheet relative, the module relative, both (which is
+  master), a favicon added relatively, each floor broken separately, a
+  relative link on the placeholder, and -- through the browser -- the module
+  relative, both, and the lab's own no-stylesheet floor. One green that is a
+  measurement rather than a gap: the stylesheet-only defect against the CSSOM
+  mechanism above. **One pass per mechanism and a fresh backup directory for
+  the second**, because `backup()` taking one copy per path is right inside a
+  pass and is exactly wrong between two -- the shape that once shipped an
+  entry here claiming a deletion the tree did not hold.
 
 ## Threat model
 

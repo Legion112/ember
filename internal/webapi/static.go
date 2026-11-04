@@ -154,6 +154,19 @@ func (s *Server) serveFS(f fs.FS) http.Handler {
 		// A client-rendered app owns its own routes, so anything that is not
 		// a file is the app's own path. Without this, a reload on
 		// /requests/abc is a 404.
+		//
+		// AND WITH IT, FOR THE LIFE OF THIS HANDLER, IT WAS A 200 THE PAGE
+		// COULD NOT LOAD. One page is answered on every depth, and a browser
+		// resolves a relative reference against the document's own directory
+		// -- so index.html's `style.css` and `./ember.js` became
+		// /requests/style.css and /requests/ember.js, which this file server
+		// correctly does not have. Only below the root, so `/` and /queue
+		// worked; and silent, because a module specifier that 404s
+		// throws before the page's own catch is installed, leaving a blank
+		// body with no message. The references are root-relative now and
+		// web/index.html's comment carries the argument. Nothing here can
+		// hold it: a server cannot know which of a page's URLs were meant to
+		// be resolved against the document.
 		if isAppRoute(r.URL.Path) {
 			s.serveApp(w, r, f)
 			return
