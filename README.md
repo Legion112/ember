@@ -2340,6 +2340,16 @@ operator has typed their sentence.
 holding an image job and an utterance is not something the wire can carry; the
 page not building one is cheaper than a 400 naming a job index nobody can see.
 
+**The selector offers every kind this build knows, not every kind your config
+can run.** `GET /api/config`'s `kinds` is a static list, so a speech-only
+configuration still offers a pickable `sd` — and picking it gives the image
+controls and a request that fails once a node is up, because there is no
+generation server to start. What warns you is the red line under the header,
+which says a configuration with no `sd:` block has nothing for an image
+request to run. The other direction is closed: a configuration with no
+`tts.voices` offers `tts` and then refuses it in the panel, naming the key,
+before anything is rented.
+
 **The artifact plays in the page.** A finished utterance is an `<audio
 controls>` beside the gallery's `<img>` for an image, and the element is chosen
 from what the server says the file **is** — `media` on the artifact, derived
