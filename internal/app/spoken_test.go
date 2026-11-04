@@ -41,7 +41,7 @@ func pipered(t *testing.T, run tts.Run, names []string) *sshx.RecordingRunner {
 	r := sshx.NewRecordingRunner()
 	for i, name := range names {
 		remote := RemoteDir + "/" + name + tts.Ext
-		argv := run.Command(run.Jobs[i], remote)
+		argv := run.Jobs[i].Command(remote)
 		say := sshx.Cmd(argv[0], argv[1:]...).String()
 		r.Outputs[say] = []byte(
 			"[2026-11-04 19:32:46.413] [piper] [info] Loaded voice in 0.191540585 second(s)\n" +
@@ -57,10 +57,15 @@ func pipered(t *testing.T, run tts.Run, names []string) *sshx.RecordingRunner {
 }
 
 func oneUtterance() tts.Run {
-	return tts.Run{
+	return tts.Run{Jobs: []tts.Job{spokenJob("Hello from ember.", "hello")}}
+}
+
+// spokenJob is an utterance with the two paths a catalogue entry supplies.
+func spokenJob(text, out string) tts.Job {
+	return tts.Job{
+		Text: text, Output: out,
 		Voice:      "/opt/voices/v.onnx",
 		EspeakData: "/opt/piper/espeak-ng-data",
-		Jobs:       []tts.Job{{Text: "Hello from ember.", Output: "hello"}},
 	}
 }
 
@@ -76,7 +81,7 @@ func TestRunSpoken_SaysEachUtteranceAndBringsItsWavHome(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "run")
 	var out bytes.Buffer
 	sink := &collect{}
-	if err := runSpoken(t.Context(), &out, sink, r, run, testOptions(), dir, node.Rate(0)); err != nil {
+	if err := runSpoken(t.Context(), &out, sink, r, run, testOptions(), dir, node.Rate(0), nil); err != nil {
 		t.Fatalf("runSpoken: %v", err)
 	}
 
@@ -133,7 +138,7 @@ func TestRunSpoken_EveryValueReachesTheNodeAsAPositionalParameter(t *testing.T) 
 	r := pipered(t, run, []string{"hello-01"})
 
 	if err := runSpoken(t.Context(), &bytes.Buffer{}, &collect{}, r, run,
-		testOptions(), filepath.Join(t.TempDir(), "run"), node.Rate(0)); err != nil {
+		testOptions(), filepath.Join(t.TempDir(), "run"), node.Rate(0), nil); err != nil {
 		t.Fatalf("runSpoken: %v", err)
 	}
 	calls := r.Calls()
@@ -152,10 +157,9 @@ func TestRunSpoken_EveryValueReachesTheNodeAsAPositionalParameter(t *testing.T) 
 // a batch where job 2 failed and 3 through 8 ran anyway bills for work the
 // operator no longer wants.
 func TestRunSpoken_StopsAtTheFirstFailureAndSaysWhichUtterance(t *testing.T) {
-	run := tts.Run{
-		Voice: "/v.onnx", EspeakData: "/e",
-		Jobs: []tts.Job{{Text: "alpha"}, {Text: "bravo"}, {Text: "charlie"}},
-	}
+	run := tts.Run{Jobs: []tts.Job{
+		spokenJob("alpha", ""), spokenJob("bravo", ""), spokenJob("charlie", ""),
+	}}
 	names := []string{"speech-01", "speech-02", "speech-03"}
 	r := pipered(t, run, names)
 	// The second utterance fails. FailOn is a substring of the rendered
@@ -166,7 +170,7 @@ func TestRunSpoken_StopsAtTheFirstFailureAndSaysWhichUtterance(t *testing.T) {
 
 	sink := &collect{}
 	err := runSpoken(t.Context(), &bytes.Buffer{}, sink, r, run,
-		testOptions(), filepath.Join(t.TempDir(), "run"), node.Rate(0))
+		testOptions(), filepath.Join(t.TempDir(), "run"), node.Rate(0), nil)
 	if err == nil {
 		t.Fatal("a failed utterance was not reported")
 	}
@@ -190,10 +194,7 @@ func TestRunSpoken_StopsAtTheFirstFailureAndSaysWhichUtterance(t *testing.T) {
 // watching a batch decides whether to stop paying for the rest, which is the
 // reason the artifacts come home as they are produced rather than at the end.
 func TestRunSpoken_CostsAreCardTimeAndAccumulate(t *testing.T) {
-	run := tts.Run{
-		Voice: "/v.onnx", EspeakData: "/e",
-		Jobs: []tts.Job{{Text: "one"}, {Text: "two"}},
-	}
+	run := tts.Run{Jobs: []tts.Job{spokenJob("one", ""), spokenJob("two", "")}}
 	r := pipered(t, run, []string{"speech-01", "speech-02"})
 
 	sink := &collect{}
@@ -202,7 +203,7 @@ func TestRunSpoken_CostsAreCardTimeAndAccumulate(t *testing.T) {
 	// AGENTS.md records about every lab renting from the free provider.
 	rate := node.Rate(3_600_000_000) // $3600/hour: $1 per second, so a span is readable
 	if err := runSpoken(t.Context(), &bytes.Buffer{}, sink, r, run,
-		testOptions(), filepath.Join(t.TempDir(), "run"), rate); err != nil {
+		testOptions(), filepath.Join(t.TempDir(), "run"), rate, nil); err != nil {
 		t.Fatalf("runSpoken: %v", err)
 	}
 	costs := sink.of(report.KindUnitCost)
@@ -231,13 +232,13 @@ func TestRunSpoken_AMissingReportLineCostsTheFiguresAndNothingElse(t *testing.T)
 	run := oneUtterance()
 	r := pipered(t, run, []string{"hello-01"})
 	// Overwrite what piper "printed" with a line that is not the report.
-	argv := run.Command(run.Jobs[0], RemoteDir+"/hello-01"+tts.Ext)
+	argv := run.Jobs[0].Command(RemoteDir + "/hello-01" + tts.Ext)
 	say := sshx.Cmd(argv[0], argv[1:]...).String()
 	r.Outputs[say] = []byte("[piper] [info] something upstream reworded\n")
 
 	sink := &collect{}
 	if err := runSpoken(t.Context(), &bytes.Buffer{}, sink, r, run,
-		testOptions(), filepath.Join(t.TempDir(), "run"), node.Rate(0)); err != nil {
+		testOptions(), filepath.Join(t.TempDir(), "run"), node.Rate(0), nil); err != nil {
 		t.Fatalf("runSpoken: %v", err)
 	}
 	ims := sink.of(report.KindJobImages)
@@ -324,7 +325,7 @@ func TestBatchOf_ChoosesOneKindAndNothingForTheShapesThatAreNotOne(t *testing.T)
 		{
 			"a speech batch",
 			Plan{Spoken: oneUtterance()},
-			"tts (piper, 1 utterance(s), voice /opt/voices/v.onnx)",
+			"tts (piper, 1 utterance(s), /opt/voices/v.onnx)",
 		},
 	}
 	for _, c := range cases {

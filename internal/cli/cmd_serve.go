@@ -19,6 +19,7 @@ import (
 	"github.com/Legion112/ember/internal/loopback"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/queue"
+	"github.com/Legion112/ember/internal/tts"
 	"github.com/Legion112/ember/internal/webapi"
 )
 
@@ -71,11 +72,29 @@ func runServe(args []string, out io.Writer, d deps) error {
 	if err != nil {
 		return err
 	}
-	if len(cfg.SD.Serve) == 0 {
-		return usageError{fmt.Errorf("%s has no sd.serve block, so there is no generation server "+
-			"to start and a queued request would have nowhere to run. See the sd: section of "+
-			"README.md, or ember.local.sd-server.example.yaml for a configuration that costs nothing",
-			*cfgPath)}
+	// THE REFUSAL IS "THIS CAN SERVE NOTHING" AND NOT "THIS HAS NO sd.serve",
+	// which is the same sentence while there is one kind and a wall the moment
+	// there are two.
+	//
+	// FOUND BY THE LAB AND BY NOTHING ELSE. Every unit test of the speech path
+	// builds a `webapi.Options` or a `queue.Queue` directly, so none of them
+	// goes through this function at all -- `go test ./...` is entirely green
+	// over a configuration `ember serve` refuses to start from, and what
+	// reported it was the first run of the lab that posts a request to a real
+	// server. The whole of the browser half was reachable by nothing.
+	//
+	// It names BOTH keys, because an operator who has written neither needs to
+	// know there are two and an operator who has written one of them has a
+	// working server.
+	voices, err := cfg.TTSCatalogue()
+	if err != nil {
+		return err
+	}
+	if len(cfg.SD.Serve) == 0 && len(voices) == 0 {
+		return usageError{fmt.Errorf("%s has no sd.serve block and publishes no tts.voices, so "+
+			"this server could offer nothing: a queued request would have nowhere to run. See the "+
+			"sd: and tts: sections of README.md, or ember.local.sd-server.example.yaml for a "+
+			"configuration that costs nothing", *cfgPath)}
 	}
 
 	// Installed here and nowhere lower. internal/app takes a context and
@@ -87,11 +106,16 @@ func runServe(args []string, out io.Writer, d deps) error {
 
 	return serveUntil(ctx, out, d, cfg, serveOptions{
 		Port: uint16(*port), AllowPaid: *allowPaid, Dist: *dist, Log: logOpts,
+		Voices: voices,
 	})
 }
 
 // serveOptions are what the flags decided.
 type serveOptions struct {
+	// Voices is the catalogue runServe already built and validated, so this
+	// process reads the key once.
+	Voices tts.Catalogue
+
 	Port      uint16
 	AllowPaid bool
 	Dist      string
@@ -169,8 +193,42 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// does not: it goes to the database, which is what the browser reads.
 	logger := logx.New(out, o.Log)
 
+	// THE SPEECH CATALOGUE, DERIVED ONCE AND HANDED TO BOTH READERS.
+	//
+	// config.Load has already validated it -- a duplicate or malformed id
+	// refuses the file -- so the error here is unreachable from a
+	// configuration this process could have started from. It is returned
+	// anyway rather than dropped, because "unreachable" is a claim about
+	// today's Load and a dropped error is how that claim stops being checked.
+	//
+	// ONE DERIVATION FOR THE QUEUE AND THE SERVER. Two calls would be two
+	// readings of one file, and the thing that makes them able to disagree is
+	// not today's code but the next `--config` reload somebody adds: the
+	// browser would then be offering ids the drain loop could not resolve.
+	// #105's defect was the opposite shape of the same seam -- a field the
+	// constructor never assigned -- and the lesson is that a wiring like this
+	// is worth one line and one guard.
+	// THE CATALOGUE THE CALLER ALREADY BUILT, which is the one-derivation rule
+	// this feature is wired on: runServe validates it before deciding whether
+	// this server can offer anything, and a second call here would be a second
+	// reading of one file. `serveUntil` is also what the labs call directly,
+	// so it derives its own when handed none -- which is the one place two
+	// readings are unavoidable and is why it is a parameter rather than a
+	// field somebody can forget.
+	voices := o.Voices
+	if voices == nil {
+		var err error
+		if voices, err = cfg.TTSCatalogue(); err != nil {
+			return err
+		}
+	}
+
 	q := &queue.Queue{
 		Store: store,
+		// The catalogue a stored voice id is resolved against. This is the
+		// only thing on the drain loop that can turn an id into a path, and
+		// it comes from the config this process was started with.
+		Voices: voices,
 		// Ledger is the same store, as a reader: the period ceilings are
 		// checked against what the generation history says was spent, which
 		// is the one number that is already recorded, numbered and durable.
@@ -291,7 +349,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	srv, err := webapi.New(webapi.Options{
 		Config: cfg, Registry: reg, Store: store, Blobs: blobs, Inputs: inputs, Queue: q,
 		AllowPaid: o.AllowPaid, Port: o.Port, Dist: o.Dist, Log: logger,
-		Token: token, Socket: sock, Runs: runs, Scan: scan,
+		Token: token, Socket: sock, Runs: runs, Scan: scan, Voices: voices,
 	})
 	if err != nil {
 		return err

@@ -612,6 +612,16 @@ func Load(path string) (Config, error) {
 	if err := cfg.rejectSecrets(); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
+	// AT LOAD AND NOT AT THE FIRST REQUEST. A duplicate or malformed voice id
+	// is a mistake in a file the operator just edited, and its symptom at
+	// lookup time is a UI offering a choice that cannot be made -- read as
+	// ember being broken rather than as their own typo. The same argument
+	// ParseSD makes for refusing a mistyped sampler before a card is rented,
+	// one layer earlier because a catalogue is published rather than
+	// submitted.
+	if _, err := cfg.TTSCatalogue(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
 	return cfg, nil
 }
 
@@ -768,8 +778,51 @@ type TTSConfig struct {
 	// invocation rather than trusting ESPEAK_DATA_PATH.
 	EspeakData string `yaml:"espeak_data"`
 
+	// Voices is the published catalogue: the model choices a REQUEST may name.
+	//
+	// WHY A LIST EXISTS AT ALL AND WHY IT IS NOT INFERRED. A browser cannot be
+	// handed a path -- a request names a provider, a card and a batch of jobs
+	// and nothing else -- so the only way it can choose a voice is to pick an
+	// **id** out of a list ember published, which is #190's shape and this
+	// repository's allow-list rule for anything dangerous. See
+	// internal/tts/catalogue.go.
+	//
+	// It is DELIBERATELY NOT derived from `voice` above. An implicit
+	// single-entry catalogue would be ember publishing a choice the operator
+	// did not make -- and the sharp version is that `voice` has a default
+	// pointing at ember's own speech image, so an operator running `ember
+	// serve` with `image: ember:sd` and no `tts:` block at all would be shown
+	// a voice that cannot work. A UI offering a button that fails after a card
+	// is rented is the "reads as working" defect with a rental attached.
+	//
+	// So an empty list means **this process serves no speech to a browser**,
+	// and `POST /api/requests` with kind `tts` is refused naming this key.
+	// `ember up` is unaffected: a config file names one voice because it names
+	// one run, and `voice` above is still that.
+	Voices []TTSVoice `yaml:"voices"`
+
 	// Jobs are the utterances, in order, on one rental.
 	Jobs []TTSJob `yaml:"jobs"`
+}
+
+// TTSVoice is one catalogue entry.
+//
+// The paths are the operator's and are unreachable from any request, which is
+// the whole reason this type is in the config and not on the wire.
+type TTSVoice struct {
+	// ID is the opaque string a request names. Lowercase letters, digits,
+	// dot, underscore and dash; see tts.ValidateVoiceID for why an
+	// allow-list on a field that reaches no path today.
+	ID string `yaml:"id"`
+
+	// Name is what a UI shows. Free text, read by nobody but a human.
+	Name string `yaml:"name"`
+
+	// Voice and EspeakData are the files on the node. EspeakData is optional
+	// and falls back to the image's, because every entry of a list repeating
+	// one path is a list with one typo waiting in it.
+	Voice      string `yaml:"voice"`
+	EspeakData string `yaml:"espeak_data"`
 }
 
 // DefaultVoice and DefaultEspeakData are where ember's own TTS image puts them.
@@ -840,14 +893,22 @@ func (c Config) ParseTTS() (tts.Run, error) {
 		return tts.Run{}, nil
 	}
 
-	run := tts.Run{
-		Voice:      firstNonEmpty(c.TTS.Voice, DefaultVoice),
-		EspeakData: firstNonEmpty(c.TTS.EspeakData, DefaultEspeakData),
-	}
+	// THE SAME TWO PATHS FOR EVERY JOB OF AN `ember up`, and the asymmetry
+	// with a request is stated rather than left to be noticed: a config file
+	// names ONE voice because it names one run, and a request picks from the
+	// catalogue because a browser has a list in front of it. One function
+	// resolves both, so the two cannot come to disagree about what a voice
+	// is -- it is just that this one has nothing to look up.
+	voice := firstNonEmpty(c.TTS.Voice, DefaultVoice)
+	espeak := firstNonEmpty(c.TTS.EspeakData, DefaultEspeakData)
+
+	var run tts.Run
 	for _, j := range c.TTS.Jobs {
 		run.Jobs = append(run.Jobs, tts.Job{
 			Text:            j.Text,
 			Output:          j.Output,
+			Voice:           voice,
+			EspeakData:      espeak,
 			Speaker:         j.Speaker,
 			LengthScale:     j.LengthScale,
 			NoiseScale:      j.NoiseScale,
@@ -861,6 +922,40 @@ func (c Config) ParseTTS() (tts.Run, error) {
 		return tts.Run{}, err
 	}
 	return run, nil
+}
+
+// TTSCatalogue is the voices a REQUEST may name.
+//
+// EMPTY IS NOT AN ERROR AND IS NOT A DEFAULT EITHER. A configuration that
+// publishes none serves no speech to a browser, which `POST /api/requests`
+// says in one sentence naming `tts.voices`; see the field's own comment for
+// why an implicit entry would be ember publishing a choice nobody made.
+//
+// The espeak fallback is here rather than in internal/tts, because it is a
+// fact about the image this repository builds and not about piper -- the same
+// split that keeps sd-server's flag spellings in internal/sdserver and a model
+// path in a config.
+func (c Config) TTSCatalogue() (tts.Catalogue, error) {
+	if len(c.TTS.Voices) == 0 {
+		return nil, nil
+	}
+	cat := make(tts.Catalogue, 0, len(c.TTS.Voices))
+	for _, v := range c.TTS.Voices {
+		cat = append(cat, tts.Voice{
+			ID:         v.ID,
+			Name:       firstNonEmpty(v.Name, v.ID),
+			Voice:      v.Voice,
+			EspeakData: firstNonEmpty(v.EspeakData, firstNonEmpty(c.TTS.EspeakData, DefaultEspeakData)),
+		})
+	}
+	// One call, so every refusal about an id or a path exists once -- and at
+	// LOAD rather than at lookup, because a duplicate id's symptom is that one
+	// of two voices can never be chosen, which an operator reads as the UI
+	// being broken rather than as their own file.
+	if err := cat.Validate(); err != nil {
+		return nil, err
+	}
+	return cat, nil
 }
 
 // firstNonEmpty is the default-if-blank rule, named once.

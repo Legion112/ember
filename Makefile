@@ -710,7 +710,7 @@ test-preview-lab:
 # require an unrelated image to exist, which is the same sentence the video
 # lab is absent by.
 test-tts-lab:
-	@$(call LAB_SELECT,'TestTTS_|TestWorkloadImage_Speech|TestWorkloadImage_Speaks',3)
+	@$(call LAB_SELECT,'TestTTS_|TestWorkloadImage_Speech|TestWorkloadImage_Speaks',4)
 	@docker image inspect $(TTS_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(TTS_IMAGE) is missing. Build it with:"; \
 		echo "  make workload-tts"; exit 1; }

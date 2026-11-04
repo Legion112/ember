@@ -31,8 +31,8 @@ func TestNewPlan_ASpeechBatchTravelsBesideTheSpecAndNotOnIt(t *testing.T) {
 	}
 	// The defaults the image bakes in, resolved once by the config rather than
 	// by the driver, so a dry run prints what will actually be sent.
-	if plan.Spoken.Voice != config.DefaultVoice {
-		t.Errorf("voice = %q, want %q", plan.Spoken.Voice, config.DefaultVoice)
+	if plan.Spoken.Jobs[0].Voice != config.DefaultVoice {
+		t.Errorf("voice = %q, want %q", plan.Spoken.Jobs[0].Voice, config.DefaultVoice)
 	}
 	// AND NOTHING ON THE SPEC, which is the seal rather than a detail: a spec
 	// field is a thing a request could one day be consulted about, and
