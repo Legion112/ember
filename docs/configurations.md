@@ -31,10 +31,25 @@ Anything that argues, measures or compares belongs here.
 | `ember.local.sd-server.example.yaml` | local | sd15, baked into `ember:sd` | `sd:` — what `ember serve` needs | nothing |
 
 The count cannot go below five without code. `{local, rented} × {cmd, sd}` is
-four distinct shapes, the config language cannot express two job shapes in one
-file (`ParseSD` refuses `cmd`, `cmds` and `sd.serve` together), and the
-starter names no job at all because the interactive shape is the one that
-holds the node open with its ports forwarded.
+four distinct shapes, a spec cannot be built from two job shapes in one file,
+and the starter names no job at all because the interactive shape is the one
+that holds the node open with its ports forwarded.
+
+**Where that refusal lives, because the first wording of this paragraph named
+the wrong function and the YAML in the wrong direction.** It read "the config
+language cannot express two job shapes in one file (`ParseSD` refuses `cmd`,
+`cmds` and `sd.serve` together)", and both halves are false. `ParseSD` has
+exactly one cross-field check — `sd.jobs` and `sd.serve` must come as a pair
+— and never looks at `Cmd` or `Cmds` at all. The language *does* express it: a
+file holding both `cmd:` and `sd:` loads through `config.Load` and passes the
+guard below. What refuses is `node.NewSpec`, through `namedWorkloads`, with
+*"cmd, cmds and sd.serve are set; use one"* — and the reason written beside it
+is better than the one invented here: a run with both would start a server,
+hold the weights in VRAM, and then execute a separate `sd-cli` that loads them
+a second time, paying for the resident copy and not using it. The conclusion
+is untouched, which is exactly what makes it worth recording: a wrong
+mechanism under a correct argument is the `ember ls --all` class, where the
+argument persuades and the thing it cites does not do the job.
 
 The two aspirational shapes are at the bottom of this document rather than at
 the root, because neither can be run: one's image is a sentence and the

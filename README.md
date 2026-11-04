@@ -590,8 +590,10 @@ a sentence and the other's asset digest is a placeholder.
 
 The durable half of `ember.flux2.yaml` and `ember.sd-server.example.yaml` is
 identical — same images, store, assets, probe and ceilings — and that
-duplication is not something a config can currently remove: `cmd`, `cmds` and
-`sd.serve` are refused together, so one file describes one job shape. See
+duplication is not something a config can currently remove: `node.NewSpec`
+refuses `cmd`, `cmds` and `sd.serve` together — a run with both would start a
+server, hold the weights in VRAM and then run a separate `sd-cli` that loads
+them a second time — so one file describes one job shape. See
 [#144](https://github.com/Legion112/ember/issues/144).
 
 ### What a flag may do that a config key may not
