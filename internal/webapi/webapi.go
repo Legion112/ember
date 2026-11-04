@@ -50,6 +50,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,6 +65,7 @@ import (
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 )
 
 // DefaultPort is where `ember serve` listens.
@@ -971,7 +973,35 @@ func (s *Server) getImage(w http.ResponseWriter, r *http.Request) {
 
 	// Declared, never sniffed: these are bytes a rented machine produced, and
 	// letting a browser decide what they are is letting the node decide.
-	w.Header().Set("Content-Type", "image/png")
+	//
+	// DERIVED FROM THE KEY AND NO LONGER THE LITERAL image/png. This route
+	// served `image/png` unconditionally, which was true of everything ember
+	// produced and stopped being true the moment a second workload kind made
+	// a wav: a .wav declared as a PNG is a file a browser will not play and,
+	// with nosniff beside it, cannot be talked into playing -- the failure
+	// #36 predicted in words ("audio served through that route is labelled as
+	// an image and, correctly, will not play").
+	//
+	// A CLOSED SWITCH AND NOT mime.TypeByExtension, which is the shorter
+	// answer and the wrong one twice over: that function reads
+	// /etc/mime.types, so what ember declares about bytes a rented machine
+	// produced would depend on which packages are installed on the operator's
+	// laptop, and it answers for every extension there is where the set ember
+	// writes is two. The key's extension is ember's own, written by one of
+	// two drivers, so a switch is a list of what this program can produce
+	// rather than a guess about a filename.
+	ctype, err := artifactType(key)
+	if err != nil {
+		// Refused rather than guessed, and a 500 rather than a 415, because
+		// the row is ember's own: an extension nothing here writes means a
+		// writer and this switch have come apart, which is a defect and not a
+		// bad request. Serving it as octet-stream would be a download prompt
+		// for an image, which reads as ember being broken in a way that
+		// points nowhere.
+		s.fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if preview {
 		// A preview is written over as sampling proceeds, so a cached one is
@@ -982,7 +1012,56 @@ func (s *Server) getImage(w http.ResponseWriter, r *http.Request) {
 		// twenty images should not re-fetch them on every render.
 		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	}
-	http.ServeContent(w, r, strings.TrimSuffix(key, "/")+".png", time.Time{}, f)
+	// AN EMPTY NAME, AND THAT IS WHAT MAKES THE HEADER ASSERTION ABLE TO FAIL.
+	//
+	// ServeContent reads the name ONLY to guess a type when none is declared,
+	// and one always is here -- the switch above is closed and its unknown
+	// path 500s -- so passing nothing costs this route nothing. What passing
+	// `path.Base(key)` cost was the TEST: with the declaration deleted,
+	// ServeContent's FIRST fallback is `mime.TypeByExtension` and not
+	// sniffing, and on a box with /etc/mime.types that answers `audio/wav` --
+	// the identical spelling -- so every header assertion on this route
+	// passed over a lost Content-Type.
+	//
+	// IT WAS WORSE THAN A DEAD ASSERTION BECAUSE IT WAS ENVIRONMENT-DEPENDENT.
+	// `.wav` is not in Go's builtin mime table, so the same defect goes red on
+	// a slim CI container and green on a developer's laptop: a verdict that
+	// depends on which packages are installed, which is precisely the
+	// dependency the closed switch above exists to refuse, reintroduced
+	// through the test's fallback path. With the name empty and the
+	// declaration deleted it fails at `content-type = "audio/wave"`, which is
+	// `http.DetectContentType`'s answer for a RIFF header and the signal the
+	// assertion was designed for.
+	http.ServeContent(w, r, "", time.Time{}, f)
+}
+
+// artifactType is what ember declares the bytes under a key to be.
+//
+// THE EXTENSIONS ARE THE WRITERS', one arm each, and the writer is named so
+// that deleting a driver and leaving an arm behind is visible:
+//
+//   - .png -- sdserver.WriteImages, every generated image and every preview
+//     frame. `output_format` can ask sd-server for a jpg, and that is NOT a
+//     third arm by omission: WriteImages names every file it writes `.png`
+//     whatever the format of the bytes inside it, so a jpg is already served
+//     as a PNG today. That is this same defect one driver over, it predates
+//     this function, and it is named here rather than fixed because the name
+//     is a key already in operators' databases.
+//   - .wav -- the speech driver, through tts.Ext.
+//
+// Nothing else, because nothing else writes an artifact row.
+func artifactType(key string) (string, error) {
+	switch strings.ToLower(path.Ext(key)) {
+	case ".png":
+		return "image/png", nil
+	case tts.Ext:
+		// audio/wav and not audio/x-wav or audio/wave: it is the spelling
+		// every browser's <audio> accepts, and the x- one is the historical
+		// form.
+		return "audio/wav", nil
+	}
+	return "", fmt.Errorf("%s has an extension ember does not declare a type for; "+
+		"a browser must never be left to guess what a rented machine produced", key)
 }
 
 // --- plumbing ---

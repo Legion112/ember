@@ -245,11 +245,19 @@ func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s prov
 		return runSteps(ctx, out, sink, client, sshexec.New(client.SSH()), p.Spec, so, runDir, p.Offer.Price)
 	}
 
-	// The served shape. Same rule as above -- a node rented to generate
-	// something stops when it has -- reached a different way: the weights
-	// stay in VRAM between jobs instead of being read again for each one.
-	if len(p.Spec.Serve) > 0 {
-		return runServed(ctx, out, sink, client, sshexec.New(client.SSH()), p.Spec, p.Jobs, so, runDir, p.Offer.Price)
+	// A TYPED BATCH, OF WHICHEVER KIND THIS RUN IS. Same rule as above -- a
+	// node rented to generate something stops when it has -- reached a
+	// different way per kind: sd keeps the weights in VRAM between jobs, and
+	// speech pays a fresh process per utterance because piper has no server
+	// to keep anything in.
+	//
+	// THIS LINE USED TO READ `if len(p.Spec.Serve) > 0`, which is a question
+	// about sd-server's argv standing in for the question "which kind is
+	// this". It answered correctly while there was one kind and had no answer
+	// at all for a second -- see batchOf, which is now the one place that
+	// decides.
+	if b := p.batchOf(); b != nil {
+		return b.Run(ctx, out, sink, client, sshexec.New(client.SSH()), p.Spec, so, runDir, p.Offer.Price)
 	}
 
 	serveErr := session.Serve(ctx, out, client, session.Forwards(p.Spec.Ports), so)

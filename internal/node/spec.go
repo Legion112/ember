@@ -404,3 +404,32 @@ func namedWorkloads(o SpecOptions) []string {
 	}
 	return out
 }
+
+// Workload names the workload key this spec was built from, or "" when it
+// carries none.
+//
+// IT EXISTS FOR A REFUSAL ONE LAYER UP AND READS THE SPEC RATHER THAN THE
+// OPTIONS. namedWorkloads above answers the same question about a
+// SpecOptions, which is what NewSpec has; a caller holding a finished Spec --
+// which is what app.NewPlan has when it finds out a second workload kind was
+// also configured -- cannot reach it, and rebuilding the options to ask would
+// be a second copy of the question.
+//
+// Two spellings collapse to one here on purpose: NewSpec folds `cmd` into
+// `Cmds` as its first entry, so a Spec cannot tell them apart and this says
+// `cmd or cmds`. Naming the wrong one of the two would be worse than naming
+// both, because an operator looking for a key that is not in their file
+// concludes the message is about somebody else's.
+//
+// There is no arm for a speech batch, and that is the seal rather than an
+// omission: Spec has no speech field, so a request can never be consulted
+// about one. See the refusal in app.NewPlan.
+func (s Spec) Workload() string {
+	switch {
+	case len(s.Serve) > 0:
+		return "sd.serve"
+	case len(s.Cmds) > 0:
+		return "cmd or cmds"
+	}
+	return ""
+}
