@@ -250,6 +250,17 @@ p.why { font-size: .85rem }
 
 details { margin-top: .8rem; font-size: .85rem }
 summary { cursor: pointer; color: var(--dim) }
+
+/* What a past generation ran with. The summary carries the seed and the
+   sampler, so it is not dimmed like the others: those two are what a
+   reproduction turns on and an operator should find them without reading. */
+details.params > summary { color: var(--fg) }
+dl.params { display: grid; grid-template-columns: max-content 1fr;
+            gap: .1rem .8rem; margin: .4rem 0 0 }
+dl.params dt { color: var(--dim) }
+dl.params dd { margin: 0; overflow-wrap: anywhere }
+.params .prompt { margin: .4rem 0 0 }
+.params .prompt code { overflow-wrap: anywhere }
 .log {
   max-height: 20rem;
   overflow: auto;

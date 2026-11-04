@@ -479,6 +479,15 @@ func TestServe_UI(t *testing.T) {
 	// runs in 39s against 86s, because the generation it had been doing all
 	// along was the panel's full 512x512.
 	setNumber(t, ctx, "width", "192", console)
+	// SET SO THAT THE PARAMETER BLOCK BELOW HAS SOMETHING TO BE WRONG ABOUT.
+	// A seed of 0 and an empty sampler are what the page sends when nobody
+	// touches either, and both render as a dash -- so an assertion that the
+	// rows are on screen would pass against a block that read nothing from
+	// the job at all. `euler_a` is in the captured `/capabilities` samplers,
+	// and the sampler control is free text until a rental has cached the
+	// capability list, which has not happened yet on this page load.
+	setNumber(t, ctx, "seed", "4242", console)
+	setText(t, ctx, "sampler", "euler_a")
 	if err := chromedp.Do(ctx,
 		chromedp.SendKeys(`textarea`, "a paper boat on a slow river"),
 		chromedp.Click(`button.primary`),
@@ -579,6 +588,46 @@ func TestServe_UI(t *testing.T) {
 	done := waitForText(t, ctx, `.jobs li`, "file(s)", 3*time.Minute, console)
 	if !strings.Contains(done, "file(s)") {
 		t.Errorf("the progress row never reported the files: %q", done)
+	}
+
+	// WHAT IT RAN WITH, AND SEED AND SAMPLER ARE THE POINT.
+	//
+	// Every layer below the render was already done -- genstore keeps the
+	// parameters, `viewRequest` sends all of them under a comment arguing
+	// they must be shown, and `model::Job` decodes twenty-three fields -- and
+	// twenty-two of them were read only by the compose form, which builds a
+	// NEW job. So a finished generation showed a truncated description and a
+	// file count, and the two things a reproduction turns on were on the wire
+	// and nowhere on screen.
+	//
+	// READ OFF THE PAGE AND NOT OUT OF THE STORE, which is the whole reason
+	// this assertion is here rather than in a Go test: the server's half is
+	// already asserted in `internal/webapi`, and what was missing was a
+	// reader. The values are ones this lab typed, so a block that rendered
+	// the struct's zero value would print a dash and go red.
+	// A POLL OVER `innerText` AND NOT `waitForText`, because the failure this
+	// has to produce is an element that is NOT THERE. `chromedp.Text`
+	// resolves at least one node and then blocks until the context ends, so
+	// with the render deleted this assertion spent the lab's whole
+	// twelve-minute budget and reported "context deadline exceeded" -- true,
+	// slow, and naming nothing. Measured: the same defect through the poll
+	// below is red in two minutes and prints what the panel said instead.
+	params := waitForParams(t, ctx, 2*time.Minute, console)
+	if !strings.Contains(params, "4242") {
+		t.Errorf("the parameter block does not name the seed this lab typed; it says:\n%s",
+			params)
+	}
+	if !strings.Contains(params, "euler_a") {
+		t.Errorf("the parameter block does not name the sampler this lab typed; it says:\n%s",
+			params)
+	}
+	// ABSENT IS NOT ZERO, through a real browser. `clip_skip` was never set,
+	// the server's own default is -1, and a page printing `0` there states a
+	// value nobody chose. `Job::settings` decides the word and `cargo test`
+	// holds it; this is the half that proves the word reaches the DOM.
+	if !strings.Contains(params, "unset") {
+		t.Errorf("the parameter block reports no unset parameter, although this request "+
+			"set none of the optional ones; it says:\n%s", params)
 	}
 
 	if errs := console.errors(); errs != "" {
@@ -2432,6 +2481,46 @@ func setNumber(t *testing.T, ctx context.Context, label, value string, console *
 	keys := kb.End + strings.Repeat(kb.Backspace, 8) + value
 	if err := chromedp.Do(ctx, chromedp.SendKeys(sel, keys)); err != nil {
 		t.Fatalf("setting %s to %s: %v\n%s", label, value, err, console.text())
+	}
+}
+
+// waitForParams polls the watcher's parameter block until it names a seed.
+//
+// `Evaluate` AND NOT `Text`, for the reason `waitForOffers` is a poll: what
+// has to be reported is an element that does not exist, and `chromedp.Text`
+// blocks on a selector that resolves nothing until the whole context ends.
+// The expression answers the empty string for an absent block and the
+// watcher panel's own text for the failure message, so a red run says what
+// the operator would have been looking at.
+func waitForParams(t *testing.T, ctx context.Context, within time.Duration, console *consoleLog) string {
+	t.Helper()
+	const probe = `(function () {
+		var p = document.querySelector("details.params");
+		var w = document.querySelectorAll("section.panel");
+		var panel = "";
+		for (var i = 0; i < w.length; i++) {
+			if (w[i].innerText.indexOf("what is happening") === 0) { panel = w[i].innerText; }
+		}
+		return [p ? p.innerText : "", panel];
+	})()`
+	deadline := time.Now().Add(within)
+	var panel string
+	for {
+		got, err := chromedp.Run(ctx, chromedp.Evaluate[[]string](probe))
+		if err != nil {
+			t.Fatalf("reading the parameter block: %v\n%s", err, console.text())
+		}
+		if len(got) == 2 {
+			if strings.Contains(got[0], "seed") {
+				return got[0]
+			}
+			panel = got[1]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the watcher never showed a parameter block naming the seed within %v; "+
+				"the panel says:\n%s\n%s", within, panel, console.text())
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 

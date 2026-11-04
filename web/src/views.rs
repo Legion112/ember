@@ -1916,6 +1916,52 @@ fn Watch(watching: RwSignal<String>) -> impl IntoView {
                     }).collect::<Vec<_>>()}
                 </ol>
 
+                // WHAT IT RAN WITH, which the page could not say at all.
+                //
+                // Every layer below this render was already done: genstore
+                // keeps the parameters as one JSON column, `viewRequest`
+                // sends all of them outbound under a comment arguing they
+                // must be shown, and `model::Job` decodes twenty-three
+                // fields. Twenty-two of them were read only by the COMPOSE
+                // form, which builds a new job, so a past generation showed
+                // a truncated prompt and a file count and nothing a
+                // reproduction needs. Measured: making the parameters
+                // `skip_deserializing` left `cargo test` green but for one
+                // round-trip assertion whose own comment says "a job on
+                // screen has to be the job that was queued" -- so the claim
+                // was in the tree and the render was not.
+                //
+                // INSIDE THE CLOSURE, and that is not style. Three keyed
+                // `<For>` defects in this page came from reading a signal
+                // outside the closure that renders it -- the frozen progress
+                // row, the stale offers table and the money column that read
+                // `$0` for every paid rental -- and `request` is `None` until
+                // the socket's first envelope arrives, so a table built once
+                // against a request id would be those defects with twenty
+                // more fields. A plain map for the same reason the job rows
+                // above are one.
+                //
+                // SITED HERE DELIBERATELY AND EXPECTED TO MOVE. #139 puts
+                // this on a `/requests/{id}` page behind a router that does
+                // not exist yet; `Parameters` takes a `Job` and nothing
+                // else, so that slice moves the call site and not the
+                // component.
+                {move || {
+                    let Some(r) = request.get() else {
+                        return ().into_any();
+                    };
+                    if r.jobs.is_empty() {
+                        return ().into_any();
+                    }
+                    let total = r.jobs.len();
+                    r.jobs
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, job)| view! { <Parameters job index=i total=total /> })
+                        .collect::<Vec<_>>()
+                        .into_any()
+                }}
+
                 // The jobs that never started have no rows above -- nothing
                 // ever named them -- so this is the only place that can say
                 // they are not coming.
@@ -1941,6 +1987,71 @@ fn Watch(watching: RwSignal<String>) -> impl IntoView {
                 </Show>
             </Show>
         </section>
+    }
+}
+
+/// Parameters is every setting one job of a past generation ran with.
+///
+/// SELF-CONTAINED AND TAKING A `Job`, so #139's `/requests/{id}` page moves
+/// the call site rather than this component. It reads no signal and holds no
+/// state: the job's parameters are written at enqueue and never change, so
+/// what has to be reactive is the request arriving, which is the caller's
+/// closure.
+///
+/// THE WORDING IS `Job::settings` AND NOT A CHAIN OF `if` HERE. "Unset"
+/// against "zero" against "off" is a decision, and this page's settled
+/// pattern puts a decision in `model` where `cargo test` reaches it --
+/// `Rows::note`, `Request::reason`, `Stream::note`. A precedence written
+/// inside a view macro can only be checked by a browser.
+///
+/// SEED AND SAMPLER ARE WHAT A REPRODUCTION TURNS ON, so they are the first
+/// two rows and the summary names them: an operator scrolling a finished
+/// generation should not have to open anything to find out whether the seed
+/// was pinned.
+#[component]
+fn Parameters(job: Job, index: usize, total: usize) -> impl IntoView {
+    let settings = job.settings();
+    let seed = settings
+        .iter()
+        .find(|s| s.label == "seed")
+        .map(|s| s.value.clone())
+        .unwrap_or_default();
+    let sampler = settings
+        .iter()
+        .find(|s| s.label == "sampler")
+        .map(|s| s.value.clone())
+        .unwrap_or_default();
+    // OPEN FOR A SINGLE JOB AND CLOSED FOR A BATCH. One job is the ordinary
+    // case and its parameters are the answer; sixteen expanded blocks are a
+    // page nobody can read, and the summary still carries the two that
+    // matter.
+    let open = total == 1;
+    view! {
+        <details class="params" open=open>
+            <summary>
+                {format!("job {} of {total}: seed {seed}, sampler {sampler}",
+                         index + 1)}
+            </summary>
+            // THE FULL PROMPT, because the row above it is the server's
+            // composed `desc`, which is truncated -- so the one thing an
+            // operator most often wants to copy was the one thing the page
+            // would not give them whole.
+            <p class="prompt"><code>{job.prompt.clone()}</code></p>
+            <Show when={
+                let n = job.negative_prompt.clone();
+                move || !n.is_empty()
+            }>
+                <p class="prompt">
+                    "negative: " <code>{job.negative_prompt.clone()}</code>
+                </p>
+            </Show>
+            <dl class="params">
+                {settings.clone().into_iter().map(|s| view! {
+                    <dt>{s.label}</dt>
+                    <dd>{s.value}</dd>
+                }).collect::<Vec<_>>()}
+            </dl>
+        </details>
     }
 }
 

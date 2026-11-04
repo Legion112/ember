@@ -592,6 +592,210 @@ pub struct Job {
     pub vae_tiling: Option<VaeTiling>,
 }
 
+/// One parameter of a past generation, as a page shows it.
+///
+/// A PAIR AND NOT A FORMATTED LINE, so the view decides the markup and this
+/// decides the wording -- which is the settled shape here (`Rows::note`,
+/// `Request::reason`, `Stream::note`): a decision is a method with a
+/// `cargo test`, never a chain of `if` inside a view macro, because nothing
+/// but a browser can read the second one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Setting {
+    pub label: &'static str,
+    pub value: String,
+}
+
+fn set(label: &'static str, value: impl Into<String>) -> Setting {
+    Setting {
+        label,
+        value: value.into(),
+    }
+}
+
+/// What a page says for a parameter nobody set.
+///
+/// ABSENT IS NOT ZERO, and the four `Option` fields above exist for exactly
+/// that: the server's own defaults are -1 for `clip_skip`, null for `eta`
+/// and `flow_shift` and 0.75 for `strength`, so printing `0` for an unset
+/// one states a value nobody chose -- in the one place an operator reads to
+/// find out what a generation actually ran with.
+pub const UNSET: &str = "unset";
+
+/// What a page says for a block the request did not carry.
+///
+/// `slg`, `hires` and `vae_tiling` are sent only when they hold something,
+/// so their ABSENCE IS A FACT about the run rather than a gap in it: the
+/// highres pass was off. That is why it is a word and not a dash -- a dash
+/// reads as "ember does not know", which is what `UNSET` means one line up,
+/// and the two must not be spelled the same.
+pub const OFF: &str = "off";
+
+impl Job {
+    /// Every parameter this job ran with, in the order a reproduction needs
+    /// them.
+    ///
+    /// SEED AND SAMPLER FIRST, because they are what a reproduction turns
+    /// on: the rest changes an image and those two decide whether the same
+    /// request produces the same pixels at all. A seed of zero is not a
+    /// seed -- `omitempty` means the browser sent none and the server chose
+    /// one -- so it is reported as not pinned rather than as `0`, which is
+    /// the same distinction `UNSET` draws for the pointers and the reason a
+    /// reproduction of such a request is not available.
+    ///
+    /// THE ROWS A JOB DID NOT CARRY ARE OMITTED AND THE ONES IT COULD NOT
+    /// HAVE ARE NOT ASKED FOR. `strength` does nothing without an image and
+    /// ember refuses the combination, so a text-to-image job gets no
+    /// strength row at all -- an `unset` there would be a question that
+    /// cannot be answered rather than one that was not.
+    pub fn settings(&self) -> Vec<Setting> {
+        let mut out = Vec::new();
+
+        out.push(set(
+            "seed",
+            if self.seed == 0 {
+                "— not pinned, the server chose one".to_string()
+            } else {
+                self.seed.to_string()
+            },
+        ));
+        out.push(set("sampler", dashed(&self.sampler)));
+        // DECODED SINCE THIS TYPE WAS WRITTEN AND READ NOWHERE -- not even
+        // by the compose form, which has no control for it. Shown because a
+        // scheduler changes the pixels and a page that omits it leaves an
+        // operator unable to tell which of the two silences they are in.
+        out.push(set("scheduler", dashed(&self.scheduler)));
+
+        if self.width != 0 && self.height != 0 {
+            out.push(set("size", format!("{}x{}", self.width, self.height)));
+        }
+        if self.steps != 0 {
+            out.push(set("steps", self.steps.to_string()));
+        }
+        if self.batch_count != 0 {
+            out.push(set("batch", self.batch_count.to_string()));
+        }
+        if self.cfg != 0.0 {
+            out.push(set("cfg", self.cfg.to_string()));
+        }
+        if self.guidance != 0.0 {
+            out.push(set("guidance", self.guidance.to_string()));
+        }
+
+        out.push(set("clip skip", opt(self.clip_skip)));
+        out.push(set("eta", opt(self.eta)));
+        out.push(set("flow shift", opt(self.flow_shift)));
+
+        if self.shifted_timestep != 0 {
+            out.push(set("shifted timestep", self.shifted_timestep.to_string()));
+        }
+        if !self.init_image.is_empty() {
+            // THE DIGEST AND NOT A FILENAME: no filename was ever sent, so
+            // there is nothing else this row could say, and the digest is
+            // what another request would have to name to run again.
+            out.push(set("init image", self.init_image.clone()));
+            out.push(set("strength", opt(self.strength)));
+        }
+        if !self.output_format.is_empty() {
+            out.push(set("output format", self.output_format.clone()));
+        }
+        if self.output_compression != 0 {
+            out.push(set(
+                "output compression",
+                self.output_compression.to_string(),
+            ));
+        }
+
+        out.push(set(
+            "skip-layer guidance",
+            match &self.slg {
+                None => OFF.to_string(),
+                Some(s) => format!(
+                    "scale {}, layers {}, {}–{}",
+                    s.scale,
+                    joined(&s.layers),
+                    s.layer_start,
+                    s.layer_end
+                ),
+            },
+        ));
+        out.push(set(
+            "highres pass",
+            match &self.hires {
+                None => OFF.to_string(),
+                Some(h) if !h.enabled => OFF.to_string(),
+                Some(h) => {
+                    let mut p = Vec::new();
+                    if !h.upscaler.is_empty() {
+                        p.push(h.upscaler.clone());
+                    }
+                    if h.scale != 0.0 {
+                        p.push(format!("x{}", h.scale));
+                    }
+                    if h.target_width != 0 && h.target_height != 0 {
+                        p.push(format!("{}x{}", h.target_width, h.target_height));
+                    }
+                    if h.steps != 0 {
+                        p.push(format!("{} steps", h.steps));
+                    }
+                    if h.denoising_strength != 0.0 {
+                        p.push(format!("denoising {}", h.denoising_strength));
+                    }
+                    if p.is_empty() {
+                        "on".to_string()
+                    } else {
+                        p.join(", ")
+                    }
+                }
+            },
+        ));
+        out.push(set(
+            "vae tiling",
+            match &self.vae_tiling {
+                None => OFF.to_string(),
+                Some(t) if !t.enabled => OFF.to_string(),
+                Some(t) => {
+                    let mut p = Vec::new();
+                    if t.tile_size_w != 0 && t.tile_size_h != 0 {
+                        p.push(format!("tile {}x{}", t.tile_size_w, t.tile_size_h));
+                    }
+                    if t.target_overlap != 0.0 {
+                        p.push(format!("overlap {}", t.target_overlap));
+                    }
+                    if t.rel_size_w != 0.0 && t.rel_size_h != 0.0 {
+                        p.push(format!("relative {}x{}", t.rel_size_w, t.rel_size_h));
+                    }
+                    if p.is_empty() {
+                        "on".to_string()
+                    } else {
+                        p.join(", ")
+                    }
+                }
+            },
+        ));
+
+        out
+    }
+}
+
+fn dashed(s: &str) -> String {
+    if s.is_empty() {
+        "—".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
+    match v {
+        None => UNSET.to_string(),
+        Some(v) => v.to_string(),
+    }
+}
+
+fn joined(v: &[i32]) -> String {
+    v.iter().map(i32::to_string).collect::<Vec<_>>().join(", ")
+}
+
 /// Skip-layer guidance.
 ///
 /// `scale` is the switch: ember sends no block at all when it is zero, which
@@ -2659,6 +2863,106 @@ mod tests {
         assert!(!bare.contains("slg"), "{bare}");
         assert!(!bare.contains("hires"), "{bare}");
         assert!(!bare.contains("vae_tiling"), "{bare}");
+    }
+
+    /// An unset parameter reads as unset, a missing block reads as off, and
+    /// an explicit zero reads as zero.
+    ///
+    /// THE THREE ARE SPELLED DIFFERENTLY BECAUSE THEY ARE DIFFERENT CLAIMS,
+    /// and the whole value of this page is that it says what a generation ran
+    /// with rather than what a struct's zero value is. `clip_skip: Some(0)`
+    /// is a model being told zero; `None` is the server's own -1; a `hires`
+    /// of `None` is a highres pass that was off. A page that printed `0` for
+    /// all three would state two values nobody chose.
+    #[test]
+    fn an_unset_parameter_is_not_a_zero_one() {
+        let bare = Job {
+            prompt: "a paper boat".into(),
+            ..Default::default()
+        }
+        .settings();
+        let find = |label: &str| -> String {
+            bare.iter()
+                .find(|s| s.label == label)
+                .unwrap_or_else(|| panic!("no {label} row in {bare:?}"))
+                .value
+                .clone()
+        };
+        assert_eq!(find("clip skip"), UNSET);
+        assert_eq!(find("eta"), UNSET);
+        assert_eq!(find("flow shift"), UNSET);
+        assert_eq!(find("skip-layer guidance"), OFF);
+        assert_eq!(find("highres pass"), OFF);
+        assert_eq!(find("vae tiling"), OFF);
+        // A seed of zero is not a seed: omitempty means the browser sent
+        // none, so a reproduction of this request is not available and the
+        // row says so instead of printing a number nobody chose.
+        assert!(find("seed").contains("not pinned"), "{bare:?}");
+        // And a parameter a text-to-image job cannot have is not asked
+        // about, because `unset` there is a question with no answer.
+        assert!(!bare.iter().any(|s| s.label == "strength"), "{bare:?}");
+
+        let set = Job {
+            prompt: "a paper boat".into(),
+            seed: 42,
+            sampler: "euler_a".into(),
+            scheduler: "karras".into(),
+            clip_skip: Some(0),
+            eta: Some(0.0),
+            flow_shift: Some(3.5),
+            hires: Some(Hires {
+                enabled: true,
+                upscaler: "Latent".into(),
+                steps: 10,
+                ..Default::default()
+            }),
+            slg: Some(Slg {
+                layers: vec![7, 8],
+                scale: 2.5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .settings();
+        let find = |label: &str| -> String {
+            set.iter()
+                .find(|s| s.label == label)
+                .unwrap_or_else(|| panic!("no {label} row in {set:?}"))
+                .value
+                .clone()
+        };
+        assert_eq!(find("seed"), "42");
+        assert_eq!(find("sampler"), "euler_a");
+        assert_eq!(find("scheduler"), "karras");
+        // The two that would be indistinguishable from unset if zero meant
+        // unset, which is the entire reason both are pointers.
+        assert_eq!(find("clip skip"), "0");
+        assert_eq!(find("eta"), "0");
+        assert_eq!(find("flow shift"), "3.5");
+        assert!(find("highres pass").contains("Latent"), "{set:?}");
+        assert!(find("skip-layer guidance").contains("7, 8"), "{set:?}");
+        // Still off, because the one block that was not sent is the one
+        // whose absence must not read as the two that were.
+        assert_eq!(find("vae tiling"), OFF);
+        // An `enabled: false` block is off too: ember sends the block for
+        // the other fields, and upstream's own switch is `enabled`.
+        let disabled = Job {
+            hires: Some(Hires {
+                enabled: false,
+                upscaler: "Latent".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .settings();
+        assert_eq!(
+            disabled
+                .iter()
+                .find(|s| s.label == "highres pass")
+                .unwrap()
+                .value,
+            OFF
+        );
     }
 
     /// A block that is set travels whole, under the names ember accepts.
