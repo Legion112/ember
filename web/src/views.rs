@@ -68,9 +68,31 @@ pub fn App() -> impl IntoView {
 /// Posture is the line that says what this server will and will not do.
 ///
 /// On screen rather than in the help text, because the one thing a person has
-/// to decide here is whether to leave the process running -- and what bounds
-/// the damage of there being no authentication is whether paid providers are
-/// reachable at all.
+/// to decide here is whether to leave the process running -- and the two facts
+/// that decide it answer different questions. Authentication answers who is
+/// asking: another account on this machine, and anything reaching a forwarded
+/// port, cannot queue a rental. `--allow-paid` is a ceiling on what the answer
+/// permits. Neither bounds the other, so the line carries both.
+///
+/// AND THE CREDENTIAL'S LIMIT IS PRINTED WITH IT, because a control whose
+/// limits are not printed is a control that gets believed past them -- the
+/// rule `cli.announceToken` states for the terminal, which the operator this
+/// page is for may never see: the one-time URL means somebody had a shell, and
+/// `ssh -L 7777:localhost:7777` means that shell is on the other machine. So
+/// the wording is that paragraph's, compressed to one clause, rather than a
+/// second account of the same control.
+///
+/// WHAT THIS LINE USED TO SAY was "no authentication: any page in this browser
+/// can reach this port", unconditionally, in every `ember serve` from the one
+/// that made the token mandatory (#29) to #167 -- a verbatim survival of the
+/// state that issue closed. It was false twice over by then: `webapi.New`
+/// refuses a zero token, so an unauthenticated `ember serve` is not a
+/// configuration this program can be in, and a page on another site is refused
+/// by `checkOrigin` before the credential is even asked for -- while
+/// `SameSite=Strict` means a cross-site request carries no cookie, which is
+/// the half the clause was actually about. A working control reported as
+/// absent, on the one line an operator reads to decide whether to walk away
+/// from a process that can rent GPUs.
 #[component]
 fn Posture(config: RwSignal<Config>) -> impl IntoView {
     // Built outside the macro: a closure returning a view, nested inside
@@ -102,7 +124,15 @@ fn Posture(config: RwSignal<Config>) -> impl IntoView {
                     }.into_any()
                 }
             }}
-            " · no authentication: any page in this browser can reach this port"
+            // UNCONDITIONAL, AND STATIC, which is what it can be now the
+            // credential is mandatory: there is no state of this program in
+            // which a token is not required on this port, so there is nothing
+            // here for a `Config` field to switch on and nothing for a
+            // `cargo test` to decide. The clause the lab reads is these two
+            // halves together -- the control and its limit -- because a line
+            // that said only the first would be the old defect inverted: a
+            // control believed past its limits rather than reported absent.
+            " · every request needs a token; it does not keep out your own uid or root"
         </p>
 
         <Show when=move || !config.get().servable && !config.get().providers.is_empty()>
