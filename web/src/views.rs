@@ -68,9 +68,33 @@ pub fn App() -> impl IntoView {
 /// Posture is the line that says what this server will and will not do.
 ///
 /// On screen rather than in the help text, because the one thing a person has
-/// to decide here is whether to leave the process running -- and what bounds
-/// the damage of there being no authentication is whether paid providers are
-/// reachable at all.
+/// to decide here is whether to leave the process running -- and the two facts
+/// that decide it answer different questions. Authentication answers who is
+/// asking: another account on this machine, and anything reaching a forwarded
+/// port, cannot queue a rental. `--allow-paid` is a ceiling on what the answer
+/// permits. Neither bounds the other, so the line carries both.
+///
+/// AND THE CREDENTIAL'S LIMIT IS PRINTED WITH IT, because a control whose
+/// limits are not printed is a control that gets believed past them -- the
+/// rule `cli.announceToken` states for the terminal, which the operator this
+/// page is for may never see: the one-time URL means somebody had a shell, and
+/// `ssh -L 7777:localhost:7777` means that shell is on the other machine. So
+/// the wording is that paragraph's rather than a second account of the same
+/// control -- its two limits and not its two mechanisms, which is a lossy
+/// compression and is said to be one at the clause itself rather than implied
+/// to be lossless here.
+///
+/// WHAT THIS LINE USED TO SAY was "no authentication: any page in this browser
+/// can reach this port", unconditionally, in every `ember serve` from the one
+/// that made the token mandatory (#29) to #167 -- a verbatim survival of the
+/// state that issue closed. It was false twice over by then: `webapi.New`
+/// refuses a zero token, so an unauthenticated `ember serve` is not a
+/// configuration this program can be in, and a page on another site is refused
+/// by `checkOrigin` before the credential is even asked for -- while
+/// `SameSite=Strict` means a cross-site request carries no cookie, which is
+/// the half the clause was actually about. A working control reported as
+/// absent, on the one line an operator reads to decide whether to walk away
+/// from a process that can rent GPUs.
 #[component]
 fn Posture(config: RwSignal<Config>) -> impl IntoView {
     // Built outside the macro: a closure returning a view, nested inside
@@ -102,7 +126,41 @@ fn Posture(config: RwSignal<Config>) -> impl IntoView {
                     }.into_any()
                 }
             }}
-            " · no authentication: any page in this browser can reach this port"
+            // UNCONDITIONAL, AND STATIC, which is what it can be now the
+            // credential is mandatory: there is no state of this program in
+            // which a token is not required on this port, so there is nothing
+            // here for a `Config` field to switch on and nothing for a
+            // `cargo test` to decide. The clause the lab reads is these three
+            // spans -- the control and both of its limits -- because a line
+            // that said only the first would be the old defect inverted: a
+            // control believed past its limits rather than reported absent.
+            //
+            // "ON THIS PORT" AND NOT "EVERY REQUEST", because `ServeSocket`
+            // answers the same routes with no token at all: the socket is
+            // 0600 in a 0700 directory, so `connect(2)` is the check and the
+            // operating system made it before ember saw a byte. A browser
+            // cannot open a unix socket, so the channel this reader is on is
+            // the one the sentence is about -- and three words are cheaper
+            // than leaving the next reader to re-derive the exception. As a
+            // claim about WHO can reach this server the shorter spelling was
+            // true anyway, since 0600 means the operator's own uid; it
+            // over-claimed only about HOW, by one channel, and a line that
+            // over-claims by a channel is how the one above it came to
+            // under-claim by a control.
+            //
+            // WHAT IS COMPRESSED AWAY AND WHAT IS NOT. `cli.announceToken`
+            // prints two limits and the mechanism of the first: your own uid
+            // or root, *which can read the token*, and no expiry, *restart
+            // ember to revoke it*. Both limits are here; both mechanisms are
+            // not, because a page gives the fact and the terminal and
+            // `README.md` give the how. Non-expiry is the one that was left
+            // out of the first version of this clause and it is the one that
+            // bears hardest on the decision this line exists for -- whether
+            // to leave the process running -- so "a terminal this operator
+            // may never see" cannot be the argument for printing the control
+            // here and the argument for withholding a limit of it.
+            " · every request on this port needs a token; it does not keep out your own uid or \
+             root, and it never expires"
         </p>
 
         <Show when=move || !config.get().servable && !config.get().providers.is_empty()>
@@ -1170,74 +1228,80 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                 <p class="hint">"nothing queued"</p>
             </Show>
             <table class="queue">
-                <tbody>
-                    <For each=move || list.get().requests.items key=|r| (r.id.clone(), r.status.clone()) let:r>
-                        {
-                            let id = r.id.clone();
-                            let running_id = r.id.clone();
-                            let cancellable = r.is_cancellable();
-                            let cancel_id = r.id.clone();
-                            let asked_id = r.id.clone();
-                            let pending_id = r.id.clone();
-                            view! {
-                                // BOTH CLASSES READ THE SIGNAL, and the first
-                                // one did not. `list.get().running` was read
-                                // at row-render time, so the highlight on the
-                                // request being generated could only be as
-                                // fresh as the last change to `(id, status)`
-                                // -- a row claimed from `queued` does get
-                                // rebuilt, so the stale window is one poll
-                                // and the cost is a misplaced highlight
-                                // rather than a wrong figure. Swept anyway,
-                                // because leaving one read outside the
-                                // closure in a row whose other one was the
-                                // defect is leaving the next reader to work
-                                // out which is which.
-                                <tr class:running=move || list.get().running == running_id
-                                    class:watching=move || watching.get() == id>
+                // A `<tbody>` PER REQUEST, which is what makes the reason a
+                // row rather than a sentence inside a cell.
+                //
+                // THE DEFECT: the reason rendered inside `td.status`, one
+                // cell of a six-column table under `table-layout: auto`, in
+                // the `1fr` half of the page's `1.3fr 1fr` grid. Measured at
+                // a 1280px viewport: the table is 407px, the status cell gets
+                // 174px of it, and `app.AttachStore`'s store refusal -- 170
+                // characters naming `ember store create` -- rendered 174px
+                // tall, NINE lines at two or three words each, with the row
+                // 204px. Five failed requests fill the viewport and the queue
+                // stops being readable. The sentence was never the problem;
+                // the column was.
+                //
+                // WHY A ROW GROUP AND NOT TWO LOOSE `<tr>`s. Three things
+                // follow from the grouping and would otherwise be three
+                // separate decisions that can disagree: the `running` and
+                // `watching` highlights cover the pair rather than its first
+                // half, one border is drawn under the request rather than
+                // between its two rows, and a reader can tell which request a
+                // reason belongs to -- which with loose rows is genuinely
+                // ambiguous, because `td`'s bottom border would sit between
+                // them and attach the reason to the request BELOW.
+                //
+                // `<table>` takes several `<tbody>` elements by spec and this
+                // is what they are for. The lab's `rowOf` matches `//tr`, so
+                // it reads through this unchanged.
+                <For each=move || list.get().requests.items key=|r| (r.id.clone(), r.status.clone()) let:r>
+                    {
+                        let id = r.id.clone();
+                        let running_id = r.id.clone();
+                        let cancellable = r.is_cancellable();
+                        let cancel_id = r.id.clone();
+                        let asked_id = r.id.clone();
+                        let pending_id = r.id.clone();
+                        // `Request::reason` IS the decision about which rows
+                        // get a reason row, and it already has the two cargo
+                        // tests that hold it: a refused request's sentence is
+                        // its own and not the destroy warning, and a request
+                        // with nothing to explain says nothing. A second
+                        // method answering the same question here would be
+                        // `queue.Cost`'s mistake -- two paths for one
+                        // decision, where a reader cannot tell which is live.
+                        let why = r.reason().map(str::to_string);
+                        view! {
+                            // BOTH CLASSES READ THE SIGNAL, and the first
+                            // one did not. `list.get().running` was read
+                            // at row-render time, so the highlight on the
+                            // request being generated could only be as
+                            // fresh as the last change to `(id, status)`
+                            // -- a row claimed from `queued` does get
+                            // rebuilt, so the stale window is one poll
+                            // and the cost is a misplaced highlight
+                            // rather than a wrong figure. Swept anyway,
+                            // because leaving one read outside the
+                            // closure in a row whose other one was the
+                            // defect is leaving the next reader to work
+                            // out which is which.
+                            //
+                            // ON THE GROUP RATHER THAN ON THE ROW, so that
+                            // one `class:` drives the pair. Two `<tr>`s each
+                            // carrying `watching` would draw two outlines
+                            // with a seam between them, which is the thing
+                            // the grouping exists to avoid.
+                            <tbody class:running=move || list.get().running == running_id
+                                class:watching=move || watching.get() == id>
+                                <tr>
                                     <td>
                                         <button class="link" on:click={
                                             let id = r.id.clone();
                                             move |_| watching.set(id.clone())
                                         }>{r.id.chars().take(8).collect::<String>()}</button>
                                     </td>
-                                    // THE REASON, IN THE ROW THAT HAS IT.
-                                    //
-                                    // `Request::error` reached this page on
-                                    // every route and the socket and was read
-                                    // by no view, so a request stopped by a
-                                    // money ceiling or by a sampler the caps
-                                    // do not list said `failed` and nothing
-                                    // else. The operator-visible state of a
-                                    // failed generation was one word.
-                                    //
-                                    // IN THE ROW AND NOT UNDER THE TABLE,
-                                    // which is where the panel's other two
-                                    // lines live. A listing can hold several
-                                    // failed requests at once and a panel
-                                    // line cannot say which one it is about;
-                                    // the cancel refusal can, because there
-                                    // is one ask in flight. It also keeps
-                                    // this out of `p.error`, the class the
-                                    // cancel lab counts as siblings of the
-                                    // table to assert a refusal is gone --
-                                    // and a reason that is still true is not
-                                    // a refusal anybody dismissed.
-                                    //
-                                    // A `title` as well as the text, because
-                                    // `queue.fail` writes whatever the
-                                    // planner said and some of those are long
-                                    // enough to wrap a cell.
-                                    <td class="status">{r.status.clone()}
-                                        {match r.reason() {
-                                            None => ().into_any(),
-                                            Some(why) => view! {
-                                                <span class="why" title=why.to_string()>
-                                                    {why.to_string()}
-                                                </span>
-                                            }.into_any(),
-                                        }}
-                                    </td>
+                                    <td class="status">{r.status.clone()}</td>
                                     <td>{format!("{} job(s)", r.jobs.len())}</td>
                                     <td>{r.gpu.clone()}</td>
                                     <td class="price">{price_cell(list, r.id.clone())}</td>
@@ -1348,10 +1412,79 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                                         </Show>
                                     </td>
                                 </tr>
-                            }
+                                // THE REASON, ON ITS OWN ROW, AT THE WHOLE WIDTH
+                                // OF THE TABLE.
+                                //
+                                // `Request::error` reached this page on every
+                                // route and the socket and was read by no view,
+                                // so a request stopped by a money ceiling or by a
+                                // sampler the caps do not list said `failed` and
+                                // nothing else. The operator-visible state of a
+                                // failed generation was one word. Putting it in
+                                // the status cell fixed that and bought the
+                                // nine-line cell measured above; a `colspan` is
+                                // what buys the sentence the width it needs.
+                                //
+                                // STILL INSIDE THE TABLE, which is a constraint
+                                // and not an accident: the cancel lab counts
+                                // `table.queue ~ p.error, table.queue + p.error`
+                                // -- error elements that are SIBLINGS of the table
+                                // -- to assert a refused cancel's message is gone.
+                                // A reason moved out from under the table would
+                                // put a `.why` in that neighbourhood and leave the
+                                // next person to add a class there reasoning about
+                                // a selector whose subject had quietly changed. It
+                                // also keeps the reason out of `p.error` itself:
+                                // a reason that is still true is not a refusal
+                                // anybody dismissed.
+                                //
+                                // IN THE TABLE AND NOT UNDER THE PANEL, which is
+                                // where the panel's other two lines live. A
+                                // listing can hold several failed requests at once
+                                // and a panel line cannot say which one it is
+                                // about; the cancel refusal can, because there is
+                                // one ask in flight.
+                                //
+                                // NOTHING AT ALL WHEN THERE IS NO REASON, rather
+                                // than an empty `<tr>`: a blank row under every
+                                // request would double the table's height and draw
+                                // a border under each half, and a reader would
+                                // take the gap for a reason that was withheld.
+                                //
+                                // `colspan` IS A LITERAL AND THE LAB IS WHAT
+                                // CHECKS IT. Nothing in Rust can count the `<td>`s
+                                // a view macro emits, so the number here and the
+                                // row above it can only be held together by
+                                // something that renders them:
+                                // TestServe_UINamesWhyARequestFailed asserts the
+                                // reason cell is as wide as the table, which goes
+                                // red the day a seventh column arrives and this
+                                // still says six. It cannot catch a colspan that
+                                // is too LARGE, because the table model clamps one
+                                // to the columns the table has -- and too small is
+                                // the defect a new column produces.
+                                //
+                                // NO `title`. The old span carried one "because
+                                // some of those are long enough to wrap a cell",
+                                // which was true of the cell and is not true of a
+                                // row: the whole sentence is on screen, selectable
+                                // and copyable, and the remediation in it is a
+                                // command an operator has to copy. A native
+                                // tooltip is a second carrier of one string that
+                                // cannot be selected, does not appear on a touch
+                                // device and truncates differently per platform.
+                                {match why {
+                                    None => ().into_any(),
+                                    Some(why) => view! {
+                                        <tr class="reason">
+                                            <td class="why" colspan="6">{why}</td>
+                                        </tr>
+                                    }.into_any(),
+                                }}
+                            </tbody>
                         }
-                    </For>
-                </tbody>
+                    }
+                </For>
             </table>
 
             // IN FULL, the same as the other two panels: `ember serve` is

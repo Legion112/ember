@@ -617,6 +617,55 @@ func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
 // `Budgets`, `PeriodCeilings`, `ParsePorts` and more -- so a load that
 // resolved nothing would otherwise find no pointer receivers and pass. Zero
 // methods is a fatal.
+//
+// IT ASKS ONE QUESTION OF THE TYPE, AND THAT IS WHY IT IS NOT AN AST WALK.
+// `sig.Recv().Type().(*types.Pointer)` is the whole test, so genericity cannot
+// hide a receiver from it. Measured rather than reasoned, by type-checking a
+// synthetic `type Config[T any]` with both receiver forms:
+// `*p.Config[T]` asserts to `*types.Pointer` TRUE and `p.Config[T]` asserts
+// FALSE -- so a generic pointer receiver is caught and a generic value
+// receiver is still correctly ignored.
+//
+// `TestTrustHasOneImplementationAndItIsPin` is the cautionary one: it switched
+// on receiver SYNTAX, SKIPPED the shape it could not name, and a generic
+// receiver walked straight past it, with `go build`, `go vet`,
+// `golangci-lint` and the whole suite green while ember dialled every node it
+// rented with no host key verification. Whoever writes the next guard here
+// should know which of the two approaches survived contact: one question of
+// the type, never a switch over the spellings somebody thought of.
+//
+// ITS OWN BOUND, because the subject is narrower than the sentence it
+// defends: this asks what methods are DECLARED ON `Config`, and
+// `NumMethods()` is exactly that -- declared, not promoted. Two measured
+// greens follow from it, neither of them a counterexample to "wrote to by any
+// statement", since a method call is not a statement:
+//
+//   - `Config` EMBEDDING a type that has a pointer-receiver method. Measured
+//     by embedding one: this test stays green, because the promoted method is
+//     in `Config`'s method SET and not in its declared list.
+//   - a pointer-receiver method on a FIELD's type, called as
+//     `cfg.SD.ZeroField()`. Measured by adding one to `SDConfig`: green, for
+//     the same reason.
+//
+// AND NEITHER CAN REACH THIS ISSUE'S SUBJECT, which is what makes the bound
+// acceptable rather than merely stated. `MaxDayUSD` and `MaxMonthUSD` are
+// DIRECT fields of `Config`: a promoted method can only mutate the embedded
+// struct, and a field-type method can only mutate `cfg.SD`. `Config` embeds
+// nothing today, measured.
+//
+// So the residue this guard leaves rests on **the ceilings being direct fields
+// of `Config`** -- a far more local and stable property than the one it
+// replaced, which was "nobody adds a pointer-receiver method to a config
+// struct this size". That narrowing is the real thing this guard bought, and
+// it is written here so the next reader does not have to rediscover it by
+// attacking the guard.
+//
+// (It said "forty-field" and `Config` has 29 -- counted two ways, the
+// `yaml:`-tagged fields and the non-comment lines in the struct block, both
+// 29. The sentence's point survives either figure, which is exactly why a
+// number nobody checks does not belong in it, and why this one is now a
+// measurement or nothing: the history of this region is prose claiming more
+// than the measurement, and the figure that said "forty" was decoration.)
 func TestConfig_DeclaresNoPointerReceiverMethodOnConfig(t *testing.T) {
 	pkgs, err := packages.Load(&packages.Config{
 		Mode: packages.NeedName | packages.NeedTypes,
@@ -860,6 +909,15 @@ func configObjects(info *types.Info, fn *ast.FuncDecl) configBindings {
 // be well-formed: an unrecognised target records nothing, which is safe in the
 // one direction that matters, since acceptance at the construction site needs
 // the value there to BE a bound object.
+//
+// TWO OF THE SIX ARMS ARE DEFENSIVE AND CANNOT FIRE FOR THIS GUARD'S SUBJECT,
+// said rather than left to be mistaken for live code. A tracked object is a
+// `config.Config` VALUE, a struct is not indexable, so `cfg[…] = x` is not
+// legal Go and the `IndexExpr` and `IndexListExpr` arms are unreachable from a
+// write to one. They are here because this function is about assignment
+// targets in general and exhaustiveness is the property claimed above -- not
+// because anything measured has taken them. The walkaround that looked like it
+// did is W19, and it does not: see the note on it in `AGENTS.md`.
 func rootIdent(e ast.Expr) *ast.Ident {
 	for {
 		switch v := e.(type) {

@@ -2028,13 +2028,29 @@ read it: the whole operator-visible state of a failed generation was the word
 not, which is the one place a document here claimed something the code did not
 do.
 
-The row prints it under its status and the watcher prints it as a line of its
-own, and **neither of them is the destroy warning.** "The node may still be
-running and billing — check `ember ls`" belongs to a destroy that failed and to
-nothing else: a request a ceiling refused never had a node, and sending an
-operator to check their bill for a machine that never existed is a false alarm
-on the one page they would read to decide. The same reason the sweep answers
-"not abandoned" for everything it cannot be sure of.
+The queue gives it **a row of its own** across the whole table and the watcher
+prints it as a line of its own, and **neither of them is the destroy warning.**
+"The node may still be running and billing — check `ember ls`" belongs to a
+destroy that failed and to nothing else: a request a ceiling refused never had a
+node, and sending an operator to check their bill for a machine that never
+existed is a false alarm on the one page they would read to decide. The same
+reason the sweep answers "not abandoned" for everything it cannot be sure of.
+
+**A row of its own, because a cell is not a place to put a sentence.** It used
+to render inside the status cell — one column of a six-column table, in the
+narrower half of the page's two-column grid. Measured at a 1280px viewport: the
+table is 407px, that cell gets 174px, and the store refusal — 170 characters
+naming `ember store create` — came out 174px tall, nine lines of two or three
+words. Five failed requests filled the screen and the queue stopped being
+readable. Across the table the same sentence is four lines. Nothing is
+truncated and nothing is hidden behind a click: the sentence is the server's
+own and carries the command that fixes it, so an operator who does not know to
+click would be back to reading `failed` and nothing else.
+
+Ember's own line breaks survive too. `app.AttachStore` writes the remediation
+on its own indented line, and HTML collapses a run of whitespace — so `ember
+store create` used to run together with the prose on both sides of it. The
+reason is rendered as the server wrote it.
 
 **A request the page cannot read is named, and does not blank the table.** The
 queue listing crosses a language: a number is a Go `int` on the way out and an

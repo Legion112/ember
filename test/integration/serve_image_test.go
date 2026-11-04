@@ -414,10 +414,55 @@ func TestServe_UI(t *testing.T) {
 		// The posture line: the one thing a person has to read before
 		// deciding whether to leave this running.
 		chromedp.WaitVisible(`.posture`),
+	); err != nil {
+		t.Fatalf("loading the page: %v\n%s", err, console.text())
+	}
+
+	// AND ITS TEXT, IN BOTH DIRECTIONS, because the wait above is a
+	// visibility check on the one line of this page that carries a security
+	// claim -- and it passed for the whole life of #29 over a line reading
+	// "no authentication: any page in this browser can reach this port",
+	// while `webapi.New` was already refusing a zero token and `checkOrigin`
+	// was already refusing another site's page. A working control reported as
+	// absent, to the operator deciding whether to walk away from a process
+	// that can rent GPUs.
+	//
+	// THE ABSENCE IS ASSERTED AS WELL AS THE PRESENCE: a check that only
+	// looked for the new sentence would pass against a page printing both,
+	// which is how a claim like that survives a fix. And the control and each
+	// of its two limits are separate assertions, because dropping a limit
+	// would be the same defect inverted -- a control believed past its limits
+	// -- and one `Contains` over the whole clause could not tell a dropped
+	// limit from a dropped control.
+	//
+	// MEASURED, and that split is why: with the old clause restored all three
+	// of the assertions below it then had fired, and dropping ONLY the limit
+	// half fired exactly one. All three firing together would have proved the
+	// suite went red and not why. The third span, non-expiry, was added after
+	// that measurement and is asserted on the same reasoning rather than on
+	// its own exit code.
+	posture, perr := chromedp.Run(ctx, chromedp.Text(`.posture`))
+	if perr != nil {
+		t.Fatalf("reading the posture line: %v\n%s", perr, console.text())
+	}
+	if !strings.Contains(posture, "every request on this port needs a token") {
+		t.Errorf("the posture line does not say this server is authenticated:\n%s", posture)
+	}
+	if !strings.Contains(posture, "does not keep out your own uid or root") {
+		t.Errorf("the posture line does not say who the credential leaves in:\n%s", posture)
+	}
+	if !strings.Contains(posture, "never expires") {
+		t.Errorf("the posture line does not say the credential does not expire:\n%s", posture)
+	}
+	if strings.Contains(posture, "no authentication") {
+		t.Errorf("the posture line still claims there is no authentication:\n%s", posture)
+	}
+
+	if err := chromedp.Do(ctx,
 		chromedp.Click(`//button[contains(text(), "what is available")]`),
 		chromedp.WaitVisible(`table.offers tr`),
 	); err != nil {
-		t.Fatalf("loading the page: %v\n%s", err, console.text())
+		t.Fatalf("loading the offers: %v\n%s", err, console.text())
 	}
 
 	offers, oerr := chromedp.Run(ctx, chromedp.Text(`table.offers`))
@@ -1150,6 +1195,7 @@ func TestServe_UINamesWhyARequestFailed(t *testing.T) {
 	l := harness.New(t)
 	l.WriteConfig(nil)
 	l.AppendConfig(serveConfig)
+	l.AppendConfig(whyStoreConfig)
 
 	cmd, srv, wait := startServe(t, l)
 	defer func() {
@@ -1161,7 +1207,8 @@ func TestServe_UINamesWhyARequestFailed(t *testing.T) {
 	}()
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Headless, chromedp.NoSandbox, chromedp.DisableGPU)
+		chromedp.Headless, chromedp.NoSandbox, chromedp.DisableGPU,
+		chromedp.WindowSize(wideViewport, 900))
 	alloc, cancelAlloc := chromedp.NewExecAllocator(t.Context(), opts...)
 	defer cancelAlloc()
 	ctx, cancel := chromedp.NewContext(alloc)
@@ -1191,21 +1238,43 @@ func TestServe_UINamesWhyARequestFailed(t *testing.T) {
 	}
 	t.Logf("the row says: %s", failed.Error)
 
-	// THE ROW NAMES IT. Read off the page's own structure -- the status cell
-	// of the row whose id button the page printed -- so markup that changes
-	// breaks this, which is the correct direction.
-	why := rowOf(id) + `//span[@class="why"]`
+	// TWO WAITS, BECAUSE THEY ARE TWO DEFECTS WITH TWO FIXES. "the page never
+	// named the reason" and "the reason is on the page but not on a row of its
+	// own" are not the same finding, and one wait that fires for both tells
+	// whoever reads the failure neither. Measured: reinstating the old markup
+	// -- the reason back inside `td.status` as a `<span class="why">` -- fires
+	// the second and not the first, and deleting the reason row outright fires
+	// the first.
+	anyWhy := queuePanel + `//*[@class="why"]`
+	if err := shortWait(ctx, anyWhy, 30*time.Second); err != nil {
+		t.Fatalf("the queue panel never named why the request failed at all: %v\n"+
+			"the queue panel says: %q\n%s", err, panelText(ctx), console.text())
+	}
+
+	// THE ROW NAMES IT. Read off the page's own structure -- the reason row
+	// that follows the row whose id button the page printed -- so markup that
+	// changes breaks this, which is the correct direction.
+	why := whyOf(id)
 	if err := shortWait(ctx, why, 30*time.Second); err != nil {
-		t.Fatalf("the failed row never showed a reason: %v\nthe queue panel says: %q\n%s",
-			err, panelText(ctx), console.text())
+		t.Fatalf("the reason is somewhere in the queue panel but not on a row of its own "+
+			"under %s, so it is back in a cell one column wide: %v\n"+
+			"the queue panel says: %q\n%s", id[:8], err, panelText(ctx), console.text())
 	}
 	got, err := chromedp.Run(ctx, chromedp.Text(why))
 	if err != nil {
 		t.Fatalf("reading the reason off the row: %v\n%s", err, console.text())
 	}
+	// EQUALITY AND NOT `Contains`, AND THE NEWLINES ARE HALF OF WHAT IT HOLDS.
+	// `app.AttachStore` writes the remediation on its own indented line --
+	// "Create it with:\n  ember store create\n" -- and HTML collapses a run of
+	// whitespace, so the command ran together with the prose on both sides of
+	// it until `.why` was given `white-space: pre-wrap`. Measured: with the
+	// default `normal` this comparison is red on exactly those two newlines.
+	// A collapsed line break is a paraphrase.
 	if got != failed.Error {
 		t.Errorf("the row says %q and the request carries %q; the page must not paraphrase a "+
-			"refusal, because the sentence is the server's own and names the remediation",
+			"refusal, because the sentence is the server's own and names the remediation, "+
+			"on its own line",
 			got, failed.Error)
 	}
 
@@ -1226,6 +1295,12 @@ func TestServe_UINamesWhyARequestFailed(t *testing.T) {
 		t.Errorf("the watcher says %q, which does not contain the row's reason %q",
 			watched, failed.Error)
 	}
+
+	// AFTER THE CLICK, because half of what it measures is where the watched
+	// mark landed and nothing is watched until something is clicked. The
+	// geometry half does not care: opening the watch panel adds rows under a
+	// panel that already spans both columns, so no column width moves.
+	assertReasonReadsAtTheTablesWidth(t, ctx, console)
 
 	// THE SENTENCE THAT MUST NOT BE HERE. Nothing was created, so there is no
 	// node to check and no bill accruing; printing the destroy warning over
@@ -1281,6 +1356,215 @@ func waitForFailure(t *testing.T, srv served, id string, within time.Duration) f
 type failedState struct {
 	Status string `json:"status"`
 	Error  string `json:"error"`
+}
+
+// whyStoreConfig names a store the local provider does not have, which is how
+// this lab gets a reason long enough to be worth measuring.
+//
+// A LONG REASON OR THE HEIGHT ASSERTION BELOW CANNOT FAIL. The trigger used to
+// be `gpu: h100` alone, whose refusal is one short line -- and one short line
+// is one short line in a 174px cell as much as in a 407px row, so a bound on
+// the rendered height would have passed against the defect it is written for.
+// "What would this say if the bug were present?" answered "the same thing" is
+// not an assertion.
+//
+// `app.AttachStore` IS STILL BEFORE ANY MONEY, which is the property the gpu
+// trigger was chosen for and this one keeps: `NewPlan` resolves the store at
+// plan.go:172 and reaches `PickOffer` at 280, so a configuration naming a
+// store the provider does not have is refused before an offer is chosen, let
+// alone created. No container, no image pull, nothing billed. `local` reports
+// `Stores: true`, so the refusal is the one that names the remediation rather
+// than the one about a provider with no persistent storage -- 170 characters
+// over three lines, which is the sentence the issue's screenshot showed
+// wrapped to two words a line.
+const whyStoreConfig = `
+store:
+  name: flux2
+`
+
+// wideViewport is the width the queue's layout assertions have to be taken at,
+// and it is load-bearing rather than tidiness.
+//
+// Headless Chrome's own default window is 800x600, and the page's grid is one
+// column below `min-width: 60rem`. At 800px the queue panel is already the
+// full width of the body, the reason has all the room it could want, and every
+// assertion below passes whatever the markup does -- the `AssertNoStray`
+// failure reached through a viewport. Measured at 1280: the body is 1088, the
+// queue panel is 444 and its table 407, which is the layout the defect lives
+// in. `assertReasonReadsAtTheTablesWidth` re-checks that the grid really did
+// split rather than trusting this number.
+const wideViewport = 1280
+
+// maxReasonLines is how many lines of the queue table a request's reason may
+// take, measured in its own rendered line height rather than in pixels.
+//
+// The store refusal is three lines as ember writes it and its longest -- 100
+// characters -- wraps once at the table's width, so four. Five leaves a line
+// of slack for a font this was not measured on. Inside `td.status` the same
+// sentence rendered NINE, which is the separation that makes this a bound
+// rather than a decoration.
+const maxReasonLines = 5
+
+// whyOf is the reason row of one request: the row that follows it inside the
+// same group.
+//
+// `following-sibling` RATHER THAN A DESCENDANT OF THE REQUEST'S ROW, which is
+// the whole change -- the reason used to be a `<span>` inside `td.status` and
+// is a `<tr>` of its own now. Bounded to the first one, because a `<tbody>`
+// holds one request and a sibling axis with no bound would reach the next
+// group's rows if the grouping were ever dropped.
+func whyOf(id string) string {
+	return rowOf(id) + `/following-sibling::tr[@class="reason"][1]/td[@class="why"]`
+}
+
+// reasonGeometry is what the browser says about the rendered reason row.
+//
+// EVERY FIELD IS ASSERTED ON, which is why there is no `whiteSpace` here and
+// no body width. A collapsed line break is already caught by the row's text
+// equality against `requests.err`, so a second check on the computed style
+// would be two paths for one property with the weaker one in front; and a body
+// width says nothing the two panel widths beside it do not.
+type reasonGeometry struct {
+	Viewport     float64 `json:"viewport"`
+	QueuePanel   float64 `json:"queuePanel"`
+	SpanAllPanel float64 `json:"spanAllPanel"`
+	TableWidth   float64 `json:"tableWidth"`
+	CellWidth    float64 `json:"cellWidth"`
+	CellHeight   float64 `json:"cellHeight"`
+	LineHeight   float64 `json:"lineHeight"`
+
+	// Groups, OnTbody, HoldsTheReason and MarkedRows are pure DOM: which
+	// element the watched mark is ON, and whether that element is the one
+	// holding the reason.
+	Groups         int  `json:"groups"`
+	OnTbody        bool `json:"onTbody"`
+	HoldsTheReason bool `json:"holdsTheReason"`
+	MarkedRows     int  `json:"markedRows"`
+}
+
+// assertReasonReadsAtTheTablesWidth is the measurement this slice exists for.
+//
+// A HEIGHT IS THE PROPERTY AND A CLASS NAME IS NOT. `.why` was present on the
+// page for the whole life of the defect: the reason was rendered, decoded,
+// coloured and carried a `title`, and it was still forty lines of two words,
+// because what was wrong was the width it was given. An assertion that the
+// class exists passes against that; an assertion about how tall it comes out
+// does not.
+//
+// AND THE WIDTH IS WHAT HOLDS THE `colspan` TO THE ROW ABOVE IT. Nothing in
+// Rust can count the `<td>`s a view macro emits, so the literal 6 in `views`
+// and the six cells beside it can only be held together by something that
+// renders them. A seventh column with the colspan left at six makes this cell
+// narrower than its table, which is red here. It cannot see a colspan that is
+// too LARGE -- the table model clamps one to the columns the table has -- and
+// that is the direction with no defect behind it.
+//
+// AND THE MARK'S SUBJECT IS A DOM QUESTION, WHICH IS A DIFFERENT PROPERTY FROM
+// WHETHER A BROWSER PAINTS IT. "Does Chrome draw an `outline` on a
+// `<tbody>`" is a test of Chrome and needs a screenshot, which is why it is a
+// note in AGENTS.md and not a lab. "Is the element carrying `watching` the one
+// that holds the reason" is a test of ember, is four lines, and had no exit
+// code: moving `class:watching` back onto the `<tr>` -- the exact regression
+// `style.css` argues against -- left this lab GREEN. The two numbers
+// discriminate perfectly, measured:
+//
+//	as it ships:      groups 1, onTbody true,  holdsTheReason true,  markedRows 0
+//	mark on the <tr>: groups 0, onTbody false, holdsTheReason false, markedRows 1
+//
+// `markedRows` is the half that makes it a finding rather than an absence: a
+// mark on nothing at all and a mark on the wrong element are different
+// defects, and without it both read as "groups 0".
+func assertReasonReadsAtTheTablesWidth(t *testing.T, ctx context.Context, console *consoleLog) {
+	t.Helper()
+
+	raw, err := chromedp.Run(ctx, chromedp.Evaluate[string](`(() => {
+		const panels = [...document.querySelectorAll('section.panel')];
+		const table = document.querySelector('table.queue');
+		const cell = document.querySelector('table.queue tr.reason td.why');
+		const queue = table ? table.closest('section.panel') : null;
+		// The watch panel is the one the stylesheet makes span both columns,
+		// so it is the body's own width whichever way the grid went.
+		const spanAll = panels[2];
+		const px = s => parseFloat(s) || 0;
+		const groups = [...document.querySelectorAll('table.queue tbody.watching')];
+		return JSON.stringify({
+			viewport: window.innerWidth,
+			queuePanel: queue ? queue.getBoundingClientRect().width : -1,
+			spanAllPanel: spanAll ? spanAll.getBoundingClientRect().width : -1,
+			tableWidth: table ? table.getBoundingClientRect().width : -1,
+			cellWidth: cell ? cell.getBoundingClientRect().width : -1,
+			cellHeight: cell ? cell.getBoundingClientRect().height : -1,
+			lineHeight: cell ? px(getComputedStyle(cell).lineHeight) : -1,
+			groups: groups.length,
+			onTbody: groups.length === 1,
+			holdsTheReason: groups.length === 1
+				&& groups[0].querySelector('tr.reason td.why') !== null,
+			markedRows: document.querySelectorAll('table.queue tr.watching').length,
+		});
+	})()`))
+	if err != nil {
+		t.Fatalf("measuring the reason row: %v\n%s", err, console.text())
+	}
+	var g reasonGeometry
+	if uerr := json.Unmarshal([]byte(raw), &g); uerr != nil {
+		t.Fatalf("reading the measurement %q: %v", raw, uerr)
+	}
+	t.Logf("reason row: %+v", g)
+
+	if g.CellWidth < 0 || g.LineHeight <= 0 {
+		t.Fatalf("there is no reason cell to measure: %+v\nthe queue panel says: %q",
+			g, panelText(ctx))
+	}
+
+	// THE PRECONDITION, ASSERTED RATHER THAN ASSUMED. Everything below is about
+	// a queue squeezed into one half of a two-column grid, and that grid only
+	// exists above 60rem. If the viewport were ever narrowed -- or the media
+	// query changed -- the panel would be the full width of the page and the
+	// bound would hold against any markup at all.
+	//
+	// THE VIEWPORT IT PRINTS IS THE MEASURED ONE AND NOT THE CONSTANT. It used
+	// to name `wideViewport`, so a run that never got the window it asked for
+	// reported "the viewport is 1280" while the browser was at Chrome's own
+	// 800 -- a message naming the setting rather than the cause, which sends
+	// the reader to the media query instead of to the allocator.
+	if g.QueuePanel >= g.SpanAllPanel {
+		t.Fatalf("the queue panel is %.0fpx against the spanning panel's %.0fpx at a viewport of "+
+			"%.0fpx (the lab asks for %d), so the page is not in its two-column layout and "+
+			"nothing below measures what it is written for",
+			g.QueuePanel, g.SpanAllPanel, g.Viewport, wideViewport)
+	}
+
+	if d := g.TableWidth - g.CellWidth; d > 2 {
+		t.Errorf("the reason cell is %.0fpx inside a %.0fpx table, %.0fpx short: its colspan does "+
+			"not reach every column of the row above it, so the sentence is being wrapped into "+
+			"part of a table instead of across it",
+			g.CellWidth, g.TableWidth, d)
+	}
+
+	// The bottom padding rides along with the text, so the bound is the lines
+	// plus a few pixels rather than an exact multiple.
+	bound := float64(maxReasonLines)*g.LineHeight + 8
+	if g.CellHeight > bound {
+		t.Errorf("the reason is %.0fpx tall, about %.0f lines of %.1fpx, against a bound of "+
+			"%d lines (%.0fpx): a request's reason that runs down the panel is the defect -- "+
+			"five failed requests then fill the viewport and the queue is unreadable",
+			g.CellHeight, g.CellHeight/g.LineHeight, g.LineHeight, maxReasonLines, bound)
+	}
+
+	// THE WATCHED MARK IS ON THE GROUP THAT HOLDS THE REASON. Three properties
+	// rest on the grouping -- the highlight covers the pair, one border is
+	// drawn under the request rather than between its own two rows, and the
+	// reason cannot read as belonging to the request below -- and until this
+	// probe none of the three had an exit code: the geometry above is
+	// identical whichever element carries the class.
+	if !g.OnTbody || !g.HoldsTheReason {
+		t.Errorf("the watched request is marked on %d row group(s) and %d row(s), and the group "+
+			"holding the reason is marked: %t. The mark belongs to the `<tbody>` that holds "+
+			"both the request and its reason -- on the `<tr>` it covers the request and "+
+			"leaves the sentence outside it, which reads as the reason belonging to the "+
+			"request below",
+			g.Groups, g.MarkedRows, g.HoldsTheReason)
+	}
 }
 
 // TestServe_UICancelSaysWhatTheServerAnswered presses the one button in the

@@ -1847,6 +1847,96 @@ that sentence made unrepresentable rather than merely tested.
   can pass for either reason proves neither, and that is how a working seal
   gets quietly weakened while the suite stays green -- the `AssertNoStray`
   failure, reached from a third direction.
+- **And the page told every operator there was no authentication for the whole
+  of that time, which is the `ember ls --all` class in the running program's
+  own UI rather than in a comment or a document (#167).**
+  `web/src/views.rs`'s posture line
+  ended `· no authentication: any page in this browser can reach this port`,
+  unconditionally -- outside the `if c.allow_paid` above it, so on screen in
+  both postures on every page load -- and `Posture`'s own doc comment rested
+  the `--allow-paid` default on "what bounds the damage of there being no
+  authentication". A verbatim survival of the state #29 closed: `webapi.New`
+  refuses a zero token, a page on another site fails `checkOrigin` before the
+  credential is asked for, and `SameSite=Strict` means a cross-site request
+  carries no cookie at all, which is the half that clause was about. **The
+  distinguishing claim is the SURFACE and not the audience**, and the first
+  wording of this entry had it as "read by whoever next edited the code"
+  against "read by the operator" -- which is wrong about this file's own
+  record two hundred lines up: the `--all` on an `ember ls` and the
+  `ember up --config ember.local.yaml` naming a file that never existed were
+  both in `README.md`, which operators read. What is new is that this one was
+  in the **program's own UI**, printed by the running process to the person
+  deciding whether to walk away from it, where a document is read before the
+  decision and a comment is read by nobody making it. And it was wrong in the
+  direction that makes a working control look absent. `README.md`'s own
+  paragraph was corrected when the token landed and the page was not, which is
+  "a claim is worth exactly what the code does" with the two surfaces one
+  commit apart.
+  **The replacement is `announceToken`'s two limits and not its two
+  mechanisms, and the reason it is on the page at all is #105's**: that
+  paragraph prints the control and its limits into a terminal, and the
+  operator this page is for may never see one -- the one-time URL means
+  somebody had a shell, and `ssh -L 7777:localhost:7777` means that shell is
+  on the other machine. So "every request on this port needs a token; it does
+  not keep out your own uid or root, and it never expires", all three spans,
+  because a control whose limits are not printed is a control that gets
+  believed past them and a line that said only the first would be the old
+  defect inverted. Not a deletion, which was the other candidate: a warning
+  naming a condition the program cannot be in is worse than silence, and that
+  is an argument about the old clause rather than about a true one.
+  **THE FIRST VERSION KEPT ONE LIMIT OF THE TWO AND CALLED ITSELF THAT
+  PARAGRAPH COMPRESSED**, which is the same shape one scale down: non-expiry
+  was dropped, it is the more surprising of the two and the one that bears
+  hardest on "should I leave this running", and the argument for printing the
+  control here -- a terminal this operator may never see -- cannot also be the
+  argument for withholding a limit of it. Both limits are there now; both
+  *mechanisms* (which uid can read the token, and that a restart is what
+  revokes it) are not, because a page gives the fact and the terminal and
+  `README.md` give the how -- and the clause says so where it is written
+  rather than reading as lossless.
+  **"On this port" and not "every request", for one channel's worth of
+  precision.** `ServeSocket` answers the same routes with no token, because
+  the socket is 0600 in a 0700 directory and `connect(2)` is the check. As a
+  claim about WHO can reach this server the shorter spelling was already true
+  -- 0600 means the operator's own uid -- so it over-claimed only about HOW,
+  by one channel, and that is a different defect from the one it replaced: the
+  old clause reported a live control as ABSENT, which is a false negative
+  about a control, and this would have been a true control described one
+  channel too widely. Three words close it, against leaving the next reader to
+  re-derive the socket exception.
+  **A `WaitVisible` on the one line of that page carrying a security claim is
+  what let it stand.** `TestServe_UI` waited for `.posture` to appear and
+  asserted nothing about its text, so the lab written to drive the page an
+  operator reads passed against either wording for the life of the clause --
+  the same shape as the three cross-origin labs above it. It reads the text
+  now, and the **absence** of `no authentication` is asserted beside the
+  presence of the new sentence, because a check that only looked for the new
+  text would pass against a page printing both. The control and each of its
+  limits are separate assertions for the same reason: one `Contains` over the
+  whole clause cannot tell a dropped limit from a dropped control.
+  **The clause is static and there is therefore no `cargo test`**, which is
+  stated rather than papered over. The credential is mandatory, so there is no
+  state of this program a `Config` field could switch the sentence on -- the
+  `Listing::answer` / `Rows::note` / `Stream::note` shape is for a decision,
+  and asserting a string literal against itself is the closed loop this file
+  refuses elsewhere. The exit code available is the lab's.
+  **IT WAS NOT RUN BY THE CHANGE AND WAS RUN BY THE VERIFICATION, AND THAT
+  ORDER IS THE ENTRY RATHER THAN A NOTE ON IT.** The commit made no claim
+  about it, because a lab takes the flock on the one Docker daemon and this
+  file has had to retract a red-test claim twice. Run afterwards, scoped to
+  `TestServe_UI` with a `make web` per step and a control at both ends: the
+  opening control **0**, the old clause restored **1** with all three of the
+  assertions firing, the closing control **0**. And the split is what the
+  discriminator measured rather than the redness: dropping **only** the limit
+  half fires **exactly one** of them, so the halves do the work claimed for
+  them -- three firing together would have proved the suite went red and not
+  why. The third span, non-expiry, landed after that measurement and is
+  asserted on the same reasoning and no exit code of its own. The scoping is
+  not cosmetic either: `make test-serve-lab` is exit 2 on master over a
+  deterministic failure in `TestServe_UIResumesAProgressStreamItLost`, which
+  is **#185** and nothing to do with this -- and the only reason it surfaced
+  as a finding rather than as a false "lab green" in a commit message is that
+  the commit declined to assert an exit code nobody had.
 - **A request may narrow the config's ceilings and never widen them.** `ember
   up`'s `applyFlags` *replaces*: `--max-hourly-usd 999` raises the ceiling,
   because the person typing it is the person who set it. A request is not that
@@ -3302,6 +3392,112 @@ that sentence made unrepresentable rather than merely tested.
   `busy_timeout(5000)` are for, and nothing is rented: the seeded row is
   `running` only for the instant between `Adopt` and the `Update` that ends
   it, and `ClaimNext` takes queued rows alone.
+- **A sentence in a table cell is a sentence in whatever width is left over,
+  and the fix for #103 landed in one (#138).** The reason a request ended was
+  rendered as a `<span class="why">` inside `td.status` -- one column of a
+  six-column table under `table-layout: auto`, in the `1fr` half of the page's
+  `1.3fr 1fr` grid. **Measured at a 1280px viewport rather than argued: the
+  body is 1088, the queue panel 444, its table 407, and that cell gets 174 of
+  it** -- so `app.AttachStore`'s store refusal, 170 characters naming
+  `ember store create`, rendered **174px tall, nine lines of two or three
+  words**, in a 204px row. Five failed requests fill the viewport. The entry
+  above about `Request::reason` is right that the page had to show it and says
+  nothing about where, and the CSS comment that did -- "it sits under the
+  status word, on its own line, because the reason is a sentence and the cell
+  is one column wide" -- names the problem and settles for it.
+  **WHOLE, AND NOT TRUNCATED BEHIND AN INTERACTION, and the reason is that the
+  length was never the defect.** The same sentence across the table is **four**
+  lines. So the question "should this be clamped" is downstream of a width that
+  is now right, and answering it with a `<details>` or a `title`-only
+  truncation would put an operator who does not know to click back where #103
+  found them -- reading `failed` and nothing else -- over a sentence whose
+  whole point is that it carries `ember store create`. The `title` the old span
+  had is **gone** for the same reason it existed: it was there "because some of
+  those are long enough to wrap a cell", which is true of a cell and not of a
+  row, and a native tooltip is a second carrier of one string that cannot be
+  selected, does not appear on a touch device and truncates per platform.
+  **`white-space: pre-wrap`, BECAUSE EMBER WROTE THE LINE BREAKS AND HTML WAS
+  EATING THEM.** `app.AttachStore` writes "Create it with:\n  ember store
+  create\n" so the command is on its own indented line; collapsed, it ran
+  together with the prose on both sides. This is `.log`'s rule one class over
+  -- the server composed the layout and the page is not a second author of it
+  -- and it is not decoration: the lab's existing "the page must not paraphrase
+  a refusal" equality goes **red** on exactly those two newlines, in the row
+  and again in the watcher, because `.why` is one rule for both.
+  **A `<tbody>` PER REQUEST AND NOT TWO LOOSE `<tr>`s**, because the grouping
+  decides three things at once that would otherwise be three rules able to
+  disagree: `running` and `watching` cover the pair rather than its first half,
+  one border is drawn under the request rather than between its own two rows,
+  and the reason cannot read as belonging to the request BELOW it -- which with
+  loose rows it would, since `td`'s bottom border sits between them. Written as
+  `.queue td { border-bottom: 0 }` plus a `tbody tr:last-child` rule rather
+  than `:has(+ tr.reason)`, which holds whether or not a reason row is there
+  and needs no lookahead.
+  **The `colspan` is a literal and the lab is what holds it to the row above
+  it.** Nothing in Rust can count the `<td>`s a view macro emits, so the six
+  here and the six cells beside it are held together only by something that
+  renders them: the lab asserts the reason cell is as wide as its table, which
+  is red the day a seventh column arrives. It cannot see a colspan that is too
+  LARGE, because the table model clamps one to the columns the table has, and
+  that is the direction with no defect behind it.
+  **THE LAB'S VIEWPORT IS LOAD-BEARING AND IS ASSERTED RATHER THAN TRUSTED.**
+  Headless Chrome's own window is 800x600 and the grid is one column below
+  60rem, so at the default the queue panel is already the full width of the
+  page and a height bound passes against any markup at all -- the
+  `AssertNoStray` shape reached through a viewport. `chromedp.WindowSize` sets
+  it and the assertion then re-checks that the grid really split, by comparing
+  the queue panel against the one the stylesheet makes span both columns.
+  **And the trigger had to change for the bound to be able to fail**: the lab
+  refused a `gpu` the local provider does not offer, whose reason is one short
+  line -- one short line in a 174px cell as much as in a 407px row. It names a
+  store the provider does not have instead, which `NewPlan` refuses at
+  plan.go:172 against `PickOffer` at 280, so nothing is created and nothing is
+  billed, and the reason is the three-line one the issue's screenshot showed.
+  **Six reinstatements, no two of which fire the same assertion, which is the
+  half worth recording.** Two of them fire a pair, and that is the shape rather
+  than a blur: what matters is that no case is indistinguishable from another.
+  The old markup is red at "the reason is somewhere in the panel but not on a
+  row of its own"; no reason row at all is red at "the panel never named why
+  the request failed", and those are two waits rather than one precisely
+  because they are two defects with two fixes; `colspan="1"` is red at the
+  width (208 of 407) **and** at the height (7 lines against 5);
+  `white-space: normal` is red at the row's text equality **and** at the
+  watcher's -- two disjoint assertions, and geometry catches neither, since
+  collapsing the line breaks makes the cell *shorter* (62.5px); the viewport
+  removed is red at the two-column precondition and at nothing else; and a
+  reworded comment came back **not caught**. Controls green at both ends, one
+  backup per path, every case ending on a diff against the pristine copy.
+  **The precondition is the only thing between a narrowed viewport and a false
+  pass, and that has an exit code rather than an argument.** Removing the
+  window size **and** the precondition together is **exit 0, green**, at 694px,
+  where the height bound is satisfied by a queue panel that is already the full
+  width of the page.
+  **The harness's own defect is a restore that repairs the SOURCE and not the
+  ARTEFACT, and it goes both ways.** It rebuilt the wasm only for the cases
+  that patched Rust or CSS, so the one Go-only case ran against
+  `internal/webapi/dist` as the case before it had left it -- and reported that
+  case's `white-space: normal` as its own finding, a second assertion firing
+  that had nothing to do with the patch under test. Caught by asking why a case
+  had fired an assertion nobody had aimed at it. **The other direction is the
+  dangerous one**: patch `web/style.css`, do not rebuild, and the lab is
+  **exit 0 with the geometry byte-identical to the control** -- the same root
+  cause, that no test run derives `internal/webapi/dist/style.css` from the
+  working tree, and a false GREEN gets committed where a false RED gets
+  investigated. It rebuilds unconditionally now.
+  **One thing was measured by hand and is not asserted anywhere, and it is
+  narrower than it first read**: that Chrome paints an `outline` on a
+  `<tbody>` at all. That is a test of Chrome, needs a screenshot, and is a note
+  here rather than a lab for exactly that reason -- checked against real Chrome
+  on a page holding nothing but a table with three groups. What it was wrongly
+  used to decline is a **different property**: whether the mark's SUBJECT is
+  the group that holds the reason, which is pure DOM, is a test of ember, and
+  is four lines in a lab that already clicks that row. It had no exit code --
+  moving `class:watching` back onto the `<tr>` left the lab green -- and now it
+  does: `groups`, `onTbody`, `holdsTheReason` and `markedRows` read
+  `1/true/true/0` as it ships and `0/false/false/1` with the mark on the row.
+  Until that probe, the three things the grouping settles had no exit code
+  between them, because the geometry is identical whichever element carries
+  the class.
 - **The remote end of a forward is built by `tunnel.RemoteLoopback(port)` and
   never parsed from input.** `direct-tcpip` connects anywhere the node can
   reach, including the provider's metadata service; a free-form remote host
@@ -6355,6 +6551,42 @@ A leaked node bills by the hour in silence. These are not style preferences.
   running total in prose is the thing it has been wrong about before. So the
   lists below are the record and nothing sums them: every case is named, every
   case has a verdict, and a reader who wants a number can count the names.
+  **AND DROPPING THE TOTAL WAS NECESSARY AND NOT SUFFICIENT, which the fourth
+  instance proved by not being a total at all.** With no number left to be
+  wrong, the list itself was: one red filed as evidence for a refusal its
+  message does not name, and the green half of the same case recorded only in
+  the prose below it, so neither side of the list reconciled with the pass that
+  produced it -- while the paragraph above said the lists were the record.
+
+  **THE REASON NO AMOUNT OF ARITHMETIC COULD HAVE CAUGHT IT: A RED IS TWO
+  CLAIMS, AND ONLY ONE OF THEM WAS EVER BEING CHECKED.** A red says the case
+  failed *and* why it failed, and every check this paragraph has carried --
+  the total, then the per-family counts, then the reconciliation between list
+  and count -- sees the verdict alone. Both misfiled entries had a CORRECT
+  verdict and a wrong reason: the index case really is red, the parenthesised
+  dereference really is red, and both were filed as evidence for a mechanism
+  their own messages do not name. An exit code cannot tell those apart from a
+  correctly filed red, so no sum over exit codes can either. What makes a list
+  self-checking is that each entry's evidence is **the tool's own output read
+  back** -- then the classification stops being something the author is trusted
+  to have done and becomes something a reader re-derives, which is what the
+  three families below are grouped by and how the two misfilings at the end
+  were found.
+
+  **AND THE FORCE OF THAT IS THAT THE REVIEWER MADE THE IDENTICAL ERROR.** The
+  independent pass that checked this work captured
+  *"Config is set from `cfg` and its address is taken in the same function"*
+  for the parenthesised-dereference case -- the message was in its own output
+  -- and filed it as evidence for the `ParenExpr` and `StarExpr` arms anyway,
+  which is precisely the misreading it had just caught one case over in the
+  index entry. Two independent readers, the same mistake, one case apart, with
+  the disproving message sitting in both sets of output. That is the strongest
+  evidence in this whole sequence that the verdict-only check was the problem
+  rather than either reader's care, and it is why the remedy is structural --
+  group by the message -- rather than a resolution to read more carefully. The
+  `checkDirectRunnerConfig` refusal-site count below is the same lesson a third
+  time: both readers counted families, which is a reading, instead of sites,
+  which are lines in a function -- and both got a different wrong answer.
   **Every case RED where expected, every control GREEN, controls at both ends
   of each pass, and every case ended in a `git diff` against HEAD rather than
   in an exit code** -- HEAD being the pristine copy, taken once, which is the
@@ -6382,24 +6614,105 @@ A leaked node bills by the hour in silence. These are not style preferences.
   **The walkaround pass is what proves the wiring guard**, and two of its
   clauses have no defect available on the pristine tree at all: the `moved`
   refusal and the positional-field fatal fire only on code somebody would have
-  to write, which is what the walkaround pass writes. Its reds: a zero
-  composite literal, a non-zero one, a `var` of the right type, the field
-  dropped, a struct selector, a conversion, a closure with no config parameter,
-  **a reassignment of the parameter one line above the wiring**, **a shadow in
-  an inner block**, a shadow through a range clause, a shadow through an
-  if-statement initialiser, the parameter's address taken, a copy through a
-  second `:=`, **a field write that zeroes exactly the two ceilings**, a nested
-  field write, a write through an index, a write through a parenthesised
-  dereference, a compound-assign to a field, a field write inside a closure
-  with the construction outside it, **a range clause assigning into a ceiling
-  field**, a range clause assigning the whole variable, a range clause
-  assigning into the KEY position, an assignment inside a `select` clause, and
-  an inc/dec of a field. Its greens: a closure that takes the config, an
-  identifier from `config.Load`, the fields reordered, **two legitimate `:=`
-  range loops beside the wiring**, and the one documented bound -- a config
-  handed across a call. And one green that is a FINDING rather than a pass,
-  which is the entry above: a pointer-receiver method mutating the config, now
-  covered by a second guard instead of by that one.
+  to write, which is what the walkaround pass writes. **The list is the record
+  and nothing sums it**, and each entry sits under the refusal whose message it
+  drew, because an entry filed under the wrong one is the mistake corrected at
+  the end of this paragraph. **`checkDirectRunnerConfig` refuses at six sites,
+  of which these entries draw four, and the figure is counted rather than
+  carried**: `Config is set from a %T` five times, `which is not an object this
+  function bound` six, `Config is set from %q and %s in the same function`
+  twelve, and `this queue.DirectRunner does not set Config` once, which is the
+  twenty-four reds. Two are never drawn and both are defensive -- the
+  positional-field fatal, and the fatal for an identifier the type checker has
+  no object for, which cannot happen in a package that type-checked.
+  **That is a different pair from the two named at the top of this paragraph,
+  and the overlap is one member**: "no defect available on the pristine tree"
+  asks which sites need code somebody would have to write, and the `moved`
+  refusal is one of those AND is drawn twelve times by code this pass writes;
+  "never drawn" asks which sites no entry reached at all. The positional fatal
+  is in both pairs, which is why the two sentences read as one claim and are
+  not.
+  **Both of the two readers who have counted this got it wrong, in different
+  directions, and neither was counting refusals**: this paragraph first said
+  three drawn and one defensive, because it counted its own FAMILIES, and the
+  not-an-object family draws two sites rather than one -- by AST kind where
+  there is no object to name, by name where there is. Review then said six
+  sites and accounted for five, keeping the family count and correcting the
+  defensive one. A family is a reading of the list; a site is a line in the
+  function, and only the second is countable. The written-to family's twelve
+  entries draw ONE site, whose `%s` carries the clause -- assigned to, address
+  taken, something inside it assigned, the same by a range clause, incremented
+  -- which is why counting messages and counting sites are different sums as
+  well.
+
+  Red because the field is not set: the `Config` key dropped altogether.
+
+  Red because the value is not an object the function bound -- by AST kind
+  where there is no object to name: a zero composite literal; a non-zero one; a
+  conversion; a struct selector; and **an indexed value, `Config: cfgs[0]`**.
+  By name where there is: a `var` of the right type; a copy through a second
+  `:=`; a closure with no config parameter; **a shadow in an inner block**; a
+  shadow through a range clause; and a shadow through an if-statement
+  initialiser.
+
+  Red because the object was written to: **a reassignment of the parameter one
+  line above the wiring**; the parameter's address taken; a write through a
+  parenthesised dereference; **a field write that zeroes exactly the two
+  ceilings**; a nested field write; a compound-assign to a field; a field write
+  inside a closure with the construction outside it; an inc/dec of a field;
+  **a range clause assigning into a ceiling field**; a range clause assigning
+  the whole variable; a range clause assigning into the KEY position; and an
+  assignment inside a `select` clause.
+
+  Green, each one a shape that must stay accepted: a closure that takes the
+  config; an identifier from `config.Load`; the fields reordered; **two
+  legitimate `:=` range loops beside the wiring**; **the same index write with
+  `Config: cfg`**; and the one documented bound -- a config handed across a
+  call.
+  **ONE ENTRY WAS FILED UNDER THE WRONG REFUSAL, WHICH IS "ASK WHY A CASE WENT
+  THE WAY IT DID" APPLIED TO A RED -- the half nobody checks.** "A write
+  through an index" was offered as evidence for write-recording and is nothing
+  of the kind: its message is "set from a `*ast.IndexExpr`", because the
+  literal reads `Config: cfgs[0]`, so it belongs beside the struct selector and
+  the conversion and duplicates what they already cover. Measured by splitting
+  it, and **both halves are in the lists above** rather than the correction
+  living only here -- which is the defect this paragraph had in its own first
+  wording, where the disclaimer sat under an unchanged list and no count
+  reconciled with either. The split half, `Config: cfg` with the same index
+  write, is **green and correctly so**, since the write was to `cfgs` and `cfg`
+  was never written to.
+  **Two more entries evidence a clause one step earlier than their names
+  suggest, which is the same reading error caught before it is made.** "The
+  parameter's address taken" and "a write through a parenthesised dereference"
+  both draw *"its address is taken in the same function"* -- so neither reaches
+  `rootIdent` at all, and the parenthesised one is not evidence for the
+  `ParenExpr` and `StarExpr` arms it is named after. What does evidence the
+  root walk is the five that draw *"something inside it is assigned to"* -- the
+  field write, the nested one, the compound-assign, the one inside a closure
+  and the one in a `select` -- plus the two range clauses that say the same of a
+  range and the inc/dec.
+  And -- worse for the record -- `rootIdent`'s `IndexExpr` and `IndexListExpr`
+  arms are unreachable for this guard's subject **in principle**: a tracked
+  object is a `config.Config` value, a struct is not indexable, so
+  `cfg[…] = x` is not legal Go. Those two arms are defensive, which their own
+  comment now says, and no measurement here has ever taken them.
+  **The `ParenExpr` and `StarExpr` arms are defensive for a DIFFERENT reason,
+  and "nothing evidences them" was the weaker thing to say.** They can fire:
+  on a `*config.Config` held as a parameter or a return value, `(*p).MaxDayUSD
+  = ""` peels to `p`. What they cannot do is fire USEFULLY here, because a
+  pointer that aliases a tracked object can only be obtained by `&cfg`, and the
+  address clause records that first -- which is exactly why the parenthesised
+  case above draws the address message and not these arms. Unreachable in
+  principle and reachable but always pre-empted are two different kinds of
+  defensive, and a reader who finds only the index arms' reason will assume
+  these share it.
+  **THE POINTER-RECEIVER FINDING IS NOT ONE OF THOSE GREENS AND USED TO BE
+  LISTED AS ONE.** It was never a walkaround case: the pass prints its header
+  and then says in place of a verdict that it is vacuous on this tree, because
+  `internal/config` declares no such method -- it was measured by adding one,
+  not by patching the construction site. So it belongs to the entry above and
+  not to this pass, and counting it here is how the green side read as one more
+  than the list held.
   **And the per-arm verdict is the proof the free-rental pair discriminates**:
   with `Binds` reverted to `IsZero`, the PAID arm and the no-ceiling arm stay
   **PASS** and only the FREE arm goes **FAIL**, so the free arm is doing the
@@ -6576,6 +6889,31 @@ A leaked node bills by the hour in silence. These are not style preferences.
   whole arrangement, since the thing being guarded is a guard going silent. An
   unenforced dependency that is cheap to break and reports nothing is what
   `AssertNoStray` was; this is ten lines and a floor.
+  **IT ASKS ONE QUESTION OF THE TYPE AND THAT IS THE REASON FOR ITS SHAPE**:
+  `sig.Recv().Type().(*types.Pointer)`, so genericity cannot hide a receiver.
+  Measured by type-checking a synthetic `type Config[T any]` with both forms --
+  `*p.Config[T]` asserts to `*types.Pointer` **true**, `p.Config[T]`
+  **false** -- so a generic pointer receiver is caught and a generic value
+  receiver is still correctly ignored.
+  `TestTrustHasOneImplementationAndItIsPin` is the cautionary one -- it
+  switched on receiver SYNTAX, skipped the shape it could not name, and a
+  generic receiver walked past it with the whole tree green while ember dialled
+  every node it rented with no host key verification. Whoever writes the next
+  guard here should know which of the two approaches survived: one question of
+  the type, never a switch over the spellings somebody thought of.
+  **AND ITS OWN BOUND IS NARROWER THAN THE SENTENCE IT DEFENDS, which is the
+  thing this PR exists to stop happening a seventh time.** `NumMethods()` is
+  methods DECLARED on `Config` -- not promoted ones. Two measured greens:
+  `Config` embedding a type that has a pointer-receiver method, and a
+  pointer-receiver method on a FIELD's type called as `cfg.SD.ZeroField()`.
+  Neither is a counterexample to "wrote to by any statement", because a method
+  call is not a statement; both are this guard's bound. **And neither can reach
+  this issue's subject**: `MaxDayUSD` and `MaxMonthUSD` are DIRECT fields of
+  `Config`, so a promoted method mutates the embedded struct and a field-type
+  method mutates `cfg.SD`, and `Config` embeds nothing today -- all three
+  measured. So the residue now rests on **the ceilings being direct fields of
+  `Config`**, which is a far more local and stable property than the one it
+  replaced, and that narrowing is the real thing this guard bought.
   **The third option was taken and rejected rather than overlooked**: recording
   a write when a pointer-receiver method is called on a tracked root is about
   the same size and uses type info the guard already has -- and it makes the

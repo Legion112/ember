@@ -107,13 +107,34 @@ td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
 .offers tr:hover td { background: color-mix(in oklab, var(--accent) 10%, transparent) }
 .price { text-align: right; white-space: nowrap }
 .status { color: var(--dim) }
-.queue tr.running td { background: color-mix(in oklab, var(--good) 12%, transparent) }
-/* THE ROW IS OUTLINED, NOT EACH CELL. Per-cell outlines drew a box around
-   every td, and the last two -- the price, empty on a free provider, and the
-   cancel button, absent unless a request is still queued -- rendered as two
-   empty boxes trailing the row with nothing in them. A row has one outline
-   and empty cells stay invisible. */
-.queue tr.watching { outline: 1px solid var(--accent); outline-offset: -1px }
+/* ONE REQUEST IS A ROW GROUP, because it can be two rows: the request and,
+   when it ended with something to say, its reason. The highlight and the
+   outline are on the group so that they cover the pair -- on the rows they
+   would mark the request and leave its reason outside, which reads as the
+   reason belonging to the request below. */
+.queue tbody.running td { background: color-mix(in oklab, var(--good) 12%, transparent) }
+/* THE GROUP IS OUTLINED, NOT EACH CELL AND NOT EACH ROW. Per-cell outlines
+   drew a box around every td, and the last two -- the price, empty on a free
+   provider, and the cancel button, absent unless a request is still queued --
+   rendered as two empty boxes trailing the row with nothing in them. Per-row
+   outlines draw a seam between a request and its own reason. One group, one
+   outline, and empty cells stay invisible. */
+.queue tbody.watching { outline: 1px solid var(--accent); outline-offset: -1px }
+
+/* ONE BORDER PER REQUEST, NOT PER ROW. `td` carries the rule globally, which
+   is right for every other table here and wrong for the only one whose rows
+   come in pairs: a border between a request and its reason cuts the pair in
+   half and attaches the sentence to whatever is underneath. The group's last
+   row is the one that ends a request, so that is the one that draws. Written
+   as a reset plus a last-child rule rather than with `:has(+ tr.reason)`,
+   because this holds whether or not a reason row is there and needs no
+   lookahead. */
+.queue td { border-bottom: 0 }
+.queue tbody tr:last-child td { border-bottom: 1px solid var(--line) }
+/* The reason hugs the row it belongs to: no gap above it. The left padding is
+   the global `td` rule's, so the sentence starts where the table's own text
+   does rather than at the group's edge. */
+.queue tr.reason td { padding-top: 0 }
 
 /* THE SWEEP'S OWN SENTENCE, and the one colour that matters here is the one
    that says a person has to do something. `ember ls` says it with an exit
@@ -154,10 +175,32 @@ label.denied input, label.denied select { cursor: not-allowed }
    is a third one: `.error` is "ember refused what you just asked for" and is
    what the cancel lab counts under the queue table, and `.fatal` is the
    destroy-failed sentence about a node that may still be billing -- which must
-   not print over a request that never reached a provider. In the table it sits
-   under the status word, on its own line, because the reason is a sentence and
-   the cell is one column wide. */
-.why { display: block; color: var(--bad); font-size: .78rem; font-weight: 400 }
+   not print over a request that never reached a provider.
+
+   `pre-wrap`, BECAUSE EMBER WROTE THE LINE BREAKS AND HTML WAS EATING THEM.
+   `app.AttachStore` writes "no store named %q at %s. Create it with:\n  ember
+   store create\nNothing here...", and the remediation is on its own indented
+   line precisely so it can be read and copied. Collapsed, the command ran
+   together with the prose on both sides of it -- measured as `white-space:
+   normal` on the real page, with the row's text differing from `requests.err`
+   by exactly those two newlines, which is the lab's "the page must not
+   paraphrase a refusal" assertion going red. This is the `.log` block's rule
+   one class over: the server composed the layout and the page's job is not to
+   re-flow it. `break-word` with it for the same reason `.log` has it -- a path
+   or a URL in a reason must not push the table sideways.
+
+   NO `display: block`. It used to be a `<span>` inside the status cell and
+   needed it to sit on its own line; it is a `<td colspan>` of its own now, and
+   `display: block` on a table cell takes it out of the table box model, which
+   is the one thing that would stop the colspan working at all. `<p>` is block
+   without being told. */
+.why {
+  color: var(--bad);
+  font-size: .78rem;
+  font-weight: 400;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 p.why { font-size: .85rem }
 /* `.stream` is the watcher's progress socket having stopped. A FOURTH class
    and dim rather than red, for the reason the money row beside it says "not
