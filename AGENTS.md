@@ -6226,6 +6226,16 @@ A leaked node bills by the hour in silence. These are not style preferences.
   running total in prose is the thing it has been wrong about before. So the
   lists below are the record and nothing sums them: every case is named, every
   case has a verdict, and a reader who wants a number can count the names.
+  **AND DROPPING THE TOTAL WAS NECESSARY AND NOT SUFFICIENT, which the fourth
+  instance proved by not being a total at all.** With no number left to be
+  wrong, the list itself was: one red filed as evidence for a refusal its
+  message does not name, and the green half of the same case recorded only in
+  the prose below it, so neither side of the list reconciled with the pass that
+  produced it -- while the paragraph above said the lists were the record. A
+  list is not self-checking merely because nothing sums it; what checks it is
+  reading the pass's own messages back, case by case, which is what the three
+  families below are grouped by and what found the two misfilings named at the
+  end.
   **Every case RED where expected, every control GREEN, controls at both ends
   of each pass, and every case ended in a `git diff` against HEAD rather than
   in an exit code** -- HEAD being the pristine copy, taken once, which is the
@@ -6253,38 +6263,73 @@ A leaked node bills by the hour in silence. These are not style preferences.
   **The walkaround pass is what proves the wiring guard**, and two of its
   clauses have no defect available on the pristine tree at all: the `moved`
   refusal and the positional-field fatal fire only on code somebody would have
-  to write, which is what the walkaround pass writes. Its reds: a zero
-  composite literal, a non-zero one, a `var` of the right type, the field
-  dropped, a struct selector, a conversion, a closure with no config parameter,
-  **a reassignment of the parameter one line above the wiring**, **a shadow in
-  an inner block**, a shadow through a range clause, a shadow through an
-  if-statement initialiser, the parameter's address taken, a copy through a
-  second `:=`, **a field write that zeroes exactly the two ceilings**, a nested
-  field write, a write through an index, a write through a parenthesised
-  dereference, a compound-assign to a field, a field write inside a closure
-  with the construction outside it, **a range clause assigning into a ceiling
-  field**, a range clause assigning the whole variable, a range clause
-  assigning into the KEY position, an assignment inside a `select` clause, and
-  an inc/dec of a field. Its greens: a closure that takes the config, an
-  identifier from `config.Load`, the fields reordered, **two legitimate `:=`
-  range loops beside the wiring**, and the one documented bound -- a config
-  handed across a call. And one green that is a FINDING rather than a pass,
-  which is the entry above: a pointer-receiver method mutating the config, now
-  covered by a second guard instead of by that one.
-  **ONE OF THOSE REDS EVIDENCES THE WRONG MECHANISM AND IS RE-DESCRIBED RATHER
-  THAN COUNTED**, which is "ask why a case went the way it did" applied to a
-  RED -- the half nobody checks. "A write through an index" was offered as a
-  write-recording case and is nothing of the kind: it is red at the
-  CONSTRUCTION-SITE branch, naming "set from a `*ast.IndexExpr`", because the
-  literal reads `Config: cfgs[0]`. Measured by splitting it: the same index
-  write with `Config: cfg` is **green, and correctly so**, since the write was
-  to `cfgs` and `cfg` was never written to. So it duplicates what the struct
-  selector and the conversion already cover, and -- worse for the record --
-  `rootIdent`'s `IndexExpr` and `IndexListExpr` arms are unreachable for this
-  guard's subject **in principle**: a tracked object is a `config.Config`
-  value, a struct is not indexable, so `cfg[…] = x` is not legal Go. Those two
-  arms are defensive, which their own comment now says, and no measurement here
-  has ever taken them.
+  to write, which is what the walkaround pass writes. **The list is the record
+  and nothing sums it**, and each entry sits under the refusal whose message it
+  drew, because an entry filed under the wrong one is the mistake corrected at
+  the end of this paragraph. These entries draw three of them and not two,
+  which is a correction to this paragraph's own earlier shape: a field that is
+  not set has no value to classify at all. Three is what the entries reached,
+  not what the guard has -- the positional-field fatal named above is a fourth
+  that none of them draws.
+
+  Red because the field is not set: the `Config` key dropped altogether.
+
+  Red because the value is not an object the function bound -- by AST kind
+  where there is no object to name: a zero composite literal; a non-zero one; a
+  conversion; a struct selector; and **an indexed value, `Config: cfgs[0]`**.
+  By name where there is: a `var` of the right type; a copy through a second
+  `:=`; a closure with no config parameter; **a shadow in an inner block**; a
+  shadow through a range clause; and a shadow through an if-statement
+  initialiser.
+
+  Red because the object was written to: **a reassignment of the parameter one
+  line above the wiring**; the parameter's address taken; a write through a
+  parenthesised dereference; **a field write that zeroes exactly the two
+  ceilings**; a nested field write; a compound-assign to a field; a field write
+  inside a closure with the construction outside it; an inc/dec of a field;
+  **a range clause assigning into a ceiling field**; a range clause assigning
+  the whole variable; a range clause assigning into the KEY position; and an
+  assignment inside a `select` clause.
+
+  Green, each one a shape that must stay accepted: a closure that takes the
+  config; an identifier from `config.Load`; the fields reordered; **two
+  legitimate `:=` range loops beside the wiring**; **the same index write with
+  `Config: cfg`**; and the one documented bound -- a config handed across a
+  call.
+  **ONE ENTRY WAS FILED UNDER THE WRONG REFUSAL, WHICH IS "ASK WHY A CASE WENT
+  THE WAY IT DID" APPLIED TO A RED -- the half nobody checks.** "A write
+  through an index" was offered as evidence for write-recording and is nothing
+  of the kind: its message is "set from a `*ast.IndexExpr`", because the
+  literal reads `Config: cfgs[0]`, so it belongs beside the struct selector and
+  the conversion and duplicates what they already cover. Measured by splitting
+  it, and **both halves are in the lists above** rather than the correction
+  living only here -- which is the defect this paragraph had in its own first
+  wording, where the disclaimer sat under an unchanged list and no count
+  reconciled with either. The split half, `Config: cfg` with the same index
+  write, is **green and correctly so**, since the write was to `cfgs` and `cfg`
+  was never written to.
+  **Two more entries evidence a clause one step earlier than their names
+  suggest, which is the same reading error caught before it is made.** "The
+  parameter's address taken" and "a write through a parenthesised dereference"
+  both draw *"its address is taken in the same function"* -- so neither reaches
+  `rootIdent` at all, and the parenthesised one is not evidence for the
+  `ParenExpr` and `StarExpr` arms it is named after. What does evidence the
+  root walk is the five that draw *"something inside it is assigned to"* -- the
+  field write, the nested one, the compound-assign, the one inside a closure
+  and the one in a `select` -- plus the two range clauses that say the same of a
+  range and the inc/dec.
+  And -- worse for the record -- `rootIdent`'s `IndexExpr` and `IndexListExpr`
+  arms are unreachable for this guard's subject **in principle**: a tracked
+  object is a `config.Config` value, a struct is not indexable, so
+  `cfg[…] = x` is not legal Go. Those two arms are defensive, which their own
+  comment now says, and no measurement here has ever taken them.
+  **THE POINTER-RECEIVER FINDING IS NOT ONE OF THOSE GREENS AND USED TO BE
+  LISTED AS ONE.** It was never a walkaround case: the pass prints its header
+  and then says in place of a verdict that it is vacuous on this tree, because
+  `internal/config` declares no such method -- it was measured by adding one,
+  not by patching the construction site. So it belongs to the entry above and
+  not to this pass, and counting it here is how the green side read as one more
+  than the list held.
   **And the per-arm verdict is the proof the free-rental pair discriminates**:
   with `Binds` reverted to `IsZero`, the PAID arm and the no-ceiling arm stay
   **PASS** and only the FREE arm goes **FAIL**, so the free arm is doing the
