@@ -507,8 +507,8 @@ func (j ttsJob) ask() *tts.Ask {
 // `if j.Prompt != "" || j.Width != 0 || ...` over twenty-three fields, which is
 // the hand-maintained list this repository refuses by name -- and the field
 // that would be forgotten is whichever one is added next, which is exactly the
-// one a smuggled value would arrive in. Clearing the two fields that are NOT
-// the image kind's and comparing the rest against a zero value cannot be
+// one a smuggled value would arrive in. Clearing the ONE field that is not the
+// image kind's -- TTS -- and comparing the rest against a zero value cannot be
 // out of date.
 //
 // reflect.DeepEqual and not ==, because newJob holds a slice (slgJob.Layers)

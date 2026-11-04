@@ -38,6 +38,17 @@ func stores(t *testing.T) map[string]Store {
 
 func req(prompts ...string) Request {
 	r := Request{
+		// SET, which is the tidy-up that DISARMED A GUARD AND IS THE REASON
+		// THE TEST BELOW EXISTS. `Kind` is a first-class column and every
+		// other field here is set, so filling it in is what anybody would do
+		// -- and until TestClaimNext_AMigratedRowHasNoKindAndIsStillClaimable
+		// was written, leaving it EMPTY was the only thing making
+		// TestClaimNext_OnlyJoinsACompatibleRental catch a claim predicate
+		// that compared `kind` as a raw column. That catch was incidental: it
+		// turned on this literal rather than on the rule, so this one line
+		// would have silently re-opened a permanently unclaimable queue for
+		// every operator upgrading from schema 5.
+		Kind:     KindSD,
 		Provider: "local",
 		GPU:      "rtx2080ti",
 		TTL:      time.Hour,

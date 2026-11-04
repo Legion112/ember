@@ -167,6 +167,52 @@ func (j Job) Describe() string {
 // control that does nothing.
 const Ext = ".wav"
 
+// NameMax is the longest single filename every filesystem ember writes to
+// accepts.
+//
+// Not a figure ember chose: NAME_MAX is 255 bytes on ext4, xfs, btrfs and
+// overlayfs, which is every filesystem a node ember rents writes to.
+const NameMax = 255
+
+// suffixReserve is how much of a filename ember composes around the stem.
+//
+// `SpokenStem` writes "<stem>-%02d" and the extension is four bytes, so the
+// suffix is a dash, the index's digits and ".wav". TEN DIGITS ARE RESERVED
+// rather than the two the format pads to, because `%02d` is a MINIMUM width
+// and nothing bounds how many jobs a batch holds -- so the index's width is
+// the batch's size, and reserving for the two-digit case is a bound that is
+// correct until somebody queues a hundred utterances.
+//
+// FOUND BY THE ARITHMETIC TEST BESIDE IT AND NOT BY REVIEW: the first version
+// of this reserved EIGHT, derived from "-100.wav", and
+// TestMaxOutput_LeavesRoomForTheSuffixEmberComposes went red on "-1000.wav"
+// being nine. Over-reserving is the safe direction and costs nine bytes of a
+// name nobody types, which is why it is ten and not four.
+const suffixReserve = len("-") + 10 + len(Ext)
+
+// MaxOutput bounds a filename stem, and the bound is DERIVED rather than
+// chosen.
+//
+// WHY THERE HAS TO BE ONE AT ALL, which is ValidateOutput's own stated purpose
+// read back: it exists so that a stem which cannot work is refused "before a
+// card is rented", and without a length check a 100,000-character stem passed
+// every check here, reached `piper --output_file` on a rented machine and
+// failed THERE -- after the create call, the wait for sshd and the image pull
+// had all been paid for. The stem is the SECOND request-supplied string that
+// reaches a filename, after the voice id, and it was the one with no bound
+// while `MaxVoiceID` is 64 and `MaxText` is 8000 and both say why.
+//
+// NameMax minus what ember composes around it, so the figure is arithmetic
+// rather than taste -- a round number here would be ember's preference
+// standing in for a filesystem's limit, and the thing being prevented is
+// exactly the filesystem's refusal.
+//
+// It is therefore NOT a judgement about what length of name an operator might
+// mean: 240 bytes is longer than any name anybody types, and a stem that long
+// is a paste rather than a choice. What the bound buys is that the refusal
+// arrives here instead of on the node.
+const MaxOutput = NameMax - suffixReserve
+
 // MaxText bounds one utterance.
 //
 // Not a limit piper publishes: it has none, and it will happily synthesise a
@@ -185,8 +231,9 @@ const MaxText = 8000
 //
 // The cheapest moment to find a typo is before a card is paid for, which is
 // the rule sdserver.Validate follows. Every bound here is piper's own, read
-// off its --help and its observed refusals, except MaxText and the stem --
-// both of which are ember's and say so.
+// off its --help and its observed refusals, except MaxText and MaxOutput --
+// both of which are ember's and say so, the second derived from NAME_MAX
+// because what it prevents is a filesystem's refusal on a rented machine.
 func (r Run) Validate() error {
 	if len(r.Jobs) == 0 {
 		return errors.New("tts.jobs is empty: there is nothing to say")
@@ -255,10 +302,27 @@ func (j Job) Validate() error {
 // of sdserver's safeStem here is two copies of a containment rule, which is
 // the defect AGENTS.md records about the journal's "nodes" subdirectory.
 //
+// A DENY-LIST WHERE THE VOICE ID GOT AN ALLOW-LIST, and the asymmetry is
+// deliberate rather than an oversight. An id is a TOKEN: it is compared with
+// == , a UI round-trips it, and nothing legitimate needs a space or a capital
+// in one -- so the narrow set costs nothing. A stem is a FILENAME an operator
+// chose, and `blob.ValidateKey` and `sdserver`'s own stem rule are both
+// deny-lists for that reason: an allow-list there would refuse a space, an
+// accent or a CJK character, all of which are names somebody means. What the
+// two have in common is that neither is cleaned -- a hostile name is refused,
+// because path.Clean absorbs a traversal and a check that cleaned first could
+// never fire.
+//
 // An empty stem is fine: the caller numbers a job that does not name itself.
 func ValidateOutput(stem string) error {
 	if stem == "" {
 		return nil
+	}
+	if len(stem) > MaxOutput {
+		return fmt.Errorf("output is %d bytes, above the bound of %d: ember appends up to %d "+
+			"more for the index and the extension, and a filename longer than %d bytes is "+
+			"refused by the filesystem on the node -- after a card has been paid for",
+			len(stem), MaxOutput, suffixReserve, NameMax)
 	}
 	if stem != path.Base(stem) || strings.ContainsAny(stem, `\/`) {
 		return fmt.Errorf("output %q is not a plain filename: a stem names one file in the run's "+

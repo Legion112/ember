@@ -7486,6 +7486,91 @@ A leaked node bills by the hour in silence. These are not style preferences.
   Excluding that one guard the tree is exit 0 across forty packages, so the
   claim -- that no assertion about the behaviour reports it and only the lab
   does -- holds in full and needed the clause.
+- **A GUARD THAT CATCHES ITS DEFECT BY ACCIDENT IS ONE A TIDY-UP DISARMS, and
+  the migration rule had no assertion whose subject was the rule.** The entry
+  above argues that `CASE WHEN kind = '' THEN 'sd'` is the difference between a
+  working upgrade and a permanently unclaimable queue, and reports a
+  reinstatement going red. It did -- at
+  `TestClaimNext_OnlyJoinsACompatibleRental`, and **only because the shared
+  `req()` fixture happened not to set `Kind`**, so its rows stored `''` while
+  the compat held `sd`.
+  **Measured, and the measurement is the finding**: add `Kind: KindSD` to that
+  fixture -- which is an entirely reasonable tidy-up now the column is
+  first-class and every other field there is set -- and with the wedge still in
+  place `go test ./internal/genstore/` is **ok** and `go test ./...` is **exit
+  0, no FAIL anywhere**. `grep` found no pre-schema-6 claim test in that
+  package at all. So the rule rested on a literal in a fixture rather than on
+  an assertion, and the next person to tidy that struct would have silently
+  re-opened it for every operator upgrading from schema 5.
+  **BOTH HALVES, because either alone leaves the dependency.** The fixture is
+  tidied AND `TestClaimNext_AMigratedRowHasNoKindAndIsStillClaimable` is
+  written: it builds the pre-v6 shape itself, asserts in its own body that the
+  kind really is empty, and claims it with an `sd` compat -- which cannot be
+  switched off by anybody editing a fixture, because the absence is the
+  subject. Tidying alone would have removed the only catch there was; writing
+  alone would have left two assertions where one is accidental and a reader
+  cannot tell which. Reinstated: the SQL defect is now red at the new test and
+  **not** at `OnlyJoinsACompatibleRental`, which is the proof the accident is
+  gone rather than merely covered.
+  **The refusal is asserted before the acceptance**, because an acceptance
+  alone is consistent with a claim that takes everything -- which is exactly
+  what a compat ignoring the kind is.
+  This is `TestOpen_MigratesAVersionFourFile`'s lesson from the other side:
+  that one was a hand-built fixture missing the ROW the bug reads, and this was
+  a hand-built fixture missing the VALUE.
+
+- **The output stem was the second request-supplied string reaching a filename
+  and the only one with no length bound.** The entry above frames the voice id
+  as "the one place a path enters", and `Ask.Output` is also a wire field,
+  resolved into the node-side path by `Resolve`. `MaxVoiceID` is 64 and
+  `MaxText` is 8000, both with written reasons; the stem had none -- so a
+  **100,000-character** stem passed `ValidateOutput`, `Job.Validate` and
+  `Resolve`, and failed at `piper --output_file` **on the node, after a card
+  was paid for**, which is the one thing that function's own doc says it exists
+  to prevent. `tts.go`'s own sentence claimed every bound was piper's "except
+  `MaxText` and the stem -- both of which are ember's and say so", and the stem
+  had no bound to say: a claim in a comment worth exactly what the code does.
+  **The bound is DERIVED and the arithmetic is the assertion.** `NameMax` is
+  255 -- NAME_MAX on ext4, xfs, btrfs and overlayfs -- and `suffixReserve` is
+  what `SpokenStem` composes around a stem, so `MaxOutput` is the subtraction.
+  A round number there would be ember's taste standing in for a filesystem's
+  limit, and the thing being prevented is exactly the filesystem's refusal; 240
+  bytes is longer than any name anybody types, so the bound is not a judgement
+  about names at all.
+  **AND THE FIRST RESERVE WAS ONE BYTE WRONG, FOUND BY THE ARITHMETIC TEST
+  WRITTEN FOR IT AND NOT BY REVIEW.** It reserved EIGHT, derived from a
+  two-digit index padded into `-100.wav` -- and `-1000.wav` is nine, because
+  `%02d` is a MINIMUM width and nothing bounds how many utterances a batch
+  holds, so the index's width is the batch's size. The reserve is ten digits
+  now: over-reserving is the safe direction and costs nine bytes of a name
+  nobody types. A bound that was correct until somebody queued a hundred
+  utterances is the `imagelabs` shape reached through arithmetic.
+  **The two halves are in different packages, and that is a boundary rather
+  than a choice**: `suffixReserve` is the claim and `SpokenStem` is what
+  appends it, and `internal/tts` cannot call `internal/app`. So the
+  subtraction is asserted there and the composition here, in
+  `TestSpokenStem_FitsInsideTheFilenameBoundItWasGiven` -- which is the test
+  that went red over the eight.
+  **IT STAYS A DENY-LIST WHERE THE ID GOT AN ALLOW-LIST, and the asymmetry is
+  argued rather than left to look like an oversight.** An id is a TOKEN:
+  compared with `==`, round-tripped by a UI, and nothing legitimate needs a
+  space or a capital in one, so the narrow set costs nothing. A stem is a
+  FILENAME an operator chose -- `blob.ValidateKey` and `sdserver`'s own stem
+  rule are both deny-lists for that reason, because an allow-list would refuse
+  a space, an accent or a CJK character, all of which are names somebody means.
+  What the two share is that neither CLEANS: a hostile name is refused, because
+  `path.Clean` absorbs a traversal and a check that cleaned first could never
+  fire.
+  **Six reinstatements, each judged on an exit code AND on which test
+  reported it**, which is the half the #165 entry records as the one nobody
+  checks: a correct verdict filed under the wrong mechanism is what two
+  independent readers got wrong there. Red and correctly attributed: the SQL
+  predicate raw, the recording store's comparison raw, the length check gone,
+  the reserve back to eight, and `MaxOutput` as a round literal. One negative
+  control green. Controls at both ends, every case ending on a `git diff`
+  against HEAD -- and one case reported ANCHOR-MISS rather than a verdict,
+  because a `gofmt` rewrap had moved the line it was anchored on, which is
+  trap one working.
 
 ## Style
 
