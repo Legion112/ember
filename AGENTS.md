@@ -1779,8 +1779,9 @@ that sentence made unrepresentable rather than merely tested.
   gets quietly weakened while the suite stays green -- the `AssertNoStray`
   failure, reached from a third direction.
 - **And the page told every operator there was no authentication for the whole
-  of that time, which is the `ember ls --all` class on an operator-facing
-  surface rather than in a comment (#167).** `web/src/views.rs`'s posture line
+  of that time, which is the `ember ls --all` class in the running program's
+  own UI rather than in a comment or a document (#167).**
+  `web/src/views.rs`'s posture line
   ended `· no authentication: any page in this browser can reach this port`,
   unconditionally -- outside the `if c.allow_paid` above it, so on screen in
   both postures on every page load -- and `Posture`'s own doc comment rested
@@ -1788,25 +1789,52 @@ that sentence made unrepresentable rather than merely tested.
   authentication". A verbatim survival of the state #29 closed: `webapi.New`
   refuses a zero token, a page on another site fails `checkOrigin` before the
   credential is asked for, and `SameSite=Strict` means a cross-site request
-  carries no cookie at all, which is the half that clause was about. The other
-  instances of this class were read by whoever next edited the code; this one
-  was read by the operator, on the line that exists to help them decide
-  whether to walk away from a process that can rent GPUs, and it was wrong in
-  the direction that makes a working control look absent. `README.md`'s own
+  carries no cookie at all, which is the half that clause was about. **The
+  distinguishing claim is the SURFACE and not the audience**, and the first
+  wording of this entry had it as "read by whoever next edited the code"
+  against "read by the operator" -- which is wrong about this file's own
+  record two hundred lines up: the `--all` on an `ember ls` and the
+  `ember up --config ember.local.yaml` naming a file that never existed were
+  both in `README.md`, which operators read. What is new is that this one was
+  in the **program's own UI**, printed by the running process to the person
+  deciding whether to walk away from it, where a document is read before the
+  decision and a comment is read by nobody making it. And it was wrong in the
+  direction that makes a working control look absent. `README.md`'s own
   paragraph was corrected when the token landed and the page was not, which is
   "a claim is worth exactly what the code does" with the two surfaces one
   commit apart.
-  **The replacement is `announceToken`'s paragraph compressed to one clause,
-  and the reason it is on the page at all is #105's**: that paragraph prints
-  the control and its limit into a terminal, and the operator this page is for
-  may never see one -- the one-time URL means somebody had a shell, and
-  `ssh -L 7777:localhost:7777` means that shell is on the other machine. So
-  "every request needs a token; it does not keep out your own uid or root",
-  both halves, because a control whose limits are not printed is a control
-  that gets believed past them and a line that said only the first would be
-  the old defect inverted. Not a deletion, which was the other candidate: a
-  warning naming a condition the program cannot be in is worse than silence,
-  and that is an argument about the old clause rather than about a true one.
+  **The replacement is `announceToken`'s two limits and not its two
+  mechanisms, and the reason it is on the page at all is #105's**: that
+  paragraph prints the control and its limits into a terminal, and the
+  operator this page is for may never see one -- the one-time URL means
+  somebody had a shell, and `ssh -L 7777:localhost:7777` means that shell is
+  on the other machine. So "every request on this port needs a token; it does
+  not keep out your own uid or root, and it never expires", all three spans,
+  because a control whose limits are not printed is a control that gets
+  believed past them and a line that said only the first would be the old
+  defect inverted. Not a deletion, which was the other candidate: a warning
+  naming a condition the program cannot be in is worse than silence, and that
+  is an argument about the old clause rather than about a true one.
+  **THE FIRST VERSION KEPT ONE LIMIT OF THE TWO AND CALLED ITSELF THAT
+  PARAGRAPH COMPRESSED**, which is the same shape one scale down: non-expiry
+  was dropped, it is the more surprising of the two and the one that bears
+  hardest on "should I leave this running", and the argument for printing the
+  control here -- a terminal this operator may never see -- cannot also be the
+  argument for withholding a limit of it. Both limits are there now; both
+  *mechanisms* (which uid can read the token, and that a restart is what
+  revokes it) are not, because a page gives the fact and the terminal and
+  `README.md` give the how -- and the clause says so where it is written
+  rather than reading as lossless.
+  **"On this port" and not "every request", for one channel's worth of
+  precision.** `ServeSocket` answers the same routes with no token, because
+  the socket is 0600 in a 0700 directory and `connect(2)` is the check. As a
+  claim about WHO can reach this server the shorter spelling was already true
+  -- 0600 means the operator's own uid -- so it over-claimed only about HOW,
+  by one channel, and that is a different defect from the one it replaced: the
+  old clause reported a live control as ABSENT, which is a false negative
+  about a control, and this would have been a true control described one
+  channel too widely. Three words close it, against leaving the next reader to
+  re-derive the socket exception.
   **A `WaitVisible` on the one line of that page carrying a security claim is
   what let it stand.** `TestServe_UI` waited for `.posture` to appear and
   asserted nothing about its text, so the lab written to drive the page an
@@ -1814,18 +1842,32 @@ that sentence made unrepresentable rather than merely tested.
   the same shape as the three cross-origin labs above it. It reads the text
   now, and the **absence** of `no authentication` is asserted beside the
   presence of the new sentence, because a check that only looked for the new
-  text would pass against a page printing both. The two halves of the new
-  sentence are separate assertions for the same reason: one `Contains` over
-  the whole clause cannot tell a dropped limit from a dropped control.
-  **The clause is static and there is therefore no `cargo test`, which is
-  stated rather than papered over.** The credential is mandatory, so there is
-  no state of this program a `Config` field could switch the sentence on --
-  the `Listing::answer` / `Rows::note` / `Stream::note` shape is for a
-  decision, and asserting a string literal against itself is the closed loop
-  this file refuses elsewhere. The exit code available is the lab's, and it
-  was **not run here** (a lab takes the flock on the one Docker daemon), so no
-  claim is made that it goes red with the old clause reinstated -- which is
-  exactly the claim this file has had to retract twice.
+  text would pass against a page printing both. The control and each of its
+  limits are separate assertions for the same reason: one `Contains` over the
+  whole clause cannot tell a dropped limit from a dropped control.
+  **The clause is static and there is therefore no `cargo test`**, which is
+  stated rather than papered over. The credential is mandatory, so there is no
+  state of this program a `Config` field could switch the sentence on -- the
+  `Listing::answer` / `Rows::note` / `Stream::note` shape is for a decision,
+  and asserting a string literal against itself is the closed loop this file
+  refuses elsewhere. The exit code available is the lab's.
+  **IT WAS NOT RUN BY THE CHANGE AND WAS RUN BY THE VERIFICATION, AND THAT
+  ORDER IS THE ENTRY RATHER THAN A NOTE ON IT.** The commit made no claim
+  about it, because a lab takes the flock on the one Docker daemon and this
+  file has had to retract a red-test claim twice. Run afterwards, scoped to
+  `TestServe_UI` with a `make web` per step and a control at both ends: the
+  opening control **0**, the old clause restored **1** with all three of the
+  assertions firing, the closing control **0**. And the split is what the
+  discriminator measured rather than the redness: dropping **only** the limit
+  half fires **exactly one** of them, so the halves do the work claimed for
+  them -- three firing together would have proved the suite went red and not
+  why. The third span, non-expiry, landed after that measurement and is
+  asserted on the same reasoning and no exit code of its own. The scoping is
+  not cosmetic either: `make test-serve-lab` is exit 2 on master over a
+  deterministic failure in `TestServe_UIResumesAProgressStreamItLost`, which
+  is **#185** and nothing to do with this -- and the only reason it surfaced
+  as a finding rather than as a false "lab green" in a commit message is that
+  the commit declined to assert an exit code nobody had.
 - **A request may narrow the config's ceilings and never widen them.** `ember
   up`'s `applyFlags` *replaces*: `--max-hourly-usd 999` raises the ceiling,
   because the person typing it is the person who set it. A request is not that
