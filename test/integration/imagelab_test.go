@@ -82,7 +82,8 @@ func TestWorkloadImage_SupportsVideoGeneration(t *testing.T) {
 
 	for _, want := range []string{
 		// The mode a Wan model needs. Without it the pin predates video
-		// entirely and ember.video.example.yaml is fiction.
+		// entirely and the video configuration in docs/configurations.md is
+		// fiction.
 		"vid_gen",
 		// How long a clip is, and the flag a chained pipeline drives.
 		"--video-frames",

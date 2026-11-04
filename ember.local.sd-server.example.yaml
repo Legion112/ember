@@ -1,50 +1,39 @@
 # ember's web UI, on this machine, for nothing.
 #
-# `ember serve` needs an `sd:` block, because the serve argv names the weights
-# and a request arriving over HTTP may not. None of the other committed
-# examples is usable for that here: ember.local.example.yaml is a `cmd:` run,
-# and ember.sd-server.example.yaml rents from RunPod and wants FLUX.2. This is
-# the one that costs nothing.
+# `ember serve` needs an sd: block, because the serve argv names the weights
+# and a request arriving over HTTP may not. This is the one committed example
+# that provides one and costs nothing.
 #
 #   make docker-build
 #   make workload-sd MODEL=/path/to/v1-5-pruned_bf16.gguf
 #   make web
 #   ember serve --config ember.local.sd-server.example.yaml
 #
-# WHAT IT PROVES, which is why it is worth having beyond convenience: the
-# whole path a rented card takes -- provision, SSH, host-key pin, resident
-# sd-server, progress stream, images home, destroy -- running against a real
-# sshd in a real container, with a real generation at the end of it, on a
-# laptop. The only thing it does not exercise is the provider's API.
+# WHAT IT PROVES beyond convenience, and why each timeout differs from the
+# rented path's: docs/configurations.md.
 
 provider: local
 
 # The CPU build. It carries sd-server beside sd-cli and a baked sd15, which is
-# what makes this free: `make test-preview-lab` already proves that server
-# starts with no GPU at all.
-#
-# A scalar image: and not an images: map, because a local run has exactly one
-# machine and knows what is in it. The map is for a run that selects on VRAM
-# or price and does not know what it will get.
+# what makes this free. A scalar image: and not an images: map, because a
+# local run has exactly one machine and knows what is in it.
 image: ember:sd
 
-# Thirty minutes is generous for a laptop and still a deadline. There is no
-# such thing as a run without one: `ember serve` holds a rental for as long as
-# there is queued work, and the TTL is what bounds that if something wedges.
+# Generous for a laptop and still a deadline. There is no such thing as a run
+# without one: `ember serve` holds a rental for as long as there is queued
+# work, and the TTL is what bounds that if something wedges.
 ttl: 30m
 
 # The web UI shows these as the ceilings a request may narrow and never widen.
-# Both are nominal here -- the local provider is free -- and they are written
-# out so the UI has something to display and so the shape is copyable to a
+# Both are nominal here -- the local provider is free -- and are written out
+# so the UI has something to display and the shape is copyable to a
 # configuration that is not free.
 max_hourly_usd: "0.50"
 max_run_usd: "0.25"
 
 sd:
   # ember appends --listen-ip 127.0.0.1 --listen-port 1234 itself and refuses
-  # a serve command that names either. A config choosing 0.0.0.0 would publish
-  # an unauthenticated image generator, with arbitrary file paths in its
-  # request body, on whatever interface the machine has.
+  # a serve command that names either.
   #
   # --model and NOT --diffusion-model: this is a whole checkpoint in one file.
   # --diffusion-model is for a standalone DiT, which is what FLUX.2 needs, and
@@ -54,28 +43,22 @@ sd:
     - --model
     - /opt/models/sd15.gguf
 
-  # A laptop CPU loads sd15 in a few seconds. The default is ten minutes,
-  # which is right for 56 GiB off a network volume and far too patient here:
-  # a server that died wants noticing now, not at the deadline.
+  # A laptop CPU loads sd15 in a few seconds. The ten-minute default is right
+  # for 56 GiB off a network volume and far too patient here: a server that
+  # died wants noticing now, not at the deadline.
   ready_timeout: 2m
 
-  # The UI starts from these. `proj` is a projection rather than a decode, so
-  # it costs almost nothing per frame -- tae and vae run a real decode, which
-  # on a card billing by the second is the expensive setting.
-  #
-  # Every 2 steps rather than ember's usual 5, because a generation here is
-  # short enough that 5 would produce one frame and nothing to watch.
+  # `proj` projects the latent rather than decoding it, so it costs almost
+  # nothing per frame; tae and vae run a real decode. Every 2 steps rather
+  # than ember's usual 5, because a generation here is short enough that 5
+  # would produce one frame and nothing to watch.
   preview: proj
   preview_interval: 2
 
   # `ember serve` replaces this with whatever the browser queues, so it is a
   # placeholder -- but it cannot be empty: ParseSD refuses a server with no
   # jobs, because that configuration rents a card, loads the weights and
-  # generates nothing.
-  #
-  # It is also what `ember up --config ember.local.sd-server.example.yaml`
-  # would run, which is a useful way to check the configuration without a
-  # browser.
+  # generates nothing. It is also what `ember up` on this file would run.
   jobs:
     - prompt: "a rural railway station at dusk, warm light, cel-shaded"
       width: 384

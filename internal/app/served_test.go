@@ -1009,6 +1009,19 @@ func servedSpecWithTimeout(t *testing.T, serve []string, tmo time.Duration) node
 //
 // Checked against the committed files rather than a fixture, because the
 // files are the thing that was wrong.
+//
+// ITS SUBJECT IS THE ROOT FILES AND IS DELIBERATELY NOT WIDENED TO THE TWO
+// SHAPES #144 DEMOTED, and that loses nothing measurable. Those two moved
+// into docs/configurations.md because neither can be run, and the assertion
+// below was already vacuous over both: `ember store sync` on the video one
+// fails at ParseAssets over REPLACE_WITH_THE_DIGEST_PUSH_PRINTS, and on the
+// code-model one at ValidateImage over an image: that is a sentence with no
+// tag -- so each was resolving an image for a sync that could never happen.
+// The live subjects are the root files that really can sync. The typo half of
+// the check still reaches both blocks, through internal/config's
+// TestExampleConfigs_LoadAndParse, which reads every ```yaml fence in docs/.
+// The names in the paragraph above are the record of the bug rather than a
+// claim about what this glob now sees.
 func TestExampleConfigs_CanSyncTheirOwnStore(t *testing.T) {
 	paths, err := filepath.Glob(filepath.Join("..", "..", "ember*.yaml"))
 	if err != nil {

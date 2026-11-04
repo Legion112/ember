@@ -657,6 +657,65 @@ moment it imports a sibling, the sibling's dependencies become its own.
   in a nested checkout, `TestNoHandlerOutsideLogx` goes red naming the nested
   path -- so what a future widener needs is the prune, which is what the
   warning should be read as asking for.
+- **The seven committed configurations were 71% comment, and the guard that
+  stopped one of them rotting was keyed on a directory (#144).** They were
+  1,158 lines of which 329 were configuration -- `ember.code-model.example.yaml`
+  was 85% prose -- so one file was doing two jobs: the project's documentation
+  of record *and* an alternate config, which is the profile/job conflation #144
+  complains about, one level up. The prose is `docs/configurations.md` now and
+  the five surviving files hold configuration plus a line or two about what a
+  wrong value costs. **Measured rather than claimed: the non-comment lines of
+  all five are byte-identical to what was committed**, so nothing an operator
+  runs changed, and the five sum to 540 lines against 1,158.
+  **The two files that moved OUT of the root are the ones that cannot be
+  run**, which is the test of "is this an alternate configuration or a worked
+  example": `video`'s asset digest is `REPLACE_WITH_THE_DIGEST_PUSH_PRINTS`
+  and `code-model`'s `image:` is a sentence, both deliberately, so both refuse
+  before anything is rented. They are ```yaml fences in that document, and
+  their settings were diffed as a sorted set against the deleted files rather
+  than eyeballed.
+  **A fenced block is loaded by nothing, so the move would have cost the
+  `KnownFields` check over 85 lines of hand-written YAML -- and the rule the
+  guard needed was never a directory.** It is "every ember configuration this
+  repository commits", which is derivable: a ```yaml fence under `docs/` is
+  one. That is the `LAB_TAGS` rule rather than a second hand-maintained list,
+  and it costs the converse -- a yaml fence under `docs/` that is NOT an ember
+  config fails `TestExampleConfigs_LoadAndParse`, which is the signal to retag
+  it. `docs/long-video-is-a-pipeline.md`'s `cmds` chain is why that is a
+  feature: it is a real, small, loadable config and it is now checked for
+  free.
+  **BOTH FLOORS ARE OVER THE ANSWER AND NOT OVER AN INTERMEDIATE, and the
+  first shape of the helper had that wrong.** `Load` answers `Default()` and a
+  **nil** error for a file that is not there, so a source contributing nothing
+  passes every assertion -- and a floor on a local slice that is then not
+  returned is the same hole one line further down: it counted `fenced` and
+  could have returned `paths` alone, green. `committedConfigs` counts over the
+  list it hands back, telling the two apart by whether the path is one of the
+  temp files the extractor wrote, so dropping **either** source is red.
+  **`TestExampleConfigs_CanSyncTheirOwnStore` was NOT widened to the two
+  blocks, and that narrowing loses nothing measurable**: `ember store sync` on
+  the video one fails at `ParseAssets` over the placeholder digest and on the
+  code-model one at `ValidateImage` over an untagged sentence, so the
+  assertion was already resolving an image for a sync that could never happen.
+  Its comment says so rather than keeping a subject it no longer has.
+  **Seven reinstatements, each red, two negative controls green, controls at
+  both ends, and every case ended in a diff against one backup taken once per
+  path**: a typo in each demoted block, the extractor's glob pointed at
+  `*.mdx`, the fenced source dropped from the return, the root source dropped
+  from the return, a foreign `kind: Deployment` fence, and an unclosed fence.
+  The negative control's first anchor missed and the harness reported
+  ANCHOR-MISS rather than a verdict, which is that trap working. And -- because
+  belt and braces reads exactly like a dead gate -- the guard was reverted to
+  its root-only shape with a typo still in a demoted block: `go test ./...` is
+  **exit 0**, so nothing else in the tree reports it.
+  **One thing has no exit code and is named rather than papered over: nothing
+  checks that a relative link in `README.md` or `docs/` resolves.** The sweep
+  found `ember up --config ember.local.yaml` in `README.md` -- a file name that
+  has never existed, the `ember ls --all` shape reached through a path instead
+  of a flag -- and fixed it by hand. A guard is cheap and was not built here,
+  because it is a change to the README guards' own file and this change was
+  about the configurations; what stands in its place is that every relative
+  link in both documents was checked once, by script, and resolves.
 
 ## Threat model
 
@@ -5913,6 +5972,37 @@ A leaked node bills by the hour in silence. These are not style preferences.
   measurement expected to be green -- the "ask why a case went the way it did
   rather than accepting it" rule, which has now caught a harness defect from
   both directions.
+- **Every measurement that was only in a config file's header is in
+  `docs/configurations.md` now, and the entry above about the placeholders
+  cites two files that no longer exist (#144).** That entry -- "a placeholder
+  in a committed config is a sentence whose refusal quotes it" -- is left as
+  it stands, because it is the record of #18's lesson and the refusals it
+  describes are unchanged; what moved is where the two configurations are
+  written down, which is the Testing entry at the end of that section. The
+  numbers that had no second home anywhere in the tree, listed because the
+  one unacceptable outcome of that change was losing one: the 70 GiB store's
+  standing charge (**$0.0067/hr, $0.16/day, $4.90/month**, which `ember ls`
+  prints and only `ember store rm` stops); the weight breakdown behind the
+  56.16 GiB (**23.33 GiB of it a prompt-reading LLM, 32.60 GiB the diffusion
+  file alone**, against a registry that refuses a layer above ~10 GiB); the
+  push arithmetic that `store sync` exists to avoid (**56.16 GiB at 67 Mbps
+  is 1h52m**, after about an hour of pulling it home first); the **11 seconds
+  and two hundredths of a cent** a sync cost to learn that the older node
+  image read `embernode fetch` as "be a node"; **EUR-IS-1 is the only one of
+  the ten S3 datacentres with three cards at 80 GiB or more**; the per-image
+  dollar table for a resident model against a fresh process at four batch
+  sizes on an RTX PRO 6000 at $2.49/hr (`cmds` $0.1936/$0.1895/$0.1696/$0.1075
+  against `sd.jobs` $0.2378/$0.1302/$0.1249/$0.1055, crossover between one and
+  two images); **sd15 Q8_0 at 256x256, 0.44 s per job served against 1.91 s
+  fresh**; **56 GiB of weights in a 125 GiB machine behind an 11 GiB card**;
+  and, for the code model, **18,556,689,568 bytes / 17.28 GiB**, its digest
+  `fadc3e5f…` confirmed twice for two requests and no bytes, **37 minutes to
+  push at 67 Mbps**, about **20 seconds to verify at 868 MiB/s**, and **$8.00
+  a day, $160 a month** for a card idle most of an eight-hour session. The
+  ones that already had a home in `README.md`, `AGENTS.md`, `docs/` or a Go
+  comment -- 67 Mbps, 868 MiB/s, $1.79, 4412 MiB, 35 GB per step, the $0.37
+  CPU-fallback run and its 122-second text encoder, 14 GB per Wan expert, the
+  33/77/81 frame counts -- were checked for by grep rather than assumed.
 
 ## Style
 
