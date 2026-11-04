@@ -655,10 +655,17 @@ func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
 //
 // So the residue this guard leaves rests on **the ceilings being direct fields
 // of `Config`** -- a far more local and stable property than the one it
-// replaced, which was "nobody adds a pointer-receiver method to a
-// forty-field config struct". That narrowing is the real thing this guard
-// bought, and it is written here so the next reader does not have to
-// rediscover it by attacking the guard.
+// replaced, which was "nobody adds a pointer-receiver method to a config
+// struct this size". That narrowing is the real thing this guard bought, and
+// it is written here so the next reader does not have to rediscover it by
+// attacking the guard.
+//
+// (It said "forty-field" and `Config` has 29 -- counted two ways, the
+// `yaml:`-tagged fields and the non-comment lines in the struct block, both
+// 29. The sentence's point survives either figure, which is exactly why a
+// number nobody checks does not belong in it, and why this one is now a
+// measurement or nothing: the history of this region is prose claiming more
+// than the measurement, and the figure that said "forty" was decoration.)
 func TestConfig_DeclaresNoPointerReceiverMethodOnConfig(t *testing.T) {
 	pkgs, err := packages.Load(&packages.Config{
 		Mode: packages.NeedName | packages.NeedTypes,
