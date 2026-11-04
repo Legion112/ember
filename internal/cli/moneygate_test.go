@@ -459,16 +459,30 @@ func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhatACeilingCouldRefuse(t *testing.
 // AND A WRITE IS THE ONE THING IDENTITY CANNOT ANSWER, because `cfg =
 // config.Config{}` and `cfg.MaxDayUSD = ""` both leave the object alone and
 // change what is in it -- which is dataflow. It is refused rather than
-// reasoned about: an object the function WROTE TO is no longer accepted, and
-// the failure says which way. Written to means assigned to whole, written
-// through a field or an element, or had its address taken -- the field form
-// was the fourth walkaround and the most plausible of them, and the first
-// version of this sentence said "assigned to anywhere in the function" while
-// the code looked only for a bare identifier on the left. That is the allow-
-// list direction and a refusal rather than an analysis, which is what keeps it
-// from becoming the scope-aware dataflow pass that would be the wrong tool
-// here. Measured: no production function in this package that builds a
-// DirectRunner does any of them, and `internal/config` declares no
+// reasoned about: **an object the function wrote to is no longer accepted**,
+// and the failure says which way. That sentence has no qualifying clause, and
+// getting it to that state took five attempts and four wrong ones:
+//
+//   - v2's prose said "bound to a config.Config" over a set of NAMES;
+//   - its fix said "assigned to ... anywhere in the function" while the code
+//     looked only for a bare identifier on the left, so `cfg.MaxDayUSD = ""`
+//     was green -- the most plausible walkaround of the lot, since it reads as
+//     normalisation and zeroes exactly the two ceiling fields;
+//   - and that fix still missed the two write forms that are not an
+//     `*ast.AssignStmt` at all: a range clause with `token.ASSIGN`, where
+//     `for _, cfg.MaxDayUSD = range []string{""} {}` zeroed a ceiling with the
+//     guard green, and `*ast.IncDecStmt`.
+//
+// Go has exactly those three statement nodes that write to an existing
+// variable, plus `&x`; all four are recorded, each through `rootIdent`. The
+// choice at the last step was two `case` arms or a sixth attempt at wording a
+// bound, and the code is the cheaper and more durable answer -- which is the
+// general lesson rather than a fact about this guard.
+//
+// That is the allow-list direction and a refusal rather than an analysis, which
+// is what keeps it from becoming the scope-aware dataflow pass that would be
+// the wrong tool here. Measured: no production function in this package that
+// builds a DirectRunner does any of them, and `internal/config` declares no
 // pointer-receiver method on `Config`, so there is no mutating method call to
 // catch either.
 //
@@ -580,12 +594,21 @@ type configBindings struct {
 	// and not by name.
 	bound map[types.Object]bool
 
-	// moved is every object the function WROTE TO rather than merely read:
-	// assigned to whole, written to through a field or an element, or had its
-	// address taken. An object in here is not accepted even if it is bound,
-	// because identity says which variable it is and says nothing about what
-	// is in it -- so the honest answer to a variable that was written to is a
-	// refusal rather than a guess.
+	// moved is every object the function WROTE TO rather than merely read. An
+	// object in here is not accepted even if it is bound, because identity
+	// says which variable it is and says nothing about what is in it -- so the
+	// honest answer to a variable that was written to is a refusal rather than
+	// a guess.
+	//
+	// THE RULE HAS NO QUALIFYING CLAUSE NOW, AND THAT TOOK FIVE ATTEMPTS. Go
+	// has exactly three statement nodes that write to an existing variable --
+	// `*ast.AssignStmt`, `*ast.RangeStmt` with `token.ASSIGN`, and
+	// `*ast.IncDecStmt` -- plus `&x`, which hands a writer to something this
+	// guard cannot see into. All four are recorded, each through `rootIdent`,
+	// so "an object the function wrote to is no longer accepted" is simply
+	// true. Every earlier wording was a bound somebody had to be trusted to
+	// have stated correctly, and four of the five were wrong: see the history
+	// on the test above.
 	//
 	// THE FIELD CASE WAS THE FOURTH WALKAROUND AND IT IS THE MOST PLAUSIBLE OF
 	// THEM ALL. The first version of this looked only for an `*ast.Ident` on
@@ -632,6 +655,32 @@ func configObjects(info *types.Info, fn *ast.FuncDecl) configBindings {
 		}
 	}
 
+	// wrote records whatever variable this expression is a write TARGET for,
+	// through rootIdent, so the target does not have to be the bare variable.
+	//
+	// ONE FUNCTION BECAUSE THERE ARE THREE STATEMENT NODES THAT WRITE, which
+	// is the journal's "one name for a path" rule met in an AST walk: the
+	// first version handled `*ast.AssignStmt` alone and `*ast.RangeStmt` and
+	// `*ast.IncDecStmt` reached none of its logic, so
+	// `for _, cfg.MaxDayUSD = range []string{""} {}` zeroed a ceiling and the
+	// guard was green. Three call sites that each have to remember to reduce
+	// their own left-hand side is one place for the next one to be forgotten.
+	wrote := func(e ast.Expr, how string) {
+		id := rootIdent(e)
+		if id == nil {
+			return
+		}
+		obj := info.Uses[id]
+		if obj == nil {
+			return
+		}
+		if _, bare := e.(*ast.Ident); bare {
+			c.moved[obj] = how
+			return
+		}
+		c.moved[obj] = "something inside it " + how
+	}
+
 	params(fn.Type.Params)
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch v := n.(type) {
@@ -659,24 +708,33 @@ func configObjects(info *types.Info, fn *ast.FuncDecl) configBindings {
 			}
 			// Anything that is not a definition WRITES to what is already
 			// there, which is the one walkaround identity cannot see.
-			//
-			// THROUGH rootIdent, because the target does not have to be the
-			// bare variable: `cfg.MaxDayUSD = ""` has a SelectorExpr on the
-			// left and the first version skipped it, which was the fourth
-			// walkaround and the most plausible of them.
 			for _, l := range v.Lhs {
-				id := rootIdent(l)
-				if id == nil {
-					continue
+				wrote(l, "is assigned to")
+			}
+		case *ast.RangeStmt:
+			// A RANGE CLAUSE ASSIGNS, and only when it is not a definition.
+			// `for _, x := range …` is token.DEFINE and binds a NEW object,
+			// which must stay acceptable or a legitimate loop would be refused
+			// -- and which the bound check already handles, since a new object
+			// is not one this function bound to a config. `for _, cfg = range`
+			// and `for _, cfg.MaxDayUSD = range` are token.ASSIGN and write to
+			// something that already exists.
+			if v.Tok == token.ASSIGN {
+				if v.Key != nil {
+					wrote(v.Key, "is assigned to by a range clause")
 				}
-				if obj := info.Uses[id]; obj != nil {
-					if _, ok := l.(*ast.Ident); ok {
-						c.moved[obj] = "it is assigned to"
-					} else {
-						c.moved[obj] = "something inside it is assigned to"
-					}
+				if v.Value != nil {
+					wrote(v.Value, "is assigned to by a range clause")
 				}
 			}
+		case *ast.IncDecStmt:
+			// `cfg.MinVRAMGiB++` is a write and is not an AssignStmt. It
+			// cannot zero either ceiling, because both are strings -- so this
+			// arm exists for the RULE rather than for an exploit, which is the
+			// whole reason it is code: the sentence "an object the function
+			// wrote to is no longer accepted" is then true with no clause
+			// narrowing it, and this guard's prose has over-claimed four times.
+			wrote(v.X, "is incremented or decremented")
 		}
 		return true
 	})
@@ -689,11 +747,18 @@ func configObjects(info *types.Info, fn *ast.FuncDecl) configBindings {
 //
 // WHY A WALK AND NOT A TYPE SWITCH ON ONE LEVEL: `cfg.MaxDayUSD`, `cfg.SD.Serve`,
 // `cfgs[0].MaxDayUSD` and `(*p).MaxDayUSD` are all writes to something, and the
-// thing they are writes to is whatever is leftmost. Anything this cannot reduce
-// to an identifier answers nil and the caller records nothing, which is safe in
-// the one direction that matters: an unrecognised target is not a variable this
-// guard accepts at the construction site either, because acceptance needs the
-// value there to BE a bound object.
+// thing they are writes to is whatever is leftmost.
+//
+// AND THE SET IS EXHAUSTIVE RATHER THAN MERELY SAFE, which is worth stating
+// because the first wording of this comment claimed only the weaker thing.
+// Go's assignable expression forms are exactly `Ident`, `SelectorExpr`,
+// `IndexExpr`, `IndexListExpr`, `StarExpr` and `ParenExpr` -- the six below --
+// so there is no assignment target this cannot reduce. The nil return is
+// therefore unreachable from a real target rather than a tolerated gap, and it
+// is kept because an AST this guard is handed is not a thing it should trust to
+// be well-formed: an unrecognised target records nothing, which is safe in the
+// one direction that matters, since acceptance at the construction site needs
+// the value there to BE a bound object.
 func rootIdent(e ast.Expr) *ast.Ident {
 	for {
 		switch v := e.(type) {
