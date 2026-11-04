@@ -412,15 +412,26 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// RECORDED, THROUGH `ember up`'s OWN HELPER. This is a rental -- the
-	// cheapest machine with no card, for as long as the download takes -- and
-	// it was in no ledger either, which is the same defect #148 is about
-	// reached from the command line instead of from the queue. recordRental opens
-	// the store in this plan's own state directory, writes the row before the
-	// create call and hands back the sink the rental reports to; it cannot fail
-	// the run, and `report.Text` is silent about every event a sync emits, so
-	// this command's output is byte-for-byte what it was.
-	sink, finish := recordRental(out, plan)
+	// BOUNDED AND RECORDED, THROUGH `ember up`'s OWN HELPER. This is a rental
+	// -- the cheapest machine with no card, for as long as the download takes
+	// -- and it was in no ledger (#148) and inside no period ceiling (#165)
+	// either, which is the same pair of defects reached from the command line
+	// instead of from the queue. `ember serve`'s own store fill has had both
+	// gates since #142; this is the command an operator types for the same
+	// work, and $0.06/hour for eighty-one minutes is still money that lands on
+	// the invoice `max_month_usd` is defending.
+	//
+	// boundAndRecord opens the store in this plan's own state directory,
+	// refuses the rental if a configured ceiling would not take it, writes the
+	// row before the create call and hands back the sink the rental reports
+	// to. Recording still cannot fail the run; the ceiling can, which is the
+	// one asymmetry and is argued where the function is. `report.Text` is
+	// silent about every event a sync emits, so this command's output is
+	// byte-for-byte what it was.
+	sink, finish, err := boundAndRecord(ctx, out, cfg, plan)
+	if err != nil {
+		return err
+	}
 	syncErr := plan.SyncAssets(ctx, out, sink)
 	finish(syncErr)
 	if syncErr != nil {

@@ -2094,9 +2094,12 @@ max_month_usd: "250.00"
 Both are UTC calendar periods, and a rental is refused when the offer's price
 over the TTL would take the period past its ceiling — the same arithmetic
 `max_run_usd` is compared against, at the same moment, after the offer is
-chosen and before anything is created. `ember serve` prints where both stand
-at startup, and a refused request carries the reason, so it is in the page and
-in `ember history`:
+chosen and before anything is created. **They bound every rental ember makes**:
+a queued request, the machine with no card `ember serve` rents to fill an empty
+store, a run submitted to a daemon, `ember up` in your own shell, and
+`ember store sync`. `ember serve` prints where both stand at startup, and a
+refused request carries the reason, so it is in the page and in
+`ember history`:
 
 ```
 the month beginning 2026-11 has spent $212.3 of its max_month_usd ceiling of
@@ -2145,10 +2148,38 @@ turnover. A ceiling reached by something else while a request sat in the queue
 is the other half of the same argument. The refusal reaches the operator
 anyway — the request is marked failed with the reason.
 
-Two things it does not do. A free rental is never refused: the local provider's
-price is zero, so its projection is zero and it adds nothing to any period.
-And `ember up` does not read these at all — it is one rental the operator
-started themselves, which is the case `max_run_usd` already covers.
+**They bound `ember up` and `ember store sync` too, and that is a change.**
+This section used to end "`ember up` does not read these at all — it is one
+rental the operator started themselves". It read them nowhere, and nor did a
+run submitted to a daemon: five paths write the cost column these totals are
+summed from and only two were projected against a ceiling, so the key that
+says "spend no more than $20 today" bounded the web UI's queue and nothing
+else. There is no flag for either to go beside `--max-hourly-usd`,
+deliberately: unlike the hourly ceiling these are not a
+property of one rental, so a flag that raised one would be a flag that spent
+another command's allowance. Edit the file, or point `--config` at a different
+one.
+
+What that means in practice, for the two commands that used to be unbounded:
+
+- **A refusal where there used to be a rental.** `ember up` with a
+  `max_month_usd` your month has nearly spent stops before anything is
+  created, with the same message the queue gets, and exits non-zero. `--dry-run`
+  is never refused, because it rents nothing.
+- **A ceiling it cannot check is a refusal, not a pass.** Recording a run in
+  the generation history is best-effort — a database that will not open prints
+  one line and the run goes ahead — but a *configured* ceiling with no readable
+  history refuses, because "I could not read what has been spent" is not "it is
+  allowed". The same rule makes `ember ls` exit non-zero over a provider it
+  could not ask.
+- **`max_day_usd: "banana"` is now an error.** It was accepted and ignored on
+  these paths, because nothing between loading the file and renting read the
+  key.
+
+One thing they still do not do. A free rental is never refused: the local
+provider's price is zero, so its projection is zero and it adds nothing to any
+period — which is most of what this repository measures with, and the direction
+this change was most careful about.
 
 What it reads is complete, which is worth saying because `ember spend` has to
 warn that its per-job figures are not. `requests.cost` was a column before the
@@ -2352,6 +2383,18 @@ would make the flag mean "unless you came in the other door". So a paid
 provider submitted to a daemon started without it is refused, naming the flag —
 while the same command with no daemon running spends, because then you are at
 the keyboard. The flag is a property of the long-running process.
+
+**`max_day_usd` and `max_month_usd` bound it from BOTH files, and that is the
+other place this channel is not simply your own shell.** A ceiling is a
+question about a ledger — "has this month spent more than this" — and the
+ledger a submitted run is recorded in is the daemon's, so the config
+`ember serve` was started with is consulted as well as the one you named. Both
+bind and neither widens the other: the tightest of the two applies, per period,
+with an unset ceiling meaning no ceiling. Reading only the daemon's would leave
+`ember.yaml`'s ceiling unenforced through a daemon started with a different
+`--config`, which is the divergence between the two paths this whole channel
+exists to remove; reading only yours would leave the daemon's allowance
+spendable by a file it never read.
 
 Three smaller differences worth knowing:
 

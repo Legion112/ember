@@ -1813,6 +1813,18 @@ that sentence made unrepresentable rather than merely tested.
   `README.md`: the identical command spends with no daemon and is refused
   through one, because the flag is a property of the long-running process and
   not of the request.
+  **THERE ARE TWO SUCH THINGS NOW AND THE SECOND IS `max_day_usd` AND
+  `max_month_usd` (#165).** The sentence above says "one thing", and the reason
+  it was one was that the period ceilings reached this channel not at all: the
+  run's config travelled and nothing read either key from it or from the
+  daemon's. A ceiling is a question about a LEDGER and the ledger a submitted
+  run is recorded in is the daemon's, so `DirectRunner.Config` is the daemon's
+  own file and `Ceilings.Tightest` composes it with the run's -- both bind,
+  neither widens the other. Unlike `--allow-paid` this is not the daemon's
+  answer *instead of* the operator's: it is both answers, because the only
+  reading under which one of them could be dropped is one where an operator's
+  written ceiling stops applying. The whole argument is the entry at the end of
+  **Money**.
 - **A request names a provider, a card and a batch of jobs, and nothing else.**
   No image, no store, no mount, no ports, no serve argv, no gpu probe, no
   assets, no `extra`. Those stay in `ember.yaml`, which is what keeps every
@@ -5605,6 +5617,15 @@ A leaked node bills by the hour in silence. These are not style preferences.
   month and is a bound on the queue alone. That is **#165**, not this one: a
   pointer to an issue nobody can find is the shape this file keeps
   correcting.
+  **THAT PARAGRAPH IS NOW THE RECORD OF A GAP THAT IS CLOSED, and it was not
+  settled after all: all three of those paths carry the ceiling as of #165, and
+  the sentence "the ceilings replace" turned out to be about the wrong
+  ceilings.** It is left in place rather than rewritten because a prediction
+  this file made and the code then met is worth more than a tidy present
+  tense -- the arrangement two entries down in **Threat model** uses the same
+  wording for the same reason. The entry below has what the reading found and
+  the one thing this paragraph got wrong: `--allow-paid` is not the only place
+  the socket is not simply the operator's own shell.
   `internal/webapi` and `internal/provision` were **measured and restored**
   and nothing in them was edited. Two of the deletions also turned
   `TestNoProductionDeadCode` red as collateral, because stubbing a gate out
@@ -6070,6 +6091,189 @@ A leaked node bills by the hour in silence. These are not style preferences.
   comment -- 67 Mbps, 868 MiB/s, $1.79, 4412 MiB, 35 GB per step, the $0.37
   CPU-fallback run and its 122-second text encoder, 14 GB per Wan expert, the
   33/77/81 frame counts -- were checked for by grep rather than assumed.
+- **Three of the five paths that write `requests.cost` had no period ceiling,
+  the issue's framing was wrong twice, and the cause predates the socket it
+  blamed (#165).** #165 reads "a run submitted over the socket spends the
+  daemon's period allowance without being bounded by it", which is true and
+  understates it on both axes.
+
+  **It is not about the socket.** Five paths write `requests.cost` -- the
+  column `genstore.Spend` sums with **no status filter** -- all of them through
+  `queue.AdoptRun` or the queue's own `Recorder`: the queued request, the
+  queue's store fill, `ember up` submitted over the socket, `ember up` in a
+  shell, and `ember store sync` in a shell. Only the first two were projected
+  against a ceiling. So `ember up` has never been bounded by `max_day_usd`,
+  daemon or no daemon. The chronology settles whose defect it was and it is not
+  #146's: the ceilings landed in `bc30700`; `cbd3f14` -- "the command every
+  measurement was taken with recorded nothing" -- gave the ceiling's own INPUT
+  a writer the gate did not cover, which is the moment the bound became
+  partial; and `8bb845a`, the socket, merely inherited it.
+
+  **And neither config was read on those paths, so the "whose config" question
+  dissolved before it could be argued.** `config.Config.PeriodCeilings` had
+  exactly **two** non-test callers: `refuseOverPeriod` in
+  `internal/queue/planner.go` and a startup **print** in `cmd_serve.go`. So
+  this was never "change which config the ceiling comes from", it was "read the
+  key at all" -- and the corollary is sharper than the headline: `max_day_usd:
+  "banana"` in a config an `ember up` named was accepted and the run went
+  ahead, because `KnownFields(true)` catches a key that does not exist and has
+  nothing to say about a value that is not a price.
+
+  **Measured rather than argued, before anything was written**: identical
+  config, identical empty ledger, the queued arm REFUSES with the full
+  `$19.45 ... ceiling of $20, ... $20.34` message, and the submitted arm
+  returns `err=<nil>` with **$500** already spent against a `$20` day. There
+  was no gate, not a gate computing the wrong number -- which is why the
+  structural check (two callers, one of them a print) is the measurement that
+  matters and a differential against a wrong figure would have been the easier
+  and weaker one.
+
+  **ALL THREE ARE GATED, and the alternative that was refused is the one that
+  looks cheaper.** Socket-only would have closed the issue as written and
+  shipped a new money divergence between the two `up` paths, in the one place
+  #146 exists to remove divergence -- the identical command bounded through a
+  daemon and unbounded in a shell, which is `--allow-paid`'s trade run
+  backwards. The cost of all three is that `ember up` and `ember store sync`
+  can now be refused with no flag to override, on the command every measurement
+  in `README.md` was taken with; that is written in `README.md` where an
+  operator reads about the keys rather than left to be discovered from an exit
+  code.
+
+  **ONE FUNCTION AND NOT FIVE COPIES.** `queue.RefuseOverPeriod` and
+  `queue.CeilingsOf` are package functions with five and three callers, where
+  there was one method on `AppPlanner`; the announcement in `cmd_serve` reads
+  the key through `CeilingsOf` too, so the gate and the print cannot come to
+  disagree about what `max_day_usd` means. The price and the TTL are
+  **parameters** rather than fields read inside, because #157 measured both
+  halves as gates that cannot fail when either is a literal zero, and a copy
+  per call site is a place for one of them to pass a zero.
+
+  **WHOSE CONFIG ON THE SOCKET: BOTH, TIGHTEST PER PERIOD.** A ceiling is a
+  question about a LEDGER, and the ledger a submitted run is recorded in is
+  `DirectRunner.Store` -- the daemon's. So the file that owns that ledger has
+  to be consulted or #165 stays open; and the run's own has to be consulted or
+  an operator whose `ember.yaml` sets `max_day_usd` and who started the daemon
+  with a different `--config` gets a bounded `ember up` in a shell and an
+  unbounded one through a daemon. `Ceilings.Tightest` takes the smaller of the
+  two per period through `Narrow`'s own `smallerUSD`, so zero means unbounded
+  on both sides and **neither ceiling is widened by the other**.
+  **It is not `Narrow`'s rule reached again and it does not contradict "the
+  ceilings replace"**: that sentence is about `app.Overrides.Apply` replacing
+  `max_hourly_usd` from a flag, and the period ceilings have no flag and no
+  field on any wire type -- there is nothing here that could replace anything.
+  What is composed is two files an operator wrote, and the smaller of two
+  numbers an operator wrote cannot be a limit they did not ask for.
+  **NO OVERRIDE FLAG, which is the default answer and survived being asked.**
+  A day or month flag beside `--max-hourly-usd` would be consistent with `up`'s
+  flags-replace rule and is wrong for a reason the hourly one is not: the
+  hourly ceiling bounds the rental in front of you and these bound a period
+  every other rental shares, so a flag that raised one would spend another
+  command's allowance. Editing the file, or `--config`, is the escape hatch and
+  it is already there.
+
+  **RECORDING IS BEST-EFFORT AND BOUNDING IS NOT, which is the one asymmetry
+  and the shell paths are where it is reachable.** `recordRental`'s rule --
+  "it cannot fail the run", because refusing to rent over a database that will
+  not open would be ember declining to do the thing it is for -- stands
+  unchanged. A **configured** ceiling with no readable ledger is a refusal, on
+  the rule that makes `ember ls` exit non-zero over a provider it could not
+  ask. Two uses of one store and only one of them may be skipped, so they are
+  one function (`cli.boundAndRecord`) with one open and one order; the
+  alternative was two opens of one SQLite file to ask two questions about the
+  same rows, which somebody later makes one anyway, in whichever order they
+  happen to write. On `ember serve` the branch is unreachable -- the store is
+  always wired -- so without the shell paths it would have been a branch
+  nothing could take.
+
+  **NOT ON A DRY RUN**, which both shell callers return before. `--dry-run`
+  rents nothing, so a ceiling that refused it would be refusing a command that
+  cannot spend -- the free-rental rule with a different zero in it.
+
+  **A FREE RENTAL IS STILL NEVER REFUSED**, answered where it always was, on
+  `Ceilings.Allow`'s `projected <= 0`. This was the direction the change could
+  most easily have got wrong, because `ember up` against the local provider is
+  how most of `README.md`'s measurements were taken, and it has a test on the
+  CLI path as well as the arithmetic one.
+
+  **THE PRODUCTION WIRING HAS A GUARD, AND THE REASON IS #105's.** Every test
+  of these gates sets `DirectRunner.Config` itself, which is exactly the
+  arrangement that let `GET /api/nodes` answer 501 in every shipped
+  `ember serve`: the three assignments to `webapi`'s `scan` were all in test
+  files reaching past the constructor, so the suite could not tell "the
+  production value is missing" from "this test did not set it". Making it
+  unrepresentable was the first choice and is **not available**: a zero
+  `config.Config` is a legitimate value -- an operator who set no ceiling has
+  one -- so no type and no runtime check can tell "nobody wired it" from
+  "nothing is configured". So `TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate`
+  parses `internal/cli`'s production files and fails on a `queue.DirectRunner`
+  literal that does not name `Config`, with a floor (a walk that found none
+  fails) and a **fatal** on a positional literal it cannot read --
+  `TestFlagTablesClassifyEveryFlagSetMethod`'s rule, because the alternative to
+  failing on a literal this guard cannot classify is reading past the one that
+  matters.
+
+  **Seventeen reinstatements, every one RED where expected, two negative
+  controls GREEN, controls at both ends, and every case ended in a `git diff`
+  against HEAD rather than in an exit code** -- HEAD being the pristine copy,
+  taken once, which is the fifth harness trap removed rather than guarded.
+  (The first wording of this sentence and of the commit message both said
+  SIXTEEN, over a list of seventeen written three lines below it -- which is
+  this file's own rule about a running total in prose, committed by the
+  paragraph that counts the cases. A count over an enumerated list is at least
+  checkable, which is why it is corrected rather than dropped.) Red: the
+  submitted gate deleted; its projection over the DAEMON's ttl; the same
+  taking the LONGER of the two ttls; the daemon's ceiling alone; the run's
+  alone; a zero projection; both parses naming the same file; the shell gate
+  deleted; a zero shell ttl; a zero shell price; a configured ceiling with an
+  unopenable ledger reading as satisfied; an unopenable ledger refusing with no
+  ceiling configured; the shell gate moved ABOVE the dry-run return; a free
+  rental losing its exemption; the row adopted before the ceiling is checked;
+  `cmd_serve` not wiring its own config; and a gate that refuses every rental
+  there is. Green: two reworded comments.
+
+  **Three cases reported BUILD-ERROR rather than a verdict on the first
+  attempt, which is the harness refusing to read a non-compiling tree** -- two
+  `declared and not used` from dropping one side of the `Tightest` call, and a
+  `ctx` that is not in scope where the dry-run patch inserted its call. The
+  check is `go vet` on the two packages and not `go build ./...`, because
+  `go build` does not compile `_test.go` files and a signature change would
+  therefore read as a caught defect: a FALSE RED, which is the one direction a
+  harness cannot be caught out safely.
+
+  **And one case was reported wrongly by the harness rather than by the tree,
+  which is trap six working.** The "refuses every rental" case printed eight
+  failing tests and the socket path's acceptance arm was not among them -- so
+  the question was whether that arm could fail at all. It can: the list was
+  `head -8` and had exactly eight entries, and re-running the case unfiltered
+  names `TestDirectRunner_ProjectsASubmittedRunAgainstTheDaemonsPeriodCeilings`
+  and three more. A truncated report and a dead assertion look identical, and
+  the only thing that told them apart was asking why a case went the way it
+  did.
+
+  **The belt-and-braces measurement, because belt and braces reads exactly
+  like a dead gate.** With the three new gates removed, this change's own tests
+  removed (`internal/cli/moneygate_test.go` deleted and
+  `internal/queue/moneygate_test.go` reverted to master), and the two symbols
+  that then had no caller removed with them, `go test ./...` is **exit 0**: so
+  nothing that existed before this change reported the gap. The two
+  intermediate steps are worth recording rather than skipping, because each is
+  a *true* report about the patched tree and not a second witness for the gate:
+  `TestNoProductionDeadCode` names `DirectRunner.refuseOverPeriod` and then
+  `Ceilings.Tightest`, one symbol at a time, which is the collateral #157
+  already recorded for the same reason.
+
+  **What is NOT done, said rather than left to be found.** The gate counts
+  rentals and not store standing charges, which is the gap the original entry
+  records and this change does not touch. `ember up` in a shell has no
+  discriminator between `plan.Spec.TTL` and `cfg.TTL` -- the overrides have
+  already replaced by then, so the two are equal and no test there can tell
+  them apart; the socket path HAS one, because the daemon's config is a third
+  TTL in scope, and that is where the assertion lives. And the one clock
+  dependence is named where it is paid: `runUp` reads `time.Now`, so the shell
+  test that seeds a month's spend says in its own failure message that a UTC
+  month turning over mid-test puts the seeded rental in the previous period.
+  Injecting a clock would mean a production signature shaped by a test's
+  convenience, and the other two arms of that test read no clock at all.
 
 ## Style
 

@@ -151,7 +151,10 @@ func runUp(args []string, out io.Writer, d deps) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	sink, finish := recordRental(out, plan)
+	sink, finish, err := boundAndRecord(ctx, out, cfg, plan)
+	if err != nil {
+		return err
+	}
 
 	runErr := plan.Do(ctx, out, sink)
 
@@ -166,6 +169,92 @@ func runUp(args []string, out io.Writer, d deps) error {
 	return runErr
 }
 
+// boundAndRecord is a shell rental's whole money-and-ledger step: it opens the
+// generation history once, refuses a rental the configured period ceilings
+// would carry a period past, and hands back the sink the run reports to.
+//
+// WHY THESE TWO THINGS ARE ONE FUNCTION. They need the same open store and
+// they need it in one order. `max_day_usd` and `max_month_usd` reached neither
+// `ember up` nor `ember store sync` before #165 -- five rental paths write
+// `requests.cost` and two of them were gated -- so the key an operator wrote
+// to bound a day bounded the queue alone. Closing that needs a SELECT over the
+// ledger, which is the file `recordRental` was already opening a line later;
+// two opens of one SQLite database in one process to answer two questions
+// about the same rows is the kind of thing somebody later makes one anyway,
+// and would make it in whichever order they happened to write.
+//
+// THE ORDER IS THE WHOLE CARE IN IT. The ceiling is checked BEFORE Adopt
+// writes a row and before anything is created, which is the journal's own rule
+// read from the other end: the row says a rental is coming, so a refused run
+// that had already written one would have told the ledger about a machine
+// nobody rented. It also leaves a second, independent witness that the gate
+// fired where it claims to -- no row.
+//
+// RECORDING IS BEST-EFFORT AND BOUNDING IS NOT, which is the one asymmetry
+// here and is the reason this is not simply "open the store, do both". A
+// database that will not open -- one written by a newer ember, a state
+// directory that is not writable -- is a diagnostic problem, and refusing to
+// rent over it would be ember declining to do the thing it is for because it
+// could not take notes. But a CONFIGURED ceiling with no ledger to read is a
+// refusal: an operator who wrote `max_month_usd` has said unattended spending
+// must stop somewhere, and "probably fine" is the one answer a spend ceiling
+// must never give. So the same failure is a printed line when no ceiling is
+// set and a refusal when one is, and nothing silently loses a ceiling.
+//
+// NOT ON A DRY RUN, and both callers return before reaching this. `--dry-run`
+// rents nothing, so its projection is a rental that will not happen -- and a
+// money ceiling that refused a command which spends nothing is the same
+// mistake as refusing a free rental, which Ceilings.Allow is careful not to
+// make.
+//
+// THE CEILING IS THE NAMED CONFIG'S, because on this path that file is the
+// only one there is: `ember up --config x.yaml` reads x.yaml for the ledger's
+// own location as well, so the limit and the total it is compared against come
+// from one place. The socket path is the one where two configs reach one
+// ledger, and DirectRunner.Config has that argument.
+func boundAndRecord(
+	ctx context.Context,
+	out io.Writer,
+	cfg config.Config,
+	plan app.Plan,
+) (report.Sink, func(error), error) {
+	cs, err := queue.CeilingsOf(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	store, serr := genstore.Open(plan.Paths.State)
+	if serr != nil {
+		if !cs.IsZero() {
+			return nil, nil, fmt.Errorf("this configuration sets a period ceiling (%v a day, "+
+				"%v a month) and the generation history it is checked against could not be "+
+				"opened, so ember cannot tell whether this rental is within it and will not "+
+				"rent: %w", cs.Day, cs.Month, serr)
+		}
+		sink, finish := declineToRecord(out, serr)
+		return sink, finish, nil
+	}
+
+	// BEFORE Adopt AND WITH THE PLAN'S OWN FIGURES. plan.Offer is the card
+	// that was chosen and plan.Spec.TTL is the deadline the node will get
+	// after every override has had its say -- the two halves #157 measured as
+	// gates that cannot fail when either is a literal zero.
+	if err := queue.RefuseOverPeriod(ctx, cs, store, time.Now(), plan.Spec.TTL, plan.Offer.Price); err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+
+	sink, finish := recordRental(out, store, plan)
+	return sink, finish, nil
+}
+
+// declineToRecord says out loud that this run is not going in the history, and
+// runs it anyway.
+func declineToRecord(out io.Writer, err error) (report.Sink, func(error)) {
+	outf(out, "not recording this run in the generation history: %v\n", err)
+	return report.Text(out), func(error) {}
+}
+
 // recordRental puts this run in the generation history and hands back the sink
 // the run reports to.
 //
@@ -175,6 +264,10 @@ func runUp(args []string, out io.Writer, d deps) error {
 // #148 found in the queue's own store fill, reached from the command line. A
 // name that claimed one caller while two used it is the shape of defect this
 // repository records about `AssertNoStray`.
+//
+// THE STORE IS A PARAMETER NOW, because boundAndRecord above needs the same
+// open one for the period ceilings and the two had to happen in one order.
+// Closing it stays here, with the finish that is the last thing to use it.
 //
 // WHY A RENTAL FROM A SHELL RECORDS, AND WHY WITHOUT BEING ASKED. `ember serve` was the
 // only writer to the history, so the command every measurement in README was
@@ -212,23 +305,14 @@ func runUp(args []string, out io.Writer, d deps) error {
 // recorder would be two things to keep in step the first time one gained a
 // column -- which is the reason the recorder moved out of Queue in the first
 // place, met again one layer up.
-func recordRental(out io.Writer, plan app.Plan) (report.Sink, func(error)) {
+func recordRental(out io.Writer, store genstore.Store, plan app.Plan) (report.Sink, func(error)) {
 	text := report.Text(out)
-	decline := func(err error) (report.Sink, func(error)) {
-		outf(out, "not recording this run in the generation history: %v\n", err)
-		return text, func(error) {}
-	}
-
-	store, err := genstore.Open(plan.Paths.State)
-	if err != nil {
-		return decline(err)
-	}
 
 	_, sink, finish, err := queue.AdoptRun(context.Background(), store, plan,
 		plan.Options.Log, time.Now, text)
 	if err != nil {
 		_ = store.Close()
-		return decline(err)
+		return declineToRecord(out, err)
 	}
 	return sink, func(runErr error) {
 		finish(runErr)

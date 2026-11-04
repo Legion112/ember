@@ -248,6 +248,33 @@ type DirectRunner struct {
 	// start its own, which is the second rental.
 	Queue *Queue
 
+	// Config is the config `ember serve` was started with, and it is here for
+	// its PERIOD CEILINGS and nothing else.
+	//
+	// WHY THE DAEMON'S CONFIG AND NOT ONLY THE RUN'S (#165). A ceiling is a
+	// question about a LEDGER -- "has this day spent more than max_day_usd" --
+	// and the ledger a submitted run is recorded in is Store above, which is
+	// the daemon's. So the file that owns that ledger has to be consulted, or
+	// `max_month_usd` in the config `ember serve` read means a bound on the
+	// queue's rentals and not on the month: `AdoptRun` writes `requests.cost`
+	// and `genstore.Spend` sums that column with no status filter, so a
+	// submitted run SPENDS the queue's allowance either way. That was the
+	// defect, and the fix needs a ceiling from this side.
+	//
+	// AND THE RUN'S OWN CONFIG IS CONSULTED TOO, through Ceilings.Tightest.
+	// Reading only this one would ship a money divergence between the two
+	// `up` paths, which is the one thing #146 exists to remove: an operator
+	// whose `ember.yaml` sets `max_day_usd` and who started the daemon with a
+	// different `--config` would get a BOUNDED `ember up` in a shell and an
+	// unbounded one through a daemon. Neither ceiling is widened by the other.
+	//
+	// IT IS NOT AN OVERRIDE AND IT IS NOT ON THE WIRE. app.RunAsk has no field
+	// for either ceiling and gains none: the limit that stops a submitted run
+	// is one the submitter cannot name, which is the `extra` refusal applied
+	// to money rather than to parameters, and the reason there is no flag for
+	// either to go beside --max-hourly-usd.
+	Config config.Config
+
 	// AllowPaid gates every provider that is not free, HERE TOO.
 	//
 	// THIS IS THE ONE PLACE THE SOCKET IS NOT SIMPLY "THE OPERATOR'S OWN
@@ -360,6 +387,23 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 		return "", err
 	}
 
+	// AND THE PERIOD CEILINGS, which this path did not have (#165).
+	//
+	// HERE AND NOT AFTER Adopt, because the row is the journal's own rule --
+	// written before the create call -- and a refused run that had already
+	// written one would mean the ledger was told a rental was coming when
+	// none was. Nothing has been created at this point and nothing has been
+	// recorded, so a refusal costs the catalogue read and no more. It is also
+	// what makes the test's second witness available: no row means the gate
+	// fired before Adopt.
+	//
+	// They are two separate gates and both are reachable: --allow-paid
+	// answers whether this process may spend at all, and the ceilings answer
+	// whether this month can take one more rental.
+	if err := r.refuseOverPeriod(ctx, cfg, plan); err != nil {
+		return "", err
+	}
+
 	id, sink, finish, err := AdoptRun(ctx, r.Store, plan, r.log(), r.now)
 	if err != nil {
 		return "", err
@@ -409,6 +453,30 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 		return "", err
 	}
 	return id, nil
+}
+
+// refuseOverPeriod bounds a submitted run against the ceilings of BOTH configs
+// and against the daemon's ledger.
+//
+// The whole argument for the pair is on the Config field. What is here is the
+// two parses, which are kept apart so that a ceiling that will not parse names
+// WHICH file it is in: an operator reading "max_day_usd: malformed price" has
+// two candidates on this path and exactly one of them is the one they just
+// typed a path to.
+//
+// The projection is the plan's own -- the offer that was chosen and the TTL on
+// the spec, which is the deadline the node will actually get, after
+// Overrides.Apply has had its say.
+func (r DirectRunner) refuseOverPeriod(ctx context.Context, runCfg config.Config, plan app.Plan) error {
+	mine, err := CeilingsOf(r.Config)
+	if err != nil {
+		return fmt.Errorf("in the config ember serve was started with, %w", err)
+	}
+	theirs, err := CeilingsOf(runCfg)
+	if err != nil {
+		return fmt.Errorf("in the config this run named, %w", err)
+	}
+	return RefuseOverPeriod(ctx, mine.Tightest(theirs), r.Store, r.now(), plan.Spec.TTL, plan.Offer.Price)
 }
 
 // AdoptRun writes the row for a run nobody queued and hands back the stream it
