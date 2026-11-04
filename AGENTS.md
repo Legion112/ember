@@ -6263,6 +6263,104 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `Ceilings.Tightest`, one symbol at a time, which is the collateral #157
   already recorded for the same reason.
 
+  **AND REVIEW FOUND TWO OF THESE GATES WRONG AFTER ALL, WHICH IS WHAT THE
+  PARAGRAPH ABOVE SHOULD HAVE EXPECTED.** Seventeen reinstatements going red
+  on a first attempt is the finding about the harness this file predicts, not a
+  verdict on the change; an independent pass of twenty found one green against
+  expectation and one guard it could walk around. Both are below, with what
+  each measured.
+
+  **A FREE RENTAL WAS REFUSED BY A MONEY CEILING, AND THIS FILE'S OWN RULE WAS
+  QUOTED FOUR LINES ABOVE THE BRANCH THAT BROKE IT.** The no-ledger refusal
+  asked `!cs.IsZero()` and nothing about the price, so `ember up --provider
+  local` -- projection zero, adding nothing to any period -- with
+  `max_month_usd` set and a `generations.db` that would not open was refused
+  outright, where master printed `not recording this run ...` and ran.
+  `Ceilings.Allow`'s own `projected <= 0` sits PAST that refusal and never gets
+  asked. **The defect is older than #165 and was unreachable**: the same arm in
+  `AppPlanner.refuseOverPeriod` has had it since `bc30700`, and `cmd_serve`
+  always wires the Ledger, so nothing an operator could type reached it --
+  until #165 put the same arm on the shell path, where `genstore.Open` really
+  can fail.
+  **It was asserted. Twice.** `TestUp_ALedgerThatWillNotOpen...`'s refusal arm
+  was configured `provider: local`, so the test asserted the defect and went
+  red when the missing condition was added -- an inverted assertion and not a
+  missing one. And `TestAppPlanner_ChecksThePeriodCeilingBeforeRenting`
+  contradicted itself inside one body: it asserted the same FREE rental refused
+  with no ledger and planned with one, where a ledger cannot change a free
+  rental's answer, under a comment that states the rule it was breaking. Both
+  are inverted, and both now carry a PAID arm beside the free one, because a
+  refusal arm on a free provider cannot tell "a ceiling with no ledger refuses"
+  from "a ceiling with no ledger refuses everything".
+  **The fix is one predicate and not a condition repeated**, because the
+  condition was already repeated and both copies were missing the same half.
+  `Ceilings.Binds(ttl, price)` is the one place that answers "could this rental
+  be refused at all", hoisted ABOVE the ledger question at both sites, so the
+  consistency half the review asked for costs nothing and adds no sub-branch to
+  an unreachable arm. `Ceilings.UnreadableLedger(why)` is the sentence, which
+  existed twice with different wording -- two places for one money refusal to
+  drift, which is the other half of that nit.
+
+  **AND THE WIRING GUARD CHECKED THE FIELD'S NAME AND NEVER ITS VALUE, so it
+  could be walked around while reading as protection.** `Config:
+  config.Config{}` substituted for `Config: cfg` in `cmd_serve` left
+  `go build`, `go vet`, `golangci-lint` and `go test ./...` all at exit 0 --
+  the guard among them -- with the daemon's ceilings reaching the
+  submitted-run gate nowhere and `Tightest` composing a zero against the run's
+  config, which is #165's own defect under a test whose prose claims to refuse
+  it in advance. That is `TestTrustHasOneImplementationAndItIsPin`'s
+  generic-receiver hole one guard over: a guard that can be walked around is
+  worse than none, and this one claimed its own completeness in this file
+  before anybody had tried.
+  **The value must now be an identifier the enclosing function BOUND to a
+  config.Config**, which is `declaredFlags`' rule one type over -- a
+  `config.Config` parameter, or a `:=` from `config.Load`, and nothing else.
+  Walked around on purpose afterwards, each case diff-clean: a zero composite
+  literal, a non-zero one, a `var` of the right type, the field dropped, a
+  struct selector and a conversion are **all exit 1**; the parameter route, a
+  closure taking the config, and an identifier from `config.Load` are **all
+  exit 0**, so there is no false positive on a rename or on the two refactors
+  somebody would write. The closure case was a false positive on the first
+  attempt and is why `*ast.FuncLit` parameters count -- accepting a top-level
+  helper and refusing the closure form would have been one rule answering two
+  ways.
+  **The bound is the function and it is stated rather than chased**: this
+  cannot follow a config ACROSS a call, so a helper handed a zero at its call
+  site passes. Closing that means type-checked dataflow, a different tool; what
+  is closed is the one-step version written at the construction site, which is
+  the walkaround review measured. **A pointer field refused as nil in `Start`
+  was weighed and rejected**: it is this package's own shape for a dependency
+  that must be wired, and it catches strictly less -- a nil says "nobody wired
+  it" and says nothing about a zero handed over deliberately.
+
+  **AND THE SUBMITTED RUN'S GATE READ A TOTAL THAT COULD GO STALE IN THE WINDOW
+  IT WAS WAITING THROUGH, which is now checked twice.** `Start`'s gate runs on
+  the CLIENT's goroutine and `Submit` then parks on the rendezvous until the
+  drain loop is between iterations; `requests.cost` is written from
+  `provision.WithNode`'s **deferred** teardown, so a queued rental in flight
+  when the gate read contributed ZERO, finished and recorded while the
+  submission was parked, and the submitted run rented with nothing re-read.
+  Worked: $20 day, $19 recorded, a $2 rental in flight, a $0.89 projection --
+  $19.89 admits and the day ends at $21.89. Bounded by one rental, and **one
+  rental is the magnitude this feature exists to refuse** -- "a ceiling every
+  period breaches by one rental, and one rental is the $54 this exists for" --
+  so the bound is not a defence. Before #165 both gates lived on the drain
+  loop, where "the completed cost of finished rentals" and "everything
+  recorded" were the same set; moving one onto a client's goroutine is what
+  made the design sentence insufficient, and the sentence was carried over
+  unexamined.
+  So `Direct.Run` re-checks, on the loop, where no other rental can be in
+  flight. The row already exists by then, so a refusal ENDS it rather than
+  leaving a phantom reading `running`: `finish` routes through `classify`, the
+  reason lands on `requests.err`, and `runOutcome` is what prints it to a
+  client still following the stream. **The test is deterministic and not a
+  race**, because a flaky money assertion teaches people to re-run rather than
+  to read: nothing receives from the handoff while `Start` runs, so `Submit`
+  parks for certain; the extra spend is seeded while it is parked; and the loop
+  is started only after that, so the re-check cannot read the store before the
+  seed. The order is settled by which call the test makes next and never by a
+  sleep.
+
   **What is NOT done, said rather than left to be found.** The gate counts
   rentals and not store standing charges, which is the gap the original entry
   records and this change does not touch. `ember up` in a shell has no
@@ -6275,6 +6373,32 @@ A leaked node bills by the hour in silence. These are not style preferences.
   month turning over mid-test puts the seeded rental in the previous period.
   Injecting a clock would mean a production signature shaped by a test's
   convenience, and the other two arms of that test read no clock at all.
+
+  **AND THE STALE-TOTAL RACE IS CLOSED ONLY WHERE THERE IS A LOOP TO CLOSE IT
+  ON.** `ember up` and `ember store sync` in a shell read the ledger and then
+  rent, and a daemon's rental in flight contributes 0 to that read exactly as
+  it did on the socket path -- so the same one-rental overshoot reaches them,
+  and there is no goroutine of this process's on which the total would be
+  complete. Closing it would mean a lock on the ledger held across a rental, or
+  a ledger read the renting process does not own, neither of which exists here.
+  Named rather than papered over, because the socket path's re-check makes the
+  shell's absence look like an oversight.
+
+  **AND THE RULE THIS ENTRY ARGUES FOR IS NOT APPLIED IN A SHELL, which is
+  review's finding and is a deliberate stop rather than a miss.** The whole
+  case for `DirectRunner.Config` is that a ceiling is a question about a ledger
+  -- so `ember store sync --config scratch.yaml`, with no ceiling in
+  `scratch.yaml`, writes into the ledger at the DEFAULT `state_dir` (which
+  `app.ResolvePaths` resolves when a config names none, `d.HomeDir` being a
+  test-only override) while bounded only by the file it named. Symmetric with
+  the socket case and not fixed, for a reason the socket case does not have:
+  there, both files are in scope BY CONSTRUCTION -- one arrived in the request
+  and the daemon already held the other. In a shell only one is, and the only
+  way to find a second would be to read the default `ember.yaml` as well, which
+  is ember choosing a file the operator did not name, breaks `--config` as "run
+  this configuration instead", and is `ember reap`'s refusal of a second pair
+  reached from the other side. The honest statement is that `--config` names
+  the ceiling as well as the run.
 
 ## Style
 

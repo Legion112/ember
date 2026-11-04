@@ -430,7 +430,41 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 	w := report.Writer(sink)
 
 	d := Direct{Req: id, Run: func(ctx context.Context) error {
-		runErr := plan.Do(ctx, w, sink)
+		// AND AGAIN HERE, ON THE LOOP, BECAUSE THE TOTAL IS ONLY COMPLETE
+		// HERE. The gate above runs on the CLIENT's goroutine and `Submit`
+		// then parks on the rendezvous until the drain loop is between
+		// iterations -- so a queued rental in flight when it read contributed
+		// ZERO, because `requests.cost` is written from provision.WithNode's
+		// deferred teardown. It finishes and records while the submission is
+		// parked, and without this the submitted run would rent against a
+		// figure that was true when it was read and is not any more: $20 day,
+		// $19 recorded, a $2 rental in flight, a $0.89 projection -- the gate
+		// sees $19.89 and admits, the day ends at $21.89.
+		//
+		// It is bounded by ONE rental, because `Run` takes a parked handoff at
+		// the top of the next iteration before `ClaimNext` -- and one rental
+		// is the magnitude this whole feature exists to refuse: "a ceiling
+		// every period breaches by one rental, and one rental is the $54 this
+		// exists for". Before #165 both gates lived on this goroutine, where
+		// "the completed cost of finished rentals" and "everything recorded"
+		// were the same set; moving one of them onto a client's goroutine is
+		// what made the design sentence insufficient.
+		//
+		// THE ROW ALREADY EXISTS BY NOW, which is why this is not simply a
+		// second refusal: `AdoptRun` wrote it before the create call, so a
+		// refusal here has to END it rather than leave a phantom reading
+		// `running`. `finish` does that -- it routes through `classify`, so a
+		// ceiling error becomes `failed` with the reason on `requests.err`,
+		// which `runOutcome` is what prints to the client still following the
+		// stream. Nothing has been created, so nothing is billing.
+		//
+		// NOT A THIRD READ ANYWHERE ELSE: the shell paths cannot do this,
+		// because there is no loop of this process's to be complete on. That
+		// limit is written down in AGENTS.md rather than papered over.
+		runErr := r.refuseOverPeriod(ctx, cfg, plan)
+		if runErr == nil {
+			runErr = plan.Do(ctx, w, sink)
+		}
 		// CLOSE BEFORE FINISH, AND NEITHER DEFERRED, because the sequence is
 		// load-bearing: Close flushes the trailing partial line -- which is
 		// usually the error -- into the sink, and Finish is what flushes the
