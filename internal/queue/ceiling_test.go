@@ -292,6 +292,88 @@ func TestPlanner_RefusesAConfiguredCeilingWithNothingToReadItAgainst(t *testing.
 	}
 }
 
+// TestCeilings_BindsOnlyWhenACeilingCouldRefuse.
+//
+// The predicate both no-ledger refusals ask, over all four quadrants. It
+// exists because #165's first form asked only `IsZero` at each of them, so a
+// FREE rental with a ceiling configured and no readable ledger was refused --
+// `Allow`'s own `projected <= 0` sits PAST the refusal and never gets asked.
+// Hoisting the question is what makes the fix one condition rather than two
+// copies of one.
+func TestCeilings_BindsOnlyWhenACeilingCouldRefuse(t *testing.T) {
+	paid, free := node.Rate(1_790_000), node.Rate(0)
+	set, unset := Ceilings{Month: 50_000_000}, Ceilings{}
+
+	cases := []struct {
+		name  string
+		cs    Ceilings
+		ttl   time.Duration
+		price node.Rate
+		want  bool
+	}{
+		{"a ceiling and a paid rental", set, time.Hour, paid, true},
+		{"a ceiling and a FREE rental", set, time.Hour, free, false},
+		{"a ceiling and a zero ttl", set, 0, paid, false},
+		{"no ceiling and a paid rental", unset, time.Hour, paid, false},
+		{"no ceiling and a free rental", unset, time.Hour, free, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.cs.Binds(c.ttl, c.price); got != c.want {
+				t.Errorf("Binds = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestRefuseOverPeriod_NeverRefusesAFreeRentalEvenWithNoLedgerToRead.
+//
+// The pair, because either half alone reads as working: a nil ledger under a
+// configured ceiling refuses a PAID rental and must not refuse a free one.
+// Asserted here as well as on the shell path -- where the arm is reachable in
+// production -- because this is the arm `ember serve` has and the two share
+// the predicate.
+func TestRefuseOverPeriod_NeverRefusesAFreeRentalEvenWithNoLedgerToRead(t *testing.T) {
+	cs := Ceilings{Month: 50_000_000}
+
+	if err := RefuseOverPeriod(t.Context(), cs, nil, at(17, 12), time.Hour, 0); err != nil {
+		t.Errorf("a free rental was refused by a ceiling with no ledger to read it against: %v", err)
+	}
+	err := RefuseOverPeriod(t.Context(), cs, nil, at(17, 12), time.Hour, node.Rate(1_790_000))
+	if err == nil {
+		t.Fatal("a paid rental was allowed by a ceiling with no ledger to read it against")
+	}
+	if !strings.Contains(err.Error(), "will not rent") {
+		t.Errorf("the refusal does not say nothing was rented: %v", err)
+	}
+}
+
+// TestUnreadableLedger_IsOneSentenceWithAnOptionalCause.
+//
+// One sentence for one money rule: it existed twice, in `RefuseOverPeriod` and
+// in `cli.boundAndRecord`, worded differently -- two places for one refusal to
+// drift. `why` is the cause where there is one to name and nil where there is
+// not, and the cause is wrapped so `errors.Is` still reaches it.
+func TestUnreadableLedger_IsOneSentenceWithAnOptionalCause(t *testing.T) {
+	cs := Ceilings{Day: 20_000_000, Month: 250_000_000}
+
+	bare := cs.UnreadableLedger(nil)
+	for _, want := range []string{"$20", "$250", "will not rent"} {
+		if !strings.Contains(bare.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, bare)
+		}
+	}
+
+	cause := errors.New("file is not a database")
+	wrapped := cs.UnreadableLedger(cause)
+	if !errors.Is(wrapped, cause) {
+		t.Errorf("the cause is not wrapped, so a caller cannot reach it: %v", wrapped)
+	}
+	if !strings.Contains(wrapped.Error(), "will not rent") {
+		t.Errorf("the wrapped form lost the sentence: %v", wrapped)
+	}
+}
+
 func TestPlanner_ReportsTheOperatorsOwnBadCeiling(t *testing.T) {
 	p := AppPlanner{Config: config.Config{MaxDayUSD: "~~"}, Ledger: genstore.NewRecordingStore()}
 	err := p.refuseOverPeriod(t.Context(), time.Hour, node.Rate(1_790_000))
@@ -375,10 +457,25 @@ func TestOnce_RecordsACeilingRefusalOnTheRequest(t *testing.T) {
 // preview frame, capabilities.model, and the eleven of fifty-one parameters
 // the UI could send.
 //
-// It is reached through the no-ledger refusal rather than through a price,
-// because the local provider's offers are free and a free rental is never
-// refused by a money ceiling. The recording Docker engine is what proves
-// nothing was created.
+// **ITS FIRST TWO ARMS USED TO CONTRADICT EACH OTHER AND NOBODY READ THEM
+// TOGETHER.** It reached the no-ledger refusal through the LOCAL provider --
+// "because the local provider's offers are free and a free rental is never
+// refused by a money ceiling", said in this comment -- and asserted that the
+// free rental WAS refused when no ledger was wired and was planned when one
+// was. A ledger cannot change a free rental's answer: `Allow` returns nil on
+// `projected <= 0` whatever is in the store. So the only thing the first arm
+// ever asserted is that the nil-ledger branch refused a rental the ceiling
+// could not possibly refuse -- the free-rental defect, at this layer,
+// UNREACHABLE in production because `cmd_serve` always wires the Ledger, and
+// locked in by an assertion whose own comment names the rule it broke. #165's
+// first form made the same branch reachable on the shell path, where
+// `genstore.Open` really can fail, and review found it there.
+//
+// So the arms are three now and they discriminate: a free rental is planned
+// with a ledger and without one, and a PAID rental with no ledger is refused
+// -- which is what carries the join this test is named for, on the branch it
+// is named for. The recording Docker engine is what proves nothing was
+// created.
 func TestAppPlanner_ChecksThePeriodCeilingBeforeRenting(t *testing.T) {
 	engine := dockerengine.NewRecordingEngine()
 	engine.GPURuntime = true
@@ -401,21 +498,20 @@ func TestAppPlanner_ChecksThePeriodCeilingBeforeRenting(t *testing.T) {
 		Jobs: []genstore.Job{{Prompt: "a cat", Width: 512, Height: 512, Steps: 4}},
 	}
 
-	_, err := AppPlanner{Config: cfg, Deps: deps}.Plan(t.Context(), req)
-	if err == nil {
-		t.Fatal("a configured period ceiling with nothing to read it against was planned through")
+	// A FREE rental, with a ceiling configured and nothing to read it against.
+	// It is planned, because its projection is zero and it adds nothing to any
+	// period -- and a ceiling ember cannot check still cannot refuse a run
+	// that cannot breach it.
+	rental, err := AppPlanner{Config: cfg, Deps: deps}.Plan(t.Context(), req)
+	if err != nil {
+		t.Fatalf("a FREE rental was refused by a ceiling with no ledger to read it against: %v", err)
 	}
-	if !strings.Contains(err.Error(), "will not rent") {
-		t.Errorf("Plan = %v, want the period ceiling's own refusal", err)
-	}
-	if n := len(engine.Containers()); n != 0 {
-		t.Errorf("%d container(s) were created before the refusal", n)
+	if rental == nil {
+		t.Fatal("Plan returned no rental and no error")
 	}
 
-	// And with a ledger it plans, which is what says the check is a check
-	// rather than a wall: the local provider is free, so its projection is
-	// zero and no period can be exceeded by it.
-	rental, err := AppPlanner{
+	// And with a ledger, which is the arm that was always right.
+	rental, err = AppPlanner{
 		Config: cfg, Deps: deps, Ledger: genstore.NewRecordingStore(),
 		Now: func() time.Time { return at(17, 12) },
 	}.Plan(t.Context(), req)
@@ -424,5 +520,23 @@ func TestAppPlanner_ChecksThePeriodCeilingBeforeRenting(t *testing.T) {
 	}
 	if rental == nil {
 		t.Fatal("Plan returned no rental and no error")
+	}
+
+	// A PAID rental with no ledger IS refused, which is the join: Plan reaches
+	// the no-ledger branch, and it is the price that makes the ceiling able to
+	// bite. AllowPaid, or refusePaid would stop this one line earlier and the
+	// assertion would be about the wrong gate.
+	paid := pricedConfig()
+	paid.MaxMonthUSD = "50"
+	_, err = AppPlanner{Config: paid, Deps: pricedFakes(t), AllowPaid: true}.
+		Plan(t.Context(), aPricedRequest())
+	if err == nil {
+		t.Fatal("a configured period ceiling with nothing to read it against was planned through")
+	}
+	if !strings.Contains(err.Error(), "will not rent") {
+		t.Errorf("Plan = %v, want the period ceiling's own refusal", err)
+	}
+	if n := len(engine.Containers()); n != 0 {
+		t.Errorf("%d container(s) were created before the refusal", n)
 	}
 }

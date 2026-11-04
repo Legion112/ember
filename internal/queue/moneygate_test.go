@@ -440,6 +440,135 @@ func TestDirectRunner_TheTTLItProjectsOverIsTheRunsAndNotTheDaemons(t *testing.T
 	}
 }
 
+// TestDirectRunner_ReChecksTheCeilingOnTheLoopWhereTheTotalIsComplete.
+//
+// THE GAP THE FIRST FORM OF #165 LEFT, found by review. `Start`'s gate runs on
+// the CLIENT's goroutine and `Submit` then parks on the rendezvous until the
+// drain loop is between iterations. `requests.cost` is written from
+// `provision.WithNode`'s DEFERRED teardown, so a queued rental in flight when
+// the gate read contributed ZERO -- it finishes and records while the
+// submission is parked, and the submitted run then rented against a figure
+// that was true when it was read and is not any more. Worked: $20 day, $19
+// recorded, a $2 rental in flight, a $0.89 projection -- $19.89 admits, the day
+// ends at $21.89.
+//
+// Bounded by one rental, and one rental is the magnitude this feature exists
+// to refuse. Before #165 both gates lived on the drain loop, where "the
+// completed cost of finished rentals" and "everything recorded" were the same
+// set; moving one onto a client's goroutine is what made that insufficient.
+//
+// THE TEST IS DETERMINISTIC AND NOT A RACE, which matters because a flaky
+// money assertion teaches people to re-run rather than to read. Nothing
+// receives from the handoff while `Start` runs, so `Submit` parks for certain;
+// the spend is seeded while it is parked; and only then is the loop started,
+// so the re-check cannot read the store before the seed. The order is settled
+// by which call the test makes next and not by a sleep.
+//
+// WHAT IT ASSERTS IS THE ROW, because `Start` has already answered the client
+// by then -- nil, with the id. So the refusal has to reach the operator
+// through `requests.err`, which is what `runOutcome` prints to a client still
+// following the stream, and `finish` is what writes it through `classify`.
+// With the re-check removed the run reaches `plan.Do` instead and the row ends
+// with a RunPod create failure, so the ceiling's own words are what
+// discriminate.
+func TestDirectRunner_ReChecksTheCeilingOnTheLoopWhereTheTotalIsComplete(t *testing.T) {
+	st := genstore.NewRecordingStore()
+	// $19 already recorded against a $20 day: the first read admits a $0.89
+	// rental at $19.89.
+	spentOn(t, st, at(17, 9), 19_000_000)
+	q := &Queue{Store: st, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
+
+	r := paidRunner(t, q, st)
+	r.AllowPaid = true
+	r.Config = config.Config{MaxDayUSD: "20"}
+	r.Now = func() time.Time { return at(17, 12) }
+
+	type res struct {
+		id  genstore.ReqID
+		err error
+	}
+	done := make(chan res, 1)
+	go func() {
+		id, err := r.Start(context.Background(), app.RunAsk{Config: writeRunConfig(t, submittedRunConfig)})
+		done <- res{id, err}
+	}()
+
+	// Adopt happens inside Start and immediately before Submit, so the row
+	// appearing is how this test knows the first gate has already passed --
+	// a refusal there writes no row, which is the other test's witness.
+	id := waitForRow(t, st)
+
+	// The rental that was in flight finishes and records while the submission
+	// is parked. $19 + $1.50 is $20.50, so the honest total now refuses a
+	// $0.89 rental and the stale one still admits it.
+	spentOn(t, st, at(17, 10), 1_500_000)
+
+	aLoop(t, q)
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("Start refused the submission, so it never reached the loop: %v", got.err)
+	}
+	if got.id != id {
+		t.Fatalf("Start answered %s and the row is %s", got.id, id)
+	}
+
+	row := waitForTerminal(t, st, id)
+	if row.Status != genstore.StatusFailed {
+		t.Errorf("the row ended as %q, want failed: a run admitted on a stale total rented "+
+			"past the ceiling", row.Status)
+	}
+	for _, want := range []string{"max_day_usd", "ceiling of $20,", "$20.5"} {
+		if !strings.Contains(row.Err, want) {
+			t.Errorf("the recorded reason does not mention %q, so the ceiling was not re-read on "+
+				"the loop (it says %q)", want, row.Err)
+		}
+	}
+}
+
+// waitForRow blocks until the history holds one request and answers its id.
+//
+// A BOUND AND A t.Fatal RATHER THAN A SLEEP: what is being waited for is a
+// write another goroutine makes, and the thing that means it will never happen
+// is the deadline -- `orExited`'s rule as the browser labs spell it. A skip
+// here would report success for something that never ran.
+func waitForRow(t *testing.T, st genstore.Store) genstore.ReqID {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		rs, err := st.List(context.Background(), genstore.Filter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rs {
+			if r.Status == genstore.StatusRunning {
+				return r.ID
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("no adopted row appeared, so Start never reached Submit")
+	return ""
+}
+
+// waitForTerminal blocks until a request has ended and answers the row.
+func waitForTerminal(t *testing.T, st genstore.Store, id genstore.ReqID) genstore.Request {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		r, err := st.Get(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Status.Terminal() {
+			return r
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("request %s never ended", id)
+	return genstore.Request{}
+}
+
 // TestDirectRunner_TakesTheTighterOfTheTwoConfigsCeilings.
 //
 // BOTH FILES BIND AND NEITHER WIDENS THE OTHER, which is the second half of

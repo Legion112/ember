@@ -168,18 +168,16 @@ func (c Ceilings) Tightest(o Ceilings) Ceilings {
 // so the price and the ttl are parameters rather than fields read here, and
 // every caller passes the plan's own.
 //
-// A CEILING WITH NO LEDGER TO READ IS A REFUSAL AND NOT A PASS. An operator
-// who wrote max_month_usd into their config has said that unattended spending
-// must stop somewhere, and the one answer a spend ceiling must never give is
-// "probably fine" -- the same rule that makes `ember ls` exit non-zero over a
-// provider it could not ask. It cannot be reached through `ember serve`, which
-// always wires the store; on the shell paths it IS reachable, because
-// recording a rental is best-effort there and a database that will not open is
-// a line printed rather than a refusal. Those are two different uses of one
-// store and only one of them may be skipped: see cli.boundAndRecord.
+// A CEILING WITH NO LEDGER TO READ IS A REFUSAL AND NOT A PASS -- see
+// UnreadableLedger, which is that sentence and is shared with the shell paths.
 //
-// A FREE RENTAL IS NEVER REFUSED, which Allow answers on the projection being
-// zero rather than on anything here.
+// AND THE FREE CHECK IS Binds, UPSTREAM OF THE LEDGER QUESTION RATHER THAN
+// INSIDE Allow. The first version of this function asked `cs.IsZero()` and
+// then `led == nil`, so a FREE rental with a ceiling configured and no ledger
+// was refused -- `Allow`'s own `projected <= 0` sits past the refusal and
+// never gets asked. That is the defect this file's own comment four lines up
+// names, written one line below it, and it shipped in #165's first form on the
+// shell path where the branch is reachable. Review found it.
 func RefuseOverPeriod(
 	ctx context.Context,
 	cs Ceilings,
@@ -188,15 +186,60 @@ func RefuseOverPeriod(
 	ttl time.Duration,
 	price node.Rate,
 ) error {
-	if cs.IsZero() {
+	if !cs.Binds(ttl, price) {
 		return nil
 	}
 	if led == nil {
-		return fmt.Errorf("this configuration sets a period ceiling (%v a day, %v a month) and "+
-			"nothing here can read what has been spent, so ember cannot tell whether this rental "+
-			"is within it and will not rent", cs.Day, cs.Month)
+		return cs.UnreadableLedger(nil)
 	}
 	return cs.Allow(ctx, led, now, price.Cost(ttl))
+}
+
+// Binds reports whether these ceilings could refuse a rental projected at this
+// price over this ttl.
+//
+// ONE PLACE ANSWERS "COULD THIS RENTAL BE REFUSED AT ALL", and the reason it
+// is a named predicate rather than two conditions written out twice is that
+// both refusals which happen WITHOUT reading a ledger have to ask it: the
+// `led == nil` arm above, and `cli.boundAndRecord`'s arm for a generation
+// history that will not open. The first form of #165 asked only `IsZero` at
+// both, so `ember up --provider local` -- price zero, projection zero, adds
+// nothing to any period -- was refused outright by a configured ceiling it
+// could not check. Two copies of a money condition, and both were missing the
+// same half.
+//
+// A FREE RENTAL IS NEVER REFUSED BY A MONEY CEILING, which is what the second
+// half is: the local provider's price is zero, so its projection is zero and
+// it adds nothing to any period. Refusing one because a paid month is spent
+// would stop the one kind of run that costs nothing.
+//
+// The projection is derived here from the price and the ttl rather than taken
+// as a figure, for RefuseOverPeriod's own reason: #157 measured a literal zero
+// in either half as a gate that cannot fail, so a caller hands over the two
+// facts and never the answer.
+func (c Ceilings) Binds(ttl time.Duration, price node.Rate) bool {
+	return !c.IsZero() && price.Cost(ttl) > 0
+}
+
+// UnreadableLedger is the refusal for a configured ceiling ember cannot check.
+//
+// ONE SENTENCE FOR ONE MONEY RULE. It existed twice with different wording --
+// here and in `cli.boundAndRecord` -- which is two places for one refusal to
+// drift and one place for the next reader to believe the other one. why is the
+// cause when there is one to name (a database that would not open) and nil
+// when there is not (nothing was wired).
+//
+// IT DOES NOT ASK WHETHER THE RENTAL IS FREE, and that is deliberate: Binds is
+// the one place that question is answered, and a second copy of it here is the
+// defect this pair was built to remove. Every caller asks Binds first.
+func (c Ceilings) UnreadableLedger(why error) error {
+	const s = "this configuration sets a period ceiling (%v a day, %v a month) and ember cannot " +
+		"read what has been spent against it, so it cannot tell whether this rental is within " +
+		"it and will not rent"
+	if why == nil {
+		return fmt.Errorf(s, c.Day, c.Month)
+	}
+	return fmt.Errorf(s+": %w", c.Day, c.Month, why)
 }
 
 // Spender is the one read a ceiling needs.

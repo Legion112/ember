@@ -2166,20 +2166,30 @@ What that means in practice, for the two commands that used to be unbounded:
   `max_month_usd` your month has nearly spent stops before anything is
   created, with the same message the queue gets, and exits non-zero. `--dry-run`
   is never refused, because it rents nothing.
-- **A ceiling it cannot check is a refusal, not a pass.** Recording a run in
-  the generation history is best-effort — a database that will not open prints
-  one line and the run goes ahead — but a *configured* ceiling with no readable
-  history refuses, because "I could not read what has been spent" is not "it is
-  allowed". The same rule makes `ember ls` exit non-zero over a provider it
-  could not ask.
+- **A ceiling it cannot check is a refusal, not a pass — for a rental it could
+  refuse.** Recording a run in the generation history is best-effort: a
+  database that will not open prints one line and the run goes ahead. A
+  *configured* ceiling with no readable history refuses, because "I could not
+  read what has been spent" is not "it is allowed" — the same rule makes
+  `ember ls` exit non-zero over a provider it could not ask. But a **free**
+  rental is exempt from both: it projects nothing, so there is no total a
+  missing history could hide.
 - **`max_day_usd: "banana"` is now an error.** It was accepted and ignored on
   these paths, because nothing between loading the file and renting read the
   key.
 
-One thing they still do not do. A free rental is never refused: the local
+One thing they still do not do. **A free rental is never refused**: the local
 provider's price is zero, so its projection is zero and it adds nothing to any
-period — which is most of what this repository measures with, and the direction
-this change was most careful about.
+period, which is most of what this repository measures with.
+
+That sentence was true of the design and **false of the code** in the first
+version of this, which is worth saying rather than quietly correcting. The
+refusal above asked only whether a ceiling was *configured* and never whether
+the rental could breach one, so `ember up --provider local` with `max_month_usd`
+set and an unreadable history was refused outright — against this paragraph,
+against the comment four lines above the branch, and against a test that
+asserted it. Review found it. The question asked now is "could this rental be
+refused at all", in one place that both no-history refusals share.
 
 What it reads is complete, which is worth saying because `ember spend` has to
 warn that its per-job figures are not. `requests.cost` was a column before the
@@ -2395,6 +2405,16 @@ with an unset ceiling meaning no ceiling. Reading only the daemon's would leave
 `--config`, which is the divergence between the two paths this whole channel
 exists to remove; reading only yours would leave the daemon's allowance
 spendable by a file it never read.
+
+**And it is checked twice, the second time on the rental loop.** The first
+check happens while your `ember up` is still waiting, and a run asked for while
+the queue is mid-rental **waits** — so the total it read can go stale in
+exactly the window it is waiting through, because a rental's cost is recorded
+when the node is destroyed. The second check runs on the goroutine that is
+about to rent, where no other rental can be in flight and the total is
+therefore complete. A run refused there is already a row, so it ends as
+`failed` with the reason, which the client you detached from (or `ember
+history`) prints. Nothing is created either way.
 
 Three smaller differences worth knowing:
 

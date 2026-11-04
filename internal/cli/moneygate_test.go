@@ -302,10 +302,20 @@ func TestUp_AFreeRentalIsNeverRefusedByASpentCeiling(t *testing.T) {
 	}
 }
 
-// TestUp_ALedgerThatWillNotOpenRefusesONLYWhenACeilingIsConfigured.
+// breakLedger puts a DIRECTORY where `generations.db` goes, which is a failure
+// neither `app.ResolvePaths` nor the run itself cares about: only the thing
+// that opens the database sees it.
+func breakLedger(t *testing.T, d deps) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(d.HomeDir, "state", genstore.FileName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUp_ALedgerThatWillNotOpenRefusesOnlyWhatACeilingCouldRefuse.
 //
-// THE ONE ASYMMETRY IN boundAndRecord, asserted in both directions because
-// either half alone reads as working.
+// THE ONE ASYMMETRY IN boundAndRecord, asserted in THREE directions because
+// any two of them are consistent with the defect review found.
 //
 // Recording is best-effort: a database that will not open is a diagnostic
 // problem, and refusing to rent over it would be ember declining to do the
@@ -318,25 +328,22 @@ func TestUp_AFreeRentalIsNeverRefusedByASpentCeiling(t *testing.T) {
 // provider it could not ask. A ceiling that silently does nothing is worse
 // than one that was never configured.
 //
-// The ledger is broken by putting a DIRECTORY where the database file goes,
-// which is a failure neither `app.ResolvePaths` nor the run itself cares
-// about: only the thing that opens `generations.db` sees it.
-func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhenACeilingIsConfigured(t *testing.T) {
-	breakLedger := func(t *testing.T, d deps) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Join(d.HomeDir, "state", genstore.FileName), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	t.Run("with a ceiling it refuses", func(t *testing.T) {
-		d := labDeps(t)
+// AND A FREE RENTAL IS EXEMPT FROM BOTH, which is the arm this test was built
+// without and the reason it is three arms rather than two. #165's first form
+// asked `cs.IsZero()` here and nothing about the price, so
+// `ember up --provider local` -- projection zero, adding nothing to any period
+// -- was refused outright by a ceiling ember could not check. **The free arm
+// used to BE the refusal arm**: its config read `provider: local` with
+// `max_month_usd: "50"`, so this test asserted the defect and went red when
+// the missing condition was added. So the refusal arm is re-pointed at a PAID
+// provider and the free one put beside it, which is the pair that
+// discriminates -- a refusal arm on a free provider cannot tell "a ceiling
+// with no ledger refuses" from "a ceiling with no ledger refuses everything".
+func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhatACeilingCouldRefuse(t *testing.T) {
+	t.Run("a PAID rental with a ceiling is refused", func(t *testing.T) {
+		d, _ := (&fakeCatalogue{}).deps(t)
 		breakLedger(t, d)
-		cfg := filepath.Join(t.TempDir(), config.FileName)
-		body := "provider: local\nimage: x:v1\nttl: 5m\nmax_month_usd: \"50\"\n"
-		if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		cfg := paidUpConfig(t, "max_month_usd: \"50\"\n")
 
 		var out bytes.Buffer
 		err := runUp([]string{"--config", cfg}, &out, d)
@@ -349,18 +356,20 @@ func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhenACeilingIsConfigured(t *testing
 		if !strings.Contains(err.Error(), "$50") {
 			t.Errorf("the refusal does not name the ceiling it could not check: %v", err)
 		}
-		// Not the printed line, which is what an unbounded run gets.
+		// Not the printed line, which is what a run the ceiling cannot refuse
+		// gets.
 		if strings.Contains(out.String(), "not recording") {
 			t.Errorf("a configured ceiling declined to record and ran anyway:\n%s", out.String())
 		}
 	})
 
-	t.Run("without one it says so and runs", func(t *testing.T) {
+	t.Run("a FREE rental with the same ceiling is not", func(t *testing.T) {
 		d := labDeps(t)
 		d.Engine.(*dockerengine.RecordingEngine).FailOn = "ContainerCreate"
 		breakLedger(t, d)
 		cfg := filepath.Join(t.TempDir(), config.FileName)
-		if err := os.WriteFile(cfg, []byte("provider: local\nimage: x:v1\nttl: 5m\n"), 0o600); err != nil {
+		body := "provider: local\nimage: x:v1\nttl: 5m\nmax_month_usd: \"50\"\n"
+		if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 
@@ -368,6 +377,26 @@ func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhenACeilingIsConfigured(t *testing
 		err := runUp([]string{"--config", cfg}, &out, d)
 		if err == nil {
 			t.Fatal("the create call was supposed to fail")
+		}
+		if strings.Contains(err.Error(), "will not rent") {
+			t.Fatalf("a FREE rental was refused by a money ceiling ember could not check, which "+
+				"is the one kind of run that costs nothing: %v", err)
+		}
+		if !strings.Contains(out.String(), "not recording") {
+			t.Errorf("a run that could not be recorded said nothing about it:\n%s", out.String())
+		}
+	})
+
+	t.Run("a paid rental with no ceiling is not either", func(t *testing.T) {
+		d, _ := (&fakeCatalogue{}).deps(t)
+		breakLedger(t, d)
+		cfg := paidUpConfig(t, "")
+
+		var out bytes.Buffer
+		err := runUp([]string{"--config", cfg}, &out, d)
+		if err == nil {
+			// The fake serves no /v2/pods, so this cannot be reached.
+			t.Fatal("the run rented against a fake with no pods route")
 		}
 		if strings.Contains(err.Error(), "will not rent") {
 			t.Fatalf("a run with no ceiling configured was refused for an unreadable ledger: %v", err)
@@ -398,12 +427,46 @@ func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhenACeilingIsConfigured(t *testing
 // which is #105's own sentence about why its defect survived.
 //
 // A PARSE AND NOT A GREP. The subject is "every production construction of
-// this type names Config", which `go/parser` answers and `grep` cannot: a
-// POSITIONAL literal has no field names at all and is a fatal here rather than
-// a skip, because the alternative to failing on a literal this guard cannot
-// read is reading straight past the one that matters --
+// this type is handed the daemon's own config", which `go/parser` answers and
+// `grep` cannot: a POSITIONAL literal has no field names at all and is a fatal
+// here rather than a skip, because the alternative to failing on a literal this
+// guard cannot read is reading straight past the one that matters --
 // TestFlagTablesClassifyEveryFlagSetMethod's rule. The floor is the other
 // half: a walk that found no construction passes every assertion.
+//
+// IT CHECKS THE VALUE AND NOT ONLY THE FIELD'S NAME, which the first version
+// did not, and review walked around it: `Config: config.Config{}` substituted
+// for `Config: cfg` left `go build`, `go vet`, `golangci-lint` and
+// `go test ./...` all at exit 0 -- this guard among them -- while the daemon's
+// ceilings reached the submitted-run gate nowhere and `Tightest` composed a
+// ZERO against the run's config, which is #165's own defect with the test
+// claiming to refuse it in advance. The precedent for fixing rather than
+// documenting is `TestTrustHasOneImplementationAndItIsPin`, whose first version
+// skipped a generic receiver.
+//
+// SO THE VALUE MUST BE AN IDENTIFIER THE ENCLOSING FUNCTION BOUND TO A
+// config.Config, which is `declaredFlags`' rule one type over: there, a call
+// counts only when the identifier it is called on was bound to a
+// `*flag.FlagSet` in that function. Two ways to be bound are accepted, which
+// are the two this package uses -- a `config.Config` PARAMETER (`serveUntil`'s
+// `cfg`) and a `:=` from `config.Load` (`runUp`'s and `runStoreSync`'s shape,
+// where a DirectRunner could plausibly move). Nothing else is: a composite
+// literal, a selector, a call and a `var` of the type all fail, because none of
+// them is the file `ember serve` read.
+//
+// WHAT IT GIVES UP, so the next reader does not have to find out: an identifier
+// COPIED from an accepted one (`d := cfg`) fails although it is correct. That
+// is a shape nobody writes, the message says what to write instead, and
+// widening it would mean a dataflow pass for a false positive this package
+// cannot currently produce. A RENAME is safe, which is the refactor that
+// actually happens -- the rule is the binding and never the spelling `cfg`.
+//
+// A POINTER FIELD REFUSED AS NIL IN Start WAS WEIGHED AND IS NOT THE ANSWER.
+// It is this package's own shape for a dependency that must be wired -- Start
+// already refuses a nil Queue and a nil Store -- and it catches strictly less:
+// a nil says "nobody wired it" and says nothing about the measured walkaround,
+// which hands over a zero rather than nothing. Adding it beside this guard
+// would be a second mechanism for a property this one already holds.
 func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -421,42 +484,150 @@ func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
 		if perr != nil {
 			t.Fatalf("parse %s: %v", name, perr)
 		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			lit, ok := n.(*ast.CompositeLit)
-			if !ok {
-				return true
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
 			}
-			sel, ok := lit.Type.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "DirectRunner" {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != "queue" {
-				return true
-			}
-			found++
-			for _, el := range lit.Elts {
-				kv, ok := el.(*ast.KeyValueExpr)
+			// The identifiers THIS function bound to a config.Config, which is
+			// what makes the check about the daemon's own file rather than
+			// about the spelling of a variable.
+			daemon := configIdents(fn)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				lit, ok := n.(*ast.CompositeLit)
 				if !ok {
-					t.Fatalf("%s: a queue.DirectRunner is built with a positional field this "+
-						"guard cannot read, so it cannot say whether the daemon's config "+
-						"reaches the period ceiling: name the fields",
-						fset.Position(el.Pos()))
-				}
-				if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Config" {
 					return true
 				}
-			}
-			t.Errorf("%s: this queue.DirectRunner does not set Config, so a run submitted over "+
-				"the socket is bounded by the config it named and not by the one ember serve "+
-				"read -- which is #165, and max_day_usd goes back to bounding the queue alone",
-				fset.Position(lit.Pos()))
-			return true
-		})
+				sel, ok := lit.Type.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "DirectRunner" {
+					return true
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if !ok || pkg.Name != "queue" {
+					return true
+				}
+				found++
+				checkDirectRunnerConfig(t, fset, lit, daemon)
+				return true
+			})
+		}
 	}
 	if found == 0 {
 		t.Fatal("found no production queue.DirectRunner to check, so this guard asserted nothing")
 	}
+}
+
+// checkDirectRunnerConfig is the per-literal half, so the walk above reads as
+// the walk and this reads as the rule.
+func checkDirectRunnerConfig(t *testing.T, fset *token.FileSet, lit *ast.CompositeLit, daemon map[string]bool) {
+	t.Helper()
+	for _, el := range lit.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			t.Fatalf("%s: a queue.DirectRunner is built with a positional field this guard "+
+				"cannot read, so it cannot say whether the daemon's config reaches the "+
+				"period ceiling: name the fields",
+				fset.Position(el.Pos()))
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "Config" {
+			continue
+		}
+		val, ok := kv.Value.(*ast.Ident)
+		if !ok {
+			t.Errorf("%s: Config is set from a %T rather than from a config.Config this "+
+				"function bound, so the daemon's own ceilings may reach the submitted-run "+
+				"gate nowhere -- which is #165. Pass the config ember serve read",
+				fset.Position(kv.Value.Pos()), kv.Value)
+			return
+		}
+		if !daemon[val.Name] {
+			t.Errorf("%s: Config is set from %q, which this function did not bind to a "+
+				"config.Config -- a config.Config parameter, or a := from config.Load. So "+
+				"this may not be the file ember serve read, and max_day_usd would go back "+
+				"to bounding the queue alone (#165)",
+				fset.Position(kv.Value.Pos()), val.Name)
+		}
+		return
+	}
+	t.Errorf("%s: this queue.DirectRunner does not set Config, so a run submitted over "+
+		"the socket is bounded by the config it named and not by the one ember serve "+
+		"read -- which is #165, and max_day_usd goes back to bounding the queue alone",
+		fset.Position(lit.Pos()))
+}
+
+// configIdents is every identifier fn bound to a config.Config.
+//
+// Two bindings, which are the two this package uses: a parameter of that type,
+// and a `:=` whose right-hand side is config.Load. Anything else is not the
+// file `ember serve` read, and the guard above says so rather than guessing.
+//
+// A CLOSURE'S PARAMETERS COUNT TOO, and that was measured rather than assumed:
+// the first version walked `*ast.FuncDecl` parameters alone, so a DirectRunner
+// built inside a `func(cfg config.Config) { ... }` was reported although it is
+// correct -- a false positive on a refactor somebody could plausibly write.
+// A top-level helper taking the config is accepted for the same reason, so
+// refusing the closure form would have been the same rule answering two ways.
+//
+// THE BOUND IS THE FUNCTION, which is `declaredFlags`' bound and is stated
+// rather than chased: this cannot follow a config ACROSS a call, so a helper
+// that takes `config.Config` and is handed a zero at its call site passes.
+// Closing that means type-checked dataflow, which is a different tool; what is
+// closed is the one-step version -- a zero written at the construction site --
+// which is the walkaround review measured and the only one anybody writes by
+// accident.
+func configIdents(fn *ast.FuncDecl) map[string]bool {
+	out := map[string]bool{}
+
+	isConfigType := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Config" {
+			return false
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		return ok && pkg.Name == "config"
+	}
+	params := func(fl *ast.FieldList) {
+		if fl == nil {
+			return
+		}
+		for _, p := range fl.List {
+			if !isConfigType(p.Type) {
+				continue
+			}
+			for _, n := range p.Names {
+				out[n.Name] = true
+			}
+		}
+	}
+
+	params(fn.Type.Params)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.FuncLit:
+			params(v.Type.Params)
+		case *ast.AssignStmt:
+			if len(v.Lhs) == 0 || len(v.Rhs) != 1 {
+				return true
+			}
+			call, ok := v.Rhs[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Load" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "config" {
+				return true
+			}
+			if id, ok := v.Lhs[0].(*ast.Ident); ok {
+				out[id.Name] = true
+			}
+		}
+		return true
+	})
+	return out
 }
 
 // TestStoreSync_ProjectsTheCheapMachineAgainstThePeriodCeilings.
@@ -472,8 +643,18 @@ func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
 // a tenth of that, which is red for a missing gate and for a projection of
 // zero, and the acceptance arm beside it is what stops a gate that refuses
 // every sync.
+// THE ACCEPTANCE ARM HAS A POSITIVE WITNESS, which it did not: it asserted
+// only that the refusal was not the ceiling's, which is also what a sync that
+// stopped somewhere else entirely would say. The row `boundAndRecord` adopts
+// after the gate is the same witness the `up` arms use, and it is read through
+// `recorded` -- the spelling `TestStoreSync_RecordsTheRentalItMakes` already
+// uses. The first version of this opened the store under the config's own
+// `state_dir` instead and found nothing, which is the journal's
+// "one name for a path, not one per call site" rule met in a test: a second
+// spelling is how a test ends up asserting against a directory nothing wrote
+// to, and here it did.
 func TestStoreSync_ProjectsTheCheapMachineAgainstThePeriodCeilings(t *testing.T) {
-	run := func(t *testing.T, ceiling string) (string, error) {
+	run := func(t *testing.T, ceiling string) (deps, string, error) {
 		t.Helper()
 		d := labDeps(t)
 		d.CloudBaseURL = cpuOnlyRunPod(t)
@@ -482,10 +663,10 @@ func TestStoreSync_ProjectsTheCheapMachineAgainstThePeriodCeilings(t *testing.T)
 
 		var out bytes.Buffer
 		err := runStore([]string{"sync", "-config", cfg}, &out, d)
-		return out.String(), err
+		return d, out.String(), err
 	}
 
-	_, err := run(t, "max_day_usd: \"0.001\"\n")
+	d, _, err := run(t, "max_day_usd: \"0.001\"\n")
 	if err == nil {
 		t.Fatal("a store sync projected past the day's ceiling was run")
 	}
@@ -494,16 +675,24 @@ func TestStoreSync_ProjectsTheCheapMachineAgainstThePeriodCeilings(t *testing.T)
 			t.Errorf("the refusal does not mention %q, so it is not the period ceiling's: %v", want, err)
 		}
 	}
+	if rows := recorded(t, d); len(rows) != 0 {
+		t.Errorf("a refused sync wrote %d row(s): the ceiling is checked before Adopt, so a row "+
+			"means the ledger was told a rental was coming when none was", len(rows))
+	}
 
 	// The negative control. The fake serves no `/v2/pods`, so a sync that got
 	// past the gate stops at the create call -- which is the point: what has
 	// to be proved is that the ceiling let it through.
-	out, err := run(t, "max_day_usd: \"20\"\n")
+	d, out, err := run(t, "max_day_usd: \"20\"\n")
 	if err == nil {
 		t.Fatalf("the sync rented against a fake with no pods route:\n%s", out)
 	}
 	if strings.Contains(err.Error(), "max_day_usd") {
 		t.Fatalf("a sync well inside its ceiling was refused, so the gate refuses every sync "+
 			"there is: %v", err)
+	}
+	// Positively: it got past the gate and the rental was adopted.
+	if rows := recorded(t, d); len(rows) != 1 {
+		t.Errorf("the history holds %d row(s), want the sync the ceiling allowed", len(rows))
 	}
 }

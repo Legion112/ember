@@ -201,11 +201,19 @@ func runUp(args []string, out io.Writer, d deps) error {
 // must never give. So the same failure is a printed line when no ceiling is
 // set and a refusal when one is, and nothing silently loses a ceiling.
 //
+// AND A FREE RENTAL IS A PRINTED LINE TOO, which the first form of this got
+// wrong. `queue.Ceilings.Binds` is what the refusal asks, so the question is
+// "could this rental be refused at all" rather than "is a ceiling set" --
+// `ember up --provider local` projects zero, adds nothing to any period, and
+// must run whatever the month has spent and whatever the history will do. Said
+// here as well as at Binds because this is the only reachable caller of that
+// arm, so this is where a reader would look for the rule and where the defect
+// was.
+//
 // NOT ON A DRY RUN, and both callers return before reaching this. `--dry-run`
 // rents nothing, so its projection is a rental that will not happen -- and a
-// money ceiling that refused a command which spends nothing is the same
-// mistake as refusing a free rental, which Ceilings.Allow is careful not to
-// make.
+// money ceiling that refused a command which spends nothing is the free-rental
+// mistake with a different zero in it.
 //
 // THE CEILING IS THE NAMED CONFIG'S, because on this path that file is the
 // only one there is: `ember up --config x.yaml` reads x.yaml for the ledger's
@@ -225,11 +233,16 @@ func boundAndRecord(
 
 	store, serr := genstore.Open(plan.Paths.State)
 	if serr != nil {
-		if !cs.IsZero() {
-			return nil, nil, fmt.Errorf("this configuration sets a period ceiling (%v a day, "+
-				"%v a month) and the generation history it is checked against could not be "+
-				"opened, so ember cannot tell whether this rental is within it and will not "+
-				"rent: %w", cs.Day, cs.Month, serr)
+		// Binds AND NOT IsZero, which is what the first form of this asked and
+		// is the defect review found: a FREE rental -- `ember up --provider
+		// local`, projection zero, adding nothing to any period -- was refused
+		// outright by a ceiling ember could not check, against the paragraph
+		// three above saying that is the mistake. The predicate and the
+		// sentence are both queue's, because this arm and
+		// queue.RefuseOverPeriod's `led == nil` arm are one money rule with
+		// two readers and they used to word it differently.
+		if cs.Binds(plan.Spec.TTL, plan.Offer.Price) {
+			return nil, nil, cs.UnreadableLedger(serr)
 		}
 		sink, finish := declineToRecord(out, serr)
 		return sink, finish, nil
