@@ -2190,6 +2190,66 @@ that sentence made unrepresentable rather than merely tested.
   sentence the operator pressed the button to read. Nor is it gated on
   `is_terminal`: nothing writes the column without ending the request, so that
   guard would be a branch nothing can reach.
+- **The same shape again, and this one is twenty-two fields rather than one:
+  every parameter a generation ran with crossed every seam and was rendered
+  nowhere (#181).** No ordinal, because a running total in prose is the thing
+  this file has been wrong about before -- what is worth saying is that the
+  two entries above it are the same defect in a row and in a field, and this
+  is it in a whole type. `genstore` keeps them as one JSON column per
+  request, `internal/webapi`'s `viewRequest` sends **all** of them outbound
+  under a comment arguing that "rendering a request's jobs without them would
+  show an operator a job description that is not the job that ran", and
+  `web/src/model.rs`'s `Job` decodes twenty-three fields -- of which
+  `views.rs` read twenty-two **in the compose form**, which builds a *new*
+  job. So the watcher showed a server-composed `desc`, a file count and a
+  pass/step, and seed, sampler, scheduler, cfg, guidance, clip_skip, eta,
+  flow_shift, shifted_timestep, strength, init_image, output_format,
+  output_compression, slg, hires and vae_tiling were on the wire and off the
+  screen. **Measured the only way that means anything**, which is the
+  `requestView.Error` entry's own method one axis over: making the parameters
+  `skip_deserializing` left `cargo test` at 52 of 53 passing, and the single
+  failure was a round-trip assertion whose own comment reads "the same type is
+  what a request view returns: a job on screen has to be the job that was
+  queued". The claim was in the tree, in a comment, beside a test that could
+  not check it -- a claim in this file, or in a comment, is worth exactly what
+  the code does.
+  **`scheduler` was read by NOTHING, not even the form.** There is no control
+  for it, so a browser could never set one; what it reports is a scheduler an
+  `ember up` request put in the store, and a page that omitted the row left an
+  operator unable to tell which of the two silences they were in.
+  **Three words for three claims, because a dash reads as "ember does not
+  know".** `unset` is the four `Option` fields nobody set, whose server-side
+  defaults are -1, null, null and 0.75, so a `0` there states a value nobody
+  chose; `off` is a block that was not sent, which is upstream's own off and a
+  fact about the run; and a seed of zero says "not pinned" rather than `0`,
+  because `omitempty` means none was sent and that generation is therefore not
+  reproducible. The wording is `Job::settings` and not a chain of `if` in a
+  view macro, which is this page's settled pattern -- `Rows::note`,
+  `Request::reason`, `Stream::note` -- because only a browser can read the
+  second one.
+  **Sited in the watcher deliberately and expected to move.** #139 puts this
+  on a `/requests/{id}` page behind a router that does not exist; the
+  component takes a `Job` and reads no signal, so that slice moves the call
+  site. What it does NOT move is the closure: `request` is `None` until the
+  socket's first envelope arrives, and three keyed-`<For>` defects in this
+  page -- the frozen progress row, the stale offers table and the money column
+  that read `$0` for every paid rental -- were all a signal read outside the
+  closure that renders it, so a parameter table built once against a request
+  id would be those defects with twenty more fields.
+  Watched to fail, which is the one piece of discipline that is not optional
+  here: `opt(None)` returning `"0"` turns `an_unset_parameter_is_not_a_zero_one`
+  red, and deleting the call site turns `TestServe_UI` red on the seed and the
+  sampler it typed into the page.
+  **The first version of that second red was 721 seconds of "context deadline
+  exceeded", which is this file's own `waitForText` warning collected.**
+  `chromedp.Text` resolves at least one node and then blocks until the
+  context ends, so a selector matching NOTHING spends the lab's whole
+  twelve-minute budget and names neither the block nor what was on screen
+  instead -- and the assertion's whole job here is to report an element that
+  is not there. `waitForParams` polls `innerText` through `Evaluate`, which
+  answers the empty string for an absent block: the same defect is then red
+  in two minutes with the watcher panel's own text in the failure, and the
+  repaired tree is green in 46 seconds.
 - **`report.KindRunFinished` and `KindRunFailed` are deleted, and the test is
   whether a second live mechanism exists.** Both were declared, both were in
   `Kinds()`, both were rendered as deliberately silent by `Text`, and

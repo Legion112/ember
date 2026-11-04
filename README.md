@@ -1747,6 +1747,38 @@ anywhere. The one control that varies between two presses is the card filter,
 and that is exactly the case the key could not refresh — changing the provider
 clears the list, which is why this was invisible.
 
+### What the watcher says about the parameters
+
+Under the progress rows, each job of the watched request has a **what it ran
+with** block: its full prompt, its negative prompt, and every parameter the
+request carried — seed, sampler, scheduler, size, steps, batch, cfg, guidance,
+clip skip, eta, flow shift, shifted timestep, the init image's digest and its
+strength, the output format and compression, and the three blocks (skip-layer
+guidance, the hires pass, VAE tiling). The summary line carries the **seed and
+the sampler**, because those two are what a reproduction turns on, and the
+block is open for a single job and closed for a batch.
+
+Three words that mean three different things, and they are spelled
+differently on purpose:
+
+| on screen | what it means |
+|---|---|
+| `unset` | nobody set it and the server used its own default — which is `-1` for clip skip and `null` for eta and flow shift, so printing `0` there would state a value nobody chose |
+| `off` | the block was not sent at all, which is upstream's own "off": a hires pass that did not happen, rather than one ember cannot report |
+| `— not pinned, the server chose one` | the seed was zero, which `omitempty` means was never sent — so this generation is not reproducible, and the row says so instead of printing `0` |
+
+The parameters crossed every seam and were rendered nowhere. `genstore` keeps
+them as one JSON column per request, `viewRequest` sends all of them outbound
+under a comment arguing they must be shown, and the page's own `Job` decodes
+twenty-three fields — twenty-two of which were read only by the **compose**
+form, which builds a *new* job. So a finished generation showed a truncated
+description and a file count, and the two things a reproduction needs were on
+the wire and off the screen.
+
+The block is sited in the watcher **deliberately and is expected to move**: a
+`/requests/{id}` page is the right home for it and there is no router yet, so
+it is a self-contained component taking one job and nothing else.
+
 ### What the watcher says about money
 
 The progress panel's money row is the **rental**, and it says which of five
