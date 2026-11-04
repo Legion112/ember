@@ -139,6 +139,35 @@ fn reason(status: u16, body: &str) -> Error {
     }
 }
 
+/// urlish escapes anything that would end a query parameter early.
+///
+/// IN `api` AND NOT IN A VIEW, because there are two callers now and they are
+/// both here in spirit: the offers query's provider and card filter, and the
+/// progress socket's request id. It lived beside the first of those until #139
+/// slice 3, which made `location.pathname` an input to the second -- and two
+/// copies of one escaping rule is two places for one of them to drift, with
+/// the layering the wrong way round besides (`api` must not read `views`).
+///
+/// Hand-written and tiny rather than a dependency: the set is `a-z0-9-_.~`,
+/// which is every unreserved character, and everything else is percent-encoded.
+/// The server parses the query itself, so a value that arrives mangled is a
+/// filter that silently matched the wrong thing -- or, for the socket, a
+/// cursor nobody asked for, since Go's `Query().Get` takes the FIRST value of
+/// a duplicated key and a request id holding an `&` would supply a second
+/// `after=`.
+pub fn urlish(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 fn describe(v: JsValue) -> Error {
     v.as_string()
         .or_else(|| {
@@ -189,7 +218,16 @@ impl Socket {
         let loc = window()?.location();
         let host = loc.host().map_err(describe)?;
         // Same scheme as the page: http on loopback, so ws and never wss.
-        let url = format!("ws://{host}/ws?id={id}&after={after}");
+        //
+        // THE ID IS ESCAPED, which it did not need to be until #139 slice 3.
+        // Its one caller used to pass a `watching` signal written from the
+        // server's own listing -- sixteen hex characters -- and the id comes
+        // off `location.pathname` now, which an operator can type anything
+        // into. `/requests/x&after=99` would otherwise send
+        // `?id=x&after=99&after=0`, and Go's `Query().Get` takes the first
+        // value: a watcher resuming from a cursor nobody chose, on this
+        // machine, over the page that says which step is on screen.
+        let url = format!("ws://{host}/ws?id={}&after={after}", urlish(id));
 
         let ws = web_sys::WebSocket::new(&url).map_err(describe)?;
 
@@ -257,7 +295,7 @@ impl Drop for Socket {
 
 #[cfg(test)]
 mod tests {
-    use super::reason;
+    use super::{reason, urlish};
 
     /// The 409 the cancel route answers, verbatim, carrying the remediation.
     ///
@@ -288,5 +326,34 @@ mod tests {
         // prints nothing over a failure is the state this whole path was in.
         assert_eq!(reason(500, "not json at all"), "the server answered 500");
         assert_eq!(reason(409, r#"{"error":""}"#), "the server answered 409");
+    }
+
+    /// A card model with a space in it -- "NVIDIA H100 80GB HBM3" is how
+    /// RunPod spells one -- must not end the query parameter early, or the
+    /// filter silently matches something else.
+    #[test]
+    fn escapes_what_would_break_a_query() {
+        assert_eq!(urlish("rtx4090"), "rtx4090");
+        assert_eq!(urlish("h100-80g"), "h100-80g");
+        assert_eq!(urlish("a b"), "a%20b");
+        assert_eq!(urlish("a&gpu=b"), "a%26gpu%3Db");
+        assert_eq!(urlish("a#b"), "a%23b");
+        assert_eq!(urlish(""), "");
+    }
+
+    /// AND A REQUEST ID IS A SECOND CALLER SINCE #139 SLICE 3, which is why
+    /// this function is here rather than beside the offers form.
+    ///
+    /// The id comes off `location.pathname`, so `/requests/x&after=99` is an
+    /// address an operator can type: unescaped it sends
+    /// `?id=x&after=99&after=0`, Go's `Query().Get("after")` takes the FIRST
+    /// value, and the watcher resumes request `x` from a cursor nobody chose.
+    /// The one it would send today is sixteen hex characters, for which this
+    /// is the identity -- which is exactly why nothing would have reported it.
+    #[test]
+    fn a_request_id_cannot_smuggle_a_cursor() {
+        assert_eq!(urlish("3f9a1c20d4e7b865"), "3f9a1c20d4e7b865");
+        assert_eq!(urlish("x&after=99"), "x%26after%3D99");
+        assert_eq!(urlish("x#y"), "x%23y");
     }
 }

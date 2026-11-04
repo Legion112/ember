@@ -879,6 +879,10 @@ func TestServe_UIShowsACostWrittenAfterTheStatusEnded(t *testing.T) {
 	if err := chromedp.Do(ctx, chromedp.WaitVisible(`h1`)); err != nil {
 		t.Fatalf("the app did not mount: %v\n%s", err, console.text())
 	}
+	// THE QUEUE IS A PAGE SINCE #139 SLICE 3, so getting to it is a step
+	// rather than a given. Before the split every lab here landed on `/` with
+	// all four panels on screen.
+	navTo(t, ctx, "the queue", queuePanel)
 
 	// Out of band, through the store rather than through the code under
 	// test, which is the rule the SIGKILL labs and the caps lab follow.
@@ -1225,6 +1229,10 @@ func TestServe_UINamesWhyARequestFailed(t *testing.T) {
 	if err := shortWait(ctx, `h1`, 30*time.Second); err != nil {
 		t.Fatalf("the app never mounted: %v\n%s", err, console.text())
 	}
+	// THE QUEUE IS A PAGE SINCE #139 SLICE 3. The watcher is another one, and
+	// this lab reaches it below by clicking the row -- which is what that link
+	// is for.
+	navTo(t, ctx, "the queue", queuePanel)
 
 	// Posted with the tab already open, so what is asserted below arrived
 	// while the page was watching rather than on a reload.
@@ -1278,11 +1286,25 @@ func TestServe_UINamesWhyARequestFailed(t *testing.T) {
 			got, failed.Error)
 	}
 
+	// BEFORE THE CLICK NOW, AND THAT ORDER IS THE SLICE RATHER THAN A TIDY-UP.
+	// It used to run after, because half of what it measured was where the
+	// `watching` mark landed and nothing was watched until a row was clicked.
+	// The click is a NAVIGATION since #139 slice 3 -- the watcher is a page --
+	// so there is no queue table left to measure on the other side of it, and
+	// the mark it was looking for is gone with the panel that gave it a
+	// subject. See the function for what that cost and what replaced it.
+	assertReasonReadsAtTheTablesWidth(t, ctx, console)
+
 	// AND THE WATCHER NAMES IT, which is the half with no event behind it: a
 	// request the planner refused has an empty stream, so a panel folding
 	// only events has nothing at all to say about it.
-	if err := chromedp.Do(ctx, chromedp.Click(rowOf(id)+`/td[1]/button`)); err != nil {
-		t.Fatalf("watching the failed request: %v\n%s", err, console.text())
+	//
+	// AN `<a>` AND NOT A `<button>`, which is the one edit the route forced in
+	// that cell: it wrote a `watching` signal a panel on the same screen read,
+	// and it is an address now -- so this click is a client-side navigation to
+	// `/requests/{id}` and everything after it is on that page.
+	if err := chromedp.Do(ctx, chromedp.Click(rowOf(id)+`/td[1]/a`)); err != nil {
+		t.Fatalf("opening the failed request's page: %v\n%s", err, console.text())
 	}
 	if err := shortWait(ctx, `p.why`, 30*time.Second); err != nil {
 		t.Fatalf("the watcher never said why the request ended: %v\n%s", err, console.text())
@@ -1295,12 +1317,18 @@ func TestServe_UINamesWhyARequestFailed(t *testing.T) {
 		t.Errorf("the watcher says %q, which does not contain the row's reason %q",
 			watched, failed.Error)
 	}
-
-	// AFTER THE CLICK, because half of what it measures is where the watched
-	// mark landed and nothing is watched until something is clicked. The
-	// geometry half does not care: opening the watch panel adds rows under a
-	// panel that already spans both columns, so no column width moves.
-	assertReasonReadsAtTheTablesWidth(t, ctx, console)
+	// AND THE CLICK WENT SOMEWHERE AN OPERATOR CAN COME BACK TO OR SEND ON,
+	// which a button writing a signal could not: the address bar is what a
+	// reload reads and what "copy link" copies, and a row that rendered the
+	// watcher without moving the URL would pass every assertion above it.
+	where, werr := chromedp.Run(ctx, chromedp.Location())
+	if werr != nil {
+		t.Fatalf("reading the location: %v\n%s", werr, console.text())
+	}
+	if want := "/requests/" + id; !strings.HasSuffix(where, want) {
+		t.Errorf("clicking the queue row left the browser on %q, which does not end in %q",
+			where, want)
+	}
 
 	// THE SENTENCE THAT MUST NOT BE HERE. Nothing was created, so there is no
 	// node to check and no bill accruing; printing the destroy warning over
@@ -1395,15 +1423,25 @@ store:
 // split rather than trusting this number.
 const wideViewport = 1280
 
-// maxReasonLines is how many lines of the queue table a request's reason may
-// take, measured in its own rendered line height rather than in pixels.
+// `maxReasonLines` AND THE HEIGHT BOUND WERE HERE AND THE SPLIT TOOK THEIR
+// SUBJECT, which is measured rather than argued and is the better outcome of
+// the two available.
 //
-// The store refusal is three lines as ember writes it and its longest -- 100
-// characters -- wraps once at the table's width, so four. Five leaves a line
-// of slack for a font this was not measured on. Inside `td.status` the same
-// sentence rendered NINE, which is the separation that makes this a bound
-// rather than a decoration.
-const maxReasonLines = 5
+// The bound was five rendered lines, and what made it a bound was the
+// separation: #138 measured the same sentence at NINE lines inside `td.status`
+// at the 174px that cell got in the `1fr` half of a two-column grid. The queue
+// has a page of its own since #139 slice 3, so there is no narrow half --
+// measured on the repaired tree at the same 1280px viewport, the table is
+// 1003px and the reason cell is 62.5px tall.
+//
+// AND `colspan="1"` IS NOW 62.5px TOO, byte-identical: reinstated, the status
+// column takes 745px of the leftovers and the sentence still wraps to the same
+// three lines. So the bound could not fail over the one defect it was written
+// for, which is worse than no check -- while the WIDTH assertion is red on the
+// same patch at "745px inside a 1003px table, 257px short". The width is what
+// holds the `colspan` literal to the six cells beside it, it is the half with
+// an exit code, and the height is left in the measurement `t.Logf` prints for
+// a reader rather than asserted on.
 
 // whyOf is the reason row of one request: the row that follows it inside the
 // same group.
@@ -1425,21 +1463,19 @@ func whyOf(id string) string {
 // would be two paths for one property with the weaker one in front; and a body
 // width says nothing the two panel widths beside it do not.
 type reasonGeometry struct {
-	Viewport     float64 `json:"viewport"`
-	QueuePanel   float64 `json:"queuePanel"`
-	SpanAllPanel float64 `json:"spanAllPanel"`
-	TableWidth   float64 `json:"tableWidth"`
-	CellWidth    float64 `json:"cellWidth"`
-	CellHeight   float64 `json:"cellHeight"`
-	LineHeight   float64 `json:"lineHeight"`
+	Viewport   float64 `json:"viewport"`
+	Main       float64 `json:"main"`
+	QueuePanel float64 `json:"queuePanel"`
+	TableWidth float64 `json:"tableWidth"`
+	CellWidth  float64 `json:"cellWidth"`
+	CellHeight float64 `json:"cellHeight"`
+	LineHeight float64 `json:"lineHeight"`
 
-	// Groups, OnTbody, HoldsTheReason and MarkedRows are pure DOM: which
-	// element the watched mark is ON, and whether that element is the one
-	// holding the reason.
+	// Groups and HoldsTheReason are pure DOM: whether a request and its
+	// reason are one row group, and whether the group that holds a reason is
+	// the one that holds its request.
 	Groups         int  `json:"groups"`
-	OnTbody        bool `json:"onTbody"`
 	HoldsTheReason bool `json:"holdsTheReason"`
-	MarkedRows     int  `json:"markedRows"`
 }
 
 // assertReasonReadsAtTheTablesWidth is the measurement this slice exists for.
@@ -1459,47 +1495,70 @@ type reasonGeometry struct {
 // too LARGE -- the table model clamps one to the columns the table has -- and
 // that is the direction with no defect behind it.
 //
-// AND THE MARK'S SUBJECT IS A DOM QUESTION, WHICH IS A DIFFERENT PROPERTY FROM
+// AND THE GROUPING IS A DOM QUESTION, WHICH IS A DIFFERENT PROPERTY FROM
 // WHETHER A BROWSER PAINTS IT. "Does Chrome draw an `outline` on a
 // `<tbody>`" is a test of Chrome and needs a screenshot, which is why it is a
-// note in AGENTS.md and not a lab. "Is the element carrying `watching` the one
-// that holds the reason" is a test of ember, is four lines, and had no exit
-// code: moving `class:watching` back onto the `<tr>` -- the exact regression
-// `style.css` argues against -- left this lab GREEN. The two numbers
-// discriminate perfectly, measured:
+// note in AGENTS.md and not a lab.
 //
-//	as it ships:      groups 1, onTbody true,  holdsTheReason true,  markedRows 0
-//	mark on the <tr>: groups 0, onTbody false, holdsTheReason false, markedRows 1
+// WHAT #139 SLICE 3 TOOK FROM THIS PROBE, said here rather than left to be
+// noticed. It used to read `tbody.watching`, and that was the one element on
+// this page carrying a group-level mark: moving `class:watching` onto the
+// `<tr>` was the regression `style.css` argues against, it had no exit code
+// until this probe, and the two numbers discriminated perfectly --
+// `groups 1, onTbody true, holdsTheReason true, markedRows 0` as it shipped
+// against `0/false/false/1` with the mark on the row.
 //
-// `markedRows` is the half that makes it a finding rather than an absence: a
-// mark on nothing at all and a mark on the wrong element are different
-// defects, and without it both read as "groups 0".
+// `watching` IS GONE WITH THE PANEL THAT GAVE IT A SUBJECT. It marked the
+// request the watcher beside this table was showing, and the watcher is a
+// page now -- so on the queue page nothing is being watched and there is no
+// mark a failed request can carry. `class:running` has exactly the same shape
+// and is the only mark left, and this lab cannot produce it: `list.running`
+// is the queue's own live rental, which comes from the API rather than a
+// column, so it cannot be seeded and this lab is deliberately about a request
+// that never reached a provider.
+//
+// SO BOTH FIELDS ARE DELETED RATHER THAN WEAKENED. The obvious replacement was
+// "nothing marks a `<tr>`", and it is a check that cannot fail here: measured,
+// with `class:running` moved onto the row the count is still ZERO, because
+// nothing is running. A check that reads as protection and reports nothing is
+// the `AssertNoStray` failure, so it is gone and the gap is this paragraph.
+//
+// NOT CLOSED, AND THAT IS THE `TestConformance_CannotCatchARederivedRunID`
+// ARRANGEMENT: the suite states what it cannot see, so whoever next moves a
+// mark in this table reads this and decides again rather than trusting a
+// green run. What DOES still have an exit code is the two properties of the
+// grouping that need no mark -- one group per request, and the reason inside
+// the group that holds its request.
 func assertReasonReadsAtTheTablesWidth(t *testing.T, ctx context.Context, console *consoleLog) {
 	t.Helper()
 
 	raw, err := chromedp.Run(ctx, chromedp.Evaluate[string](`(() => {
-		const panels = [...document.querySelectorAll('section.panel')];
 		const table = document.querySelector('table.queue');
 		const cell = document.querySelector('table.queue tr.reason td.why');
 		const queue = table ? table.closest('section.panel') : null;
-		// The watch panel is the one the stylesheet makes span both columns,
-		// so it is the body's own width whichever way the grid went.
-		const spanAll = panels[2];
+		const main = document.querySelector('main');
 		const px = s => parseFloat(s) || 0;
-		const groups = [...document.querySelectorAll('table.queue tbody.watching')];
+		const groups = [...document.querySelectorAll('table.queue tbody')];
+		const holding = groups.filter(g => g.querySelector('tr.reason td.why') !== null);
 		return JSON.stringify({
 			viewport: window.innerWidth,
+			// main AND NOT body: the body carries the page's own 1.5rem
+			// padding, so a panel filling its grid is 48px inside it at any
+			// width and a comparison against the body would be a comparison
+			// against a constant. main IS the grid, which is the thing a
+			// second column would take half of.
+			main: main ? main.getBoundingClientRect().width : -1,
 			queuePanel: queue ? queue.getBoundingClientRect().width : -1,
-			spanAllPanel: spanAll ? spanAll.getBoundingClientRect().width : -1,
 			tableWidth: table ? table.getBoundingClientRect().width : -1,
 			cellWidth: cell ? cell.getBoundingClientRect().width : -1,
 			cellHeight: cell ? cell.getBoundingClientRect().height : -1,
 			lineHeight: cell ? px(getComputedStyle(cell).lineHeight) : -1,
 			groups: groups.length,
-			onTbody: groups.length === 1,
-			holdsTheReason: groups.length === 1
-				&& groups[0].querySelector('tr.reason td.why') !== null,
-			markedRows: document.querySelectorAll('table.queue tr.watching').length,
+			// The group holding the reason also holds the request's own row,
+			// which is what makes the sentence read as belonging to the
+			// request ABOVE it rather than the one below.
+			holdsTheReason: holding.length === 1
+				&& holding[0].querySelector('tr:not(.reason) td.status') !== null,
 		});
 	})()`))
 	if err != nil {
@@ -1516,22 +1575,31 @@ func assertReasonReadsAtTheTablesWidth(t *testing.T, ctx context.Context, consol
 			g, panelText(ctx))
 	}
 
-	// THE PRECONDITION, ASSERTED RATHER THAN ASSUMED. Everything below is about
-	// a queue squeezed into one half of a two-column grid, and that grid only
-	// exists above 60rem. If the viewport were ever narrowed -- or the media
-	// query changed -- the panel would be the full width of the page and the
-	// bound would hold against any markup at all.
+	// THE PRECONDITION, ASSERTED RATHER THAN ASSUMED, AND ITS SUBJECT MOVED
+	// WITH #139 SLICE 3.
+	//
+	// It used to be "the queue panel is narrower than the one the stylesheet
+	// makes span both columns", because the height bound below it was about a
+	// queue squeezed into one half of a `1.3fr 1fr` grid -- and a full-width
+	// panel would have satisfied that bound against any markup at all. There is
+	// no such grid and, for the reason beside `maxReasonLines`, no such bound.
+	//
+	// What it asserts now is the SPLIT'S OWN CLAIM: the queue has the page. A
+	// `Fatalf` because the width measurement under it is about a table inside
+	// this panel, and what it refuses is a second panel put back on this route
+	// -- which is the one change that would make the queue's table narrow
+	// again without touching a line of its markup.
 	//
 	// THE VIEWPORT IT PRINTS IS THE MEASURED ONE AND NOT THE CONSTANT. It used
 	// to name `wideViewport`, so a run that never got the window it asked for
 	// reported "the viewport is 1280" while the browser was at Chrome's own
 	// 800 -- a message naming the setting rather than the cause, which sends
 	// the reader to the media query instead of to the allocator.
-	if g.QueuePanel >= g.SpanAllPanel {
-		t.Fatalf("the queue panel is %.0fpx against the spanning panel's %.0fpx at a viewport of "+
-			"%.0fpx (the lab asks for %d), so the page is not in its two-column layout and "+
-			"nothing below measures what it is written for",
-			g.QueuePanel, g.SpanAllPanel, g.Viewport, wideViewport)
+	if d := g.Main - g.QueuePanel; d > 2 {
+		t.Fatalf("the queue panel is %.0fpx inside a %.0fpx <main> at a viewport of %.0fpx (the "+
+			"lab asks for %d), %.0fpx short of it: the queue is sharing its grid row with "+
+			"something, so nothing below measures what it is written for",
+			g.QueuePanel, g.Main, g.Viewport, wideViewport, d)
 	}
 
 	if d := g.TableWidth - g.CellWidth; d > 2 {
@@ -1541,29 +1609,25 @@ func assertReasonReadsAtTheTablesWidth(t *testing.T, ctx context.Context, consol
 			g.CellWidth, g.TableWidth, d)
 	}
 
-	// The bottom padding rides along with the text, so the bound is the lines
-	// plus a few pixels rather than an exact multiple.
-	bound := float64(maxReasonLines)*g.LineHeight + 8
-	if g.CellHeight > bound {
-		t.Errorf("the reason is %.0fpx tall, about %.0f lines of %.1fpx, against a bound of "+
-			"%d lines (%.0fpx): a request's reason that runs down the panel is the defect -- "+
-			"five failed requests then fill the viewport and the queue is unreadable",
-			g.CellHeight, g.CellHeight/g.LineHeight, g.LineHeight, maxReasonLines, bound)
-	}
-
-	// THE WATCHED MARK IS ON THE GROUP THAT HOLDS THE REASON. Three properties
-	// rest on the grouping -- the highlight covers the pair, one border is
-	// drawn under the request rather than between its own two rows, and the
-	// reason cannot read as belonging to the request below -- and until this
-	// probe none of the three had an exit code: the geometry above is
-	// identical whichever element carries the class.
-	if !g.OnTbody || !g.HoldsTheReason {
-		t.Errorf("the watched request is marked on %d row group(s) and %d row(s), and the group "+
-			"holding the reason is marked: %t. The mark belongs to the `<tbody>` that holds "+
-			"both the request and its reason -- on the `<tr>` it covers the request and "+
-			"leaves the sentence outside it, which reads as the reason belonging to the "+
-			"request below",
-			g.Groups, g.MarkedRows, g.HoldsTheReason)
+	// A REQUEST AND ITS REASON ARE ONE ROW GROUP. Three properties rest on the
+	// grouping -- a mark covers the pair, one border is drawn under the
+	// request rather than between its own two rows, and the reason cannot read
+	// as belonging to the request below -- and the geometry above is identical
+	// whichever element carries which, so this is the only exit code on any of
+	// them.
+	//
+	// ONE GROUP, because this lab queues one request. Measured on both
+	// reinstatements, and they discriminate: loose `<tr>`s read as ZERO and
+	// are red here with nothing else firing, while a reason given a `<tbody>`
+	// of its own is red at `whyOf` -- two defects, two fixes, two failures.
+	// Leptos builds this DOM with `createElement`, so there is no HTML
+	// parser to insert a `<tbody>` and a dropped group really is absent.
+	if g.Groups != 1 || !g.HoldsTheReason {
+		t.Errorf("the queue table has %d row group(s) and the one holding the reason also "+
+			"holds a request's own row: %t. A request and its reason are one `<tbody>` -- "+
+			"as loose rows, `td`'s bottom border sits between them and attaches the "+
+			"sentence to the request BELOW",
+			g.Groups, g.HoldsTheReason)
 	}
 }
 
@@ -1670,6 +1734,10 @@ func TestServe_UICancelSaysWhatTheServerAnswered(t *testing.T) {
 	if err := chromedp.Do(ctx, chromedp.WaitVisible(`h1`)); err != nil {
 		t.Fatalf("the app did not mount: %v\n%s", err, console.text())
 	}
+	// THE QUEUE IS A PAGE SINCE #139 SLICE 3, and this lab leaves it and comes
+	// back below, because the cancel button is on the queue and the evidence
+	// that a job started is on the request's page.
+	navTo(t, ctx, "the queue", queuePanel)
 
 	// THE REFUSAL. The row reads `running` from the claim while the node is
 	// still running the probe, so the queue has nothing to signal.
@@ -1728,11 +1796,24 @@ func TestServe_UICancelSaysWhatTheServerAnswered(t *testing.T) {
 	// images arrive. Waiting for "step " cost a ten-minute run that read
 	// "job 1/3 ... 1 file(s)" and never saw one, because the first job had
 	// finished before the socket replayed its frames.
-	if err := chromedp.Do(ctx, chromedp.Click(rowOf(batch)+`/td[1]/button`)); err != nil {
-		t.Fatalf("watching the request: %v\n%s", err, console.text())
+	if err := chromedp.Do(ctx, chromedp.Click(rowOf(batch)+`/td[1]/a`)); err != nil {
+		t.Fatalf("opening the request's page: %v\n%s", err, console.text())
 	}
 	if err := shortWait(ctx, `.jobs li`, 5*time.Minute); err != nil {
 		t.Fatalf("no job of the batch ever started: %v\n%s", err, console.text())
+	}
+	// AND BACK TO THE QUEUE, because the cancel button is there and the
+	// watcher is a page of its own since #139 slice 3. The BACK BUTTON rather
+	// than the nav link, which is the history entry that click made: a
+	// `pushState` nobody can come back from is a navigation that has broken
+	// the one control every browser has, and it would be invisible from the
+	// nav link alone.
+	if err := chromedp.Do(ctx, chromedp.NavigateBack()); err != nil {
+		t.Fatalf("going back to the queue: %v\n%s", err, console.text())
+	}
+	if err := shortWait(ctx, stopOf(batch)+`/button`, 60*time.Second); err != nil {
+		t.Fatalf("the back button did not return to a queue with a cancel button on this "+
+			"row: %v\nthe queue panel says: %q\n%s", err, panelText(ctx), console.text())
 	}
 
 	// THE ACCEPTED ONE, which says so before the next poll: the status the row
@@ -1809,6 +1890,52 @@ gpu_probe: ["sh", "-c", "sleep 25"]
 // happened to put first.
 const queuePanel = `//section[h2[text()="the queue"]]`
 
+// The other two panels that are now pages, named for the same reason: one
+// spelling per selector.
+const (
+	composePanel = `//section[h2[text()="what to rent"]]`
+	billingPanel = `//section[h2[text()="what is billing"]]`
+	watchPanel   = `//section[h2[text()="what is happening"]]`
+)
+
+// navLink is the header's link to one page, found by the label it prints.
+//
+// THE LABEL AND NOT THE href, because the label is what an operator clicks and
+// the href is `Route::path`'s, which `every_nav_entry_round_trips` already
+// holds. A selector on the href would be this lab agreeing with the router
+// about a string neither of them shows anybody.
+func navLink(label string) string {
+	return fmt.Sprintf(`//nav/a[text()=%q]`, label)
+}
+
+// navTo clicks a header link and waits for that page's panel.
+//
+// A CLICK AND NOT A `chromedp.Navigate`, and the difference is the whole of
+// what #139 slice 3 built. A navigate is a full document load: about 1.9 MiB
+// of wasm re-fetched under `Cache-Control: no-store`, the app mounted again, and
+// every signal on the page starting over -- so every lab below it would be an
+// assertion about a fresh page rather than about the one it had been driving,
+// and a page whose links were never intercepted would pass all of them.
+//
+// THE PANEL AND NOT THE HEADING, because the heading is in the DOM for exactly
+// one page at a time and waiting for the `<section>` that holds it is the same
+// wait with the same selector. Eleven labs navigated to `/` and found their
+// panel by heading, which survives a panel moving file and does not survive
+// the panel not being on `/` -- this is what each of them needed, and it fails
+// as a selector that times out rather than silently.
+func navTo(t *testing.T, ctx context.Context, label, panel string) {
+	t.Helper()
+	if err := shortWait(ctx, navLink(label), 30*time.Second); err != nil {
+		t.Fatalf("the header has no link to %q: %v", label, err)
+	}
+	if err := chromedp.Do(ctx, chromedp.Click(navLink(label))); err != nil {
+		t.Fatalf("clicking the %q link: %v", label, err)
+	}
+	if err := shortWait(ctx, panel, 30*time.Second); err != nil {
+		t.Fatalf("clicking %q did not bring up its page: %v", label, err)
+	}
+}
+
 // TestServe_UIResumesAProgressStreamItLost.
 //
 // THE ONE CLASS OF BUG ONLY A BROWSER CAN SEE, reached from a third
@@ -1836,7 +1963,7 @@ const queuePanel = `//section[h2[text()="the queue"]]`
 // lost stream is on screen long enough for a poll to read it: a recovery with
 // the server up takes 250ms. It is what proves the note is drawn at all,
 // which of the two sentences a browser is shown, and that the line goes away
-// when a handshake really does land. refuseSockets carries the argument.
+// when a handshake really does land. noteOnALostStream carries the argument.
 //
 // The third is a stream ended under a request the page KNOWS is over, across
 // a RESTART -- the case the issue leads with, since a restart is the
@@ -1882,7 +2009,17 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	defer cancelAlloc()
 	ctx, cancel := chromedp.NewContext(alloc)
 	defer cancel()
-	ctx, cancelTimeout := context.WithTimeout(ctx, 12*time.Minute)
+	// TWENTY AND NOT TWELVE, which is a backstop rather than a bound and was
+	// sized for a shorter lab. The third drop now cancels through the API,
+	// waits for a second request to be claimed onto the same rental and
+	// generate, and holds two windows of its own -- so the session is
+	// legitimately longer than it was, and on a machine running three other
+	// lab suites a run that reaches its LAST assertion was killed at twelve
+	// by this line rather than by anything it asserts. Every wait inside is
+	// separately bounded, which is what makes this a backstop: raising it
+	// cannot hide a hang, only a slow machine. Still well under the 30m the
+	// test binary gets.
+	ctx, cancelTimeout := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancelTimeout()
 
 	tokenURL := fmt.Sprintf("%s?t=%s", pageURL, srv.Token)
@@ -2049,8 +2186,11 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// against a server that is not there -- and the server's own handshake
 	// count is what a page that cleared the line without re-opening would
 	// fail. `held` was read before the drop, and the attempts between then
-	// and here reached no server at all, because a refused open never gets
-	// that far.
+	// and here DID reach the server -- the break is a path and not a refusal
+	// to construct -- but they reached `/api/no-such-socket`, which is a 404
+	// and not `serveWS`, so none of them logged the line this counts. The
+	// count is of handshakes that got as far as a watcher, which is the thing
+	// being claimed.
 	waitForNoStreamNote(t, ctx, 60*time.Second, console)
 	if back := openedSockets(l); back <= held {
 		t.Errorf("the note went away with the server still reporting %d handshake(s) "+
@@ -2086,8 +2226,19 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// Queued BEFORE the cancel so the drain loop finds it when the batch
 	// ends and claims it onto the same rental: queued afterwards, `drain`
 	// would have returned, destroyed the node and had to rent again.
+	// SIX HUNDRED STEPS, AND THE SMALL NUMBER WAS A RACE THIS LAB LOST.
+	// "It is running now" is not "it will still be running in a moment", and
+	// the assertions below need a request the signal INTERRUPTS: at sixty
+	// steps the rider finished during the window and the restart arm's own
+	// window, so the row read `done`, which is terminal -- the premise
+	// passed -- and carries no reason at all, so the sentence this arm ends
+	// on could never appear. Measured rather than reasoned: the journal of a
+	// failing run held the watched request `cancelled` and the rider `done`.
+	// Six hundred cannot finish inside a lab that never waits for it, which
+	// is the same device as the sixty steps the watched request gets, and it
+	// costs nothing: the node is destroyed by the signal either way.
 	rider := queueJobs(t, srv, `{"provider":"local","jobs":[
-		{"prompt":"a lighthouse","width":192,"height":192,"steps":60,"seed":2,"output":"light"}
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":2,"output":"light"}
 	]}`)
 
 	cancelResp := ask(t, "POST", srv, "/api/requests/"+id+"/cancel", "")
@@ -2112,14 +2263,14 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// `None if terminal` branch, decided in `model` where cargo test reaches
 	// it and drawn nowhere a browser could see until this.
 	//
-	// THE REFUSAL IS WHAT MAKES THE SILENCE MEAN SOMETHING, which is the same
+	// THE BREAK IS WHAT MAKES THE SILENCE MEAN SOMETHING, which is the same
 	// argument as the second drop from the other side: without it a page that
 	// DID retry would be back in 250ms and would look exactly like one that
 	// correctly did not.
-	refuseSockets(t, ctx, true)
+	breakSockets(t, ctx)
 	dropSocket(t, ctx, console)
 	requireNoStreamNote(t, ctx, 10*time.Second, console)
-	refuseSockets(t, ctx, false)
+	mendSockets(t, ctx)
 
 	// AND IT IS GENERATING, so the signal below interrupts a rental with work
 	// in it rather than an idle server.
@@ -2152,9 +2303,19 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// for twenty hours: the note used to be asserted here on the premise that
 	// a restart leaves the watched request live, which stopped being true the
 	// day that write started landing. The premise is now the subject.
-	if st := recordedStatus(t, l, rider); !st.Terminal() {
-		t.Fatalf("the request the shutdown interrupted reads %q, so the write that "+
-			"records how a Ctrl-C'd rental ended did not land", st)
+	// `cancelled` AND NOT MERELY TERMINAL, which is the stronger check and is
+	// here because the weaker one let a race through: a rider that FINISHED
+	// before the signal is `done`, which is terminal and carries no reason,
+	// so the arm limped on to fail sixty lines later at the sentence that
+	// reason was supposed to supply. Naming the status turns that into one
+	// message about the thing that actually went wrong. `running` is the
+	// other way this fires, and it is the #159 defect: the write that records
+	// how a Ctrl-C'd rental ended did not land.
+	if st := recordedStatus(t, l, rider); st != genstore.StatusCancelled {
+		t.Fatalf("the request the shutdown should have interrupted reads %q rather than "+
+			"cancelled: `running` means the write that records how a Ctrl-C'd rental "+
+			"ended did not land, and `done` means it finished before the signal and "+
+			"this arm has nothing interrupted to assert about", st)
 	}
 
 	second, srv2, secondWait := startServeOn(t, l, port, token, "--log-level", "debug")
@@ -2220,13 +2381,26 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// BECAUSE nothing read the signal that handler wrote; now that the page
 	// says when a stream stopped, the same close is the old socket reporting
 	// a stop over the new socket's state.
-	row := rowOf(id) + `/td/button`
+	//
+	// A NAVIGATION RATHER THAN TWO CLICKS ON ONE PAGE SINCE #139 SLICE 3, and
+	// it reaches the same drop more directly: clicking a row used to switch a
+	// `watching` signal, which replaced the stored socket and dropped the old
+	// one. The watcher is a page now, so LEAVING it disposes the component and
+	// drops the socket with it -- which is the same `Drop`, on the path an
+	// operator takes every time. Twice, because the second arrival has to open
+	// a socket over a handler set the first one cleared.
+	row := rowOf(id) + `/td/a`
 	for range 2 {
+		navTo(t, ctx, "the queue", queuePanel)
 		if err := shortWait(ctx, row, 30*time.Second); err != nil {
 			t.Fatalf("the queue row for %s never appeared: %v\n%s", id[:8], err, panelText(ctx))
 		}
 		if err := chromedp.Do(ctx, chromedp.Click(row)); err != nil {
 			t.Fatalf("clicking the queue row: %v\n%s", err, console.text())
+		}
+		if err := shortWait(ctx, watchPanel, 30*time.Second); err != nil {
+			t.Fatalf("the row's link did not open the request's page: %v\n%s",
+				err, console.text())
 		}
 		time.Sleep(time.Second)
 	}
@@ -2271,22 +2445,27 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 // resolves the `WebSocket` identifier against the global object at call time,
 // so there is no cached reference to go around it.
 //
-// IT ALSO REFUSES ON DEMAND, which is refuseSockets below and the one
-// arrangement in which a browser can see the page's note about a stream it
-// lost. The flag is checked before the real constructor is reached, so the
-// refusal is a throw out of `WebSocket::new` -- which web_sys hands back as
-// an Err rather than as an uncaught exception, leaving this lab's own
-// `error` listener clean.
+// IT ALSO BREAKS ON DEMAND, which `breakSockets` sets and `mendSockets`
+// clears, and which two labs now share -- the disposed-owner window and the
+// note about a stream this page lost. ONE MECHANISM AND NOT TWO: this helper
+// carried a second one for a few hours, a throw out of `WebSocket::new`
+// before the real constructor was reached, and the path form replaced it
+// after a measurement rather than a preference. See noteOnALostStream for
+// which claim that cost and why it was worth it.
 func recordSockets(t *testing.T, ctx context.Context) {
 	t.Helper()
 	const wrap = `(function () {
 		if (window.__emberSockets) { return "already"; }
 		window.__emberSockets = [];
-		window.__emberRefuseSockets = false;
 		var Real = window.WebSocket;
 		window.WebSocket = function (url, protocols) {
-			if (window.__emberRefuseSockets) {
-				throw new Error("ember-lab: this socket open was refused");
+			// __emberBreak IS A PATH AND NOT A BOOLEAN, so a refused
+			// re-open is still a real handshake to a real server that
+			// answers no upgrade -- see breakSockets. Unset in every lab
+			// but the two that need the retry loop to keep failing, so
+			// this is the identity wrapper everywhere else.
+			if (window.__emberBreak) {
+				url = new URL(window.__emberBreak, url).href;
 			}
 			var s = protocols === undefined ? new Real(url) : new Real(url, protocols);
 			window.__emberSockets.push(s);
@@ -2351,50 +2530,22 @@ func pageErrors(t *testing.T, ctx context.Context) string {
 	return strings.Join(got, "\n")
 }
 
-// refuseSockets makes the page's next socket opens fail, or stops doing so.
+// WHY THESE TWO ARMS BREAK A SOCKET AT ALL, which used to be written on a
+// `refuseSockets` of this lab's own and belongs with the mechanism rather
+// than with one caller. With the server up and the request live, a dropped
+// stream is back inside 250ms -- so the line the page prints about it is on
+// screen for less time than any poll can see, which is correct behaviour and
+// not something to assert around. And over an `ember serve` RESTART there is
+// no line at all, because the rental's request ends with the server, so the
+// page learns the request is over while the socket is still open and
+// correctly says nothing about a stream that has nothing left to carry. The
+// window therefore has to be MADE rather than found, over a request that is
+// still generating and still billing.
 //
-// WHY THE NOTE NEEDS ONE AT ALL. With the server up and the request live, a
-// dropped stream is back inside 250ms -- so the line the page prints about it
-// is on screen for less time than any poll can see, which is correct
-// behaviour and not something to assert around. And over an `ember serve`
-// RESTART there is no line at all, because the rental's request ends with the
-// server: `endIfUnfinished` writes the terminal status on a context that
-// survives the signal, so the page learns the request is over while the
-// socket is still open and correctly says nothing about a stream that has
-// nothing left to carry.
-//
-// So the window has to be made rather than found, and this makes it over a
-// request that is still generating and still billing -- which is the state
-// the note exists for and a stronger subject than a restart ever had. It
-// exercises both branches that schedule a re-open: the first attempt comes
-// through the socket's `onclose` and every one after it through
-// `Socket::open` returning Err, which is the only place a constructor that
-// refused can be retried from.
-//
-// A FLAG AND NOT A COUNT OF REFUSALS, because the honest question is "is the
+// A STATE AND NOT A COUNT OF REFUSALS, because the honest question is "is the
 // lab still holding the page off" rather than "how many attempts has it
 // spent": a count would have to be guessed against the backoff, and a guess
 // that is too small clears the note before the poll reads it.
-func refuseSockets(t *testing.T, ctx context.Context, refuse bool) {
-	t.Helper()
-	got, err := chromedp.Run(ctx, chromedp.Evaluate[string](fmt.Sprintf(
-		`(function () {
-			if (!window.__emberSockets) { return "unwrapped"; }
-			window.__emberRefuseSockets = %t;
-			return window.__emberRefuseSockets ? "refusing" : "allowing";
-		})()`, refuse)))
-	if err != nil {
-		t.Fatalf("setting the socket refusal to %v: %v", refuse, err)
-	}
-	want := "allowing"
-	if refuse {
-		want = "refusing"
-	}
-	if got != want {
-		t.Fatalf("the socket wrapper reported %q rather than %q, so the page is not "+
-			"being held off the way the assertions below assume", got, want)
-	}
-}
 
 // noteOnALostStream ends the page's stream, holds it off its re-open long
 // enough to read the line it prints, and lets go again.
@@ -2412,27 +2563,42 @@ func refuseSockets(t *testing.T, ctx context.Context, refuse bool) {
 //
 // So the close, the observation and the release are one evaluation and a
 // browser timer: the note is captured 600ms after the close -- about two
-// refused attempts in, far inside the bound -- and the refusal is dropped in
-// the same callback, so a Go side that stalls for a minute afterwards finds a
-// page that has already recovered rather than one that has given up.
+// refused attempts in, far inside the bound -- and the break is lifted in the
+// same callback, so a Go side that stalls for a minute afterwards finds a
+// page that has already recovered rather than one that has given up. It sets
+// `__emberBreak` directly rather than calling `breakSockets`, because the
+// point is that the set, the read and the clear are ONE round trip; the path
+// is that mechanism's own constant so there is still one spelling of it.
+//
+// WHAT THE PATH FORM COST, recorded because the alternative was deleted for
+// it. This arm first used a throw out of `WebSocket::new`, which exercised
+// `connect`'s `Err(_) => retry(…)` branch -- the only place a constructor
+// that refused can be retried from, and now a branch no lab reaches. The
+// path was kept anyway and on the merits rather than to settle a conflict: a
+// handshake that reaches a real server and gets no upgrade is what a dropped
+// stream actually looks like, while a constructor that throws is not a state
+// any server can put a browser in, so the throw was simulating a defect that
+// does not happen. Measured, not assumed: the path form holds the page in
+// `Stream::Reconnecting` for the whole window this arm reads, which is the
+// one property the throw was here for.
 //
 // It is `recordSockets`' instrument and not a seam in the page, for
 // `recordSockets`' reason.
 func noteOnALostStream(t *testing.T, ctx context.Context, console *consoleLog) string {
 	t.Helper()
-	const drop = `(function () {
+	drop := fmt.Sprintf(`(function () {
 		var all = window.__emberSockets || [];
 		if (all.length === 0) { return "no socket"; }
 		window.__emberLostNote = "";
-		window.__emberRefuseSockets = true;
+		window.__emberBreak = %q;
 		all[all.length - 1].close();
 		setTimeout(function () {
 			var p = document.querySelector("p.stream");
 			window.__emberLostNote = p ? p.textContent.trim() : "(the page printed nothing)";
-			window.__emberRefuseSockets = false;
+			window.__emberBreak = "";
 		}, 600);
 		return "dropped";
-	})()`
+	})()`, brokenSocketPath)
 	got, err := chromedp.Run(ctx, chromedp.Evaluate[string](drop))
 	if err != nil {
 		t.Fatalf("ending the page's progress stream: %v\n%s", err, console.text())
@@ -2727,8 +2893,20 @@ func lastSeq(t *testing.T, s served, id string) int64 {
 	return e.Next
 }
 
+// rowOf is the queue row of one request, found by the eight characters the
+// page prints of its id.
+//
+// `td/a` AND NOT `td/button` SINCE #139 SLICE 3. That cell wrote a `watching`
+// signal a panel on the same screen read, and the watcher is a page of its
+// own now, so the cell is a link to an address. The first run of the new
+// routing lab is what said so: the row was on screen, the selector matched
+// nothing, and the failure printed the row it could not find.
+//
+// `normalize-space()` rather than `text()`, because what is being matched is
+// the id a person reads rather than the exact text nodes a view macro chose
+// to emit.
 func rowOf(id string) string {
-	return fmt.Sprintf(`%s//table[@class="queue"]//tr[td/button[text()=%q]]`,
+	return fmt.Sprintf(`%s//table[@class="queue"]//tr[td/a[normalize-space()=%q]]`,
 		queuePanel, id[:8])
 }
 
@@ -3590,6 +3768,13 @@ func TestServe_UIReportsWhatIsBilling(t *testing.T) {
 	// after the navigation, because the listener is per document and the `?t=`
 	// exchange's 303 is part of that navigation.
 	recordPageErrors(t, ctx)
+
+	// THIS PANEL IS A PAGE SINCE #139 SLICE 3. It used to be the fourth
+	// `<section class="panel">` in one `<main>`, which auto-placed into column
+	// 1 of a third grid row and left the `1fr` column beside it empty on every
+	// wide viewport -- half a blank row, shipped, named nowhere until #139
+	// measured it.
+	navTo(t, ctx, "what is billing", billingPanel)
 
 	// NOTHING UNTIL SOMEBODY ASKS. See the header: the empty answer and the
 	// answer nobody asked for must not render the same, and the empty one is

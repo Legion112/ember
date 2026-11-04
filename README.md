@@ -1712,10 +1712,32 @@ It is the `sd.jobs` shape driven from a browser: pick a provider and a card
 from live offers, type a prompt and its parameters, push a batch, and watch the
 sampling steps and preview frames arrive while the images land on disk.
 
-There are five panels: four in the order the flow runs — what can be rented,
-what to generate, what is queued, what is happening — and a fifth,
-[what is billing](#what-the-billing-panel-shows), which is `ember ls` in a
-browser and is asked when pressed rather than on a timer.
+There are **four pages**, linked from the header in the order the flow runs:
+
+| page | address | what it is |
+|---|---|---|
+| generate | `/` | what can be rented and what to generate |
+| the queue | `/queue` | what is waiting, running and finished |
+| one request | `/requests/{id}` | its progress, what it ran with, and its images |
+| [what is billing](#what-the-billing-panel-shows) | `/nodes` | `ember ls` in a browser, asked when pressed rather than on a timer |
+
+They used to be four panels in one page sharing a two-column grid, which put
+the queue's six-column table in the narrow half — 407px of a 1088px body,
+measured — and placed the progress panel by counting its siblings. A page's
+panel is now the full width of the page: 1040px of 1040px at the same
+viewport, against the 444px the queue used to get.
+
+A request's page is an **address**, so the queue's id column is a link: it
+opens in a tab, it can be copied and sent, and a reload or a bookmark of it
+comes back to the same request. Queueing a generation goes to its page. The
+back button works, because a click inside the app pushes a history entry
+rather than redrawing; a path the app does not own — any address without a dot
+in it, which `ember serve` answers with the app rather than a 404 — says so
+and names the address it was asked for.
+
+**A composed batch does not survive leaving the page.** The draft and the
+batch live in the compose page, so navigating to the queue and back gives an
+empty form. The form coming back empty is the whole of the symptom.
 
 The five rows of the compose panel are the whole job on most runs; an
 **advanced** section below them holds the rest of what a generation can be
@@ -1953,7 +1975,28 @@ otherwise invisible from either end.
 
 **One page is served on every route the app owns**, so a reload on a path the
 app made up gets the app rather than a 404 — which is any path whose last
-segment holds no dot. Every asset that page references is therefore
+segment holds no dot. Which page that one document shows is decided in the
+browser: `location.pathname` into a signal, a link click that pushes state and
+sets it, and a `popstate` listener that reads it back. No router crate — that
+is two names on `web-sys`'s feature list (`History` and `PopStateEvent`)
+against another dependency tree, which is the trade `web/Cargo.toml` already
+made for fetch and WebSocket. A
+link the page did **not** intercept would load a whole document, re-fetch
+1,921,981 bytes of wasm under `no-store` and still work, so there is nothing to
+notice: the browser lab plants a value on `window` and asserts it survives each
+navigation, because a new document is the only thing that clears one.
+
+That figure is what the router added to. Measured, release profile, same
+toolchain, one commit apart: **1,597,604 bytes before and 1,921,981 after,
++324,377 (+20.3%)**. It is not the `web-sys` features and it is not the three
+hundred lines of routing — it is that the one `<main>` went from four
+statically typed children to a match whose arms are all `AnyView`, so four
+large view types get a vtable where the compiler used to see them in place.
+The asset travels zero network hops and the trade buys the pages; it is
+recorded because a number nobody wrote down is a number nobody can argue with
+later.
+
+Every asset that page references is therefore
 **root-relative**, and the leading slash is load-bearing: a browser resolves a
 relative reference against the *document's own directory*, so `style.css` and
 `./ember.js` asked for `/style.css` and `/ember.js` on `/` and on `/queue`,

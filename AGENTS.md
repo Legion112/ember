@@ -2340,6 +2340,302 @@ that sentence made unrepresentable rather than merely tested.
   answers the empty string for an absent block: the same defect is then red
   in two minutes with the watcher panel's own text in the failure, and the
   repaired tree is green in 46 seconds.
+- **The page became four pages, and the one thing that made it a slice rather
+  than a file move is that a component is now UNMOUNTED for the first time in
+  this program's life (#139 slice 3).** Four `<section class="panel">` shared
+  one `<main>` and a `1.3fr 1fr` grid: the queue's six-column table got the
+  narrow half -- 407px of a 1088px body, which is what #138 was about -- the
+  watcher spanned both columns through a `.panel:nth-child(3)` selector that
+  counted its siblings, and since the billing panel landed the `1fr` column
+  beside it was EMPTY on every viewport over 60rem, which nothing had named.
+  There is one panel per route now, so the grid is one column at every width
+  and `nth-child`, `.panel.idle` and the empty half-row are all gone with the
+  thing they were placing. Measured on the repaired tree: `/queue` is 1040px
+  of a 1040px `<main>` against the 444px it used to get.
+
+  **A HAND-ROLLED HISTORY ROUTER, and the precedent was in the file that would
+  otherwise have changed.** `web/Cargo.toml` puts fetch and WebSocket in
+  `web-sys` rather than a wrapper crate for *"about eighty lines in api.rs
+  against another dependency tree"*, under a comment whose own words are
+  "FEATURES AND NOT A CRATE, which is the whole reason web-sys is here rather
+  than a wrapper" -- so `History` and `PopStateEvent` are two entries on that
+  list against `leptos_router`, which is in no lockfile here and arrives with
+  its own tree. **Declared although the build already compiled without them**,
+  because cargo features are additive across the graph: `leptos` enables both
+  for its own reasons, so `web/` was spending somebody else's feature
+  selection, which is the `// indirect` marker read as evidence one ecosystem
+  over.
+
+  **WHAT IT COST IS MEASURED AND IS NOT THE FEATURES.** Release profile, same
+  toolchain, one commit apart: **1,597,604 bytes of wasm before and 1,921,981
+  after, +324,377 (+20.3%)**. It is not the three hundred lines of routing
+  either -- it is that `App`'s `<main>` went from four statically typed
+  children to a `move ||` match whose five arms each `into_any()`, so four
+  large view types get a full `AnyView` vtable where the compiler used to see
+  them in place. The trade is taken, because the alternative to a match over a
+  route is not having pages, and the figure is written down in three places
+  rather than left for somebody to find. `web/Cargo.toml`'s release-profile
+  comment claiming `opt-level = "s"` plus lto "takes the wasm well under a
+  megabyte" was already 50% wrong before this and is its own issue; this makes
+  it worse rather than causes it.
+
+  **AND A THIRD TREE SAYS THE ROUTER IS NOT WHAT COSTS IT**, which is the
+  measurement to read before believing the figure above: this branch with the
+  five-arm match replaced by static children -- `route.rs` and all four view
+  modules still compiled and instantiated -- is **1,558,267 bytes, 39,337
+  BELOW the base's 1,597,604** against the 1,921,981 it ships at, so the
+  routing and the pages cost nothing net and the whole +324,377 is the
+  `AnyView` erasure. Recorded because `+20.3%` is exactly the figure somebody
+  will one day blame the hand-rolled router for and propose deleting it over,
+  and the erasure is a property of matching on a route rather than of routing.
+
+  **THE FAILURE MODE IS INVISIBLE BY CONSTRUCTION, so the assertion is a
+  sentinel and the lab carries its own control.** A link the page does not
+  intercept is a full document load: 1.9 MiB of wasm re-fetched under
+  `Cache-Control: no-store`, the app mounted again -- and everything WORKS.
+  The right page is on screen, no error is logged, and the only symptom is a
+  second of latency. A resource count cannot see it either, because the
+  timeline starts over with the document, so the probe is a value on `window`,
+  which a new document is the only thing that clears. And a sentinel that
+  nothing in the lab can clear is an assertion that cannot fail -- so the
+  deep link at the end of `TestServe_UINavigatesWithoutReloadingTheApp` is a
+  real typed address and the sentinel is asserted GONE after it, which is what
+  makes the four `sameDocument` calls above it mean something.
+
+  **`watching` IS DELETED AND THE URL IS THE AUTHORITY.** An
+  `RwSignal<String>` in `App`, written by the queue and by a finished
+  `queue()`, became a second writable carrier of a fact that is now in the
+  path -- which is `queue.Cost`'s shape, and #139 named it in advance. So
+  `Watch` is `RequestPage(id: String)`, created per request by the route
+  match; the empty case goes with it, because an address naming no request is
+  `Route::Unknown` and never reaches the component. The queue's id cell is a
+  link rather than a button writing a signal, which is what makes a request's
+  page an address somebody can open in a tab, copy, reload or send on.
+
+  **THE HAZARD: A PENDING RE-OPEN OUTLIVING ITS OWNER, AND THE OLD GUARD WAS
+  THE READ THAT WOULD FAULT.** `retry` schedules
+  `set_timeout(move || connect(w, again), wait)` with a backoff to five
+  seconds, and that timeout is held by the BROWSER -- not an arena entry, not
+  an `on_cleanup`, nothing Leptos disposes can reach it. While the watcher was
+  a static child of `App` that was never unmounted it always landed on live
+  storage; under a router it lands on a disposed owner up to five seconds
+  after the operator navigated away. Every signal and `StoredValue` in
+  `Watcher` is an arena handle whose non-`try` read is an `expect`, and this
+  crate is built `panic = "abort"`, so the first read is an `unreachable`
+  trap: a `RuntimeError` out of a timer callback and a page that stops. The
+  epoch counter each of those four functions opened with was not a substitute
+  -- it was the read.
+
+  **`Watcher::alive` IS `try_get_value`, AND IT IS ONE MECHANISM RATHER THAN
+  TWO.** `set_timeout_with_handle` plus `on_cleanup` is what `Queue`'s poll
+  does and is the obvious second half; it is deliberately not here, because
+  `clearTimeout` cannot un-queue a callback the browser has already dispatched
+  -- so it is not sufficient alone while this is, and a clear beside it would
+  be a second path for one check whose other path is the live one. It would
+  also have made neither half's exit code its own. **The three socket handlers
+  get no guard and that is a measurement rather than an omission**: they are
+  reached only through the `api::Socket` in `w.socket`, which is an arena entry
+  disposal drops, and `Socket::drop` clears `onopen`, `onmessage` and
+  `onclose` before closing -- so a disposed owner has no socket to call them,
+  and a guard there would be a branch nothing can take.
+
+  **AND THE EPOCH COUNTER IS DELETED, because the router made its condition
+  unreachable.** It was bumped by the `Effect` that re-opened when `watching`
+  changed; the component is created per id now, so there is one open per mount
+  and `w.epoch.get_value() != epoch` could never be true. A guard whose
+  condition cannot be taken is a guard nobody can show is right.
+
+  **THE LAB MAKES THE BACKOFF WINDOW A WAIT RATHER THAN A RACE, and that is
+  the whole of why it is reliable.** A drop with `ember serve` up is answered
+  on the first attempt 250ms later, so "navigate inside the window" would be a
+  coin flip; `breakSockets` points the page's own `WebSocket` constructor at a
+  path that answers no upgrade, so every re-open fails, the backoff walks to
+  its five-second cap, and twelve attempts is forty-three seconds of them --
+  there is certainly a pending timeout at the moment of the navigation. The
+  reinstated hazard is red at `error: Uncaught RuntimeError: unreachable`.
+
+  **A RESTART USUALLY DOES NOT PRODUCE THE WINDOW, AND "CANNOT" IS WHAT THIS
+  ENTRY SAID AND IS WRONG -- corrected here before it was merged, by the agent
+  who measured it rather than by review of the sentence.** The design argument
+  is sound: SIGINT ends the rental, the row is written terminal, and `retry`
+  returns `None` for a terminal request, so there is nothing left to schedule.
+  What makes it a race rather than an exclusion is DELIVERY -- the page only
+  knows the request is terminal if the socket carried that view before it
+  closed, and nothing orders those two. When it does not arrive, `retry` sees
+  a request it still believes is live and schedules exactly the timeout this
+  hazard is about. The evidence is sharp and belongs to **#185**'s pass: a
+  reinstatement case whose patch was *a reworded comment* -- a negative
+  control, meant to be caught by nothing -- went RED at the restart
+  assertions. The window is not structurally excluded; it merely usually
+  loses. So the constructor break is what makes the hazard lab deterministic
+  rather than lucky, and the next person to read this must not drop it and
+  lean on a restart.
+
+  **AND THE WRITER IS `finish`, NOT `endIfUnfinished`**, which this entry also
+  had wrong. `drain` calls `q.finish(req.ID, err)` with the error as it came
+  back and only then wraps it as `request %s:` for its own return, so the
+  reason recorded on that path carries NO prefix -- which is the evidence,
+  because `endIfUnfinished` is the outer net for the paths `finish` never
+  reached and a row it wrote would show one.
+
+  **AND THE PAGE IS BEHAVING CORRECTLY THROUGHOUT, which is the half that
+  makes this worth leaning on at all.** `reopen_after`'s terminal rule and
+  `retry`'s `None if terminal` are doing what they were written to do, and the
+  browser-side drop arm of the reconnect lab passed the whole way through
+  #185's pass: the reconnect feature was never broken in production. So what
+  the hazard lab rests on is a deliberate behaviour rather than an accident,
+  and `TestServe_UIResumesAProgressStreamItLost`'s empty stream note is about
+  the delivery race above and not about a page that stopped reconnecting.
+
+  **AND `console.errors()` WOULD HAVE CAUGHT THIS ONE TOO, which corrects the
+  reason rather than the listener.** This file records that `chromedp.Console`
+  is blind to an uncaught throw, measured against the `Socket::drop` defect --
+  and that defect is a JS-level throw out of wasm-bindgen's glue with no Rust
+  panic behind it. A disposed-arena read IS a Rust panic, so `lib.rs`'s own
+  hook writes `ember-web panicked: Tried to access a reactive value that has
+  already been disposed` to the console before the abort, and `errors()`
+  filters for exactly that word. Measured: **both fire.** The page's `error`
+  handler stays the assertion because it is the one that sees the TRAP rather
+  than the hook's account of it -- which is what a build whose panic hook had
+  been changed would leave -- and because the sentence it prints names the
+  mechanism. So the rule is narrower than it reads: the console is blind to a
+  throw that is not a Rust panic, and a Rust panic in this crate is logged
+  twice.
+
+  **THE PASS FOUND TWO DEAD CONDITIONS IN `Route::parse`, which is what a
+  reinstatement pass is for and is a finding about the change rather than
+  about the suite.** It had a `trim_end_matches('/')` and an `!id.is_empty()`
+  guard in front of its `match`, and removing EACH left every test in the
+  module green: the one `filter(|s| !s.is_empty())` on the split had already
+  answered both, since a leading slash, a trailing one and a doubled one are
+  all empty segments and `/requests/` is therefore ONE segment. Both are gone
+  and the tests stayed, because what they assert is the ANSWER rather than the
+  mechanism -- and the mechanism they now rest on has an exit code: deleting
+  the filter turns four of them red, and the obvious alternative
+  implementation, `pathname.strip_prefix("/requests/")`, turns three red
+  because it hands back `Some("")`.
+
+  **THE SPLIT TOOK TWO OF #138'S OWN ASSERTIONS AND BOTH DELETIONS ARE
+  MEASURED RATHER THAN ARGUED.**
+
+  **The height bound first.** It was five rendered lines, and what made it a
+  bound was the separation #138 measured: the same 170-character store refusal
+  at NINE lines inside `td.status` at the 174px that cell got in the `1fr`
+  half of the grid. On the queue's own page the table is 1003px and the cell
+  is 62.5px tall -- and `colspan="1"` reinstated is **62.5px too**, because the
+  status column simply takes 745px of the leftovers and the sentence wraps to
+  the same three lines. So the bound could not fail over the one defect it
+  exists for, which is worse than no check. The WIDTH assertion is red on that
+  same patch at *"745px inside a 1003px table, 257px short"*, and it is the
+  half that holds the `colspan` literal to the six cells beside it, so the
+  height is a figure in the measurement log now rather than an assertion.
+
+  **And `onTbody`/`markedRows`, which read `tbody.watching` -- the one
+  group-level mark this page could produce, and the discriminator #138 earned
+  when moving `class:watching` onto the `<tr>` left the lab green.**
+  `class:running` has exactly the same shape and is the only mark left, and
+  that lab cannot produce it: `list.running` is the queue's live rental, read
+  from the API rather than a column, so it cannot be seeded and the lab is
+  deliberately about a request that never reached a provider. The obvious
+  replacement was the weaker "nothing marks a `<tr>`", and **measured, with
+  `class:running` moved onto the row that count is still ZERO** -- a check
+  that reads as protection and reports nothing, which is `AssertNoStray`. Both
+  fields are deleted and the gap is written where they were.
+
+  **What survives has its own exit code and the two cases discriminate.** One
+  `<tbody>` per request and the reason inside the group that holds its request
+  need no mark: reinstated as loose `<tr>`s the pair is red with nothing else
+  firing -- Leptos builds this DOM with `createElement`, so there is no HTML
+  parser to insert a `<tbody>` and a dropped group really is absent -- while a
+  reason given a `<tbody>` of its own is red at `whyOf`'s `following-sibling`
+  instead. Two defects, two fixes, two failures. It is the
+  `TestConformance_CannotCatchARederivedRunID` arrangement for the mark: the
+  suite states what it cannot see, so whoever next moves one in that table
+  decides again rather than trusting a green run.
+  **And the precondition changed subject with them.** It was "the queue panel
+  is narrower than the one the stylesheet makes span both columns", which was
+  what stopped the height bound being satisfied by a full-width panel -- and
+  there is no such grid and no such bound. What it asserts now is the SPLIT'S
+  OWN CLAIM, that the queue has the page: a `Fatalf`, because the width
+  measurement under it is about a table in that panel, and the thing it refuses
+  is somebody putting a second panel back on this route. **`<main>` and not
+  `<body>`**, because the body carries the page's 1.5rem padding, so a panel
+  filling its grid is 48px inside it at any width -- a comparison against a
+  constant, which the first run printed as a 48px failure.
+
+  **THE ELEVEN LABS WERE THE REAL COST AND IT FAILED LOUDLY, as #139
+  predicted.** Each found its panel by heading, which survives a panel moving
+  file and does not survive the panel not being on `/`, so **five** needed a
+  navigation step: the cost lab, the reason lab and the cancel lab to the
+  queue, the billing lab to its own page, and the reconnect lab twice round a
+  loop. The cancel lab needs two, and they are two different mechanisms --
+  a header link to the queue, and the BACK BUTTON after the row's link, because
+  the cancel button is on the queue and the evidence that a job started is on
+  the request's page. `navTo` clicks the header link
+  rather than navigating, because a `chromedp.Navigate` is a document load and
+  would make every lab after it an assertion about a fresh page -- and a page
+  whose links were never intercepted would pass all of them. **`rowOf` was
+  `td/button` and is `td/a`**, which the first run of the new routing lab is
+  what said: the row was on screen, the selector matched nothing, and the
+  failure printed the row it could not find.
+  **One lab's wait was a match on the stylesheet**, found the same way: `h2`
+  carries `text-transform: uppercase` and `innerText` is what is RENDERED, so
+  an assertion looking for "there is no page here" was handed "THERE IS NO
+  PAGE HERE".
+
+  **AND THE ROUTER MADE `location.pathname` AN INPUT TO A QUERY STRING, which
+  is the one correctness defect this slice introduced away from the watcher.**
+  `api::Socket::open` builds `ws://{host}/ws?id={id}&after={after}`, and for
+  the life of that function its one caller passed a `watching` signal written
+  from the server's own listing -- sixteen hex characters. The id comes off the
+  path now, so `/requests/x&after=99` is an address an operator can type, and
+  unescaped it sends `?id=x&after=99&after=0`: Go's `Query().Get` takes the
+  FIRST value of a duplicated key, so the watcher resumes request `x` from a
+  cursor nobody chose. No money and no security -- same origin, the cookie,
+  loopback, and the operator doing it to themselves -- but it is
+  `escapes_what_would_break_a_query`'s own rule, which this repository already
+  wrote down for a card filter where the consequence was "the filter silently
+  matched something else". So `urlish` **moved into `api`**, where both callers
+  now are, rather than being copied: two spellings of one escaping rule is two
+  places for one to drift, and a copy in `api` reading one in `views` would
+  have the layering backwards besides. For the id ember actually sends it is
+  the identity, which is exactly why nothing would have reported it; the test
+  is a cargo one and patching `urlish` to `s.to_string()` turns two red.
+
+  **THE EDITOR RACING THE HARNESS, which is the stale-backup shape met from
+  the other side: the harness racing itself is what the one-backup-per-path
+  rule already fixed, and this is something else writing the tree under it.**
+  No ordinal, and that is the file's own rule rather than modesty: the
+  sequence above counts to a sixth and then has an unnumbered shape after it,
+  because #186's entry dropped its own number -- so a seventh here would be
+  wrong, and this count has now been wrong three times. The NAME is the part
+  worth keeping.
+  The pass takes one backup per path before anything is patched, which is the
+  fix for a half-patched file being backed up mid-case -- and it assumes
+  nothing else writes the tree. Three files were edited while it ran, so its
+  restore put the pre-edit copies back and two comment rewrites were silently
+  gone; a fourth file was left half-patched when the pass was stopped, with a
+  `REINSTATED` marker still in it. Nothing in the pass could report either:
+  every case's own verdict was correct, and `pristine()` compares against the
+  backup the edits were made after. What caught it is the tooling's own
+  notice that a file had changed on disk, and what closes it is the rule
+  rather than a check: **while a reinstatement pass is running the tree is the
+  harness's, and an edit waits.** Recovered by stopping the pass, restoring
+  the half-patched file, re-applying the two rewrites, re-taking the backup
+  and resuming from the case that was interrupted -- then grepping the whole
+  tree for `REINSTATED` before believing anything.
+
+  **Three gaps are named rather than left.** A composed batch does not survive
+  leaving the compose page -- the draft and the batch live in that component,
+  #139 puts the lift in slice 4, and the symptom is a form that comes back
+  empty, so `README.md` says so. A request page re-opens its stream from
+  cursor zero, so coming back to a long generation replays its tail: nothing
+  is wrong, because `Progress::apply` is idempotent per sequence number, and
+  it is rows over loopback rather than anything billed. And `#183` -- the
+  provider `<select>`'s keyed `<For>` reading `config.get()` in the row body
+  -- moved file with no change at all: its semantics are exactly as they were,
+  which is deliberate, because half-moving a filed defect is how a reader
+  comes to believe it was fixed.
 - **`report.KindRunFinished` and `KindRunFailed` are deleted, and the test is
   whether a second live mechanism exists.** Both were declared, both were in
   `Kinds()`, both were rendered as deliberately silent by `Text`, and
@@ -3808,7 +4104,7 @@ that sentence made unrepresentable rather than merely tested.
   suite and the detector read it as a compile failure -- the "cannot tell a
   build failure from a pass" trap inverted, and the reason that detector now
   looks for `error[E...]` and `could not compile` instead.
-- **`make test-serve-lab` exited 2 for twenty of the twenty-four hours that
+- **`make test-serve-lab` exited 2 for twenty-two of the twenty-six hours that
   lab had existed, and the lab was asking for a sentence a correct page does
   not print (#185).** The entry above is where the reconnect landed; this is
   what happened to its own regression test three hours later.
@@ -3845,13 +4141,17 @@ that sentence made unrepresentable rather than merely tested.
   opens by NAMING this lab as the thing that filed the defect it is repairing,
   "the websocket lab's first version, which spent twelve minutes waiting for a
   reason that was never going to appear". So the two changes are linked in
-  this document, in both directions, 2,398 lines apart, and nobody re-ran the
+  this document, in both directions, 2,401 lines apart, and nobody re-ran the
   lab the first one owns. The interval is the measure of it: the lab landed at
   3d0426c, 2026-11-03 22:26:05, and 821a92c is 2026-11-04 01:29:32 and the
   **first** commit after it to touch `internal/queue/queue.go` -- so it was
-  green for 3h03m and 14 commits, and red for 20h35m and 23, five of which
-  edited that very file. It was red for 87% of its life and was found by a
-  review of an unrelated PR.
+  green for 3h03m27s and 14 commits, and red for **22h47m31s** and 23, five
+  of which edited that very file. **The first figure written here was 20h35m
+  and understated it**, because it measured to when the lab first went green
+  again rather than to the commit that fixed it -- a review recomputed it from
+  the timestamps and corrected it UPWARD, which is the direction a figure
+  about one's own finding is least likely to be wrong in by accident. It was
+  red for 88% of a 25h51m life and was found by a review of an unrelated PR.
   **THE REPAIR IS THREE DROPS, AND THE NOTE'S WINDOW IS MADE RATHER THAN
   FOUND.** A browser-side close with the server up is answered on the first
   attempt 250ms later, which is why the note was never asserted there; a
@@ -3895,6 +4195,21 @@ that sentence made unrepresentable rather than merely tested.
   -- a fetch at two seconds against a socket at 250ms, so by then the watcher
   has had several chances at the same row. That is the opposite of the window
   the shutdown offered.
+  **AND THE SECOND REQUEST HAS TO BE UNABLE TO FINISH, which the first
+  version got wrong and a merge caught.** The arm needs a request the signal
+  INTERRUPTS, and `waitForStatus(rider, "running")` establishes that it is
+  running *now* rather than that it still will be when the signal lands a
+  moment later -- the same gap as the watched request's own precondition, and
+  the third time tonight that "it is in state X" was read as "it will be in
+  state X". At sixty steps the rider finished inside the arm's own windows, so
+  the row read `done`: terminal, so the premise passed, and carrying no reason
+  at all, so the sentence the arm ends on could never appear and the failure
+  surfaced sixty lines away from its cause. Measured from the journal of a
+  failing run -- the watched request `cancelled`, the rider `done`. Six
+  hundred steps cannot finish inside a lab that never waits for it, which is
+  the device the watched request already uses, and the premise now asserts
+  `cancelled` rather than merely terminal so that a rider which finishes early
+  is one named message instead of a confusing one later.
   **A SECOND REQUEST IS WHAT KEEPS #159 IN THE ARM**, queued before the cancel
   so the drain loop claims it onto the same rental rather than renting again.
   The shutdown then has a request it really interrupts, its row is read out of
@@ -3929,6 +4244,32 @@ that sentence made unrepresentable rather than merely tested.
   `waitForText`, which cannot see an element that is absent, and "stopped"
   matches BOTH of the page's sentences, so a poll that was late read the
   wrong one as the answer.
+  **AND THE WAY IT BREAKS THE SOCKET IS #194's, NOT ITS OWN, WHICH IS A
+  MEASUREMENT RATHER THAN A MERGE RESOLUTION.** Two changes landed within
+  hours of each other needing the same browser-side instrument and both
+  edited `recordSockets`' one wrapper: #194 rewrites the URL to a path that
+  answers no upgrade (`/api/no-such-socket`, a 404 rather than a 101), and
+  this one threw out of `WebSocket::new` before the real constructor was
+  reached. **The path form subsumes the throw and is also the better
+  instrument**, so there is one mechanism: a handshake that reaches a real
+  server and is refused is what a dropped stream actually looks like, while a
+  constructor that throws is not a state any server can put a browser in --
+  the throw was simulating a defect that does not happen. Measured rather
+  than reasoned, which is the whole of why the throw went: the path holds the
+  page in `Stream::Reconnecting` across the entire window this arm reads, and
+  `RETRY_ATTEMPTS = 1` still turns the arm red under it.
+  **WHAT UNIFYING COST IS ONE BRANCH, and it is named rather than quietly
+  dropped**: a throw made `Socket::open` return Err, which is `connect`'s
+  `Err(_) => retry(…)` arm and the only place a constructor that refused can
+  be retried from, so that line is now reached by no lab at all. It is a
+  defensive branch for a URL no page constructs, and one shared helper
+  carrying two mechanisms is the drift this file keeps paying for -- but a
+  reader looking for its coverage should know there is none. The path lives in
+  `brokenSocketPath` because two labs now break these sockets and a second
+  spelling is a second thing to keep in step with what `ember serve` 404s;
+  `mendSockets` is the other half of the switch, which the restart arm needs
+  and #194's does not, since that one only ever needs the retry to keep
+  failing.
   **WHAT IS LOST IS THE CROSS-PROCESS CURSOR CLAIM, and it is lost rather than
   moved.** "A NEW process reading the same rows resumes from at least where
   the page had got to" required the page to reconnect after the restart, which

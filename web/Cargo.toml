@@ -53,6 +53,18 @@ features = [
   # never calls again).
   "HtmlInputElement", "FileList", "File", "Blob",
 
+  # The router. FEATURES AND NOT A CRATE again, and this is the entry #139
+  # weighed `leptos_router` against: two names here, against a crate that is
+  # in no lockfile in this repository and would arrive with its own tree, for
+  # a pathname read into a signal, a click that pushes state and a listener
+  # that reads it back.
+  #
+  # DECLARED ALTHOUGH THE BUILD ALREADY COMPILED WITHOUT THEM, because cargo
+  # features are additive across the graph: `leptos` enables both for its own
+  # reasons, so `web/` was spending somebody else's feature selection. That is
+  # the `// indirect` marker read as evidence -- a dependency's choice standing
+  # in for this crate's, which holds only until the day that crate narrows it.
+  "History", "PopStateEvent",
 ]
 
 [profile.release]
