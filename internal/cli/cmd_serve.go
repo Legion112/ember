@@ -214,8 +214,16 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// must have no way to name a plan, a provider or a rental: the seam is one
 	// interface with one method, and the implementation lives beside the drain
 	// loop whose single-rental invariant is what makes it safe.
+	// Config IS THIS PROCESS'S OWN AND IT IS THERE FOR THE PERIOD CEILINGS.
+	// A submitted run names its own config and that one travels -- the
+	// reversal app.RunAsk documents -- but the ledger it is recorded in is
+	// `store` here, so the file that owns that ledger has to be consulted
+	// about `max_day_usd` as well, or a submitted run spends the queue's
+	// allowance without being bounded by it (#165). See DirectRunner.Config,
+	// which has the argument and the pair.
 	runs := queue.DirectRunner{
 		Deps: d, Store: store, Queue: q, AllowPaid: o.AllowPaid, Out: out, Log: o.Log,
+		Config: cfg,
 	}
 
 	// AND THE ONE THING `GET /api/nodes` NEEDS, which it did not have in any
@@ -397,11 +405,15 @@ type periodStanding struct {
 
 // standing reads what the current day and month have come to.
 func standing(ctx context.Context, s queue.Spender, cfg config.Config) periodStanding {
-	day, month, err := cfg.PeriodCeilings()
+	// queue.CeilingsOf and not config.PeriodCeilings directly, so that the
+	// announcement and the five gates read the key through one function: this
+	// print was one of exactly two non-test callers of PeriodCeilings when
+	// #165 was filed, and the other was the only gate there was.
+	cs, err := queue.CeilingsOf(cfg)
 	if err != nil {
 		return periodStanding{Err: err}
 	}
-	st := periodStanding{Ceilings: queue.Ceilings{Day: day, Month: month}}
+	st := periodStanding{Ceilings: cs}
 	if st.Ceilings.IsZero() {
 		return st
 	}

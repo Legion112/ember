@@ -18,7 +18,14 @@ import (
 	"github.com/Legion112/ember/internal/provider/local"
 )
 
-// The two money gates on the rental a request ASKED for, which is the card.
+// The money gates in this package, and whether each of them can fail.
+//
+// IT WAS TWO AND IT IS FOUR. The two at the top are `AppPlanner.Plan`'s, on
+// the rental a request ASKED for; the two at the bottom are
+// `DirectRunner.Start`'s, on a run `ember up` submitted over the unix socket,
+// which had --allow-paid and NO PERIOD CEILING AT ALL until #165. The fifth
+// and sixth live in `internal/cli`, on the two shell paths, for the same
+// reason and in the same change.
 //
 // WHY THIS FILE EXISTS AT ALL. `AppPlanner.Plan` ends with refusePaid and then
 // refuseOverPeriod -- the last two statements before anything is created --
@@ -265,5 +272,338 @@ func TestAppPlanner_ProjectsTheChosenCardsPriceAgainstThePeriodCeilings(t *testi
 	}
 	if rental == nil {
 		t.Fatal("Plan returned no rental and no error")
+	}
+}
+
+// submittedRunConfig is `paidRunConfig` over a whole hour, so the projection
+// at $0.89/hr is exactly $0.89 and the figures in the assertions below are
+// readable rather than a rounded fraction of an hour.
+const submittedRunConfig = "provider: runpod\nimage: " + runImage + "\nttl: 1h\ncmd: [echo, hi]\n"
+
+// aLoop runs the drain goroutine for as long as the test needs one and waits
+// for its deferred destroy on the way out.
+//
+// The ACCEPTANCE arms below need one: `Submit` is a rendezvous on an
+// unbuffered channel, so a run that got past both gates parks for ever with
+// nobody receiving. The refusal arms never reach it. Nothing here asserts on a
+// row's STATUS while this is running, for the reason
+// TestDirectRunner_StartAdoptsTheRowAndHandsTheRunToTheLoop records: a rental
+// that fails fast against the recording Docker engine writes a terminal status
+// at a moment no assertion can order itself against. What they assert is the
+// COUNT, which Adopt settles synchronously inside Start before Submit is
+// reached.
+func aLoop(t *testing.T, q *Queue) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- q.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done //nolint:errcheck // waiting for the destroy, not for an error
+	})
+	return ctx
+}
+
+// ledgerRows is how many requests the history holds.
+func ledgerRows(t *testing.T, st genstore.Store) int {
+	t.Helper()
+	rs, err := st.List(context.Background(), genstore.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(rs)
+}
+
+// TestDirectRunner_ProjectsASubmittedRunAgainstTheDaemonsPeriodCeilings.
+//
+// WHAT WAS WRONG (#165). Five paths write `requests.cost`, the column
+// `genstore.Spend` sums with no status filter, and only two of them were
+// projected against `max_day_usd` and `max_month_usd`. A run submitted over
+// the socket consumed the queue's allowance and was bounded by nothing, so the
+// key read as a bound on a day and was a bound on the queue -- measured
+// structurally rather than by a test: `config.PeriodCeilings` had exactly two
+// non-test callers, this package's one gate and a startup print.
+//
+// THE CEILING IS THE DAEMON'S AND THE LEDGER IS THE DAEMON'S, which is the
+// pair the whole decision turns on: a ceiling is a question about a total, and
+// the total a submitted run adds to is the one in `DirectRunner.Store`. See
+// the Config field.
+//
+// THREE NUMBERS, CHOSEN SO THAT ONLY THE REAL GATE PASSES THEM -- #164's
+// pattern, which is the "what would this assertion say if the bug were
+// present?" question asked of a money figure. $19.45 spent today, a $20 day
+// ceiling, a $0.89 projection:
+//
+//   - a gate that IGNORED the ledger compares $0.89 against $20 and allows;
+//   - a gate that REPORTED rather than PROJECTED compares $19.45 against $20
+//     and allows -- the "ceiling every period breaches by one rental" the
+//     design refuses to be;
+//   - the live one adds them, gets $20.34, and refuses.
+//
+// THE CEILING IS MATCHED AS "ceiling of $20," AND NOT AS "$20", because "$20"
+// is a substring of the "$20.34" two fields later in the same message --
+// measured in #164 as an assertion held up by the total beside it. The comma
+// is what the message already puts after the figure, so the bound costs
+// nothing.
+//
+// TWO WITNESSES THAT IT FIRED WHERE IT CLAIMS TO. The message is one; the
+// other is that the history still holds ONE row -- the seeded rental -- so the
+// refusal landed before `Adopt` wrote the run's own. A row written first would
+// have told the ledger a rental was coming when none was.
+//
+// AND THE ACCEPTANCE IS IN THE SAME TEST, because a refusal alone is
+// consistent with a gate that refuses every submitted run there is, which
+// would make the channel useless rather than bounded.
+func TestDirectRunner_ProjectsASubmittedRunAgainstTheDaemonsPeriodCeilings(t *testing.T) {
+	cfg := writeRunConfig(t, submittedRunConfig)
+
+	over := genstore.NewRecordingStore()
+	spentOn(t, over, at(17, 9), 19_450_000)
+	q := &Queue{Store: over, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
+	ctx := aLoop(t, q)
+
+	r := paidRunner(t, q, over)
+	r.AllowPaid = true
+	r.Config = config.Config{MaxDayUSD: "20"}
+	r.Now = func() time.Time { return at(17, 12) }
+
+	_, err := r.Start(ctx, app.RunAsk{Config: cfg})
+	if err == nil {
+		t.Fatal("a submitted run projected past the day's ceiling was accepted")
+	}
+	for _, want := range []string{"max_day_usd", "2026-11-17", "$19.45", "ceiling of $20,", "$0.89", "$20.34"} {
+		if !strings.Contains(err.Error(), want) {
+			// The price is the capture's, so a `gpus.json` whose RTX 4090 is
+			// no longer $0.89/hr reads here as a gate that did not fire. Said
+			// in the message rather than left to be worked out, because a
+			// figure that moved and a gate that broke are otherwise the same
+			// red line.
+			t.Errorf("the refusal does not mention %q, so it is not the period ceiling's "+
+				"(or testdata/gpus.json no longer prices the 4090 at $0.89/hr): %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "--allow-paid") {
+		t.Errorf("the run stopped on the flag rather than on the ceiling: %v", err)
+	}
+	if n := ledgerRows(t, over); n != 1 {
+		t.Errorf("the history holds %d row(s), want only the seeded rental: a refused run that "+
+			"adopted a row told the ledger a rental was coming when none was", n)
+	}
+
+	room := genstore.NewRecordingStore()
+	spentOn(t, room, at(17, 9), 18_950_000)
+	q2 := &Queue{Store: room, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
+	ctx2 := aLoop(t, q2)
+
+	a := paidRunner(t, q2, room)
+	a.AllowPaid = true
+	a.Config = config.Config{MaxDayUSD: "20"}
+	a.Now = func() time.Time { return at(17, 12) }
+
+	if _, err := a.Start(ctx2, app.RunAsk{Config: cfg}); err != nil {
+		t.Fatalf("a submitted run that fits inside the ceiling was refused, so the gate refuses "+
+			"everything rather than refusing what crosses a ceiling: %v", err)
+	}
+	if n := ledgerRows(t, room); n != 2 {
+		t.Errorf("the history holds %d row(s), want the seeded rental and the accepted run", n)
+	}
+}
+
+// TestDirectRunner_TheTTLItProjectsOverIsTheRunsAndNotTheDaemons.
+//
+// The projection is the offer's price over the deadline THE NODE WILL GET,
+// which on this path comes from the config the run named and the overrides it
+// carried -- not from the config `ember serve` happens to have been started
+// with. Those two files are both in scope here and only one of them says how
+// long this rental lasts, so a gate that reached for `r.Config.TTL` would
+// price a submitted run at the daemon's hours.
+//
+// Measured both ways rather than asserted in one: the daemon's config names
+// TEN hours and the run's names one. At $0.89/hr with $18.95 already spent
+// against a $20 day, the honest projection is $0.89 and the run goes ahead;
+// the daemon's TTL would make it $8.90, take the day to $27.85 and refuse. So
+// substituting it is red here and nowhere else, which is the half the test
+// above cannot see because both of its configs agree about the hour.
+func TestDirectRunner_TheTTLItProjectsOverIsTheRunsAndNotTheDaemons(t *testing.T) {
+	st := genstore.NewRecordingStore()
+	spentOn(t, st, at(17, 9), 18_950_000)
+	q := &Queue{Store: st, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
+	ctx := aLoop(t, q)
+
+	r := paidRunner(t, q, st)
+	r.AllowPaid = true
+	r.Config = config.Config{MaxDayUSD: "20", TTL: 10 * time.Hour}
+	r.Now = func() time.Time { return at(17, 12) }
+
+	if _, err := r.Start(ctx, app.RunAsk{Config: writeRunConfig(t, submittedRunConfig)}); err != nil {
+		t.Fatalf("a one-hour run was priced at the daemon's ten hours: %v", err)
+	}
+}
+
+// TestDirectRunner_TakesTheTighterOfTheTwoConfigsCeilings.
+//
+// BOTH FILES BIND AND NEITHER WIDENS THE OTHER, which is the second half of
+// the decision on DirectRunner.Config. Reading only the daemon's would ship a
+// money divergence between the two `up` paths -- an operator whose
+// `ember.yaml` sets `max_day_usd` and who started the daemon with a different
+// `--config` would get a bounded `ember up` in a shell and an unbounded one
+// through a daemon, which is the one thing #146 exists to remove. Reading only
+// the run's would leave #165 open, because the allowance being spent is the
+// daemon's.
+//
+// So it is asserted in BOTH directions over the same $0.89 projection and the
+// same $19.45 already spent: the daemon alone, and the run's config alone.
+// Each arm is red if its own side is dropped, and the acceptance in the test
+// above is what stops either being satisfied by a gate that refuses
+// everything.
+func TestDirectRunner_TakesTheTighterOfTheTwoConfigsCeilings(t *testing.T) {
+	cases := []struct {
+		name   string
+		daemon config.Config
+		run    string
+	}{
+		{
+			// Only the daemon names one. This is #165 itself: the file
+			// `ember serve` read is the one that owns the ledger being spent.
+			name:   "the daemon's alone",
+			daemon: config.Config{MaxDayUSD: "20"},
+			run:    submittedRunConfig,
+		},
+		{
+			// Only the run names one. Without this arm the socket path gives
+			// LESS protection than the same command in a shell.
+			name:   "the run's alone",
+			daemon: config.Config{},
+			run:    submittedRunConfig + "max_day_usd: \"20\"\n",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := genstore.NewRecordingStore()
+			spentOn(t, st, at(17, 9), 19_450_000)
+			q := &Queue{Store: st, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
+			ctx := aLoop(t, q)
+
+			r := paidRunner(t, q, st)
+			r.AllowPaid = true
+			r.Config = c.daemon
+			r.Now = func() time.Time { return at(17, 12) }
+
+			_, err := r.Start(ctx, app.RunAsk{Config: writeRunConfig(t, c.run)})
+			if err == nil {
+				t.Fatal("the run was accepted, so this side's ceiling was not read")
+			}
+			if !strings.Contains(err.Error(), "ceiling of $20,") {
+				t.Errorf("the refusal is not the period ceiling's: %v", err)
+			}
+			if n := ledgerRows(t, st); n != 1 {
+				t.Errorf("the history holds %d row(s), want only the seeded rental", n)
+			}
+		})
+	}
+}
+
+// TestDirectRunner_AMalformedCeilingNamesWhichFileItIsIn.
+//
+// Two configs reach this gate, so "max_day_usd: malformed price" on its own
+// leaves an operator with two candidates and no way to tell which they just
+// typed a path to. The parses are kept apart for exactly that, and both
+// directions are asserted because a message that named one file whatever
+// happened would read as working on the half it is right about.
+//
+// IT IS ALSO A PATH THE KEY HAD NEVER BEEN PARSED ON. `max_day_usd: "banana"`
+// submitted to a daemon was accepted and run before this change -- not
+// refused, not warned about -- because nothing between `config.Load` and the
+// create call read the key at all.
+func TestDirectRunner_AMalformedCeilingNamesWhichFileItIsIn(t *testing.T) {
+	cases := []struct {
+		name   string
+		daemon config.Config
+		run    string
+		want   string
+	}{
+		{
+			name:   "the daemon's",
+			daemon: config.Config{MaxDayUSD: "banana"},
+			run:    submittedRunConfig,
+			want:   "the config ember serve was started with",
+		},
+		{
+			name:   "the run's",
+			daemon: config.Config{},
+			run:    submittedRunConfig + "max_day_usd: \"banana\"\n",
+			want:   "the config this run named",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := genstore.NewRecordingStore()
+			q := &Queue{Store: st, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
+			ctx := aLoop(t, q)
+
+			r := paidRunner(t, q, st)
+			r.AllowPaid = true
+			r.Config = c.daemon
+
+			_, err := r.Start(ctx, app.RunAsk{Config: writeRunConfig(t, c.run)})
+			if err == nil {
+				t.Fatal("a ceiling that is not a price was accepted")
+			}
+			if !strings.Contains(err.Error(), "max_day_usd") {
+				t.Errorf("the refusal does not name the key: %v", err)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("the refusal does not say which file holds it (want %q): %v", c.want, err)
+			}
+			if n := ledgerRows(t, st); n != 0 {
+				t.Errorf("a refused run wrote %d row(s) to the history", n)
+			}
+		})
+	}
+}
+
+// TestCeilings_TightestNeverWidensAndTreatsZeroAsUnbounded.
+//
+// The composition the socket path rests on, as arithmetic. Zero has to mean
+// unbounded on both sides or a config that sets neither narrows the other's to
+// nothing and refuses every rental there is -- which is `Narrow`'s own reason
+// for `smallerUSD`, and is why this delegates to it rather than spelling the
+// comparison a second time.
+func TestCeilings_TightestNeverWidensAndTreatsZeroAsUnbounded(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b Ceilings
+		want Ceilings
+	}{
+		{"neither", Ceilings{}, Ceilings{}, Ceilings{}},
+		{"only a", Ceilings{Day: 20_000_000}, Ceilings{}, Ceilings{Day: 20_000_000}},
+		{"only b", Ceilings{}, Ceilings{Month: 250_000_000}, Ceilings{Month: 250_000_000}},
+		{
+			"a is tighter",
+			Ceilings{Day: 20_000_000, Month: 100_000_000},
+			Ceilings{Day: 50_000_000, Month: 250_000_000},
+			Ceilings{Day: 20_000_000, Month: 100_000_000},
+		},
+		{
+			// Per period and not per config: the tighter day and the tighter
+			// month can come from different files, and taking one file whole
+			// would widen the other's.
+			"one period each",
+			Ceilings{Day: 20_000_000, Month: 250_000_000},
+			Ceilings{Day: 50_000_000, Month: 100_000_000},
+			Ceilings{Day: 20_000_000, Month: 100_000_000},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.a.Tightest(c.b); got != c.want {
+				t.Errorf("Tightest = %+v, want %+v", got, c.want)
+			}
+			// Symmetric, or "which config you name first" would be a money
+			// decision.
+			if got := c.b.Tightest(c.a); got != c.want {
+				t.Errorf("Tightest reversed = %+v, want %+v", got, c.want)
+			}
+		})
 	}
 }

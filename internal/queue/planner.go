@@ -358,38 +358,20 @@ func (p AppPlanner) recordSync(ctx context.Context, sync app.Plan, store string)
 	return runErr
 }
 
-// refuseOverPeriod is the max_day_usd and max_month_usd gate.
+// refuseOverPeriod is this planner's half of the max_day_usd and
+// max_month_usd gate: its config, its ledger and its clock.
 //
-// The projection is the offer's price over the TTL, which is exactly what
-// provision.Budget.Allow compares max_run_usd against -- so the figure a
-// period is charged and the figure one rental is bounded by are the same
-// arithmetic, and the two ceilings cannot come to disagree about what a rental
-// may come to.
-//
-// A ceiling with no ledger to read is a REFUSAL and not a pass. An operator
-// who wrote max_month_usd into their config has said that unattended spending
-// must stop somewhere, and the one answer a spend ceiling must never give is
-// "probably fine" -- the same rule that makes `ember ls` exit non-zero
-// over a provider it could not ask. It cannot happen through `ember serve`,
-// which always wires the store; it is here because a ceiling that silently
-// does nothing is worse than one that is not configured.
+// THE RULE ITSELF IS RefuseOverPeriod's, and it is a package function rather
+// than a method here because four other rental paths need the same one --
+// `ember up` in a shell, `ember up` over the socket, `ember store sync`, and
+// the store fill below. A copy per caller is a copy of a money rule, and the
+// one thing this repository records about those is that the copies drift.
 func (p AppPlanner) refuseOverPeriod(ctx context.Context, ttl time.Duration, price node.Rate) error {
-	day, month, err := p.Config.PeriodCeilings()
+	cs, err := CeilingsOf(p.Config)
 	if err != nil {
-		// The operator's own file, as Narrow says of the budgets: their
-		// error, and found before anything is rented.
-		return fmt.Errorf("the configured period ceiling: %w", err)
+		return err
 	}
-	cs := Ceilings{Day: day, Month: month}
-	if cs.IsZero() {
-		return nil
-	}
-	if p.Ledger == nil {
-		return fmt.Errorf("this configuration sets a period ceiling (%v a day, %v a month) and "+
-			"nothing here can read what has been spent, so ember cannot tell whether this rental "+
-			"is within it and will not rent", day, month)
-	}
-	return cs.Allow(ctx, p.Ledger, p.now(), price.Cost(ttl))
+	return RefuseOverPeriod(ctx, cs, p.Ledger, p.now(), ttl, price)
 }
 
 // refusePaid is the --allow-paid gate.

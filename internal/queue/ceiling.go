@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/node"
 )
@@ -101,6 +102,102 @@ type Ceilings struct {
 
 // IsZero reports whether no period is bounded.
 func (c Ceilings) IsZero() bool { return c.Day == 0 && c.Month == 0 }
+
+// CeilingsOf reads the two period ceilings out of a config.
+//
+// ONE PARSE FOR THE WHOLE PROGRAM, which is the "one name for a path, not one
+// per call site" rule applied to a money figure. config.PeriodCeilings had two
+// non-test callers when #165 was filed -- this gate and a startup PRINT in
+// cmd_serve -- so the key was read in exactly two places and enforced in one.
+// Every path that rents now goes through this function and RefuseOverPeriod
+// below, including the announcement, so a second spelling of "what does
+// max_day_usd mean" cannot appear without deleting one of them.
+//
+// The wrapping names the file rather than the request: as Narrow says of the
+// budgets, a ceiling that will not parse is the OPERATOR's error, and it is
+// found before anything is rented.
+func CeilingsOf(cfg config.Config) (Ceilings, error) {
+	day, month, err := cfg.PeriodCeilings()
+	if err != nil {
+		return Ceilings{}, fmt.Errorf("the configured period ceiling: %w", err)
+	}
+	return Ceilings{Day: day, Month: month}, nil
+}
+
+// Tightest is the stricter of two configured ceilings, per period.
+//
+// IT EXISTS FOR ONE CALLER AND ONE REASON: a run submitted over the unix
+// socket names its own config, and the LEDGER it is bounded against is the
+// daemon's. Two operator statements reach one total, so both bind it and
+// NEITHER IS WIDENED BY THE OTHER -- which is why this is a minimum and not a
+// replacement.
+//
+// It is not `Narrow`'s rule reached again, and the difference matters because
+// `ember up`'s overrides deliberately REPLACE. That rule is about a request,
+// or a flag, against the file; the period ceilings have no flag and no field
+// on any wire type, so there is nothing here that could replace anything. What
+// is being composed is two files an operator wrote, and taking the smaller of
+// two numbers an operator wrote cannot give them a limit they did not ask for.
+//
+// Zero means unbounded on both sides, through the same smallerUSD that
+// Narrow's budgets use -- a config that sets neither must not narrow the
+// other's to nothing and refuse every rental there is.
+func (c Ceilings) Tightest(o Ceilings) Ceilings {
+	return Ceilings{Day: smallerUSD(c.Day, o.Day), Month: smallerUSD(c.Month, o.Month)}
+}
+
+// RefuseOverPeriod is the max_day_usd and max_month_usd gate, for every path
+// that rents.
+//
+// IT WAS A METHOD ON AppPlanner AND TWO OF FIVE RENTAL PATHS HAD IT (#165).
+// Five paths write `requests.cost`, the column `genstore.Spend` sums with no
+// status filter, all of them through AdoptRun or the queue's own Recorder --
+// the queued request, the queue's store fill, `ember up` submitted over the
+// socket, `ember up` in a shell, and `ember store sync` in a shell. The last
+// three reached no ceiling at all, so `max_day_usd` read as a bound on a day
+// and was a bound on the queue. That is a function on the package now, and the
+// callers are the five.
+//
+// THE PROJECTION IS THE OFFER'S PRICE OVER THE TTL THE NODE WILL ACTUALLY
+// GET, which is exactly what provision.Budget.Allow compares max_run_usd
+// against -- so the figure a period is charged and the figure one rental is
+// bounded by are the same arithmetic, and the two ceilings cannot come to
+// disagree about what a rental may come to. Both halves of it are gates that
+// have been measured unable to fail: replacing the price with 0, or the TTL
+// with 0, left `go test ./...` at exit 0 before #157 (see moneygate_test.go),
+// so the price and the ttl are parameters rather than fields read here, and
+// every caller passes the plan's own.
+//
+// A CEILING WITH NO LEDGER TO READ IS A REFUSAL AND NOT A PASS. An operator
+// who wrote max_month_usd into their config has said that unattended spending
+// must stop somewhere, and the one answer a spend ceiling must never give is
+// "probably fine" -- the same rule that makes `ember ls` exit non-zero over a
+// provider it could not ask. It cannot be reached through `ember serve`, which
+// always wires the store; on the shell paths it IS reachable, because
+// recording a rental is best-effort there and a database that will not open is
+// a line printed rather than a refusal. Those are two different uses of one
+// store and only one of them may be skipped: see cli.boundAndRecord.
+//
+// A FREE RENTAL IS NEVER REFUSED, which Allow answers on the projection being
+// zero rather than on anything here.
+func RefuseOverPeriod(
+	ctx context.Context,
+	cs Ceilings,
+	led Spender,
+	now time.Time,
+	ttl time.Duration,
+	price node.Rate,
+) error {
+	if cs.IsZero() {
+		return nil
+	}
+	if led == nil {
+		return fmt.Errorf("this configuration sets a period ceiling (%v a day, %v a month) and "+
+			"nothing here can read what has been spent, so ember cannot tell whether this rental "+
+			"is within it and will not rent", cs.Day, cs.Month)
+	}
+	return cs.Allow(ctx, led, now, price.Cost(ttl))
+}
 
 // Spender is the one read a ceiling needs.
 //
