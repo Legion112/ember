@@ -2564,8 +2564,14 @@ that sentence made unrepresentable rather than merely tested.
   the identity, which is exactly why nothing would have reported it; the test
   is a cargo one and patching `urlish` to `s.to_string()` turns two red.
 
-  **A SEVENTH HARNESS SHAPE, and it is the stale-backup one met from the other
-  side: the EDITOR racing the harness rather than the harness racing itself.**
+  **THE EDITOR RACING THE HARNESS, which is the stale-backup shape met from
+  the other side: the harness racing itself is what the one-backup-per-path
+  rule already fixed, and this is something else writing the tree under it.**
+  No ordinal, and that is the file's own rule rather than modesty: the
+  sequence above counts to a sixth and then has an unnumbered shape after it,
+  because #186's entry dropped its own number -- so a seventh here would be
+  wrong, and this count has now been wrong three times. The NAME is the part
+  worth keeping.
   The pass takes one backup per path before anything is patched, which is the
   fix for a half-patched file being backed up mid-case -- and it assumes
   nothing else writes the tree. Three files were edited while it ran, so its
