@@ -417,12 +417,36 @@ func waitForTextIn(
 // forty-three seconds of them, so there is a pending timeout at the moment of
 // the navigation and it fires within five seconds of it.
 //
-// A RESTART CANNOT PRODUCE THIS, which is why the drop is browser-side: SIGINT
-// ends the rental, `endIfUnfinished` writes a terminal status, and `retry`
-// returns `None` for a terminal request -- so there is no pending timeout to
-// outlive anything. Measured on master while this lab was being written, where
-// it is also why `TestServe_UIResumesAProgressStreamItLost` reports an empty
-// stream note after its restart (#185).
+// A RESTART USUALLY DOES NOT PRODUCE THIS, WHICH IS WHY THE DROP IS
+// BROWSER-SIDE -- and "usually" is the whole of the correction, because the
+// first version of this comment said "cannot" and that is wrong.
+//
+// The design argument is sound: SIGINT ends the rental, `finish` writes a
+// terminal status, and `retry` returns `None` for a terminal request, so there
+// is nothing left to schedule. What makes it a race rather than an exclusion is
+// DELIVERY -- the page only knows the request is terminal if the socket carried
+// that view before it closed, and nothing orders those two. When it does not
+// arrive, `retry` sees a request it still believes is live and schedules
+// exactly the timeout this lab is about. #185's pass has the evidence: a
+// reinstatement case whose patch was a reworded COMMENT -- a negative control,
+// meant to be caught by nothing -- went red at its restart assertions.
+//
+// SO DO NOT DROP `breakSockets` AND LEAN ON A RESTART. The constructor break is
+// what makes this lab deterministic rather than lucky; a restart would make it
+// a flake that passes most of the time, which this suite has already paid for
+// once.
+//
+// `finish` AND NOT `endIfUnfinished`, which the first version also had wrong:
+// `drain` calls `q.finish(req.ID, err)` with the error as it came back and only
+// then wraps it as `request %s:` for its own return, so the reason recorded on
+// that path carries no prefix -- which is the evidence, since `endIfUnfinished`
+// is the outer net for the paths `finish` never reached.
+//
+// And the page is behaving CORRECTLY throughout: `reopen_after`'s terminal rule
+// and `retry`'s `None if terminal` do what they were written to do, and the
+// browser-side drop arm of the reconnect lab passed the whole way through
+// #185's pass. `TestServe_UIResumesAProgressStreamItLost`'s empty stream note
+// is about the delivery race above, not about a page that stopped reconnecting.
 func TestServe_UILeavingAReconnectingWatcherDoesNotTrapTheWasm(t *testing.T) {
 	requireChrome(t)
 	l := servableLab(t)

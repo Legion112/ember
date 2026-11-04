@@ -2445,19 +2445,47 @@ that sentence made unrepresentable rather than merely tested.
   and `w.epoch.get_value() != epoch` could never be true. A guard whose
   condition cannot be taken is a guard nobody can show is right.
 
-  **THE LAB MAKES THE BACKOFF WINDOW A WAIT RATHER THAN A RACE, and a restart
-  cannot produce it at all.** A drop with `ember serve` up is answered on the
-  first attempt 250ms later, so "navigate inside the window" would be a coin
-  flip; `breakSockets` points the page's own `WebSocket` constructor at a path
-  that answers no upgrade, so every re-open fails, the backoff walks to its
-  five-second cap, and twelve attempts is forty-three seconds of them -- there
-  is certainly a pending timeout at the moment of the navigation. SIGINT is
-  the arrangement that does NOT work: it ends the rental, `endIfUnfinished`
-  writes a terminal status and `retry` returns `None` for a terminal request,
-  so there is nothing pending to outlive anything. Measured, and it is also
-  why `TestServe_UIResumesAProgressStreamItLost` reports an empty stream note
-  after its own restart, which is **#185** and not this. The reinstated hazard
-  is red at `error: Uncaught RuntimeError: unreachable`.
+  **THE LAB MAKES THE BACKOFF WINDOW A WAIT RATHER THAN A RACE, and that is
+  the whole of why it is reliable.** A drop with `ember serve` up is answered
+  on the first attempt 250ms later, so "navigate inside the window" would be a
+  coin flip; `breakSockets` points the page's own `WebSocket` constructor at a
+  path that answers no upgrade, so every re-open fails, the backoff walks to
+  its five-second cap, and twelve attempts is forty-three seconds of them --
+  there is certainly a pending timeout at the moment of the navigation. The
+  reinstated hazard is red at `error: Uncaught RuntimeError: unreachable`.
+
+  **A RESTART USUALLY DOES NOT PRODUCE THE WINDOW, AND "CANNOT" IS WHAT THIS
+  ENTRY SAID AND IS WRONG -- corrected here before it was merged, by the agent
+  who measured it rather than by review of the sentence.** The design argument
+  is sound: SIGINT ends the rental, the row is written terminal, and `retry`
+  returns `None` for a terminal request, so there is nothing left to schedule.
+  What makes it a race rather than an exclusion is DELIVERY -- the page only
+  knows the request is terminal if the socket carried that view before it
+  closed, and nothing orders those two. When it does not arrive, `retry` sees
+  a request it still believes is live and schedules exactly the timeout this
+  hazard is about. The evidence is sharp and belongs to **#185**'s pass: a
+  reinstatement case whose patch was *a reworded comment* -- a negative
+  control, meant to be caught by nothing -- went RED at the restart
+  assertions. The window is not structurally excluded; it merely usually
+  loses. So the constructor break is what makes the hazard lab deterministic
+  rather than lucky, and the next person to read this must not drop it and
+  lean on a restart.
+
+  **AND THE WRITER IS `finish`, NOT `endIfUnfinished`**, which this entry also
+  had wrong. `drain` calls `q.finish(req.ID, err)` with the error as it came
+  back and only then wraps it as `request %s:` for its own return, so the
+  reason recorded on that path carries NO prefix -- which is the evidence,
+  because `endIfUnfinished` is the outer net for the paths `finish` never
+  reached and a row it wrote would show one.
+
+  **AND THE PAGE IS BEHAVING CORRECTLY THROUGHOUT, which is the half that
+  makes this worth leaning on at all.** `reopen_after`'s terminal rule and
+  `retry`'s `None if terminal` are doing what they were written to do, and the
+  browser-side drop arm of the reconnect lab passed the whole way through
+  #185's pass: the reconnect feature was never broken in production. So what
+  the hazard lab rests on is a deliberate behaviour rather than an accident,
+  and `TestServe_UIResumesAProgressStreamItLost`'s empty stream note is about
+  the delivery race above and not about a page that stopped reconnecting.
 
   **AND `console.errors()` WOULD HAVE CAUGHT THIS ONE TOO, which corrects the
   reason rather than the listener.** This file records that `chromedp.Console`
