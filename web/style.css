@@ -276,6 +276,22 @@ p.why { font-size: .85rem }
 .gallery figure:not(.preview) img { image-rendering: auto }
 .gallery .preview img { opacity: .85 }
 
+/* A speech artifact. The width is the player's own minimum useful one: Chrome
+ * drops the scrubber below about 15rem and leaves a transport nobody can seek
+ * with, which reads as a broken control rather than as a narrow one. */
+.gallery figure.audio { width: 18rem }
+.gallery figure.audio audio { display: block; width: 100% }
+
+/* And one ember cannot name. Bordered like the images beside it so an empty
+ * box does not read as an artifact that failed to load -- which is the one
+ * thing this state must not look like, because it is a defect report. */
+.gallery figure.unknown {
+  max-width: 18rem;
+  padding: .6rem;
+  border: 1px dashed var(--line);
+  border-radius: 5px;
+}
+
 details { margin-top: .8rem; font-size: .85rem }
 summary { cursor: pointer; color: var(--dim) }
 

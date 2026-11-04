@@ -1153,7 +1153,10 @@ tts:
 
 `GET /api/config` publishes `kinds` and `voices` — the ids and their display
 names, and **not** the paths — so a UI can offer a list it could not have
-guessed. A request then looks like this:
+guessed. The compose panel's kind selector and voice chooser are built from
+those two lists and from nothing else; see
+[speaking instead of generating](#speaking-instead-of-generating). A request
+then looks like this:
 
 ```json
 {
@@ -1922,6 +1925,11 @@ pass, VAE tiling and skip-layer guidance. Every label has an explanation on
 hover. What the UI cannot send, and why, is the list at the end of
 [what a job can be told](#what-a-job-can-be-told).
 
+The panel's **kind** selector chooses which of those controls it shows at all:
+`sd` is the panel above, and `tts` replaces it with a text area and a voice
+chooser — see
+[speaking instead of generating](#speaking-instead-of-generating).
+
 ```bash
 make web                 # builds the Rust/WASM frontend
 ember serve              # http://127.0.0.1:7777/
@@ -2234,8 +2242,9 @@ least. Every field in the form explains itself on hover.
 | prompt, size, steps, batch count, seed, sampler, scheduler, cfg, guidance, output name | `sd.serve`, `gpu_probe`, `assets:`, `verify:` |
 | clip skip, eta, flow shift, shifted timestep, output format and compression | `extra` |
 | the `hires`, `vae_tiling` and `slg` blocks | `lora` |
-| an image it has already uploaded, by digest, and its `strength` | |
-| preview mode and interval | |
+| an image it has already uploaded, by digest, and its `strength` | the voice **file** and espeak's data directory |
+| preview mode and interval | piper's `speaker`, `length_scale`, `noise_scale`, `noise_w` and `sentence_silence` |
+| the `kind`, and for speech the text and a **voice id** from `tts.voices` | |
 
 **A request that failed says why, in the row and in the watcher.** The reason
 is already a column — `requests.err`, written whether the refusal came before
@@ -2301,6 +2310,56 @@ The image is the one line of that table that moved, and what a request may name
 is a **digest** — sixty-four lowercase hex characters, or it is refused. Not a
 path, not a filename, not a URL. The next section is what that buys and what it
 does not.
+
+### Speaking instead of generating
+
+The compose panel's first control is **kind**, and choosing `tts` replaces the
+image controls with a text area and a voice chooser. The geometry, the sampler,
+the steps, the seed and the preview mode go: they are parameters of a sampling
+pass and piper has no pass, so a control for them over a speech request would
+accept a value the server refuses — `kind` is on the request, and a job setting
+the other kind's fields is rejected naming its index — or, worse, one the
+server drops, which reads as a model that ignored it. Choosing `sd` gives back
+exactly the panel that was there before. The submit button says **speak**.
+
+```bash
+make web
+ember serve        # pick tts, type a sentence, press speak
+```
+
+The chooser's entries are the `tts.voices` list from `GET /api/config`, by
+**display name**, and the request carries the **id**. Neither the voice file
+nor espeak's data directory is on that wire — a request has no field for
+either, which is what keeps every containment rule upstream of anything a
+browser can say. A configuration with no `tts.voices` says so in the panel and
+names the key, rather than showing an empty dropdown: a `<select>` with no
+options posts a blank voice id, and the refusal for that arrives after the
+operator has typed their sentence.
+
+**Changing the kind empties the batch.** One rental runs one driver, so a batch
+holding an image job and an utterance is not something the wire can carry; the
+page not building one is cheaper than a 400 naming a job index nobody can see.
+
+**The artifact plays in the page.** A finished utterance is an `<audio
+controls>` beside the gallery's `<img>` for an image, and the element is chosen
+from what the server says the file **is** — `media` on the artifact, derived
+from the blob key by the same closed switch that sets the `Content-Type` on
+that route — never from the request's kind. A kind is a property of the
+request: it answers the same today, and it stops answering the same the first
+time one kind writes two sorts of file, at which point a page switching on it
+renders every artifact as whichever the kind implied. An artifact ember
+declares no type for is **said** rather than guessed at, because an `<img>` and
+an `<audio>` both render perfectly over a fetch that failed and show nothing.
+
+**What the page cannot do is show an utterance's own text back.** A request's
+jobs are projected to the browser in the image shape — no `tts`, and no `kind`
+on the request view either — so a finished speech request arrives as one job
+with every field at its zero, and the page cannot tell it from an empty one.
+Its **what it ran with** block says the parameters were not sent rather than
+printing seven rows of dashes under an empty prompt. Queueing and playing work;
+reading back what was said does not. It needs the server-side projection to
+carry the utterance, which is a change to `requestView` rather than to the
+page.
 
 ### Generating from an image you upload
 
