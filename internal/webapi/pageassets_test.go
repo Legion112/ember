@@ -28,6 +28,16 @@ import (
 // Both were relative and both 404'd on a two-segment route.
 var pageRefs = regexp.MustCompile(`(?:href|src)="([^"]*)"|\bfrom\s+'([^']*)'`)
 
+// WHAT THESE TESTS DO NOT SEE, named rather than left to be assumed: the
+// references the page RENDERS but does not write. The gallery's <img src> and
+// <a href> and the preview's <img src> (web/src/views.rs) are built by the
+// SERVER -- wire.go's imageRef.Path is
+// fmt.Sprintf("/api/requests/%s/images/%d/%d%s", ...), leading slash and all
+// -- so they are root-relative by construction and no page this parses
+// mentions them. A reference composed in Rust is out of reach of a Go test
+// over one HTML file, which is a fact about where the join is and not a hole
+// in the parse.
+//
 // appRoutes are the path shapes a browser navigates to, by segment count.
 //
 // THE DEFECT WAS ONLY BELOW THE ROOT AND A STATUS CODE COULD NOT SEE IT.
@@ -99,12 +109,35 @@ func TestPage_LoadsItsOwnAssetsFromEveryRouteItIsServedOn(t *testing.T) {
 // all; this one is the rule, and it names what to change in the one file that
 // has to change. A relative reference here is a 404 on exactly the routes
 // slice 3 is about to add, which no status code anywhere will report.
+//
+// A PREFIX CHECK WAS NOT THE RULE, AND IT PASSED A THIRD-PARTY SCRIPT.
+// `strings.HasPrefix(ref, "/")` is true of `//evil.example/analytics.js` --
+// protocol-relative, off-origin, and the one thing this page's own comment
+// forbids by name: "No CDN and no remote font [...] a script from somewhere
+// else would be a third party in a tool whose whole posture is that only sshd
+// is reachable". So the rule as written was weaker than the rule the page
+// states. This package has already been bitten by exactly that spelling --
+// auth.go's redirect target records `//evil.example` surviving a path-only
+// check -- which is why the test asks `net/url` instead of asking the string:
+// a reference with a Scheme or a Host is not this server's to serve, whatever
+// its first character is.
 func TestPage_ReferencesEveryAssetAbsolutely(t *testing.T) {
 	for _, ref := range refsIn(t, committedPage(t)) {
-		if !strings.HasPrefix(ref, "/") {
+		u, err := url.Parse(ref)
+		if err != nil {
+			t.Errorf("web/index.html references %q, which does not parse: %v", ref, err)
+			continue
+		}
+		if u.Scheme != "" || u.Host != "" {
+			t.Errorf("web/index.html references %q, which is off this origin "+
+				"(scheme %q, host %q); nothing this page loads may come from "+
+				"anywhere but `ember serve` itself.", ref, u.Scheme, u.Host)
+			continue
+		}
+		if !strings.HasPrefix(u.Path, "/") {
 			t.Errorf("web/index.html references %q relatively; a page served on "+
 				"/requests/abc resolves it against /requests/ and gets a 404. "+
-				"Write it as %q.", ref, "/"+strings.TrimPrefix(ref, "./"))
+				"Write it as %q.", ref, "/"+strings.TrimPrefix(u.Path, "./"))
 		}
 	}
 }
@@ -201,6 +234,15 @@ func distFromCommittedPage(t *testing.T) string {
 		u, err := url.Parse(ref)
 		if err != nil {
 			t.Fatalf("reference %q does not parse: %v", ref, err)
+		}
+		// AN OFF-ORIGIN REFERENCE GETS NO STAND-IN, which is what stops the
+		// behaviour test being satisfied by one. `//evil.example/analytics.js`
+		// has Path "/analytics.js", so writing a file there would have made
+		// the loop above ask this server for a path it answers 200 and call a
+		// third-party script loadable. Nothing local stands in for a host
+		// ember does not serve.
+		if u.Scheme != "" || u.Host != "" {
+			continue
 		}
 		// Where the file server would have to hold it. Cleaned against "/" so
 		// a reference cannot name a path outside the directory this writes.
