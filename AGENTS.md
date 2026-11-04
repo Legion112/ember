@@ -6271,6 +6271,20 @@ A leaked node bills by the hour in silence. These are not style preferences.
   handed across a call. And one green that is a FINDING rather than a pass,
   which is the entry above: a pointer-receiver method mutating the config, now
   covered by a second guard instead of by that one.
+  **ONE OF THOSE REDS EVIDENCES THE WRONG MECHANISM AND IS RE-DESCRIBED RATHER
+  THAN COUNTED**, which is "ask why a case went the way it did" applied to a
+  RED -- the half nobody checks. "A write through an index" was offered as a
+  write-recording case and is nothing of the kind: it is red at the
+  CONSTRUCTION-SITE branch, naming "set from a `*ast.IndexExpr`", because the
+  literal reads `Config: cfgs[0]`. Measured by splitting it: the same index
+  write with `Config: cfg` is **green, and correctly so**, since the write was
+  to `cfgs` and `cfg` was never written to. So it duplicates what the struct
+  selector and the conversion already cover, and -- worse for the record --
+  `rootIdent`'s `IndexExpr` and `IndexListExpr` arms are unreachable for this
+  guard's subject **in principle**: a tracked object is a `config.Config`
+  value, a struct is not indexable, so `cfg[…] = x` is not legal Go. Those two
+  arms are defensive, which their own comment now says, and no measurement here
+  has ever taken them.
   **And the per-arm verdict is the proof the free-rental pair discriminates**:
   with `Binds` reverted to `IsZero`, the PAID arm and the no-ceiling arm stay
   **PASS** and only the FREE arm goes **FAIL**, so the free arm is doing the
@@ -6447,6 +6461,31 @@ A leaked node bills by the hour in silence. These are not style preferences.
   whole arrangement, since the thing being guarded is a guard going silent. An
   unenforced dependency that is cheap to break and reports nothing is what
   `AssertNoStray` was; this is ten lines and a floor.
+  **IT ASKS ONE QUESTION OF THE TYPE AND THAT IS THE REASON FOR ITS SHAPE**:
+  `sig.Recv().Type().(*types.Pointer)`, so genericity cannot hide a receiver.
+  Measured by type-checking a synthetic `type Config[T any]` with both forms --
+  `*p.Config[T]` asserts to `*types.Pointer` **true**, `p.Config[T]`
+  **false** -- so a generic pointer receiver is caught and a generic value
+  receiver is still correctly ignored.
+  `TestTrustHasOneImplementationAndItIsPin` is the cautionary one -- it
+  switched on receiver SYNTAX, skipped the shape it could not name, and a
+  generic receiver walked past it with the whole tree green while ember dialled
+  every node it rented with no host key verification. Whoever writes the next
+  guard here should know which of the two approaches survived: one question of
+  the type, never a switch over the spellings somebody thought of.
+  **AND ITS OWN BOUND IS NARROWER THAN THE SENTENCE IT DEFENDS, which is the
+  thing this PR exists to stop happening a seventh time.** `NumMethods()` is
+  methods DECLARED on `Config` -- not promoted ones. Two measured greens:
+  `Config` embedding a type that has a pointer-receiver method, and a
+  pointer-receiver method on a FIELD's type called as `cfg.SD.ZeroField()`.
+  Neither is a counterexample to "wrote to by any statement", because a method
+  call is not a statement; both are this guard's bound. **And neither can reach
+  this issue's subject**: `MaxDayUSD` and `MaxMonthUSD` are DIRECT fields of
+  `Config`, so a promoted method mutates the embedded struct and a field-type
+  method mutates `cfg.SD`, and `Config` embeds nothing today -- all three
+  measured. So the residue now rests on **the ceilings being direct fields of
+  `Config`**, which is a far more local and stable property than the one it
+  replaced, and that narrowing is the real thing this guard bought.
   **The third option was taken and rejected rather than overlooked**: recording
   a write when a pointer-receiver method is called on a tracked root is about
   the same size and uses type info the guard already has -- and it makes the
