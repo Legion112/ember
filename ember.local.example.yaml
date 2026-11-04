@@ -1,15 +1,11 @@
 # ember, generating on the GPU in this machine.
 #
-# The point is not that this is fast. It is not: the weights do not fit in an
-# 11 GiB card, so sd-cli keeps them in system RAM and streams them into VRAM
-# per layer, and roughly 35 GB crosses PCIe on each of 28 steps. A rented
-# A100 does the same image in minutes.
+# The same assets and digests as ember.flux2.yaml with the provider changed
+# and --offload-to-cpu added: weights in system RAM, streamed into VRAM per
+# layer. Not fast, and free, which is what prompt iteration wants.
 #
-# The point is that it costs nothing. Most iterations of a prompt are asking
-# "is the composition right", and that question does not need an A100. Get the
-# prompt and the seed right here for free, then render once on a rented card
-# with ember.flux2.yaml -- same assets, same digests, same command, one line
-# different.
+# WHY IT IS SLOW, why the geometry is 1024 and not 1536, and why `verify` is
+# `present` here and `always` on the rented path: docs/configurations.md.
 
 provider: local
 
@@ -18,16 +14,8 @@ provider: local
 # ordinary per-architecture tag -- so adjust the number below if the card here
 # is not an sm_75.
 #
-# There used to be a separate ember:sd-cuda-local tag, because the published
-# set excluded this machine's card. It does not any more: sm_75 is one of the
-# architectures ember publishes, so a local build and a published one are the
-# same artifact under the same naming, and two names for one thing is how they
-# drift.
-#
 # A scalar image: rather than an images: map, because a local run has exactly
-# one card and knows which. The map is for a run that selects on VRAM or price
-# and does not know what it will get -- see "Choosing the image by the card"
-# in README.md.
+# one card and knows which.
 image: ember:sd-cuda-sm75
 
 ttl: 4h
@@ -37,9 +25,7 @@ ttl: 4h
 min_vram_gib: 8
 
 # A store here is a Docker named volume: the same code path a rented network
-# volume uses, costing nothing and surviving between runs. The weights are
-# fetched once, over this machine's own downstream link, and verified by the
-# same digests the rented config uses.
+# volume uses, costing nothing and surviving between runs.
 store:
   name: models
   size_gib: 70
@@ -58,37 +44,16 @@ assets:
     sha256: ea4273f02d1fafbf8e1d1c2cf6018ed8748652eb0bf34f2dd91171f16f15ab62
     as: flux2-ae.safetensors
 
-# present, not always. The rented config re-hashes 56 GiB on every run because
-# a network volume is writable by every node that mounts it -- a cross-run
-# channel worth a minute of an A100. A Docker volume on this machine is not
-# that: nothing else writes it, and re-reading 56 GiB off this disk before
-# every local iteration would make the free path the slow one to start.
+# present, not always: nothing else writes a Docker volume on this machine, so
+# the cross-run channel the rented path re-hashes 56 GiB against does not
+# exist here -- and re-reading it off this disk before every iteration would
+# make the free path the slow one to start.
 verify: present
 
-# The same probe as the rented config, and it matters more here. The published
-# image genuinely cannot run on this card; this is what turns that into a
-# refusal instead of a silent CPU fallback.
-# Two questions, because one probe used to answer only one of them.
-#
-# `sd-cli --list-devices | grep -qi cuda` catches a card that cannot
-# initialise -- the failure internal/gpucheck was written for, where CUDA
-# never comes up and sd-cli quietly becomes a slow CPU at the GPU's price.
-#
-# It does NOT catch a wrong-architecture image. Measured: with an sm_75 image
-# on an sm_89 card, --list-devices exits zero and names the card, because
-# listing devices asks the driver what hardware exists and launches no kernel.
-# The probe passed, the workload started, and it aborted a second into the
-# first generation with "no kernel image is available for execution on the
-# device" -- after the pull and a 1.6 GB weight fetch, all billed.
-#
-# So the probe compares the image to the card first. The published images
-# write their architecture to /etc/ember-cuda-arch for exactly this; an empty
-# or missing file fails the test rather than passing it, because a comparison
-# against nothing would admit everything.
-#
-# `images:` already refuses a card it has no entry for, before renting. This
-# catches what a map cannot see: the right digest filed under the wrong key,
-# or a scalar image: pinned by hand while debugging.
+# The same two-question probe the rented config carries, and it matters more
+# here: the published image genuinely cannot run on the wrong card, and this
+# is what turns that into a refusal instead of a silent CPU fallback. An empty
+# /etc/ember-cuda-arch FAILS the test rather than passing it.
 gpu_probe:
   - sh
   - -c
@@ -104,8 +69,7 @@ cmd:
   - --vae
   - /models/flux2-ae.safetensors
 
-  # The whole reason this configuration is possible. Weights live in RAM and
-  # are pulled into VRAM as each layer needs them. 56 GiB of weights in a
+  # The whole reason this configuration is possible: 56 GiB of weights in a
   # 125 GiB machine behind an 11 GiB card.
   - --offload-to-cpu
 
@@ -120,9 +84,8 @@ cmd:
   - --steps
   - "28"
 
-  # 1024, not 1536. The DiT's compute buffer alone was 4412 MiB at 1536x1536
-  # on a card with 80 GiB to spare; on 11 GiB, beside a streaming layer, it is
-  # the first thing that will not fit. Raise it once a run has proved it fits.
+  # 1024, not 1536: the DiT's compute buffer alone was 4412 MiB at 1536x1536
+  # on a card with 80 GiB to spare. Raise it once a run has proved it fits.
   - -W
   - "1024"
   - -H

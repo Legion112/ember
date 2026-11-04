@@ -565,6 +565,35 @@ whoever else is on that host, and on this one readable by every other account.
 `serve_token`, which is `ember serve`'s own credential, lives in the same file
 for that reason and has no flag either.
 
+### The committed configurations
+
+Every command reads `ember.yaml` in the working directory by default, so
+`--config` is for naming one of the others rather than for ordinary use. Five
+are committed, and they are the four shapes `{this machine, a rented card} ×
+{one process per run, one resident server}` plus the starter:
+
+| file | runs on | job shape |
+|---|---|---|
+| `ember.example.yaml` | a rented 4090 | none — holds the node open with its ports forwarded |
+| `ember.flux2.yaml` | a rented 80 GiB card | `cmd:` — one `sd-cli` per `ember up` |
+| `ember.sd-server.example.yaml` | the same card and store | `sd:` — one resident `sd-server`, a list of jobs |
+| `ember.local.example.yaml` | the GPU in this machine | `cmd:` |
+| `ember.local.sd-server.example.yaml` | this machine, free | `sd:` — what `ember serve` needs |
+
+A configuration holds configuration: a comment in one says what a wrong value
+costs, in a line or two. Every measurement that chose a value — the store's
+$4.90-a-month standing charge, the per-image cost of a resident model against
+a fresh process at four batch sizes, the two runs that paid for `gpu_probe` —
+is in [the committed configurations](docs/configurations.md), along with the
+two shapes that are written down and cannot be run yet because one's image is
+a sentence and the other's asset digest is a placeholder.
+
+The durable half of `ember.flux2.yaml` and `ember.sd-server.example.yaml` is
+identical — same images, store, assets, probe and ceilings — and that
+duplication is not something a config can currently remove: `cmd`, `cmds` and
+`sd.serve` are refused together, so one file describes one job shape. See
+[#144](https://github.com/Legion112/ember/issues/144).
+
 ### What a flag may do that a config key may not
 
 A flag **replaces** the config's value for that run rather than narrowing it.
@@ -1060,7 +1089,7 @@ A100.
 
 ```bash
 make workload-sd-cuda-local          # builds for the card in this machine
-ember up --config ember.local.yaml   # same assets, same digests, free
+ember up --config ember.local.example.yaml   # same assets, same digests, free
 ```
 
 [`ember.local.example.yaml`](ember.local.example.yaml) is the same
@@ -3118,8 +3147,11 @@ payload, because a span of a generation carries the prompt.
 
 ## Video
 
-[`ember.video.example.yaml`](ember.video.example.yaml) is the configuration
-the store exists for. Wan 2.2's experts are 14 GB each, which could not be
+The [video configuration](docs/configurations.md#video-from-a-model-on-a-store)
+is what the store exists for. It is written down rather than committed as an
+`ember*.yaml`, because its asset digest is a placeholder on purpose and so it
+refuses before anything is rented — a configuration that cannot be run is a
+worked example. Wan 2.2's experts are 14 GB each, which could not be
 baked into an image if anybody wanted to — the registry refuses a layer above
 about 10 GB — so the weights go on a volume and the node verifies them before
 the GPU is asked to do anything.
@@ -3183,7 +3215,8 @@ rather than a pass or a fail.
 
 ## An open code model, over one forward
 
-[`ember.code-model.example.yaml`](ember.code-model.example.yaml) serves an
+The [code-model configuration](docs/configurations.md#an-open-code-model-over-one-forward)
+serves an
 open code model on a rented card and forwards it to `127.0.0.1:8080`, so an
 editor or a coding agent on this machine talks to an open model. It needed no
 new code: the forwards run *alongside* the workload rather than instead of it,
@@ -3273,8 +3306,8 @@ An ember workload image has to carry `embernode` and sshd — ember runs the
 workload as `ssh host command`, so an image that is only a server has nothing
 to connect to — and this repository builds no such image for an LLM server.
 An off-the-shelf `llama.cpp` image cannot be used as it stands for that
-reason. So the `image:` line in that file is a sentence rather than a value,
-and ember refuses it by the rule that already exists:
+reason. So the `image:` line in that configuration is a sentence rather than a
+value, and ember refuses it by the rule that already exists:
 
 ```
 ember: image "EMBER-HAS-NO-LLM-WORKLOAD-IMAGE-SEE-THIS-FILES-HEADER" has no
@@ -3282,7 +3315,7 @@ tag: pin it to a tag or a digest, or two runs will not have measured the same
 software
 ```
 
-Everything else in the file is real. The weights are pinned to a digest that
+Everything else in it is real. The weights are pinned to a digest that
 was read from Hugging Face rather than guessed — the tree API's `lfs.oid` and
 the `X-Linked-ETag` on a HEAD of the resolve URL both answer it, which is two
 independent confirmations for two requests and no bytes downloaded — and
@@ -3291,6 +3324,10 @@ no image, so the store half can be done today. That is deliberate: a committed
 example whose placeholder reads as a value is what
 [#18](https://github.com/Legion112/ember/issues/18) is about, and the loudest
 placeholder is one whose refusal quotes itself.
+
+It is also why this one is written down in `docs/` rather than committed as an
+`ember*.yaml`: a configuration that refuses by construction is a worked
+example, not an alternate configuration an operator would run.
 
 ### Whether to do this at all
 

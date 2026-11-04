@@ -1,53 +1,26 @@
-# ember, FLUX.2 [dev] on a store: the configuration the store was built for.
+# ember, FLUX.2 [dev] on a store: one sd-cli per `ember up`.
 #
-# 56.16 GiB of weights, of which 23.33 GiB is a 24-billion-parameter LLM used
-# only to read the prompt. Nothing here fits on a consumer card, and nothing
-# here could be baked into an image: the diffusion file alone is 32.60 GiB and
-# the registry refuses a layer above about 10 GiB.
+# 56.16 GiB of weights on a network volume, an A100 80GB chosen by the budget
+# ceiling, one image per rental. ember.sd-server.example.yaml is the same
+# profile driven the other way, with a resident server and a list of jobs.
 #
-# The weights are not uploaded from home either. At 67 Mbps upstream, 56.16
-# GiB is one hour and fifty-two minutes of pushing -- after an hour of pulling
-# it down to the house first. `ember store sync` rents a CPU machine for six
-# cents an hour and has the datacentre fetch them instead, which is the whole
-# reason that command exists.
+# WHAT EVERY NUMBER HERE WAS MEASURED FROM, the store's standing charge, why
+# the datacentre is pinned, and the two runs that paid for the gpu_probe:
+# docs/configurations.md.
 #
-# HOW THIS IS MEANT TO BE USED. The store outlives every node that mounts it,
-# which is the point: the 56.16 GiB is fetched once and then re-read by every
-# later run for about a minute. So prompt iteration is `ember up` again, not
-# `store sync` again, and each `ember up` destroys its GPU on the way out --
-# WithNode's defer does that even if the workload fails or the laptop is shut.
-#
-# Nothing destroys the store. It bills $0.0067 an hour, $0.16 a day, $4.90 a
-# month, with no deadline and no node attached, and `ember ls` is what prints
-# that standing charge. `ember store rm` is the only thing that stops it, and
-# it has to be typed.
-#
-# LICENSE: FLUX.2 [dev] is non-commercial. The weights and anything generated
-# from them carry that restriction; this repository's MIT licence does not
-# extend to the output of this file.
+# LICENSE: FLUX.2 [dev] is non-commercial. This repository's MIT licence does
+# not extend to the output of this file.
 
 provider: runpod
 
-# sd-cli built from stable-diffusion.cpp 77b72a2, which carries
-# src/model/integrations/flux2.cpp, and an embernode that knows the `fetch`
-# subcommand -- the published image before this one predated it, and read
-# `embernode fetch ...` as "be a node" instead.
-#
-# No checkpoint baked in: the weights are on the store named below.
-#
-# One image per architecture, and the map rather than a single reference,
-# because this configuration does not name a card -- see min_vram_gib. ember
-# reads the architecture of whichever offer the filter wins and uses that
-# entry; a card with no entry is refused before anything is rented.
+# One image per architecture, and the map rather than a single reference
+# because this configuration names no card. ember reads the architecture of
+# whichever offer the filter wins; a card with no entry is refused before
+# anything is rented, and never falls back to image: below.
 #
 # The tag in each reference is there to be read and the digest is what runs.
 # ember refuses a reference whose tag names a different architecture than its
 # key, which is the only guard against a mis-paste among eight lines of hex.
-#
-# This used to be one fat image carrying sm_80, sm_86 and sm_89 plus
-# compute_89 PTX "for forward JIT onto Blackwell". That is gone: nothing is
-# compiled on a rented machine, so the published images carry native code for
-# one architecture and no PTX at all. See AGENTS.md.
 images:
   sm_75: ghcr.io/legion112/ember-sd:sd-cuda-sm75@sha256:2da9f94d608d2f757dbf2f38f309ce73a6a41b872257c88eb9c2aadd822e20c9
   sm_80: ghcr.io/legion112/ember-sd:sd-cuda-sm80@sha256:468cbde2fdbec8d83e403b32cda8aa4db214c1fd555ddab182225cab7d442f20
@@ -58,82 +31,42 @@ images:
   sm_103: ghcr.io/legion112/ember-sd:sd-cuda-sm103@sha256:8ff5fd43523f999a116afe5821bef067290e8d2c2416a13b24a1fef9f4899c88
   sm_120: ghcr.io/legion112/ember-sd:sd-cuda-sm120@sha256:e2447c2d0e884da44c1d33b09abb4366354e606903f2f1dcd8fe2bd835d87f7f
 
-# The image for the CPU machine `ember store sync` rents.
+# The image for the CPU machine `ember store sync` rents. A CPU box has no
+# compute capability, so images: cannot choose for it and is not consulted --
+# without this scalar, `ember store sync` on this very file refuses and the
+# config could not populate the store it depends on.
 #
-# A scalar beside the map, because the two answer different questions: a CPU
-# box has no compute capability, so `images:` cannot choose for it and is not
-# consulted. Without this, `ember store sync` on this very file refuses with
-# "there is no architecture to choose an image by" -- the config could not
-# populate the store it depends on.
-#
-# The node image and not a workload one: this machine only runs `embernode
-# fetch`, and pulling 2.9 GB of CUDA to download files would be billed for
-# nothing.
-#
-# Pinned to a node image whose embernode KNOWS `fetch`. The digest
-# ember.example.yaml carried predates the subcommand, so it reads
-# `embernode fetch ...` as "be a node" and dies with "EMBER_HOST_KEY is
-# empty" -- over SSH the environment is empty, because sshd builds a fresh
-# one per session. Measured by running it: the sync failed in 11 seconds and
-# cost two hundredths of a cent to learn.
+# The node image and not a workload one, and one whose embernode knows the
+# `fetch` subcommand: an older digest reads `embernode fetch ...` as "be a
+# node" and dies with "EMBER_HOST_KEY is empty".
 image: ghcr.io/legion112/ember-node@sha256:70de4503dfeee1ecc09347fb3a8998d293b36ddf67691dd3af925950e787aa2d
 
 ttl: 1h
 
-# No GPU is named, and that is the point: the requirement is VRAM, not a
-# model. 56.16 GiB resident plus activations at 1536x1536 needs 80 GiB, and the
-# budget ceiling picks the cheapest card that has it -- in EUR-IS-1, the A100
-# 80GB at $1.79.
-#
-# This briefly had `gpu: rtxpro6000` hard-coded, because the published image
-# was built with CUDA_ARCHS="86;89" and the A100 is sm_80: PTX JITs forward,
-# never back, so the cheapest qualifying card was the one card that could not
-# run the image. It would have failed with "no kernel image is available for
-# execution on the device" after paying for the pull and the 56 GiB store read.
-#
-# That sentence turned out to be the accurate one in this repository. Seven
-# comments elsewhere claimed such a run falls back to the CPU backend instead;
-# measured on rented hardware, it aborts with exactly the error written above.
-#
-# The filter can say what it means again, and for a better reason than a wider
-# fatbin: `images:` above covers every architecture ember can select, so the
-# cheapest qualifying card is always one there is an image for -- or the run
-# refuses before renting it.
+# No gpu: on purpose -- the requirement is VRAM and not a model, and the
+# budget ceiling then picks the cheapest card that has it.
 min_vram_gib: 80
 max_hourly_usd: "2.60"
 max_run_usd: "3.00"
 
-# max_day_usd and max_month_usd bound every rental in a UTC calendar day or
-# month TOGETHER, which nothing above does: max_hourly_usd bounds a card and
-# max_run_usd bounds one rental, so thirty queued requests at $3 each are
-# inside both and are $90.
-#
-# They are read by `ember serve`, where a queue drains unattended, and a
-# request can neither widen nor narrow them -- there is no field for either on
-# the wire, so the limit that stops a browser is one the browser cannot name.
-# A rental projected to take a period past its ceiling is refused before
-# anything is created, and the request says so. Commented out because an
-# unbounded queue is what ember did before these existed; set the month one if
-# you set only one.
+# These two bound a whole UTC day or month together, which neither line above
+# does: thirty queued requests at $3 each are inside both and are $90. Read by
+# `ember serve` only. Set the month one if you set only one.
 #
 # max_day_usd: "10.00"
 # max_month_usd: "100.00"
 
-
 # A store pins every node that mounts it to one datacentre, so the datacentre
-# is chosen for what is available in it rather than for the store. EUR-IS-1 is
-# the only one of the ten that serve the S3 API with three cards at 80 GiB or
-# more, which is the only hedge there is against a capacity refusal.
+# is chosen for what is rentable in it rather than for the store.
 store:
   name: flux2
   size_gib: 70
   region: EUR-IS-1
   mount: /models
 
-# Digests are the LFS object ids from the Hugging Face tree API, so none of
-# these files has been downloaded to get them. If one is wrong, the mismatch
-# surfaces during `store sync` on a six-cent CPU machine rather than on a card
-# that bills $1.79 an hour.
+# The digests are LFS object ids read from Hugging Face's tree API, so none of
+# these files was downloaded to get them. A wrong one surfaces during
+# `store sync` on a six-cent CPU machine rather than on a card at $1.79/hour.
 assets:
   - url: https://huggingface.co/city96/FLUX.2-dev-gguf/resolve/main/flux2-dev-Q8_0.gguf
     sha256: 09d005300dd8dcbbd489bb75ada6254145c84c2c9c3d7cc1829e3c5dedcb42ce
@@ -145,73 +78,35 @@ assets:
     sha256: b2a40e5ef4eab8837d0462c303e8147ec754e2963e41916b551107d2b0ca6527
     as: Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf
 
-  # black-forest-labs/FLUX.2-dev/ae.safetensors is gated and answers 401
-  # without a licence click. This is the ungated encoder/decoder from
-  # FLUX.2-small-decoder, which docs/flux2.md names as the alternative and the
-  # flux2-dev recipe accepts under required_any: [[vae, tae]].
+  # The ungated encoder/decoder: FLUX.2-dev's own ae.safetensors answers 401
+  # without a licence click.
   - url: https://huggingface.co/black-forest-labs/FLUX.2-small-decoder/resolve/main/full_encoder_small_decoder.safetensors
     sha256: ea4273f02d1fafbf8e1d1c2cf6018ed8748652eb0bf34f2dd91171f16f15ab62
     as: flux2-ae.safetensors
 
+# always, not present: a store is writable by every node that mounts it, and
+# there is no read-only mount, so re-hashing is what stands in for one.
 verify: always
 
-# The probe that stands between renting a card and trusting it.
-#
-# This run already paid to learn why it is here. An A100-SXM4-80GB came up,
-# the weights verified, and sd-cli reported:
-#
-#   ggml_cuda_init: failed to initialize CUDA: system not yet initialized
-#   [W] auto-fit: no GPU devices; using the default backend
-#   [V] Using CPU backend
-#
-# and then started a 32-billion-parameter model on 128 CPU threads. The text
-# encoder alone took 122 seconds where a working card takes about one. Nothing
-# in ember thought anything was wrong, because the workload was running. That
-# cost $0.37 and produced nothing.
-#
-# A pipeline rather than `nvidia-smi`, because nvidia-smi can list a card on a
-# host whose NVSwitch fabric is not up -- which is the exact failure above.
-# --list-devices makes sd-cli enumerate ggml backends, so it answers the only
-# question that matters: will the program we are about to run find a GPU.
-# Two questions, because one probe used to answer only one of them.
-#
-# `sd-cli --list-devices | grep -qi cuda` catches a card that cannot
-# initialise -- the failure internal/gpucheck was written for, where CUDA
-# never comes up and sd-cli quietly becomes a slow CPU at the GPU's price.
-#
-# It does NOT catch a wrong-architecture image. Measured: with an sm_75 image
-# on an sm_89 card, --list-devices exits zero and names the card, because
-# listing devices asks the driver what hardware exists and launches no kernel.
-# The probe passed, the workload started, and it aborted a second into the
-# first generation with "no kernel image is available for execution on the
-# device" -- after the pull and a 1.6 GB weight fetch, all billed.
-#
-# So the probe compares the image to the card first. The published images
-# write their architecture to /etc/ember-cuda-arch for exactly this; an empty
-# or missing file fails the test rather than passing it, because a comparison
-# against nothing would admit everything.
-#
-# `images:` already refuses a card it has no entry for, before renting. This
-# catches what a map cannot see: the right digest filed under the wrong key,
-# or a scalar image: pinned by hand while debugging.
+# Two questions, and the one probe that used to answer only one of them: a
+# card that cannot initialise is a billed CPU, and a wrong-architecture image
+# aborts after the weights are fetched. An empty /etc/ember-cuda-arch FAILS
+# the test rather than passing it -- a comparison against nothing would admit
+# everything.
 gpu_probe:
   - sh
   - -c
   - "arch=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ' .'); img=$(cat /etc/ember-cuda-arch 2>/dev/null); echo \"card is sm_$arch, image is sm_$img\"; test -n \"$img\" && test \"$arch\" = \"$img\" && sd-cli --list-devices | grep -qi cuda"
 
-# Retried, not checked once, because the driver said "not yet". An SXM board
-# waits for nvidia-fabricmanager on the host, and probing at the earliest
-# possible moment turns a card that needed forty seconds into a refusal.
+# Retried rather than asked once: an SXM board waits for nvidia-fabricmanager
+# on the host, and probing at the earliest possible moment turns a card that
+# needed forty seconds into a refusal.
 gpu_probe_timeout: 2m
 
-# Parameters from examples/server/recipes/flux2-dev.json at the pinned commit:
-# euler, cfg-scale 1, guidance 4, size_multiple 16. The recipe defaults to
-# 1024x1024 and 20 steps; 1536 (96 x 16) and 28 steps is what the headroom is
-# for.
-#
-# --offload-to-cpu is absent, and that absence is the point. Every example in
-# upstream's docs/flux2.md passes it, because upstream is testing on hardware
-# that has to. Both models stay resident here.
+# Parameters from examples/server/recipes/flux2-dev.json at the pinned commit.
+# cfg and guidance are different numbers and conflating them generates at the
+# wrong one. --offload-to-cpu is absent, and that absence is the point: both
+# models stay resident on an 80 GiB card.
 cmd:
   - sd-cli
   - --diffusion-model

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -731,28 +732,35 @@ func mustFailSD(t *testing.T, cfg Config) error {
 	return err
 }
 
-// TestExampleConfigs_LoadAndParse reads every committed ember*.yaml.
+// TestExampleConfigs_LoadAndParse reads every configuration this repository
+// commits, wherever it is written down.
 //
 // KnownFields(true) means a misspelled key is a hard failure, so a committed
 // example with a typo in it is an example that cannot be run -- and the
-// person who finds out is whoever copies it. These files are hand-written and
-// long: ember.flux2.yaml is 211 lines and the sd-server one is comparable,
+// person who finds out is whoever copies it. These are hand-written and long,
 // which is exactly the size where a key gets misremembered.
 //
-// ParseAssets is deliberately not called. ember.video.example.yaml carries
+// TWO SOURCES, because #144 moved the two shapes that cannot be run out of
+// the root and into prose: one's image: is a sentence and the other's asset
+// digest is a placeholder, both deliberately, so neither is an alternate
+// configuration an operator would run. A fenced block is loaded by nothing,
+// so demoting them would have cost exactly this check over 85 lines of
+// hand-written YAML -- and the rule the guard needs is not a directory, it is
+// "every ember configuration this repository commits", which is derivable:
+// a ```yaml fence under docs/ is one. That is the LAB_TAGS rule rather than a
+// second hand-maintained list, and a fence that is NOT an ember config fails
+// here, which is the signal to retag or move it.
+//
+// A yaml fence that is not a whole ember configuration is a fence to retag
+// or to move, and docs/long-video-is-a-pipeline.md's `cmds` chain is why the
+// rule holds rather than being a burden: it is a real, small, loadable
+// config, and it is checked here for free.
+//
+// ParseAssets is deliberately not called. The video block carries
 // REPLACE_WITH_THE_DIGEST_PUSH_PRINTS where a digest goes, on purpose, and a
 // placeholder that refuses is the point of it.
 func TestExampleConfigs_LoadAndParse(t *testing.T) {
-	paths, err := filepath.Glob(filepath.Join("..", "..", "ember*.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(paths) < 3 {
-		t.Fatalf("found %d example config(s) at the repository root, want at least 3; "+
-			"this test is checking nothing if the glob is wrong", len(paths))
-	}
-
-	for _, p := range paths {
+	for _, p := range committedConfigs(t, filepath.Join("..", "..")) {
 		t.Run(filepath.Base(p), func(t *testing.T) {
 			cfg, err := Load(p)
 			if err != nil {
@@ -778,6 +786,108 @@ func TestExampleConfigs_LoadAndParse(t *testing.T) {
 			}
 		})
 	}
+}
+
+// committedConfigs is every configuration this repository commits: the
+// ember*.yaml files at the root, and the ```yaml fences under docs/.
+//
+// BOTH FLOORS ARE OVER THE ANSWER AND NOT OVER AN INTERMEDIATE, which is the
+// whole care in this function. Load() answers Default() and a NIL error for a
+// file that is not there, so a source that contributed nothing would pass
+// every assertion in the caller -- and a floor on a local slice that is then
+// not returned is the same hole one line further down: the first shape of
+// this helper counted `fenced` and could have returned `paths` alone, GREEN,
+// with nothing saying the demoted configurations went unread. So the two
+// counts are taken over the list that is handed back, told apart by whether
+// the path is one of the temp files fencedConfigs wrote. They are separate
+// numbers because either source could be the one that broke.
+func committedConfigs(t *testing.T, root string) []string {
+	t.Helper()
+
+	all, err := filepath.Glob(filepath.Join(root, "ember*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	extracted := t.TempDir()
+	all = append(all, fencedConfigs(t, filepath.Join(root, "docs"), extracted)...)
+
+	var fromRoot, fromDocs int
+	for _, p := range all {
+		if filepath.Dir(p) == extracted {
+			fromDocs++
+			continue
+		}
+		fromRoot++
+	}
+	if fromRoot < 3 {
+		t.Fatalf("%d of the %d configuration(s) came from an ember*.yaml at the "+
+			"repository root, want at least 3; this test is checking nothing if "+
+			"that glob is wrong or its result is not read", fromRoot, len(all))
+	}
+	if fromDocs < 1 {
+		t.Fatalf("%d of the %d configuration(s) came from a ```yaml fence under "+
+			"docs/, want at least 1; the two configurations #144 demoted out of "+
+			"the root live there, and an extractor that finds none -- or a result "+
+			"nothing reads -- is checking nothing", fromDocs, len(all))
+	}
+	return all
+}
+
+// fencedConfigs writes every ```yaml block under dir into tmp and returns the
+// paths, so Load -- which takes a path and nothing else -- can read a
+// configuration that lives inside a document.
+//
+// tmp is the caller's rather than its own, because the caller tells a fenced
+// configuration from a root one by its directory.
+//
+// The file name carries the document and the line the fence opened on,
+// because a subtest called "block" names nothing a reader can go and look at.
+//
+// The opening fence is matched as the whole line and not as a prefix: a
+// ```yaml-ish word would otherwise open a block that never closes, and the
+// remainder of the document would be handed to the YAML decoder as one
+// configuration. Everything else -- ```bash, ```, ```text -- is left alone,
+// which is what keeps a captured log or a curl command out of the set.
+func fencedConfigs(t *testing.T, dir, tmp string) []string {
+	t.Helper()
+
+	docs, err := filepath.Glob(filepath.Join(dir, "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out []string
+	for _, d := range docs {
+		raw, err := os.ReadFile(d) //nolint:gosec // a committed document
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(raw), "\n")
+		for i := 0; i < len(lines); i++ {
+			if strings.TrimRight(lines[i], "\r") != "```yaml" {
+				continue
+			}
+			start := i + 1
+			end := start
+			for end < len(lines) && strings.TrimRight(lines[end], "\r") != "```" {
+				end++
+			}
+			if end == len(lines) {
+				t.Fatalf("%s: the ```yaml block opened at line %d is never closed",
+					filepath.Base(d), i+1)
+			}
+			name := fmt.Sprintf("%s-line%d.yaml",
+				strings.TrimSuffix(filepath.Base(d), ".md"), i+1)
+			p := filepath.Join(tmp, name)
+			body := strings.Join(lines[start:end], "\n") + "\n"
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, p)
+			i = end
+		}
+	}
+	return out
 }
 
 // TestLoad_RefusesADuplicateKey pins a behaviour of the YAML library rather
