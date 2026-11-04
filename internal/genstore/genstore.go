@@ -37,6 +37,7 @@ import (
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 )
 
 // ErrNotFound means no such request. Distinguished from a read failure
@@ -142,6 +143,28 @@ type Job struct {
 	// Output is the local filename stem and never reaches the server.
 	Output string `json:"output,omitempty"`
 
+	// TTS is the utterance, when this request's Kind is KindTTS, and nil for
+	// every image generation.
+	//
+	// A POINTER TO tts.Ask AND NEVER TO tts.Job, which is the seal and not a
+	// convenience. `Ask` has no field for a voice path, for espeak's data
+	// directory, for a binary or for argv -- it carries a voice **id** that
+	// names an entry the operator published -- so a request body cannot
+	// express one and neither can a row read back out of this store. The
+	// resolution happens in the planner, from the config, which is the only
+	// place a path enters. Same asymmetry AGENTS.md records for an init
+	// image: the bytes are on the thing serialised nowhere and the reference
+	// is on the thing stored as JSON.
+	//
+	// ITS OWN COLUMN AND NOT A SECOND KEY IN `params`. That column is
+	// `sdserver.Params` -- a typed struct with twenty-three fields of one
+	// driver's -- so folding a second driver's payload into it would make
+	// `params` mean "whichever kind's parameters these are", and the first
+	// reader to unmarshal it into the wrong one gets zeros rather than an
+	// error. One JSON column per kind is still "one JSON column, not
+	// twenty-three": what that rule refuses is a column per FIELD.
+	TTS *tts.Ask `json:"tts,omitempty"`
+
 	// Params are the optional generation parameters.
 	//
 	// sdserver.Params itself rather than a mirror of it, because this package
@@ -215,6 +238,24 @@ type Request struct {
 	ID      ReqID     `json:"id"`
 	Created time.Time `json:"created"`
 	Status  Status    `json:"status"`
+
+	// Kind is which workload this request is for: empty or KindSD for stable
+	// diffusion, KindTTS for speech.
+	//
+	// ON THE REQUEST AND NOT ON A JOB, which makes a mixed batch
+	// UNREPRESENTABLE rather than refused. One rental runs one driver -- a
+	// resident sd-server, or a piper per utterance -- so an sd job and a
+	// speech job in one request would need two of them on one node, and a
+	// per-job discriminator would make that a thing a validator has to catch
+	// instead of a thing nobody can say. It is also what Compat reads, so a
+	// speech request cannot ride a rental whose sd-server it has nothing to
+	// say to.
+	//
+	// EMPTY IS SD, and that is compatibility rather than a default worth
+	// defending: every row written before this column existed is an image
+	// generation, and a migration that guessed otherwise would mislabel an
+	// operator's whole history. KindOf is the one place that reading lives.
+	Kind string `json:"kind,omitempty"`
 
 	// Provider and GPU are the selection. They are also what decides whether
 	// a queued request can join a rental that is already up -- see Compat.
@@ -404,6 +445,31 @@ func (r Request) validate(needJobs bool) error {
 	if r.Provider == "" {
 		return errors.New("a request names no provider")
 	}
+	if !KindValid(r.Kind) {
+		return fmt.Errorf("kind %q is not one ember runs; it is %q or %q",
+			r.Kind, KindSD, KindTTS)
+	}
+	// ONE KIND, AND THE JOBS HAVE TO AGREE WITH IT. A speech request whose
+	// jobs carry no utterance would rent a card and say nothing; an image
+	// request carrying one would drop it silently, which is the "built end to
+	// end and never connected" shape in a single row. Checked here rather
+	// than at the wire alone, because Adopt and a row read back out of the
+	// store reach this and not that.
+	for i, j := range r.Jobs {
+		switch KindOf(r.Kind) {
+		case KindTTS:
+			if j.TTS == nil {
+				return fmt.Errorf("jobs[%d]: this is a %s request and the job carries no utterance", i, KindTTS)
+			}
+			if err := j.TTS.Validate(); err != nil {
+				return fmt.Errorf("jobs[%d]: %w", i, err)
+			}
+		default:
+			if j.TTS != nil {
+				return fmt.Errorf("jobs[%d]: this is a %s request and the job carries an utterance", i, KindSD)
+			}
+		}
+	}
 	if needJobs && len(r.Jobs) == 0 {
 		return errors.New("a request with no jobs would rent a card, load the weights and generate nothing")
 	}
@@ -433,6 +499,18 @@ func (r Request) validate(needJobs bool) error {
 // The zero Compat means no rental is up, and ClaimNext will then take the
 // oldest queued request whatever it asked for.
 type Compat struct {
+	// Kind is read through KindOf, so a row written before the column
+	// existed and a row that says "sd" are the same rental to this.
+	//
+	// WITHOUT IT A SPEECH REQUEST COULD RIDE AN sd RENTAL. The provider and
+	// the GPU would match, the claim would succeed, and the drain loop would
+	// hand an utterance to a resident sd-server that has no route for it --
+	// after a card had been paid for. The voice does NOT appear here, and
+	// that is the measurement rather than an omission: a one-shot piper names
+	// its own model per invocation, so two requests wanting different voices
+	// are compatible and a resident driver is the only shape that would
+	// change it.
+	Kind     string
 	Provider string
 	GPU      string
 }

@@ -482,3 +482,7 @@ type appRental struct {
 func (a appRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	return a.plan.WithServed(ctx, a.out, sink, fn)
 }
+
+func (a appRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error {
+	return a.plan.WithSpoken(ctx, a.out, sink, fn)
+}

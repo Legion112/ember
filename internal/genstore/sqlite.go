@@ -17,6 +17,7 @@ import (
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 )
 
 // FileName is what the database is called inside the state directory.
@@ -33,7 +34,7 @@ const FileName = "generations.db"
 // internal/statestore's reason: reading a newer layout as an older one drops
 // columns, and the column it would drop is the one that says a request is
 // still running.
-const schemaVersion = 5
+const schemaVersion = 6
 
 // migrations takes an existing file forward, one version per entry:
 // migrations[0] moves a version-1 file to version 2.
@@ -185,6 +186,30 @@ var migrations = [][]string{
 	{
 		`ALTER TABLE requests ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 	},
+	// 5 -> 6: a second workload kind.
+	//
+	// TWO COLUMNS AND NOT A REWRITE. `requests.kind` is the discriminator the
+	// claim reads -- it is in Compat, so it decides which rental a queued row
+	// may ride, which makes it a WHERE and not payload. `jobs.tts` is the
+	// utterance as the request named it, one JSON blob in one column, which
+	// is what `jobs.params` already is for the other driver.
+	//
+	// AN EMPTY `kind` IS AN IMAGE GENERATION, which is why the default is ''
+	// and not 'sd'. Every row written before this version is one, and a
+	// migration that stamped a literal would be asserting about an operator's
+	// history rather than recording the absence; KindOf is the one place that
+	// reading lives, so the two spellings cannot drift. The alternative --
+	// `UPDATE requests SET kind='sd'` -- also rewrites every row of the table
+	// this schema is careful never to rewrite.
+	//
+	// `jobs.tts` is '' and not NULL for the reason every other column here
+	// is: NOT NULL DEFAULT '' means a scan into a string needs no
+	// sql.NullString at any call site, and "no utterance" and "the empty
+	// JSON" are the same fact.
+	{
+		`ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE jobs ADD COLUMN tts TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 // defaultLimit bounds a listing that did not ask for one.
@@ -263,6 +288,10 @@ CREATE TABLE IF NOT EXISTS requests (
 	id            TEXT PRIMARY KEY,
 	created_unix  INTEGER NOT NULL,
 	status        TEXT    NOT NULL,
+	-- Which workload this request is for. '' is an image generation, which
+	-- is every row written before schema version 6; see KindOf, which is the
+	-- one place that reading lives.
+	kind          TEXT    NOT NULL DEFAULT '',
 	provider      TEXT    NOT NULL,
 	gpu           TEXT    NOT NULL DEFAULT '',
 	offer         TEXT    NOT NULL DEFAULT '',
@@ -356,6 +385,12 @@ CREATE TABLE IF NOT EXISTS jobs (
 	-- The optional parameters, as the JSON of sdserver.Params. See
 	-- migrations for why this is one column rather than one per field.
 	params      TEXT    NOT NULL DEFAULT '{}',
+	-- The utterance, when this request is a speech one; '' otherwise. One
+	-- JSON blob in one column, which is what the params column above is for
+	-- the other driver; see the 5 -> 6 migration for why not a second key in
+	-- it. No backticks in this comment: the schema is a raw string literal,
+	-- so one would close it.
+	tts         TEXT    NOT NULL DEFAULT '',
 
 	-- WHAT HAPPENED, as opposed to what was asked for above.
 	--
@@ -567,10 +602,10 @@ func (s *SQLite) insert(ctx context.Context, r Request, started time.Time) error
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO requests
-			(id, created_unix, status, provider, gpu, offer, ttl_ns, max_hourly, max_run,
+			(id, created_unix, status, kind, provider, gpu, offer, ttl_ns, max_hourly, max_run,
 			 preview, preview_every, started_unix)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-		string(r.ID), r.Created.UnixMilli(), string(r.Status), r.Provider, r.GPU, r.Offer,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		string(r.ID), r.Created.UnixMilli(), string(r.Status), r.Kind, r.Provider, r.GPU, r.Offer,
 		int64(r.TTL), int64(r.MaxHourly), int64(r.MaxRun), r.Preview, r.PreviewInterval,
 		unixOrZero(started))
 	if err != nil {
@@ -586,14 +621,26 @@ func (s *SQLite) insert(ctx context.Context, r Request, started time.Time) error
 		if err != nil {
 			return fmt.Errorf("encode the parameters of job %d of request %s: %w", i+1, r.ID, err)
 		}
+		// Marshalled here for params' reason, and '' rather than 'null' for a
+		// job that has none: the column is NOT NULL, and "no utterance" and
+		// "the empty string" being one fact is what keeps every scan below a
+		// plain string.
+		ask := ""
+		if j.TTS != nil {
+			b, err := json.Marshal(j.TTS)
+			if err != nil {
+				return fmt.Errorf("encode the utterance of job %d of request %s: %w", i+1, r.ID, err)
+			}
+			ask = string(b)
+		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO jobs
 				(req, idx, prompt, negative, width, height, steps, batch_count, seed,
-				 sampler, scheduler, cfg, guidance, output, params)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				 sampler, scheduler, cfg, guidance, output, params, tts)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			string(r.ID), i+1, j.Prompt, j.NegativePrompt, j.Width, j.Height, j.Steps,
 			j.BatchCount, j.Seed, j.Sampler, j.Scheduler, j.CFG, j.Guidance, j.Output,
-			params)
+			params, ask)
 		if err != nil {
 			return fmt.Errorf("record job %d of request %s: %w", i+1, r.ID, err)
 		}
@@ -610,7 +657,7 @@ func (s *SQLite) insert(ctx context.Context, r Request, started time.Time) error
 // Named once because scanRequest reads it positionally: a column added to one
 // and not the other silently shifts every field after it, and the field that
 // shifts is whichever one happens to be next.
-const requestColumns = `id, created_unix, status, provider, gpu, offer, ttl_ns,
+const requestColumns = `id, created_unix, status, kind, provider, gpu, offer, ttl_ns,
 	max_hourly, max_run, preview, preview_every, run_id, node,
 	started_unix, ended_unix, cost, rate, elapsed_ns, billable_ns,
 	load_measured_ns, load_reported_ns,
@@ -634,10 +681,10 @@ func scanRequest(sc scanner) (Request, error) {
 		memCgroup                     int
 		provider, gpu, offer          string
 		preview, runID, nodeID, errTx string
-		model                         string
+		model, kind                   string
 		previewEvery                  int
 	)
-	if err := sc.Scan(&id, &created, &status, &provider, &gpu, &offer, &ttl,
+	if err := sc.Scan(&id, &created, &status, &kind, &provider, &gpu, &offer, &ttl,
 		&hourly, &maxRun, &preview, &previewEvery, &runID, &nodeID,
 		&started, &ended, &cost, &rate, &elapsed, &billable,
 		&loadMeasured, &loadReported,
@@ -649,6 +696,7 @@ func scanRequest(sc scanner) (Request, error) {
 		ID:              ReqID(id),
 		Created:         time.UnixMilli(created).UTC(),
 		Status:          Status(status),
+		Kind:            kind,
 		Provider:        provider,
 		GPU:             gpu,
 		Offer:           offer,
@@ -689,7 +737,7 @@ func scanRequest(sc scanner) (Request, error) {
 func (s *SQLite) jobsOf(ctx context.Context, q scannerQuerier, id ReqID) ([]Job, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT prompt, negative, width, height, steps, batch_count, seed,
-		       sampler, scheduler, cfg, guidance, output, params
+		       sampler, scheduler, cfg, guidance, output, params, tts
 		FROM jobs WHERE req = ? ORDER BY idx`, string(id))
 	if err != nil {
 		return nil, fmt.Errorf("read the jobs of %s: %w", id, err)
@@ -699,10 +747,10 @@ func (s *SQLite) jobsOf(ctx context.Context, q scannerQuerier, id ReqID) ([]Job,
 	var out []Job
 	for rows.Next() {
 		var j Job
-		var params string
+		var params, ask string
 		if err := rows.Scan(&j.Prompt, &j.NegativePrompt, &j.Width, &j.Height, &j.Steps,
 			&j.BatchCount, &j.Seed, &j.Sampler, &j.Scheduler, &j.CFG, &j.Guidance, &j.Output,
-			&params); err != nil {
+			&params, &ask); err != nil {
 			return nil, fmt.Errorf("read a job of %s: %w", id, err)
 		}
 		// Reported rather than swallowed. The column is written by this
@@ -712,6 +760,17 @@ func (s *SQLite) jobsOf(ctx context.Context, q scannerQuerier, id ReqID) ([]Job,
 		// at the wrong settings and look like it worked.
 		if err := json.Unmarshal([]byte(params), &j.Params); err != nil {
 			return nil, fmt.Errorf("read the parameters of a job of %s: %w", id, err)
+		}
+		// Reported rather than swallowed, for params' reason one column over,
+		// and the consequence here is sharper: a speech job whose utterance
+		// did not decode would be a job with no text, which the queue would
+		// refuse at the node rather than here -- after a card was rented.
+		if ask != "" {
+			var a tts.Ask
+			if err := json.Unmarshal([]byte(ask), &a); err != nil {
+				return nil, fmt.Errorf("read the utterance of a job of %s: %w", id, err)
+			}
+			j.TTS = &a
 		}
 		out = append(out, j)
 	}
@@ -812,8 +871,15 @@ func (s *SQLite) ClaimNext(ctx context.Context, runID string, c Compat) (Request
 
 	where, args := "", []any{string(StatusRunning), runID, s.at().UnixMilli(), string(StatusQueued)}
 	if !c.IsZero() {
-		where = ` AND provider = ? AND gpu = ?`
-		args = append(args, c.Provider, c.GPU)
+		// THE KIND IS COMPARED THROUGH KindOf AND NOT AS A COLUMN, which is
+		// the one place the empty-means-sd rule has to reach into SQL. A
+		// plain `AND kind = ?` would refuse every row written before schema
+		// version 6 to an sd rental -- they hold '' and the compat holds
+		// 'sd' -- so a restart after an upgrade would leave an operator's
+		// queue permanently unclaimable. Rewriting the rows was the
+		// alternative and is the thing this schema never does.
+		where = ` AND (CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ? AND gpu = ?`
+		args = append(args, KindSD, KindOf(c.Kind), c.Provider, c.GPU)
 	}
 
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(pick, where), args...)

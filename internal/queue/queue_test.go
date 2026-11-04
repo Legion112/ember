@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 )
 
 // fakeServed is a rental whose weights are resident, with no card.
@@ -100,9 +102,28 @@ type fakeRental struct {
 	// the rental is up, which is exactly what stopping `ember serve` mid
 	// generation does.
 	onRented func()
+
+	// spoken is what a speech rental hands its closure.
+	spoken app.Spoken
+}
+
+// WithSpoken is WithServed for a speech rental.
+//
+// THROUGH THE SAME COUNTER, which is the property it exists to keep testable:
+// `TestSubmit_...` asserts that the maximum number of open rentals across BOTH
+// kinds is one, and two independent counters could each be at one while two
+// nodes were up. So both methods go through `rent` below -- one name for a
+// path, not one per call site -- and the only difference between them is which
+// fake the closure is handed.
+func (r fakeRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error {
+	return r.rent(ctx, sink, func(ctx context.Context) error { return fn(ctx, r.spoken) })
 }
 
 func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
+	return r.rent(ctx, sink, func(ctx context.Context) error { return fn(ctx, r.served) })
+}
+
+func (r fakeRental) rent(ctx context.Context, sink report.Sink, fn func(context.Context) error) error {
 	r.mu.Lock()
 	*r.rentals++
 	r.mu.Unlock()
@@ -132,7 +153,7 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 		MemTotal: 700 << 30, MemCached: 29 << 30,
 		Bytes: 56 << 30,
 	})
-	err := fn(ctx, r.served)
+	err := fn(ctx)
 	if r.block != nil {
 		// Held open so a test can see the rental alive while it cancels.
 		select {
@@ -149,6 +170,7 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 
 type fakePlanner struct {
 	served      *fakeServed
+	spoken      recordingSpoken
 	mu          sync.Mutex
 	rentals     int
 	destroyed   int
@@ -169,7 +191,8 @@ func (p *fakePlanner) Plan(_ context.Context, r genstore.Request) (Rental, error
 		return nil, err
 	}
 	return fakeRental{
-		served: p.served, rentals: &p.rentals, destroyed: &p.destroyed,
+		served: p.served, spoken: p.spoken,
+		rentals: &p.rentals, destroyed: &p.destroyed,
 		rentErr: p.rentErr, teardownErr: p.teardownErr, mu: &p.mu, block: p.block,
 		onRented: p.onRented,
 	}, nil
@@ -179,6 +202,19 @@ func (p *fakePlanner) counts() (rentals, destroyed int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.rentals, p.destroyed
+}
+
+// newQueueOver is newQueue over a store the caller already filled.
+//
+// The speech tests enqueue before building the queue, because a request's kind
+// is what decides which rental `once` opens -- so the row has to exist first.
+func newQueueOver(t *testing.T, st genstore.Store, pl *fakePlanner) (*Queue, genstore.Store) {
+	t.Helper()
+	return &Queue{
+		Store:   st,
+		Planner: pl,
+		Outputs: filepath.Join(t.TempDir(), "outputs"),
+	}, st
 }
 
 func newQueue(t *testing.T, pl *fakePlanner) (*Queue, genstore.Store) {
@@ -1648,4 +1684,60 @@ func TestHolding_FollowsTheClaimOntoARiderAndNotTheRequestThatOpenedIt(t *testin
 		t.Error("the opener is still held while the rider is the one on the rental; one " +
 			"drain goroutine holds one request, and two would make the value a guess")
 	}
+}
+
+// recordingSpoken is a speech rental that says nothing and remembers what it
+// was asked to say.
+//
+// FIELD NAMES ARE THE Recording* ONES -- Calls, Errors -- which is this
+// repository's convention so that a reader who has met one fake reads this one
+// without learning it.
+type recordingSpoken struct {
+	mu    *sync.Mutex
+	Calls *[]tts.Run
+	Errs  *[]error
+}
+
+func newRecordingSpoken() recordingSpoken {
+	return recordingSpoken{mu: &sync.Mutex{}, Calls: &[]tts.Run{}, Errs: &[]error{}}
+}
+
+func (s recordingSpoken) Say(_ context.Context, sink report.Sink, run tts.Run, dir string, _ <-chan struct{}) error {
+	if s.mu == nil {
+		return nil
+	}
+	s.mu.Lock()
+	*s.Calls = append(*s.Calls, run)
+	var err error
+	if len(*s.Errs) > 0 {
+		err, *s.Errs = (*s.Errs)[0], (*s.Errs)[1:]
+	}
+	s.mu.Unlock()
+
+	// WHAT A REAL SPEECH RENTAL EMITS, and it is here because a fake tidier
+	// than the thing it stands in for tests a program that does not exist --
+	// the defect AGENTS.md has now recorded seven times. runSpoken emits a
+	// started, an artifact and a cost per utterance, and the artifact event
+	// is what the Recorder turns into an images row: a fake that emitted
+	// nothing would let a queue that recorded no artifact pass.
+	for i := range run.Jobs {
+		sink.Emit(report.Event{
+			Kind: report.KindUnitStarted, Unit: report.UnitJob,
+			Index: i + 1, Total: len(run.Jobs),
+		})
+		sink.Emit(report.Event{
+			Kind: report.KindJobImages, Unit: report.UnitJob,
+			Index: i + 1, Total: len(run.Jobs), Files: 1, Bytes: 1024,
+			Wrote: []report.File{{Name: fmt.Sprintf("speech-%02d.wav", i+1), Bytes: 1024}},
+			// The two figures piper prints, so a reader that stopped
+			// carrying them is visible here as well as in the app package.
+			Reported: 1184 * time.Millisecond, Measured: 62 * time.Millisecond,
+		})
+		sink.Emit(report.Event{
+			Kind: report.KindUnitCost, Unit: report.UnitJob,
+			Index: i + 1, Total: len(run.Jobs),
+		})
+	}
+	_ = dir
+	return err
 }

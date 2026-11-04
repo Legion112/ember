@@ -50,7 +50,7 @@ import (
 	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/report"
-	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 )
 
 // idlePoll is how often the loop looks for work it was not told about.
@@ -81,12 +81,33 @@ type Rental interface {
 	// sink receives the rental's own lifecycle: the node becoming ready, what
 	// it cost, and a destroy that failed.
 	WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error
+
+	// WithSpoken is the same for a speech rental, which has no server to
+	// start and therefore nothing to wait for.
+	//
+	// TWO METHODS AND NOT ONE TAKING A KIND, because the two closures are
+	// handed different things: a `Served` publishes what the server can do
+	// and a `Spoken` publishes nothing. One method returning an `any` would
+	// put a type assertion in the drain loop, which is the dispatch this
+	// change exists to remove rather than relocate.
+	WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error
 }
 
 // Queue is the drain loop.
 type Queue struct {
 	Store   genstore.Store
 	Planner Planner
+
+	// Voices is the catalogue a speech request's voice id is resolved
+	// against, from the operator's config.
+	//
+	// ON THE QUEUE AND READ NOWHERE ELSE ON THIS PATH, which is where the
+	// seal lands: a stored job carries an id and no path, so this is the only
+	// thing that can turn one into a filename -- and it comes from the config
+	// this process was started with, never from a request. Empty means this
+	// process serves no speech, which `webapi` refuses at enqueue so that no
+	// row reaches the loop that could not be resolved.
+	Voices tts.Catalogue
 
 	// Outputs is the directory requests write into.
 	//
@@ -404,25 +425,51 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 		return true, fmt.Errorf("request %s: %w", first.ID, err)
 	}
 
-	compat := genstore.Compat{Provider: first.Provider, GPU: first.GPU}
+	// THE KIND IS IN Compat, so a speech request cannot ride an sd rental.
+	// Without it the provider and the GPU would match, the claim would
+	// succeed, and the drain loop would hand an utterance to a resident
+	// sd-server that has no route for it -- after a card had been paid for.
+	compat := genstore.Compat{
+		Kind: genstore.KindOf(first.Kind), Provider: first.Provider, GPU: first.GPU,
+	}
 
-	// Released after WithServed returns and not inside it: the rental's cost
+	// Released after the rental returns and not inside it: the rental's cost
 	// and a destroy that failed arrive from the deferred teardown, which runs
 	// after the closure below has finished.
 	var served []genstore.ReqID
 	defer func() { q.release(served...) }()
 
-	rentErr := rental.WithServed(ctx, q.lifecycle(first.ID), func(ctx context.Context, s app.Served) error {
-		// Learned once per process and cached, so a mistyped sampler is
-		// refused at the moment it is typed rather than a minute into a
-		// rented card. `sd.serve` is fixed by the config, so every rental in
-		// this process reports the same capabilities.
-		if err := q.Store.PutCaps(ctx, s.Caps()); err != nil {
-			q.log().Warn("could not cache the server's capabilities; the next request will be "+
-				"checked against a card instead of against a cache", "err", err)
-		}
-		return q.drain(ctx, s, lease, compat, first, &served)
-	})
+	// ONE RENTAL EITHER WAY, AND STILL ONE DRAIN GOROUTINE. This is a branch
+	// over which rental to open, not over where the work happens: both arms
+	// call q.drain, which is called from nowhere else, and the rental lives
+	// inside this one iteration of Run's loop. Nothing here is a second path
+	// that could rent -- cmd/check-coverage's TestNothingRentsOutsideInternalApp
+	// is what bounds that, and neither arm names provision.WithNode.
+	var rentErr error
+	switch genstore.KindOf(first.Kind) {
+	case genstore.KindTTS:
+		rentErr = rental.WithSpoken(ctx, q.lifecycle(first.ID), func(ctx context.Context, sp app.Spoken) error {
+			// NO PutCaps, and that is the absence rather than an omission:
+			// piper publishes no capabilities, so there is nothing to cache
+			// and nothing a request could be validated against that
+			// internal/tts does not already check before anything is
+			// rented. A `caps` row written here would be an sd server's
+			// shape holding a speech rental's facts.
+			return q.drain(ctx, ttsRunner{sp: sp, cat: q.Voices}, lease, compat, first, &served)
+		})
+	default:
+		rentErr = rental.WithServed(ctx, q.lifecycle(first.ID), func(ctx context.Context, s app.Served) error {
+			// Learned once per process and cached, so a mistyped sampler is
+			// refused at the moment it is typed rather than a minute into a
+			// rented card. `sd.serve` is fixed by the config, so every rental
+			// in this process reports the same capabilities.
+			if err := q.Store.PutCaps(ctx, s.Caps()); err != nil {
+				q.log().Warn("could not cache the server's capabilities; the next request will be "+
+					"checked against a card instead of against a cache", "err", err)
+			}
+			return q.drain(ctx, sdRunner{s: s}, lease, compat, first, &served)
+		})
+	}
 	if rentErr != nil {
 		// The rental broke. If drain never reached this request, nothing has
 		// written how it ended and the row still says `running`; if it did,
@@ -436,7 +483,7 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 //
 // It returns when nothing compatible is left, which destroys the node: no idle
 // timeout, because a node with nothing to do is a node billing for nothing.
-func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat genstore.Compat, first genstore.Request, served *[]genstore.ReqID) error {
+func (q *Queue) drain(ctx context.Context, s runner, lease string, compat genstore.Compat, first genstore.Request, served *[]genstore.ReqID) error {
 	req := first
 	for {
 		*served = append(*served, req.ID)
@@ -498,7 +545,7 @@ func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat ge
 		// queue holds the app.Served and `ember up` holds nothing but a
 		// sink. A rider is why this write cannot be dropped in favour of the
 		// event: the rental's own events reach the opener's sink alone.
-		q.set(req.ID, func(r *genstore.Request) { r.Model = s.Caps().Model })
+		q.set(req.ID, func(r *genstore.Request) { r.Model = s.Model() })
 		err := q.generate(ctx, s, req)
 		q.finish(req.ID, err)
 		switch {
@@ -541,7 +588,7 @@ func (q *Queue) drain(ctx context.Context, s app.Served, lease string, compat ge
 }
 
 // generate runs one request's jobs and records what came back.
-func (q *Queue) generate(ctx context.Context, s app.Served, req genstore.Request) error {
+func (q *Queue) generate(ctx context.Context, s runner, req genstore.Request) error {
 	stop := make(chan struct{})
 	q.mu.Lock()
 	q.current, q.stop = req.ID, stop
@@ -563,14 +610,13 @@ func (q *Queue) generate(ctx context.Context, s app.Served, req genstore.Request
 		q.mu.Unlock()
 	}()
 
-	run := sdserver.Run{Preview: req.Preview, PreviewInterval: req.PreviewInterval}
-	for _, j := range req.Jobs {
-		run.Jobs = append(run.Jobs, j.SD())
-	}
-
+	// THE CONVERSION FROM A STORED ROW TO A DRIVER'S BATCH MOVED TO THE
+	// RUNNER, which is what made a second kind possible without a switch
+	// here: this function is the stop channel's registration and nothing
+	// else, and it reads the same for both kinds.
 	dir := q.dirOf(req.ID)
 	snk := q.sinkFor(req.ID)
-	err := s.Generate(ctx, snk, run, dir, stop)
+	err := s.Generate(ctx, snk, req, dir, stop)
 	snk.flush()
 	return err
 }

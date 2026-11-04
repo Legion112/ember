@@ -1134,6 +1134,82 @@ Use `cmd`, `cmds`, `sd.jobs` **or** `tts.jobs` — never two. A config naming tw
 is refused before anything is rented, because a run with two answers to "what
 does this node run" is one where an operator watches the wrong thing execute.
 
+#### Asking for speech from the browser
+
+`ember serve` can queue an utterance, and the request names a **voice id** —
+never a path. The ids come from a catalogue the operator publishes:
+
+```yaml
+tts:
+  voices:
+    - id: lessac
+      name: Lessac (en_US, medium)
+      voice: /opt/voices/en_US-lessac-medium.onnx
+      espeak_data: /opt/piper/espeak-ng-data   # optional; the image's by default
+    - id: thorsten
+      name: Thorsten (de_DE, high)
+      voice: /opt/voices/de_DE-thorsten-high.onnx
+```
+
+`GET /api/config` publishes `kinds` and `voices` — the ids and their display
+names, and **not** the paths — so a UI can offer a list it could not have
+guessed. A request then looks like this:
+
+```json
+{
+  "kind": "tts",
+  "provider": "local",
+  "jobs": [
+    {"tts": {"text": "Hello from ember.", "voice_id": "lessac", "output": "greeting"}}
+  ]
+}
+```
+
+`id` is lowercase letters, digits, dot, underscore and dash, and an id that is
+nothing but dots is refused: it reaches no path today, and the allow-list is
+there for the day a catalogue entry grows into a directory name.
+
+**The catalogue is not inferred from `tts.voice`.** An empty `tts.voices` means
+this process serves no speech to a browser, and `POST /api/requests` says so
+naming the key. The alternative — one implicit entry from `tts.voice`, whose
+default points at ember's own speech image — would offer a voice that cannot
+work wherever `image:` is not that one, and the refusal would arrive after a
+card was rented. `ember up` is unaffected: a config file names one voice
+because it names one run.
+
+#### What a request may and may not name
+
+A speech request names a provider, a card, a **voice id** and text. It does not
+name — and has no field for — a voice path, espeak's data directory, a binary,
+argv, an image, a store, a mount, a port, a probe, assets or `extra`. Every one
+of those stays in `ember.yaml`, which is what keeps the exposure and
+containment rules upstream of anything a browser can say.
+
+The two shapes cannot be mixed. `kind` is on the **request** and not on a job,
+so one rental runs one driver and a batch holding an image job and an utterance
+is not something a body can express; a job carrying the other kind's fields is
+refused in both directions, naming the index.
+
+| what | `sd` | `tts` |
+|---|---|---|
+| the model is chosen by | `sd.serve` in the config | a `voice_id` from `tts.voices` |
+| progress | a pass and a step within it | the job; there is none inside one |
+| what the server publishes | `/capabilities`, cached | nothing |
+| `requests.model` | what sd-server reported | empty, and `ember history` prints a dash |
+| artifacts | `<stem>-NN.png`, served `image/png` | `<stem>-NN.wav`, served `audio/wav` |
+
+**A speech job writes no step counts**, and that is an absence rather than a
+zero worth reading: `jobs.passes` and `jobs.steps_done` stay 0 because an
+utterance has neither, while `images`, `bytes` and the cost are real. The two
+figures piper does print — the audio's duration and what inference took — are
+on the artifact event and in the event stream; they are not columns, because a
+column nothing reads is a query layer with no reader.
+
+**Cancelling a speech request** drops the utterances that have not started and
+says how many. It cannot stop the one in flight, which on these measurements is
+a fraction of a second — so unlike an image generation there is nothing worth a
+job-cancel API and nothing to ask one of.
+
 #### There is no CUDA variant, and there is no server
 
 Both are measurements rather than omissions.

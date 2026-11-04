@@ -216,7 +216,15 @@ func (s *RecordingStore) ClaimNext(_ context.Context, runID string, c Compat) (R
 		if r.Status != StatusQueued {
 			continue
 		}
-		if !c.IsZero() && (r.Provider != c.Provider || r.GPU != c.GPU) {
+		// Through KindOf on BOTH sides, which is what the sqlite store's
+		// CASE does in SQL: a row written before the kind column holds '',
+		// and a compat built from one holds 'sd', so comparing the raw
+		// strings would make an upgraded queue unclaimable. A fake that got
+		// this right by comparing raw strings while the real store normalised
+		// -- or the other way round -- is the divergence the conformance
+		// table exists to catch, which is why both spell the same rule.
+		if !c.IsZero() && (KindOf(r.Kind) != KindOf(c.Kind) ||
+			r.Provider != c.Provider || r.GPU != c.GPU) {
 			continue
 		}
 		r.Status = StatusRunning

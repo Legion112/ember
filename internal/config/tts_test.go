@@ -32,8 +32,8 @@ func TestParseTTS_AVoiceWithNoJobsIsNotRefused(t *testing.T) {
 	}
 	// And nothing was defaulted either: a Run nobody will use must not look
 	// like a configured one to a reader of a dry run.
-	if run.Voice != "" {
-		t.Errorf("voice = %q, want empty for a block with no jobs", run.Voice)
+	if len(run.Jobs) != 0 {
+		t.Errorf("a block with no jobs produced %d", len(run.Jobs))
 	}
 }
 
@@ -43,11 +43,11 @@ func TestParseTTS_DefaultsToEmbersOwnImagePaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTTS: %v", err)
 	}
-	if run.Voice != DefaultVoice {
-		t.Errorf("voice = %q, want %q", run.Voice, DefaultVoice)
+	if run.Jobs[0].Voice != DefaultVoice {
+		t.Errorf("voice = %q, want %q", run.Jobs[0].Voice, DefaultVoice)
 	}
-	if run.EspeakData != DefaultEspeakData {
-		t.Errorf("espeak_data = %q, want %q", run.EspeakData, DefaultEspeakData)
+	if run.Jobs[0].EspeakData != DefaultEspeakData {
+		t.Errorf("espeak_data = %q, want %q", run.Jobs[0].EspeakData, DefaultEspeakData)
 	}
 }
 
@@ -61,11 +61,11 @@ func TestParseTTS_AConfiguredPathWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTTS: %v", err)
 	}
-	if run.Voice != "/mnt/weights/de_DE-thorsten-high.onnx" {
-		t.Errorf("voice = %q", run.Voice)
+	if run.Jobs[0].Voice != "/mnt/weights/de_DE-thorsten-high.onnx" {
+		t.Errorf("voice = %q", run.Jobs[0].Voice)
 	}
-	if run.EspeakData != "/usr/share/espeak-ng-data" {
-		t.Errorf("espeak_data = %q", run.EspeakData)
+	if run.Jobs[0].EspeakData != "/usr/share/espeak-ng-data" {
+		t.Errorf("espeak_data = %q", run.Jobs[0].EspeakData)
 	}
 }
 
@@ -78,8 +78,9 @@ func TestParseTTS_BlankIsNotAPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTTS: %v", err)
 	}
-	if run.Voice != DefaultVoice || run.EspeakData != DefaultEspeakData {
-		t.Errorf("a blank path did not fall back: voice=%q espeak=%q", run.Voice, run.EspeakData)
+	if run.Jobs[0].Voice != DefaultVoice || run.Jobs[0].EspeakData != DefaultEspeakData {
+		t.Errorf("a blank path did not fall back: voice=%q espeak=%q",
+			run.Jobs[0].Voice, run.Jobs[0].EspeakData)
 	}
 }
 

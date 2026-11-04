@@ -7490,39 +7490,6 @@ A leaked node bills by the hour in silence. These are not style preferences.
   the right answer. For a PNG it sniffs to `image/png`, which is exactly why
   `TestImage_ServedWithItsTypeDeclaredAndNotSniffed` passed with its property
   destroyed and why that assertion lives over a real listener.
-  **THAT MEASUREMENT WAS RIGHT ABOUT THE ANSWER AND WRONG ABOUT THE FALLBACK,
-  AND THE ASSERTION COULD NOT FAIL FOR A WHOLE RELEASE OF THIS BRANCH.**
-  `http.ServeContent`'s FIRST fallback is `mime.TypeByExtension` and not
-  sniffing -- and the route passed `path.Base(key)`, so the name carried
-  `.wav`, and on a box with `/etc/mime.types` that answers `audio/wav`: the
-  identical spelling. Deleting the `Set` left EVERY header assertion on that
-  route green, so `http.DetectContentType` was never reached and the entry
-  above described a fallback the code could not get to.
-  **It was worse than a dead assertion because it was
-  ENVIRONMENT-DEPENDENT.** `.wav` is not in Go's builtin mime table, so the
-  same defect is red on a slim CI container and green on a developer's laptop
-  -- a verdict about a defect that depends on which packages are installed,
-  which is precisely the dependency `artifactType`'s closed switch exists to
-  refuse, reintroduced through the TEST's fallback path rather than through
-  the production one.
-  **One token fixes it and the production code was always correct**:
-  `http.ServeContent(w, r, "", …)`. The name is read only for type guessing
-  and a declaration is always present -- the switch is closed and its unknown
-  path 500s -- so the empty name costs this route nothing, and the assertion
-  is then RED at `content-type = "audio/wave"`. What is still true is the
-  asymmetry, and it is now measured in both directions rather than inferred:
-  with the name empty, deleting the declaration turns the **wav** arm red and
-  leaves the **PNG** arm green, because Go sniffs `\x89PNG` to the same
-  answer whichever route it took. So the PNG test's live subject remains the
-  ORDERING and the `nosniff` it was moved to a real listener for, and the wav
-  arm is the only one of the two that can see a lost `Content-Type`.
-  **Reinstated three ways rather than one, which is what separated the two
-  halves**: the declaration alone (red), the name alone with the declaration
-  present (green, so the token costs nothing), and BOTH -- the historical pair
-  -- which is **green** and is the state the fix was worth making for. The
-  first attempt at the first of those stubbed `artifactType` as well and
-  turned a second, unrelated assertion red, which is the "ask why a case went
-  the way it did" rule catching a patch that was about the wrong thing.
   **One defect is NAMED AND NOT FIXED**: `sdserver.WriteImages` names every
   file it writes `.png` whatever `output_format` asked for, so a jpg is
   already served as a PNG today. That is this same defect one driver over, it
@@ -7577,28 +7544,16 @@ A leaked node bills by the hour in silence. These are not style preferences.
   job, `ParseTTS` dropping `length_scale`, the artifact event not emitted, and
   the fetch skipped.
   **The eleventh -- the dispatch reverted to `len(p.Spec.Serve) > 0`, which is
-  the defect this whole seam exists to make impossible -- is reported by NO
-  ASSERTION ABOUT THE BEHAVIOUR.** Every `runSpoken` test drives the driver or
-  its adapter directly, where the dispatch is not consulted at all, so the
-  defect lives in one line of `Plan.serve` that only a real rental reaches: a
-  speech run falls through to `session.Serve`, holds the node until its
-  deadline and says nothing. The lab is what reports it, at **exit 2** on "the
-  output does not mention `speaking:`" and "no greeting-01.wav among []". That
-  is this file's own "the most expensive defect available in a change is not
-  reliably the one the unit suite can see", met again -- and the reason the lab
-  exists rather than being coverage.
-  **THE FIRST WORDING SAID `go test ./...` EXIT 0 AND THAT IS WRONG BY ONE
-  GUARD, which is a correction rather than a retraction.** It is exit **1**,
-  because `TestNoProductionDeadCode` fires on `internal/app.(Plan).batchOf`
-  having no production caller the moment the branch stops calling it.
-  Excluding that one guard the tree is exit 0 across forty packages, so the
-  claim holds in full -- and the guard is the `TrustOnFirstUse` shape this file
-  already records and already judges: a stale-inventory check whose failure
-  text tells you to delete a function, which says nothing at all about speech
-  runs being dispatched to an sd-server. Found by an independent reading, and
-  recorded because "the suite is green over it" and "no assertion about the
-  behaviour reports it" are different sentences and this file's rule is that
-  the exit code is the one that counts.
+  the defect this whole seam exists to make impossible -- is `go test ./...`
+  exit 0.** Every `runSpoken` test drives the driver or its adapter directly,
+  where the dispatch is not consulted at all, so the defect lives in one line
+  of `Plan.serve` that only a real rental reaches: a speech run falls through
+  to `session.Serve`, holds the node until its deadline and says nothing. The
+  lab is what reports it, at **exit 2** on "the output does not mention
+  `speaking:`" and "no greeting-01.wav among []". That is this file's own "the
+  most expensive defect available in a change is not reliably the one the unit
+  suite can see", met again -- and the reason the lab exists rather than being
+  coverage.
   **Its failure takes TEN MINUTES, and that is ember being right rather than
   the lab being slow**: the fall-through is the interactive branch, which holds
   the session open by design, so the run is bounded by the config's `ttl` and
@@ -7626,6 +7581,299 @@ A leaked node bills by the hour in silence. These are not style preferences.
   binary links onnxruntime's CPU execution provider only, so there is no
   kernel for a card to be wrong about, nothing for `images:` to key on, and
   the wrong-architecture abort this file records cannot happen to it.
+- **A request can name a KIND now, and the catalogue is what keeps the seal
+  intact rather than widened (#190).** The entry above ends with "`ember
+  serve` cannot queue an utterance", and this is that. The wall was three
+  layers deep and every one of them was the same sentence written when sd was
+  the only kind.
+
+  **THE SEAL, STATED AS WHAT A REQUEST CAN AND CANNOT NAME.** A speech request
+  names a provider, a card, a **voice id** and text. It has no field for a
+  voice path, espeak's data directory, a binary, argv, an image, a store, a
+  mount, a port, a probe, assets or `extra` -- so the refusal is structural
+  rather than checked. `tts.Ask` is the shape a request stores and the shape a
+  row reads back as; `tts.Job`, which carries the two filenames, is reachable
+  only through `Ask.Resolve`, and the only thing that calls it holds the
+  catalogue the process was started with. A test reads `Ask`'s fields through
+  reflection and fails on one nobody has read, because a hand-read list of
+  what it holds is the thing that goes stale and what would be smuggled in is
+  whichever field the list has not heard of.
+
+  **A VOICE CATALOGUE AND NOT #190's WHOLE MODEL STACK, and the narrowing is
+  the point.** That issue describes an entry carrying "the image reference,
+  the assets with their digests, the probe, the serve command and the
+  outputs". A stack catalogue makes a request choose an **image**, which is a
+  bigger question than speech -- every seal in `node`, `exposure` and
+  `loopback` sits downstream of `image:` -- and one the sd path would have to
+  move for too, since `sd.serve` is one server per config. A voice is the one
+  dimension a browser needs and the one that is a path on the node, so it is
+  the honest first entry, and the id shape does not change when the wider one
+  arrives. `internal/catalogue` is also already the GPU availability history,
+  so the NAME is taken as well.
+
+  **AN EMPTY CATALOGUE IS A REFUSAL AND NOT A DEFAULT, which is the decision
+  a reader is most likely to think is an omission.** The obvious shape is one
+  implicit entry derived from `tts.voice` -- and that key's own default points
+  at ember's own speech image, so an operator running `image: ember:sd` with
+  no `tts:` block would be shown a voice that cannot work, with the refusal
+  arriving after a card was rented. So `tts.voices` is the catalogue, it is
+  empty unless the operator wrote it, and `POST /api/requests` refuses speech
+  against an empty one naming the key. `ember up` is untouched: a config file
+  names one voice because it names one run, and the asymmetry is written where
+  `ParseTTS` resolves it.
+
+  **THE ID IS AN ALLOW-LIST ON A FIELD THAT IS NOT DANGEROUS YET, and the test
+  written for that argument found the hole in it.** `[a-z0-9._-]`, lowercase,
+  bounded at 64. It reaches no path today, so a loose charset costs nothing
+  NOW -- what it costs is the day somebody widens the catalogue and reaches
+  for the id as a directory name, at which point a `..` accepted for a year is
+  already in operators' configs and in their stored rows. And `..` **passed**
+  the charset, because it is spelled entirely out of permitted characters: the
+  hole was in the check whose whole case is "the day somebody uses this as a
+  directory name", found by the test written for the case and not by review.
+  An all-dots id is refused rather than cleaned, which is
+  `internal/transfer`'s rule -- `path.Clean("/../a")` returns `/a`, so a check
+  that cleaned first could never fire.
+
+  **KIND IS ON THE REQUEST AND NOT ON A JOB, which makes a mixed batch
+  UNREPRESENTABLE rather than refused.** One rental runs one driver, so an
+  image job and an utterance in one request would need two of them on one
+  node. It is also what `Compat` reads: without it the provider and the GPU
+  would match, the claim would succeed, and the drain loop would hand an
+  utterance to a resident sd-server that has no route for it -- after a card
+  had been paid for. **The VOICE is deliberately not in `Compat`**, which is
+  the measurement rather than an omission: a one-shot piper names its own
+  `--model` per invocation and nothing is held open, so a rider wanting a
+  different voice is free, and a resident driver is the only shape that would
+  change it. An assertion says so, so the day one is built it goes red.
+
+  **EMPTY MEANS `sd` AND NOTHING ELSE COMPARES AGAINST `""`.** Every row
+  written before schema version 6 is an image generation, so the alternative
+  was `UPDATE requests SET kind='sd'` -- which rewrites every row of a table
+  this schema is careful never to rewrite, and asserts about an operator's
+  history rather than recording the absence. `genstore.KindOf` is the one
+  place that reading lives, and it had to reach into SQL: the claim's
+  predicate is `CASE WHEN kind = '' THEN 'sd' ELSE kind END`, because a plain
+  `AND kind = ?` would refuse every pre-v6 row to an sd rental and leave an
+  upgraded queue permanently unclaimable. Both stores spell the same rule, for
+  the reason the conformance table exists.
+
+  **TWO COLUMNS AND NOT A REWRITE: `requests.kind` and `jobs.tts`.** The kind
+  is a `WHERE` -- it is in `Compat`, so it decides which rental a queued row
+  may ride -- and the utterance is payload, one JSON blob in one column, which
+  is what `jobs.params` already is for the other driver. **A second key in
+  `params` was the alternative and is worse**: that column is
+  `sdserver.Params`, a typed struct of one driver's twenty-three fields, so
+  folding a second kind's payload in would make it mean "whichever kind's
+  parameters these are" and the first reader to unmarshal the wrong one gets
+  zeros rather than an error. "One JSON column, not twenty-three" refuses a
+  column per FIELD, which this is not.
+
+  **WHAT A SPEECH JOB WRITES INTO THE PROGRESS COLUMNS, which is the question
+  the shape of this schema makes hard.** `images`, `bytes`, `cost`, `started`
+  and `ended` are real. `passes` and `steps_done` stay **zero**, because an
+  utterance has neither -- a figure there would be a number with the authority
+  of a measurement and nothing behind it, which is `load_elapsed_seconds`
+  twice. The two figures piper does print, the audio's duration and what
+  inference took, travel on the artifact event and are in `events` -- and are
+  **not columns**, because `ember history` has no reader for them and a column
+  nothing reads is "a query layer with no reader", which this file calls the
+  same failure as a feature built and never connected. The honest follow-up is
+  `audio_ns`/`infer_ns` at the moment a reader exists.
+
+  **`requests.model` IS EMPTY FOR SPEECH, AND THAT IS A REFUSAL.** That column
+  is documented as what the generation server reported, and this file's reason
+  for it is that "the model is recorded from a RESPONSE, and that is what
+  makes grouping by it possible". piper publishes nothing. Filling it from the
+  config would be "a value read from the wrong place and believed", which is
+  the mistake the column exists to refuse; the voice is not lost by it, since
+  each job's stored `Ask` carries the id. Both readers already print a dash
+  and the ledger's footnote already says it means nobody read one, which is
+  exactly true.
+
+  **THE SEAM IS ONE MORE METHOD AND THE DISPATCH IS STILL ONE PLACE.**
+  `queue.runner` is `Generate` plus `Model`, with `sdRunner` holding the
+  conversion `Queue.generate` used to do inline and `ttsRunner` holding the
+  catalogue. `Rental` gains `WithSpoken` beside `WithServed` -- two methods
+  and not one taking a kind, because the two closures are handed different
+  things and one returning an `any` would put a type assertion in the drain
+  loop, which is the dispatch this work exists to remove rather than relocate.
+  **One rental at a time is untouched and still structural**: both arms of the
+  branch call `q.drain`, which is called from nowhere else, the rental lives
+  inside one iteration of `Run`'s loop, and neither arm names
+  `provision.WithNode` -- which `TestNothingRentsOutsideInternalApp` bounds.
+  The fakes go through one `rent` for the same reason: two counters could each
+  be at one while two nodes were up.
+
+  **THREE WALLS, AND ONLY A LAB COULD SEE TWO OF THEM.** `ember serve`
+  refused to start without `sd.serve`; `POST /api/requests` answered 409 to
+  everything for the same reason; and both are invisible to `go test ./...`,
+  because every unit test of this path builds a `webapi.Options` or a
+  `queue.Queue` directly and never asks whether the configuration behind it
+  could serve anything. The suite was **entirely green over a configuration
+  `ember serve` refuses to start from**. What reported them was the first run
+  of the lab that posts a request to a real server -- one after the other,
+  each fix exposing the next, which is the ordinary way this goes. Both
+  refusals are per kind now and name both keys, and the enqueue one is a
+  **409** rather than a 400 because the body is well-formed and what is
+  missing is a block in the operator's own file: a 400 would tell a page to
+  change what it sent.
+
+  **AND THE LAB'S OWN FIRST GREEN RUN REPORTED A LEAK.** A request that
+  finished does not destroy the node -- the drain loop destroys it when
+  nothing COMPATIBLE is left -- so the test exiting killed `ember serve`
+  before the teardown ran and left a container and a bridge network behind.
+  Nothing bills for the network, which is why this file records that class
+  going unnoticed until Docker had subnetted its whole address pool. It
+  SIGINTs and waits now, which is `ember serve`'s documented shutdown.
+
+  **THE PROJECTION PUBLISHES IDS AND NAMES AND NOT PATHS**, which is
+  `wire.go`'s own rule -- a hand-written view means adding a field somewhere
+  cannot publish it by default -- and `GET /api/config` carries `kinds` from
+  the one list so a kind added later reaches a UI without anybody remembering
+  the projection. The catalogue is **one derivation**: `runServe` builds it,
+  `serveUntil` takes it, and both `Queue.Voices` and `Options.Voices` are
+  handed that one value. The first version had `viewConfig` call
+  `cfg.TTSCatalogue()` itself and a test caught it -- two readings of one
+  file, four lines from the comment arguing against exactly that, which would
+  have become a browser offering ids the drain loop could not resolve the day
+  somebody added a `--config` reload.
+
+  **WHAT A BROWSER NEEDS FROM THIS AND WHAT IS STILL MISSING.** It needs
+  `GET /api/config`'s `kinds` and `voices`, and a `POST /api/requests` body
+  with `kind: "tts"` and a per-job `tts` object. What is NOT here: nothing in
+  `web/src/` is touched, there is no compose panel and no per-kind parameter
+  schema, and `requestView`'s jobs still project the sd shape -- so a page
+  can queue an utterance and read its artifact, and cannot yet render the
+  utterance back. That is #139's page split and #190's question 2.
+
+- **TWO CORRECTIONS TO THE ENTRY ABOVE, both found by an independent reading
+  and both about an exit code rather than about the code.**
+
+  **THE WAV HEADER ASSERTION COULD NOT FAIL, AND THE REASON IS NOT A DEAD
+  ASSERTION.** The entry above says `http.DetectContentType` answers
+  `audio/wave` for a RIFF header so a lost declaration shows as the wrong
+  spelling. The measurement is right and the inference about WHICH fallback
+  was wrong: `http.ServeContent`'s **first** fallback is
+  `mime.TypeByExtension`, not sniffing -- and the route passed
+  `path.Base(key)`, so the name carried `.wav`, and on a box with
+  `/etc/mime.types` that answers `audio/wav`, the identical spelling ember
+  declares. Deleting the `Set` left every header assertion on that route
+  GREEN. **Worse than dead, because it was environment-dependent**: `.wav` is
+  not in Go's builtin mime table, so the same defect was red on a slim
+  container and green on a laptop -- a verdict depending on installed
+  packages, which is precisely the dependency `artifactType`'s closed switch
+  exists to refuse, reintroduced through the test's fallback path. One token
+  fixes it: the name is `""`, which costs nothing while a declaration is
+  always present (the switch is closed and its unknown path 500s), and the
+  assertion is then RED at `content-type = "audio/wave"`. **And the PNG arm
+  still cannot fail that way**, measured and stated rather than assumed
+  symmetric: Go sniffs `\x89PNG` to `image/png`, so that test's live subject
+  remains the ORDERING and the `nosniff` it was moved here for.
+  **Reinstated three ways rather than one, which is what separated the two
+  halves**: the declaration alone (red), the name alone with the declaration
+  present (green, so the token costs nothing), and BOTH -- the historical
+  pair -- which is **green** and is the state the fix was worth making for.
+  The first attempt at the first of those stubbed `artifactType` as well and
+  turned a second, unrelated assertion red, which is the "ask why a case went
+  the way it did" rule catching a patch that was about the wrong thing.
+
+  **AND THE ELEVENTH REINSTATEMENT IS EXIT 1 RATHER THAN EXIT 0, with the
+  substance unchanged.** The entry above says reverting the dispatch leaves
+  `go test ./...` at exit 0. It leaves it at **exit 1**, because
+  `TestNoProductionDeadCode` fires on `internal/app.(Plan).batchOf` having no
+  production caller once the branch stops calling it. That is the
+  `TrustOnFirstUse` shape this file already records and already judges: a
+  stale-inventory check whose failure text tells you to delete a function, and
+  which says nothing about speech runs being dispatched to an sd-server.
+  Excluding that one guard the tree is exit 0 across forty packages, so the
+  claim -- that no assertion about the behaviour reports it and only the lab
+  does -- holds in full and needed the clause.
+- **A GUARD THAT CATCHES ITS DEFECT BY ACCIDENT IS ONE A TIDY-UP DISARMS, and
+  the migration rule had no assertion whose subject was the rule.** The entry
+  above argues that `CASE WHEN kind = '' THEN 'sd'` is the difference between a
+  working upgrade and a permanently unclaimable queue, and reports a
+  reinstatement going red. It did -- at
+  `TestClaimNext_OnlyJoinsACompatibleRental`, and **only because the shared
+  `req()` fixture happened not to set `Kind`**, so its rows stored `''` while
+  the compat held `sd`.
+  **Measured, and the measurement is the finding**: add `Kind: KindSD` to that
+  fixture -- which is an entirely reasonable tidy-up now the column is
+  first-class and every other field there is set -- and with the wedge still in
+  place `go test ./internal/genstore/` is **ok** and `go test ./...` is **exit
+  0, no FAIL anywhere**. `grep` found no pre-schema-6 claim test in that
+  package at all. So the rule rested on a literal in a fixture rather than on
+  an assertion, and the next person to tidy that struct would have silently
+  re-opened it for every operator upgrading from schema 5.
+  **BOTH HALVES, because either alone leaves the dependency.** The fixture is
+  tidied AND `TestClaimNext_AMigratedRowHasNoKindAndIsStillClaimable` is
+  written: it builds the pre-v6 shape itself, asserts in its own body that the
+  kind really is empty, and claims it with an `sd` compat -- which cannot be
+  switched off by anybody editing a fixture, because the absence is the
+  subject. Tidying alone would have removed the only catch there was; writing
+  alone would have left two assertions where one is accidental and a reader
+  cannot tell which. Reinstated: the SQL defect is now red at the new test and
+  **not** at `OnlyJoinsACompatibleRental`, which is the proof the accident is
+  gone rather than merely covered.
+  **The refusal is asserted before the acceptance**, because an acceptance
+  alone is consistent with a claim that takes everything -- which is exactly
+  what a compat ignoring the kind is.
+  This is `TestOpen_MigratesAVersionFourFile`'s lesson from the other side:
+  that one was a hand-built fixture missing the ROW the bug reads, and this was
+  a hand-built fixture missing the VALUE.
+
+- **The output stem was the second request-supplied string reaching a filename
+  and the only one with no length bound.** The entry above frames the voice id
+  as "the one place a path enters", and `Ask.Output` is also a wire field,
+  resolved into the node-side path by `Resolve`. `MaxVoiceID` is 64 and
+  `MaxText` is 8000, both with written reasons; the stem had none -- so a
+  **100,000-character** stem passed `ValidateOutput`, `Job.Validate` and
+  `Resolve`, and failed at `piper --output_file` **on the node, after a card
+  was paid for**, which is the one thing that function's own doc says it exists
+  to prevent. `tts.go`'s own sentence claimed every bound was piper's "except
+  `MaxText` and the stem -- both of which are ember's and say so", and the stem
+  had no bound to say: a claim in a comment worth exactly what the code does.
+  **The bound is DERIVED and the arithmetic is the assertion.** `NameMax` is
+  255 -- NAME_MAX on ext4, xfs, btrfs and overlayfs -- and `suffixReserve` is
+  what `SpokenStem` composes around a stem, so `MaxOutput` is the subtraction.
+  A round number there would be ember's taste standing in for a filesystem's
+  limit, and the thing being prevented is exactly the filesystem's refusal; 240
+  bytes is longer than any name anybody types, so the bound is not a judgement
+  about names at all.
+  **AND THE FIRST RESERVE WAS ONE BYTE WRONG, FOUND BY THE ARITHMETIC TEST
+  WRITTEN FOR IT AND NOT BY REVIEW.** It reserved EIGHT, derived from a
+  two-digit index padded into `-100.wav` -- and `-1000.wav` is nine, because
+  `%02d` is a MINIMUM width and nothing bounds how many utterances a batch
+  holds, so the index's width is the batch's size. The reserve is ten digits
+  now: over-reserving is the safe direction and costs nine bytes of a name
+  nobody types. A bound that was correct until somebody queued a hundred
+  utterances is the `imagelabs` shape reached through arithmetic.
+  **The two halves are in different packages, and that is a boundary rather
+  than a choice**: `suffixReserve` is the claim and `SpokenStem` is what
+  appends it, and `internal/tts` cannot call `internal/app`. So the
+  subtraction is asserted there and the composition here, in
+  `TestSpokenStem_FitsInsideTheFilenameBoundItWasGiven` -- which is the test
+  that went red over the eight.
+  **IT STAYS A DENY-LIST WHERE THE ID GOT AN ALLOW-LIST, and the asymmetry is
+  argued rather than left to look like an oversight.** An id is a TOKEN:
+  compared with `==`, round-tripped by a UI, and nothing legitimate needs a
+  space or a capital in one, so the narrow set costs nothing. A stem is a
+  FILENAME an operator chose -- `blob.ValidateKey` and `sdserver`'s own stem
+  rule are both deny-lists for that reason, because an allow-list would refuse
+  a space, an accent or a CJK character, all of which are names somebody means.
+  What the two share is that neither CLEANS: a hostile name is refused, because
+  `path.Clean` absorbs a traversal and a check that cleaned first could never
+  fire.
+  **Six reinstatements, each judged on an exit code AND on which test
+  reported it**, which is the half the #165 entry records as the one nobody
+  checks: a correct verdict filed under the wrong mechanism is what two
+  independent readers got wrong there. Red and correctly attributed: the SQL
+  predicate raw, the recording store's comparison raw, the length check gone,
+  the reserve back to eight, and `MaxOutput` as a round literal. One negative
+  control green. Controls at both ends, every case ending on a `git diff`
+  against HEAD -- and one case reported ANCHOR-MISS rather than a verdict,
+  because a `gofmt` rewrap had moved the line it was anchored on, which is
+  trap one working.
 
 ## Style
 

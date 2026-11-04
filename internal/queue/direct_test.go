@@ -97,6 +97,24 @@ type gatedRental struct {
 	order chan string
 }
 
+// WithSpoken mirrors WithServed through the same gate.
+//
+// A MIRROR AND NOT A REFUSAL, although no test here drives speech through it:
+// a fake stricter than the thing it stands in for grows its callers a branch
+// for an error nothing returns, which AGENTS.md records finding in
+// `genstore.RecordingStore.JobRuns` -- and the gate is what every assertion in
+// this file is about, so a second method that skipped it would be a rental the
+// one-at-a-time property cannot see.
+func (r gatedRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error {
+	r.gate.enter("queued")
+	defer r.gate.leave()
+	if r.order != nil {
+		r.order <- "queued"
+	}
+	sink.Emit(report.Event{Kind: report.KindNodeReady, Node: "local/n1"})
+	return fn(ctx, recordingSpoken{})
+}
+
 func (r gatedRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	r.gate.enter("queued")
 	defer r.gate.leave()

@@ -2,6 +2,7 @@ package webapi
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Legion112/ember/internal/app"
@@ -11,6 +12,7 @@ import (
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/reconcile"
 	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 )
 
 // THIS FILE IS THE BROWSER'S WHOLE VIEW OF EMBER, and nothing in it is a
@@ -56,6 +58,24 @@ type configView struct {
 	// where it stops.
 	Ceilings ceilings `json:"ceilings"`
 
+	// Kinds are the workloads this process can run, and Voices the speech
+	// models it publishes.
+	//
+	// WHY A UI HAS TO BE TOLD RATHER THAN KNOWING. A request names a voice by
+	// **id** and nothing else -- the whole seal is that it cannot name a path
+	// -- so the list of ids is something only ember can produce, out of the
+	// operator's own config. A page that guessed would offer a choice that is
+	// refused after a card is rented.
+	//
+	// Voices is EMPTY when this configuration publishes none, and a UI must
+	// read that as "this process serves no speech" rather than as an empty
+	// dropdown: `POST /api/requests` refuses a speech request against an
+	// empty catalogue, naming `tts.voices`. The alternative -- an implicit
+	// entry pointing at ember's own image -- would offer a voice that cannot
+	// work wherever `image:` is not the speech one.
+	Kinds  []string    `json:"kinds"`
+	Voices []voiceView `json:"voices"`
+
 	// AllowPaid says whether this process was started with --allow-paid. A UI
 	// that did not know would offer a card it cannot rent and surface the
 	// refusal as a failure.
@@ -80,6 +100,19 @@ type configView struct {
 	// different answers, and a UI treating the first as the second would grey
 	// out every control.
 	Caps *capsView `json:"caps,omitempty"`
+}
+
+// voiceView is one catalogue entry as a UI reads it.
+//
+// THE PATHS ARE NOT ON IT, which is the projection doing its job rather than
+// an omission: this file's own header says a hand-written projection means
+// adding a field somewhere cannot publish it by default, and
+// `config.TTSVoice` holds two filenames on the node. A UI needs an id to send
+// and a name to show; the operator knows what is behind them and a browser has
+// no use for it.
+type voiceView struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type providerView struct {
@@ -151,14 +184,29 @@ type limitView struct {
 	MaxBatchCount int `json:"max_batch_count"`
 }
 
-func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps *sdserver.Capabilities) configView {
+// voices is a PARAMETER and not re-derived from cfg here, which is the
+// one-derivation rule this feature is wired on.
+//
+// FOUND BY A TEST RATHER THAN BY REVIEW. The first version of this called
+// cfg.TTSCatalogue() itself, and the harness that set Options.Voices saw an
+// empty list -- two readings of one file, which is the thing cmd_serve's own
+// comment argues against four lines from where it wires them. A handler and a
+// drain loop resolving the same id against two derivations is a browser
+// offering ids the loop cannot resolve, and the trigger would be the next
+// --config reload somebody adds rather than anything in today's code.
+func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps *sdserver.Capabilities,
+	voices tts.Catalogue,
+) configView {
 	hourly, run, _ := cfg.Budgets()
 
 	v := configView{
 		// An empty list and never null, for the reason ws.go gives: a client
 		// whose field is a list gets a type error from `null` and drops the
 		// whole response.
-		Providers:       []providerView{},
+		Providers: []providerView{},
+		// Empty lists and never null, for the same reason.
+		Kinds:           genstore.Kinds(),
+		Voices:          []voiceView{},
 		Ceilings:        ceilings{TTL: dur(cfg.TTL), MaxHourly: rate(hourly), MaxRun: usd(run)},
 		AllowPaid:       allowPaid,
 		Servable:        len(cfg.SD.Serve) > 0,
@@ -168,6 +216,9 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 	}
 	if m, err := cfg.StoreMount(); err == nil && cfg.HasStore() {
 		v.Mount = m.String()
+	}
+	for _, e := range voices {
+		v.Voices = append(v.Voices, voiceView{ID: e.ID, Name: e.Name})
 	}
 	for _, p := range reg.All() {
 		c := p.Caps()
@@ -310,6 +361,17 @@ type inputView struct {
 // config never mentioned. The seal is structural: the field does not exist
 // here, and genstore.Job has none either.
 type newRequest struct {
+	// Kind is which workload this request is for: "sd" (or absent) for an
+	// image, "tts" for speech.
+	//
+	// ON THE REQUEST AND NOT ON A JOB, which makes a mixed batch
+	// UNREPRESENTABLE rather than refused: one rental runs one driver, so an
+	// image job and an utterance in one request would need two of them on one
+	// node. ABSENT MEANS "sd" for compatibility -- every body the page has
+	// ever posted omits it -- and `genstore.KindOf` is the one place that
+	// reading lives.
+	Kind string `json:"kind,omitempty"`
+
 	Provider string `json:"provider"`
 	GPU      string `json:"gpu,omitempty"`
 
@@ -381,6 +443,80 @@ type newJob struct {
 	SLG       *slgJob   `json:"slg,omitempty"`
 	Hires     *hiresJob `json:"hires,omitempty"`
 	VAETiling *tileJob  `json:"vae_tiling,omitempty"`
+
+	// TTS is the utterance, for a request whose kind is "tts", and absent for
+	// every image generation.
+	//
+	// A NESTED OBJECT AND NOT MORE FLAT FIELDS, so that "this body set
+	// something belonging to the other kind" is ONE comparison rather than a
+	// hand-maintained list of twenty-three names -- see crossKind, which is
+	// the check, and sdFieldsSet, which is how it is derived from this type
+	// rather than from a list beside it.
+	TTS *ttsJob `json:"tts,omitempty"`
+}
+
+// ttsJob is one utterance as a browser may ask for it.
+//
+// WHAT IT FORBIDS IS THE POINT, and it is shorter to say than what it
+// permits: there is no voice path, no espeak path, no binary, no argv, no
+// image, no store, no mount and no `extra`. The ONLY way a request chooses a
+// model is VoiceID, which names an entry in a list the operator published --
+// so every seal in node, exposure and loopback stays upstream of anything a
+// browser can say, exactly as it does for `sd`.
+//
+// There is no `extra` here and that is an absence rather than a refusal:
+// piper publishes six options in total, so an untyped map would have nothing
+// to carry that a field does not. The sd job has one in the config and refuses
+// it on the wire; this kind has nowhere for one to exist.
+type ttsJob struct {
+	// Text is the operator's content and travels exactly as a prompt does.
+	Text string `json:"text"`
+
+	// VoiceID names a catalogue entry. A UI gets the list from
+	// GET /api/config.
+	VoiceID string `json:"voice_id"`
+
+	// Output is a filename stem, refused unless it is a plain name --
+	// `newJob.Output`'s own precedent one kind over.
+	Output string `json:"output,omitempty"`
+
+	// The five piper publishes. Pointers because piper's defaults are 0,
+	// 1.0, 0.667, 0.8 and 0.2: zero is a value somebody might mean, so
+	// zero-is-unset would make "the first speaker" and "no silence between
+	// sentences" unrequestable while looking exactly like a field that works.
+	Speaker         *int     `json:"speaker,omitempty"`
+	LengthScale     *float64 `json:"length_scale,omitempty"`
+	NoiseScale      *float64 `json:"noise_scale,omitempty"`
+	NoiseW          *float64 `json:"noise_w,omitempty"`
+	SentenceSilence *float64 `json:"sentence_silence,omitempty"`
+}
+
+// ask is this utterance as the store holds it.
+func (j ttsJob) ask() *tts.Ask {
+	return &tts.Ask{
+		Text: j.Text, VoiceID: j.VoiceID, Output: j.Output,
+		Speaker: j.Speaker, LengthScale: j.LengthScale, NoiseScale: j.NoiseScale,
+		NoiseW: j.NoiseW, SentenceSilence: j.SentenceSilence,
+	}
+}
+
+// sdFieldsSet reports whether this job set anything belonging to the image
+// kind.
+//
+// DERIVED FROM THE TYPE AND NEVER FROM A LIST OF NAMES. The obvious version is
+// `if j.Prompt != "" || j.Width != 0 || ...` over twenty-three fields, which is
+// the hand-maintained list this repository refuses by name -- and the field
+// that would be forgotten is whichever one is added next, which is exactly the
+// one a smuggled value would arrive in. Clearing the ONE field that is not the
+// image kind's -- TTS -- and comparing the rest against a zero value cannot be
+// out of date.
+//
+// reflect.DeepEqual and not ==, because newJob holds a slice (slgJob.Layers)
+// and is therefore not comparable. It runs once per job of one enqueue.
+func (j newJob) sdFieldsSet() bool {
+	z := j
+	z.TTS = nil
+	return !reflect.DeepEqual(z, newJob{})
 }
 
 // slgJob, hiresJob and tileJob are the nested blocks.
@@ -458,7 +594,12 @@ func (j newJob) params() sdserver.Params {
 // that is the last thing before a create call and the only place that knows
 // the operator's own numbers.
 func (n newRequest) toRequest() (genstore.Request, error) {
+	if err := n.crossKind(); err != nil {
+		return genstore.Request{}, err
+	}
+
 	r := genstore.Request{
+		Kind:            n.Kind,
 		Provider:        n.Provider,
 		GPU:             n.GPU,
 		Preview:         n.Preview,
@@ -491,6 +632,15 @@ func (n newRequest) toRequest() (genstore.Request, error) {
 	}
 
 	for _, j := range n.Jobs {
+		if genstore.KindOf(n.Kind) == genstore.KindTTS {
+			// ONLY THE UTTERANCE, and nothing from the image half even if the
+			// body carried it -- which crossKind has already refused, so this
+			// is the second mechanism rather than the first. Copying the sd
+			// fields across "just in case" would store a prompt on a speech
+			// row that nothing reads and `ember history` would print.
+			r.Jobs = append(r.Jobs, genstore.Job{TTS: j.TTS.ask()})
+			continue
+		}
 		r.Jobs = append(r.Jobs, genstore.Job{
 			Prompt: j.Prompt, NegativePrompt: j.NegativePrompt,
 			Width: j.Width, Height: j.Height, Steps: j.Steps,
@@ -501,6 +651,39 @@ func (n newRequest) toRequest() (genstore.Request, error) {
 		})
 	}
 	return r, nil
+}
+
+// crossKind refuses a body whose jobs belong to a kind it did not name.
+//
+// BOTH DIRECTIONS, because each is a different defect. A speech request
+// carrying image fields is the one with a smuggling shape to it -- the fields
+// would be stored, read by nothing, and the next reader to widen the speech
+// path would find them already there. An image request carrying an utterance
+// is the quieter half: it would be dropped, and the operator would be billed
+// for a generation that said nothing about the thing they asked for.
+//
+// The refusal names the kind and the index, because a batch of twenty composed
+// by a page is not something an operator can bisect by reading it.
+func (n newRequest) crossKind() error {
+	if !genstore.KindValid(n.Kind) {
+		return fmt.Errorf("kind %q is not one ember runs; it is %q or %q",
+			n.Kind, genstore.KindSD, genstore.KindTTS)
+	}
+	tts := genstore.KindOf(n.Kind) == genstore.KindTTS
+	for i, j := range n.Jobs {
+		switch {
+		case tts && j.TTS == nil:
+			return fmt.Errorf("jobs[%d]: this is a %s request and the job carries no utterance",
+				i, genstore.KindTTS)
+		case tts && j.sdFieldsSet():
+			return fmt.Errorf("jobs[%d]: this is a %s request and the job also sets image "+
+				"parameters; a request names one kind", i, genstore.KindTTS)
+		case !tts && j.TTS != nil:
+			return fmt.Errorf("jobs[%d]: this is a %s request and the job carries an utterance; "+
+				"a request names one kind", i, genstore.KindSD)
+		}
+	}
+	return nil
 }
 
 // requestView is one request as a UI reads it.

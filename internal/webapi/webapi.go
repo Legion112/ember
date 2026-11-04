@@ -111,6 +111,23 @@ type Options struct {
 	// ceiling and everything a request may not choose.
 	Config config.Config
 
+	// Voices is the speech catalogue a request's voice id is checked
+	// against, derived from Config at startup by the one function that reads
+	// it.
+	//
+	// A FIELD AND NOT A READ OF Config IN THE HANDLER, which is #105's lesson
+	// applied before it costs anything: GET /api/nodes answered 501 in every
+	// shipped `ember serve` because Options had no Scan field and the three
+	// assignments in the tree were all in test files reaching past the
+	// constructor. The trap is available here too -- a handler calling
+	// s.opts.Config.TTSCatalogue() would work, and then the queue's copy and
+	// this one would be two derivations of one file that could come apart.
+	// One derivation, wired once in cmd_serve, handed to both.
+	//
+	// Empty means this process publishes no speech, which validateSpoken
+	// refuses with a sentence naming tts.voices rather than with a 501.
+	Voices tts.Catalogue
+
 	// Registry is what this process can reach. A provider with no credential
 	// is deliberately absent, so the UI does not offer a button that cannot
 	// work.
@@ -499,7 +516,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	} else if ok {
 		caps = &c
 	}
-	s.ok(w, viewConfig(s.opts.Config, s.registry(), s.opts.AllowPaid, caps))
+	s.ok(w, viewConfig(s.opts.Config, s.registry(), s.opts.AllowPaid, caps, s.opts.Voices))
 }
 
 func (s *Server) getOffers(w http.ResponseWriter, r *http.Request) {
@@ -600,9 +617,21 @@ func (s *Server) postRequest(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusForbidden, err)
 		return
 	}
-	if len(s.opts.Config.SD.Serve) == 0 {
-		s.fail(w, http.StatusConflict, errors.New("this configuration has no sd.serve block, so "+
-			"there is no generation server to start and a queued request would have nowhere to run"))
+	// CAN THIS SERVER RUN THIS KIND? Per kind, because the two have different
+	// answers: an image needs `sd.serve` and an utterance needs a voice in
+	// `tts.voices`, and a configuration with one of them can serve one of
+	// them.
+	//
+	// IT USED TO ASK ONLY ABOUT sd.serve, which was the same question while
+	// there was one kind -- and the second kind made it a wall: a server
+	// publishing voices and no sd block refused every request there was,
+	// including the ones it could run. Found by the lab that posts to a real
+	// server, after the identical defect in `ember serve`'s own startup
+	// check; both were invisible to `go test ./...`, which builds a
+	// `webapi.Options` directly and never asks whether the configuration
+	// behind it could serve anything.
+	if err := s.canServe(genstore.KindOf(req.Kind)); err != nil {
+		s.fail(w, http.StatusConflict, err)
 		return
 	}
 	if err := s.validateJobs(r.Context(), req); err != nil {
@@ -665,6 +694,17 @@ func (s *Server) refusePaid(name string) error {
 // the schedulers and the format lists have no static answer, because a list
 // ember has not been told is not a list it can check against.
 func (s *Server) validateJobs(ctx context.Context, req genstore.Request) error {
+	// SPEECH IS VALIDATED AGAINST THE CATALOGUE AND RETURNS, because none of
+	// what follows is about it: there is no preview, no sampler list and no
+	// cached capabilities -- piper publishes nothing, so the only thing a
+	// refusal can rest on is the list of voices the operator published and
+	// the bounds internal/tts holds. A fall-through would run sdserver's
+	// static validation over a job with no prompt and refuse every utterance
+	// there is.
+	if genstore.KindOf(req.Kind) == genstore.KindTTS {
+		return s.validateSpoken(req)
+	}
+
 	preview, err := sdserver.ParsePreview(req.Preview)
 	if err != nil {
 		return fmt.Errorf("preview: %w", err)
@@ -1017,11 +1057,11 @@ func (s *Server) getImage(w http.ResponseWriter, r *http.Request) {
 	// ServeContent reads the name ONLY to guess a type when none is declared,
 	// and one always is here -- the switch above is closed and its unknown
 	// path 500s -- so passing nothing costs this route nothing. What passing
-	// `path.Base(key)` cost was the TEST: with the declaration deleted,
-	// ServeContent's FIRST fallback is `mime.TypeByExtension` and not
-	// sniffing, and on a box with /etc/mime.types that answers `audio/wav` --
-	// the identical spelling -- so every header assertion on this route
-	// passed over a lost Content-Type.
+	// `path.Base(key)` cost was the test: with the declaration deleted,
+	// ServeContent's FIRST fallback is `mime.TypeByExtension`, not sniffing,
+	// and on a box with /etc/mime.types that answers `audio/wav` -- the
+	// identical spelling -- so every header assertion on this route passed
+	// over a lost Content-Type.
 	//
 	// IT WAS WORSE THAN A DEAD ASSERTION BECAUSE IT WAS ENVIRONMENT-DEPENDENT.
 	// `.wav` is not in Go's builtin mime table, so the same defect goes red on
@@ -1130,4 +1170,74 @@ func (s *Server) failStore(w http.ResponseWriter, err error) {
 		return
 	}
 	s.fail(w, http.StatusInternalServerError, err)
+}
+
+// validateSpoken refuses a speech request before it is queued.
+//
+// THE VOICE IS RESOLVED HERE AND THE RESULT IS THROWN AWAY, which looks
+// wasteful and is the point: what reaches the store is the ASK -- a voice id
+// and no path -- and what this proves is that the id names something the
+// operator published, at the cheapest moment there is. The resolution that
+// matters happens again in the drain loop, from the same catalogue, because
+// the loop builds its batch from the STORED request for every request it
+// claims. Two resolutions of one id, each the only one available on its path.
+//
+// A refusal here costs nothing. The same mistake found at the node costs a
+// rental: the create call, the wait for sshd, the probe and the image pull,
+// all of it billed, to discover that an id has a typo in it.
+func (s *Server) validateSpoken(req genstore.Request) error {
+	// AN EMPTY CATALOGUE IS ITS OWN SENTENCE AND NOT "no voice <id>". An
+	// operator who has not configured speech asked for something this process
+	// cannot do; one who has, and typed an id wrong, needs the list. Lookup
+	// answers both, and the distinction is why it does rather than why this
+	// does.
+	if len(req.Jobs) == 0 {
+		// Unreachable through toRequest, which refuses a jobless request
+		// before this, and here because Adopt and a hand-written body reach
+		// genstore.Request without passing through it. A rental that said
+		// nothing is the thing being refused.
+		return errors.New("a speech request with no utterances would rent a machine and say nothing")
+	}
+	for i, j := range req.Jobs {
+		if j.TTS == nil {
+			return fmt.Errorf("jobs[%d]: this is a %s request and the job carries no utterance",
+				i, genstore.KindTTS)
+		}
+		// Resolved rather than only looked up, so the bounds on the five
+		// numbers are the SAME function the node will apply -- one authority,
+		// and a refusal an operator reads once rather than twice in different
+		// words.
+		if _, err := j.TTS.Resolve(s.opts.Voices); err != nil {
+			return fmt.Errorf("jobs[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// canServe answers whether this configuration can run one kind.
+//
+// A 409 AND NOT A 400, which the status it replaced already had right: the
+// body is well-formed and the request is one ember understands -- what is
+// missing is a block in the operator's own file, which no edit to the request
+// can fix. A 400 would tell a page to change what it sent.
+//
+// The speech arm is deliberately NOT "is there a tts: block": a configuration
+// with `tts.jobs` and no `tts.voices` can run `ember up` and cannot serve a
+// browser, because a request names an id and there would be none to name. The
+// catalogue is the thing a request needs, so the catalogue is what is asked
+// about.
+func (s *Server) canServe(kind string) error {
+	switch kind {
+	case genstore.KindTTS:
+		if len(s.opts.Voices) == 0 {
+			return errors.New("this configuration publishes no tts.voices, so there is no voice " +
+				"a request could name: add a tts.voices list to ember.yaml")
+		}
+	default:
+		if len(s.opts.Config.SD.Serve) == 0 {
+			return errors.New("this configuration has no sd.serve block, so there is no " +
+				"generation server to start and a queued request would have nowhere to run")
+		}
+	}
+	return nil
 }
