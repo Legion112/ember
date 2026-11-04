@@ -854,6 +854,29 @@ func committedConfigs(t *testing.T, root string) []string {
 	// no single source can fail to satisfy. So the floor is "no one document
 	// carries it" rather than a census of blocks, which would be the
 	// hand-maintained list this guard's own comment argues against.
+	//
+	// WHAT THIS FLOOR CANNOT DO, because a limitation nobody can read out of
+	// the code is a limitation that will be forgotten: it counts documents
+	// and can never name the one that matters. Measured, both halves. On the
+	// tree as it stands, an extractor that skips configurations.md by name is
+	// RED -- "1 of the 6 configuration(s) came from a ```yaml fence" -- but
+	// that is the two-configuration floor answering, not this one, and it
+	// holds only while long-video-is-a-pipeline.md is the sole other page
+	// with a fence. Plant a second docs/ page carrying one and skip
+	// configurations.md: EXIT 0, seven configurations loaded, and ZERO of
+	// them from configurations.md -- both demoted blocks unread with every
+	// floor satisfied. Latent rather than present, and it stays latent only
+	// by an accident of how many pages under docs/ happen to hold YAML.
+	//
+	// NOT CLOSED, and the trade is the reason. The only fix is naming
+	// `configurations` -- one hand-maintained filename, which is exactly what
+	// the paragraph above refuses, and the LAB_TAGS argument says a list
+	// checked against nothing is worse than the gap it covers. With Glob gone
+	// there is no pattern left to narrow by accident, so reaching this needs a
+	// deliberate skip of that one name rather than a plausible edit. That is
+	// the TestConformance_CannotCatchARederivedRunID arrangement: the suite
+	// states what it cannot see, so whoever adds the second fenced page reads
+	// this and decides again.
 	if len(docs) < 2 {
 		t.Fatalf("every fenced configuration came from %v, want at least 2 "+
 			"documents under docs/; one document satisfying this floor on its "+

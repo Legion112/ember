@@ -714,6 +714,25 @@ moment it imports a sibling, the sibling's dependencies become its own.
   relaxed back to one with the walk still narrowed (the two-configuration
   floor). And the sub-directory move is now **green**, which is the half that
   says the walk is doing the work.
+  **AND THAT FLOOR COUNTS DOCUMENTS AND CAN NEVER NAME THE ONE THAT MATTERS,
+  which is stated because "no one document carries it" reads as closed and is
+  not.** Found by review attacking it rather than by the pass that built it,
+  and measured both ways: on the tree as it stands an extractor skipping
+  `configurations.md` by name is red -- but at the **two-configuration** floor
+  rather than at this one, and only while `long-video-is-a-pipeline.md` is the
+  sole other page with a fence. Plant a second `docs/` page carrying one and
+  skip `configurations.md`: **exit 0, seven configurations loaded, zero of
+  them from `configurations.md`**, both demoted blocks unread with every floor
+  satisfied. Latent rather than present, and latent only by an accident of how
+  many pages under `docs/` happen to hold YAML. **Not closed, and the trade is
+  the reason**: the only fix is naming `configurations`, one hand-maintained
+  filename, which is what the floor above refuses and what the `LAB_TAGS`
+  argument calls worse than the gap -- and with `Glob` gone there is no
+  pattern left to narrow by accident, so reaching it needs a deliberate skip
+  of that one name rather than a plausible edit. So it is the
+  `TestConformance_CannotCatchARederivedRunID` arrangement: the suite states
+  what it cannot see, and whoever adds the second fenced page reads the
+  comment and decides again.
   **THE RULE AS STATED IS WIDER THAN THE RULE AS IMPLEMENTED, and the
   difference is `README.md`.** "Every ember configuration this repository
   commits" is the sentence; "every ```yaml fence under `docs/`" is the code,
