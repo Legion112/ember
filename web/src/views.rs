@@ -1177,7 +1177,7 @@ fn Queue(watching: RwSignal<String>) -> impl IntoView {
                 // cell of a six-column table under `table-layout: auto`, in
                 // the `1fr` half of the page's `1.3fr 1fr` grid. Measured at
                 // a 1280px viewport: the table is 407px, the status cell gets
-                // 174px of it, and `app.AttachStore`'s store refusal -- 183
+                // 174px of it, and `app.AttachStore`'s store refusal -- 170
                 // characters naming `ember store create` -- rendered 174px
                 // tall, NINE lines at two or three words each, with the row
                 // 204px. Five failed requests fill the viewport and the queue

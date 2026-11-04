@@ -3179,7 +3179,7 @@ that sentence made unrepresentable rather than merely tested.
   six-column table under `table-layout: auto`, in the `1fr` half of the page's
   `1.3fr 1fr` grid. **Measured at a 1280px viewport rather than argued: the
   body is 1088, the queue panel 444, its table 407, and that cell gets 174 of
-  it** -- so `app.AttachStore`'s store refusal, 183 characters naming
+  it** -- so `app.AttachStore`'s store refusal, 170 characters naming
   `ember store create`, rendered **174px tall, nine lines of two or three
   words**, in a 204px row. Five failed requests fill the viewport. The entry
   above about `Request::reason` is right that the page had to show it and says
@@ -3234,34 +3234,51 @@ that sentence made unrepresentable rather than merely tested.
   store the provider does not have instead, which `NewPlan` refuses at
   plan.go:172 against `PickOffer` at 280, so nothing is created and nothing is
   billed, and the reason is the three-line one the issue's screenshot showed.
-  **Six reinstatements, each firing a DIFFERENT assertion, which is the half
-  worth recording.** The old markup is red at "the reason is somewhere in the
-  panel but not on a row of its own"; no reason row at all is red at "the panel
-  never named why the request failed", and those are two waits rather than one
-  precisely because they are two defects with two fixes; `colspan="1"` is red
-  at the width (208 of 407) *and* at the height (7 lines against 5);
-  `white-space: normal` is red at the two text equalities; the viewport removed
-  is red at the two-column precondition and at nothing else; and a reworded
-  comment came back **not caught**. Controls green at both ends, one backup per
-  path, every case ending on a diff against the pristine copy.
-  **The harness's own defect is the sixth shape this file has collected, and it
-  is a restore that repairs the SOURCE and not the ARTEFACT.** It rebuilt the
-  wasm only for the cases that patched Rust or CSS, so the one Go-only case ran
-  against `internal/webapi/dist` as the case before it had left it -- and
-  reported that case's `white-space: normal` as its own finding, a second
-  assertion firing that had nothing to do with the patch under test. Caught by
-  asking why a case had fired an assertion nobody had aimed at it. It rebuilds
-  unconditionally now, and the re-run leaves that case red at its own
-  precondition alone.
-  **One thing was measured by hand and is not asserted anywhere**: that Chrome
-  paints an `outline` on a `<tbody>` at all. The highlight moved from the row
-  to the group, and a browser that ignored it would have silently dropped the
-  mark saying which request the watcher is showing -- "reads as working" on an
-  affordance. Checked against real Chrome on a page holding nothing but a table
-  with three groups, which is a measurement of the browser rather than of
-  ember, and that is why it is a note here rather than a lab: a lab for it
-  would be a screenshot comparison, and the thing it would be testing is
-  Chrome.
+  **Six reinstatements, no two of which fire the same assertion, which is the
+  half worth recording.** Two of them fire a pair, and that is the shape rather
+  than a blur: what matters is that no case is indistinguishable from another.
+  The old markup is red at "the reason is somewhere in the panel but not on a
+  row of its own"; no reason row at all is red at "the panel never named why
+  the request failed", and those are two waits rather than one precisely
+  because they are two defects with two fixes; `colspan="1"` is red at the
+  width (208 of 407) **and** at the height (7 lines against 5);
+  `white-space: normal` is red at the row's text equality **and** at the
+  watcher's -- two disjoint assertions, and geometry catches neither, since
+  collapsing the line breaks makes the cell *shorter* (62.5px); the viewport
+  removed is red at the two-column precondition and at nothing else; and a
+  reworded comment came back **not caught**. Controls green at both ends, one
+  backup per path, every case ending on a diff against the pristine copy.
+  **The precondition is the only thing between a narrowed viewport and a false
+  pass, and that has an exit code rather than an argument.** Removing the
+  window size **and** the precondition together is **exit 0, green**, at 694px,
+  where the height bound is satisfied by a queue panel that is already the full
+  width of the page.
+  **The harness's own defect is a restore that repairs the SOURCE and not the
+  ARTEFACT, and it goes both ways.** It rebuilt the wasm only for the cases
+  that patched Rust or CSS, so the one Go-only case ran against
+  `internal/webapi/dist` as the case before it had left it -- and reported that
+  case's `white-space: normal` as its own finding, a second assertion firing
+  that had nothing to do with the patch under test. Caught by asking why a case
+  had fired an assertion nobody had aimed at it. **The other direction is the
+  dangerous one**: patch `web/style.css`, do not rebuild, and the lab is
+  **exit 0 with the geometry byte-identical to the control** -- the same root
+  cause, that no test run derives `internal/webapi/dist/style.css` from the
+  working tree, and a false GREEN gets committed where a false RED gets
+  investigated. It rebuilds unconditionally now.
+  **One thing was measured by hand and is not asserted anywhere, and it is
+  narrower than it first read**: that Chrome paints an `outline` on a
+  `<tbody>` at all. That is a test of Chrome, needs a screenshot, and is a note
+  here rather than a lab for exactly that reason -- checked against real Chrome
+  on a page holding nothing but a table with three groups. What it was wrongly
+  used to decline is a **different property**: whether the mark's SUBJECT is
+  the group that holds the reason, which is pure DOM, is a test of ember, and
+  is four lines in a lab that already clicks that row. It had no exit code --
+  moving `class:watching` back onto the `<tr>` left the lab green -- and now it
+  does: `groups`, `onTbody`, `holdsTheReason` and `markedRows` read
+  `1/true/true/0` as it ships and `0/false/false/1` with the mark on the row.
+  Until that probe, the three things the grouping settles had no exit code
+  between them, because the geometry is identical whichever element carries
+  the class.
 - **The remote end of a forward is built by `tunnel.RemoteLoopback(port)` and
   never parsed from input.** `direct-tcpip` connects anywhere the node can
   reach, including the provider's metadata service; a free-form remote host
