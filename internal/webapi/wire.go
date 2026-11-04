@@ -58,8 +58,49 @@ type configView struct {
 	// where it stops.
 	Ceilings ceilings `json:"ceilings"`
 
-	// Kinds are the workloads this process can run, and Voices the speech
-	// models it publishes.
+	// Kinds is every workload THIS BUILD KNOWS, and Voices the speech models
+	// this configuration publishes.
+	//
+	// NOT "WHAT THIS PROCESS CAN RUN", which is what this line used to say and
+	// which the code does not do: `viewConfig` sends `genstore.Kinds()`
+	// unconditionally, so a config with no `sd:` block still offers `sd` and
+	// one with no `tts.voices` still offers `tts`. The sentence persuaded about
+	// a filtering nobody wired, which is the shape this repository keeps
+	// recording: an argument a reader believes about a mechanism that is not
+	// there. The field is the static list rather than an answer about this
+	// configuration.
+	//
+	// AND THE GUARD CAUGHT THE FIRST WORDING OF THIS PARAGRAPH, which is worth
+	// one line because it is the same rule twice. That wording named the
+	// deleted flag as the precedent, with `ember` and a backticked `--all` on
+	// one line, and `TestComments_CiteNoFlagThatNoFlagSetDeclares` reported it
+	// -- so the comment correcting a claim about an unimplemented mechanism
+	// was itself citing a command nobody can type.
+	//
+	// WHERE THE RUNNABLE QUESTION IS ANSWERED, since it is not here. For
+	// speech, by `Voices` below and the two readers of it: the page's
+	// `Config::composing` refuses the kind naming `tts.voices`, and
+	// `POST /api/requests` refuses the request the same way, so a browser
+	// cannot get past a kind it has no voice for. For images, by `Servable`
+	// and the Posture line `Config::unrunnable` drives, which says a
+	// configuration with no `sd:` block has no generation server to start.
+	//
+	// THE RESIDUAL, PLAINLY: on a speech-only server `sd` is still a kind the
+	// selector offers and an operator can pick, and the only thing that warns
+	// them is that Posture line. Picking it gives the image controls and a
+	// request that fails once a node is up, because there is no server to
+	// start. Filtering the list would close it -- and would make `kinds` an
+	// answer about this configuration, which is a second place for "can this
+	// run" to be decided and the first direction a drift would show up in. It
+	// would collide with the page's own "has /api/config answered yet"
+	// discriminator, which reads an empty `kinds` as unanswered: a config able
+	// to run NEITHER kind would publish `[]` and the page would sit waiting for
+	// ever. `TestConfig_PublishesAtLeastOneKind` is the exit code behind that
+	// one case, and only that one -- a speech-only config filtered to `["tts"]`
+	// is non-empty and stays green -- so it is a floor under the worst
+	// narrowing rather than a guard against the whole idea. The residual is
+	// therefore written down rather than fixed here, and whoever wants the
+	// narrower list decides again with this paragraph in front of them.
 	//
 	// WHY A UI HAS TO BE TOLD RATHER THAN KNOWING. A request names a voice by
 	// **id** and nothing else -- the whole seal is that it cannot name a path
