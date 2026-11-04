@@ -459,9 +459,9 @@ func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhatACeilingCouldRefuse(t *testing.
 // AND A WRITE IS THE ONE THING IDENTITY CANNOT ANSWER, because `cfg =
 // config.Config{}` and `cfg.MaxDayUSD = ""` both leave the object alone and
 // change what is in it -- which is dataflow. It is refused rather than
-// reasoned about: **an object the function wrote to is no longer accepted**,
-// and the failure says which way. That sentence has no qualifying clause, and
-// getting it to that state took five attempts and four wrong ones:
+// reasoned about: **an object the function wrote to BY ANY STATEMENT is no
+// longer accepted**, and the failure says which way. Getting that sentence to
+// be true took six attempts and five wrong ones:
 //
 //   - v2's prose said "bound to a config.Config" over a set of NAMES;
 //   - its fix said "assigned to ... anywhere in the function" while the code
@@ -474,17 +474,33 @@ func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhatACeilingCouldRefuse(t *testing.
 //     guard green, and `*ast.IncDecStmt`.
 //
 // Go has exactly those three statement nodes that write to an existing
-// variable, plus `&x`; all four are recorded, each through `rootIdent`. The
-// choice at the last step was two `case` arms or a sixth attempt at wording a
-// bound, and the code is the cheaper and more durable answer -- which is the
-// general lesson rather than a fact about this guard.
+// variable, plus `&x`; all four are recorded, each through `rootIdent`. A
+// type-switch guard is `:=`-only, a `SendStmt` writes to a channel rather than
+// to a variable, `var x T = cfg` binds a new object, and a `select` clause's
+// assignment is an `AssignStmt`. The choice at the last step was two `case`
+// arms or another attempt at wording a bound, and the code is the cheaper and
+// more durable answer -- which is the general lesson rather than a fact about
+// this guard.
+//
+// AND "BY ANY STATEMENT" IS THE FIFTH WRONG WORDING, CORRECTED: the sentence
+// used to claim no qualifying clause at all, and a write can reach the object
+// through an EXPRESSION instead. A pointer-receiver method takes the address
+// implicitly, with no `&` anywhere in the AST -- measured, by adding a
+// `func (c *Config) ZeroCeilings()` to `internal/config` and calling
+// `cfg.ZeroCeilings()` above the wiring: the guard stays green and the whole
+// tree with it, both ceilings zeroed. The claim was vacuous rather than wrong,
+// because there is no such method; the boast was what over-reached.
+//
+// SO THE PROPERTY IT RESTS ON IS ASSERTED NOW, by
+// TestConfig_DeclaresNoPointerReceiverMethodOnConfig below, which is an
+// unenforced dependency turned into an exit code. A `Normalise()` or
+// `ApplyDefaults()` on `Config` is a thing people write for good reasons, and
+// nothing would have reported this guard going quiet when they did.
 //
 // That is the allow-list direction and a refusal rather than an analysis, which
 // is what keeps it from becoming the scope-aware dataflow pass that would be
 // the wrong tool here. Measured: no production function in this package that
-// builds a DirectRunner does any of them, and `internal/config` declares no
-// pointer-receiver method on `Config`, so there is no mutating method call to
-// catch either.
+// builds a DirectRunner writes to its config by any of those statements.
 //
 // WHAT IS STILL OPEN, and it is now the bound the prose claims rather than two
 // more: a config handed ACROSS A CALL. Any function or closure that TAKES a
@@ -569,6 +585,86 @@ func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
 	}
 }
 
+// TestConfig_DeclaresNoPointerReceiverMethodOnConfig.
+//
+// THE ONE PROPERTY THE WIRING GUARD RESTS ON AND DID NOT CHECK. That guard
+// refuses a `DirectRunner` whose `Config` is an object the function wrote to,
+// and it finds writes by walking STATEMENTS -- an assignment, a range clause,
+// an inc/dec, an `&`. A write can also arrive through an EXPRESSION: a
+// pointer-receiver method takes the address of its receiver implicitly, so
+// `cfg.ZeroCeilings()` mutates the config with no `&` and no assignment
+// anywhere in the AST, and the guard stays green. Measured, by adding such a
+// method to `internal/config` and calling it above the wiring: green across
+// `go build`, `go vet`, `golangci-lint` and `go test ./...`, with both
+// ceilings zeroed and `Tightest` composing a zero -- which is #165 again.
+//
+// IT IS VACUOUS TODAY AND THAT WAS THE WHOLE DEFENCE, which is exactly the
+// shape this repository refuses to leave on trust: `internal/config` declares
+// no pointer-receiver method on `Config`, so there is no such call to catch --
+// and nothing said so with an exit code. A `Normalise()` or an
+// `ApplyDefaults()` on `Config` is a thing people write for good reasons, and
+// the day somebody does, the wiring guard goes quiet and no test anywhere
+// reports it.
+//
+// SO THE ASSERTION IS HERE RATHER THAN IN internal/config, because the rule
+// being enforced is this GUARD's bound and not a fact about that package's
+// design. A reader who adds the method needs to be told which guard just
+// stopped seeing writes and what the two options are; a failure in the config
+// package's own tests would read as "you may not add a pointer-receiver
+// method", which is not the rule.
+//
+// THE FLOOR IS THE OTHER HALF. `Config` has value-receiver methods --
+// `Budgets`, `PeriodCeilings`, `ParsePorts` and more -- so a load that
+// resolved nothing would otherwise find no pointer receivers and pass. Zero
+// methods is a fatal.
+func TestConfig_DeclaresNoPointerReceiverMethodOnConfig(t *testing.T) {
+	pkgs, err := packages.Load(&packages.Config{
+		Mode: packages.NeedName | packages.NeedTypes,
+	}, "github.com/Legion112/ember/internal/config")
+	if err != nil {
+		t.Fatalf("load internal/config: %v", err)
+	}
+	if n := packages.PrintErrors(pkgs); n > 0 {
+		t.Fatalf("internal/config did not load cleanly (%d error(s))", n)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("loaded %d package(s) for internal/config, want 1", len(pkgs))
+	}
+
+	obj := pkgs[0].Types.Scope().Lookup("Config")
+	if obj == nil {
+		t.Fatal("internal/config declares no Config, so this guard asserted nothing")
+	}
+	named, ok := obj.Type().(*types.Named)
+	if !ok {
+		t.Fatalf("internal/config.Config is a %T rather than a named type", obj.Type())
+	}
+
+	// NumMethods is the methods DECLARED on this type in this package, which
+	// is the set that matters: a method somewhere else cannot have a receiver
+	// of this type.
+	if named.NumMethods() == 0 {
+		t.Fatal("found no methods on internal/config.Config, so this guard asserted nothing: " +
+			"Config has value-receiver methods, and finding none means the load resolved nothing")
+	}
+	for i := range named.NumMethods() {
+		m := named.Method(i)
+		sig, ok := m.Type().(*types.Signature)
+		if !ok || sig.Recv() == nil {
+			continue
+		}
+		if _, ptr := sig.Recv().Type().(*types.Pointer); !ptr {
+			continue
+		}
+		t.Errorf("internal/config.Config has a pointer-receiver method %s, which can write to a "+
+			"config without an assignment or an & anywhere in the caller -- so "+
+			"TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate can no longer see every "+
+			"write and a daemon could be wired with zeroed ceilings (#165). Either make the "+
+			"receiver a value, or teach that guard to record a write when a pointer-receiver "+
+			"method is called on a tracked root", m.Name())
+	}
+}
+
 // isDirectRunner reports whether a literal builds a queue.DirectRunner.
 //
 // ON THE SPELLING, where isConfigConfig below goes through the type checker,
@@ -600,15 +696,20 @@ type configBindings struct {
 	// honest answer to a variable that was written to is a refusal rather than
 	// a guess.
 	//
-	// THE RULE HAS NO QUALIFYING CLAUSE NOW, AND THAT TOOK FIVE ATTEMPTS. Go
+	// THE RULE IS "WROTE TO BY ANY STATEMENT", AND THAT TOOK SIX ATTEMPTS. Go
 	// has exactly three statement nodes that write to an existing variable --
 	// `*ast.AssignStmt`, `*ast.RangeStmt` with `token.ASSIGN`, and
 	// `*ast.IncDecStmt` -- plus `&x`, which hands a writer to something this
-	// guard cannot see into. All four are recorded, each through `rootIdent`,
-	// so "an object the function wrote to is no longer accepted" is simply
-	// true. Every earlier wording was a bound somebody had to be trusted to
-	// have stated correctly, and four of the five were wrong: see the history
-	// on the test above.
+	// guard cannot see into. All four are recorded, each through `rootIdent`.
+	//
+	// WHAT THE CLAUSE EXCLUDES IS AN EXPRESSION, and the fifth wrong wording
+	// was leaving it off: a pointer-receiver method takes the address of its
+	// receiver implicitly, so `cfg.ZeroCeilings()` writes with no `&` and no
+	// assignment anywhere in the AST. Vacuous today and asserted rather than
+	// assumed -- see TestConfig_DeclaresNoPointerReceiverMethodOnConfig. Every
+	// earlier wording was a bound somebody had to be trusted to have stated
+	// correctly, and five of the six were wrong: see the history on the test
+	// above.
 	//
 	// THE FIELD CASE WAS THE FOURTH WALKAROUND AND IT IS THE MOST PLAUSIBLE OF
 	// THEM ALL. The first version of this looked only for an `*ast.Ident` on
