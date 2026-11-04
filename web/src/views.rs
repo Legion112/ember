@@ -227,11 +227,21 @@ fn Posture(config: RwSignal<Config>) -> impl IntoView {
              root, and it never expires"
         </p>
 
-        <Show when=move || !config.get().servable && !config.get().providers.is_empty()>
-            <p class="fatal">
-                "This configuration has no " <code>"sd:"</code> " block, so there is no
-                 generation server to start and a queued request would have nowhere to run."
-            </p>
-        </Show>
+        // WHAT CANNOT RUN, AND THE SENTENCE IS NOT THE SAME FOR BOTH. This
+        // line used to read "no sd: block, so a queued request would have
+        // nowhere to run" whenever `servable` was false -- which was true
+        // while an image generation was the only workload, and became wrong
+        // for the configuration speech is FOR: a `tts.voices` list with no
+        // `sd:` block runs speech perfectly and this said nothing could run
+        // at all, in red, above a panel that was about to work. A warning
+        // that is wrong is worse than no warning, because the one it is
+        // wrong about is the one the operator is looking at.
+        //
+        // `Config::unrunnable` is the decision and `cargo test` reaches it;
+        // this is the render.
+        {move || match config.get().unrunnable() {
+            None => ().into_any(),
+            Some(why) => view! { <p class="fatal">{why}</p> }.into_any(),
+        }}
     }
 }

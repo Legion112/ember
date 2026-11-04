@@ -166,6 +166,58 @@ pub fn denied(flag: Option<bool>) -> bool {
     flag == Some(false)
 }
 
+/// One speech model this process publishes, as a page reads it.
+///
+/// AN ID AND A NAME AND NOTHING ELSE, which is the server's projection doing
+/// its job: `config.TTSVoice` holds two filenames on the node and neither is
+/// on this wire. A request names a voice by **id**, so the id is the only
+/// thing a page can send and the name is the only thing it can show.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Voice {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+impl Voice {
+    /// What the chooser shows for it.
+    ///
+    /// The id where there is no name, because an option with no text is an
+    /// option nobody can pick -- and `tts.voices` makes `name` optional while
+    /// `id` is what the request carries anyway.
+    pub fn label(&self) -> &str {
+        if self.name.is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
+    }
+}
+
+/// What the compose panel offers for a chosen kind.
+///
+/// A METHOD'S ANSWER AND NOT A CHAIN OF `if` IN THE VIEW, which is the settled
+/// shape here (`Rows::note`, `Request::reason`, `Listing::answer`,
+/// `Stream::note`, `Progress::rental`): the set of controls a kind shows is a
+/// decision, and a decision inside a `view!` macro can only be checked by
+/// driving a browser.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Composing {
+    /// The image controls: a prompt, the geometry, the sampler, the steps.
+    /// What is on screen today, and what `sd` and an absent kind both mean.
+    Image,
+
+    /// The speech controls: a text area and a chooser over these voices.
+    ///
+    /// Carries the list rather than a flag, so a view cannot reach the
+    /// chooser without having been handed something to put in it -- which is
+    /// the state an empty `<select>` posting a blank `voice_id` comes from.
+    Speech(Vec<Voice>),
+
+    /// A kind this process will not run, and the sentence saying why.
+    Refused(String),
+}
+
 /// What the server will let this UI offer.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Config {
@@ -175,6 +227,28 @@ pub struct Config {
     pub ceilings: Ceilings,
     #[serde(default)]
     pub allow_paid: bool,
+
+    /// Which workloads this process can run, in the order to offer them.
+    ///
+    /// READ FROM THE SERVER AND NEVER SPELLED HERE, for the reason the voices
+    /// are: `genstore.Kinds()` is the one list, and a second copy in this
+    /// crate is a place for the kind added last to be forgotten.
+    ///
+    /// EMPTY MEANS `/api/config` HAS NOT ANSWERED, not that this process runs
+    /// nothing -- the `caps` distinction one field over. `genstore.Kinds()`
+    /// is derived from nothing and cannot be empty, and
+    /// `TestConfig_PublishesAtLeastOneKind` is the exit code behind that, so
+    /// the only way this list is empty is that nothing has replaced
+    /// `Config::default()` yet.
+    #[serde(default, deserialize_with = "nullable")]
+    pub kinds: Vec<String>,
+
+    /// The speech models this process publishes, which may legitimately be
+    /// none: an `ember serve` whose config has no `tts.voices` serves no
+    /// speech to a browser, and `POST /api/requests` refuses one naming that
+    /// key.
+    #[serde(default, deserialize_with = "nullable")]
+    pub voices: Vec<Voice>,
     #[serde(default)]
     pub servable: bool,
     #[serde(default)]
@@ -223,6 +297,91 @@ impl Config {
         match &self.caps {
             None => true,
             Some(c) => !denied(pick(&c.features)),
+        }
+    }
+
+    /// What this process cannot run, where that is worth saying in red.
+    ///
+    /// ONE SENTENCE PER STATE AND NOT ONE FOR BOTH, which is the correction.
+    /// This was `!servable`, and the line it printed said "a queued request
+    /// would have nowhere to run" -- true while an image generation was the
+    /// only workload, and wrong for the configuration speech is FOR: a
+    /// `tts.voices` list with no `sd:` block runs speech perfectly. A warning
+    /// that is wrong about the thing the operator is looking at is worse than
+    /// no warning, which is the `proj` caption's rule and the false-abandoned
+    /// one.
+    ///
+    /// SILENT UNTIL `/api/config` HAS ANSWERED, keyed on `providers` as this
+    /// line always was: a default `Config` is not servable and publishes no
+    /// voices, so an unguarded version shouts "this configuration runs
+    /// nothing" at every page load for the moment before the fetch lands.
+    /// `kinds` is the discriminator `composing` uses and `providers` is the
+    /// one here, and they agree -- both are non-empty in every real response
+    /// -- so this is left as it was rather than changed under a sentence that
+    /// is about something else.
+    pub fn unrunnable(&self) -> Option<&'static str> {
+        if self.providers.is_empty() || self.servable {
+            return None;
+        }
+        if self.voices.is_empty() {
+            return Some(
+                "This configuration has no sd: block and no tts.voices, so there is \
+                 nothing for a queued request to run.",
+            );
+        }
+        Some(
+            "This configuration has no sd: block, so there is no generation server to \
+             start and a queued image request would have nowhere to run. Speech still \
+             works.",
+        )
+    }
+
+    /// Which set of controls a kind shows, and the refusal where it shows
+    /// none.
+    ///
+    /// AN EMPTY STRING IS `sd`, which is `genstore.KindOf`'s rule read from
+    /// the other side of the wire: every body this page has ever posted omits
+    /// `kind`, and the server resolves the absence to an image generation. So
+    /// the default state of this panel is the one that was there before
+    /// speech existed, and it is that way by the same comparison the server
+    /// makes rather than by a separate convention.
+    ///
+    /// SPEECH IS REFUSED WHERE THERE ARE NO VOICES, and the two reasons are
+    /// different sentences because the remedies are. `/api/config` not having
+    /// answered is a wait; a config with no `tts.voices` is an edit to
+    /// `ember.yaml` and a restart. Collapsing them would tell an operator
+    /// whose file is correct to go and change it, and an operator whose file
+    /// is empty to keep waiting.
+    ///
+    /// THE UNANSWERED ARM IS THE SECOND MECHANISM AND NOT THE FIRST.
+    /// `Compose`'s kind selector is built from `kinds`, which is empty until
+    /// the config lands -- so there is no option for an operator to pick and
+    /// the window cannot be entered through the page at all. This arm is what
+    /// holds if that ever stops being true: a `?kind=` in the URL, a
+    /// remembered choice, a default taken from somewhere else. Containment
+    /// twice, by two mechanisms, and `cargo test` reaches this one because it
+    /// is a state of this type rather than of the DOM.
+    ///
+    /// A KIND THIS BUILD DOES NOT KNOW IS NAMED. The server's own `kinds` is
+    /// the only source of the selector's options, so reaching it means the
+    /// server published something this page has no controls for -- a newer
+    /// ember behind an older page, which is a sentence and not a blank panel.
+    pub fn composing(&self, kind: &str) -> Composing {
+        match kind {
+            "" | "sd" => Composing::Image,
+            "tts" if !self.voices.is_empty() => Composing::Speech(self.voices.clone()),
+            "tts" if self.kinds.is_empty() => {
+                Composing::Refused("ember has not said which voices it publishes yet.".into())
+            }
+            "tts" => Composing::Refused(
+                "this ember serve publishes no voices, so it serves no speech. Add a \
+                 tts.voices list to ember.yaml and restart it."
+                    .into(),
+            ),
+            other => Composing::Refused(format!(
+                "this page has no controls for a {other} request; it is older than the \
+                 ember serve it is talking to."
+            )),
         }
     }
 }
@@ -590,6 +749,85 @@ pub struct Job {
     pub hires: Option<Hires>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vae_tiling: Option<VaeTiling>,
+
+    /// The utterance, for a request whose kind is `tts`, and absent for every
+    /// image generation.
+    ///
+    /// ON THE SAME TYPE AS THE IMAGE FIELDS, which is what makes one batch
+    /// hold either kind -- one `Vec<Job>`, one "add to batch" button, one
+    /// list on screen. A second draft type would have meant a second batch,
+    /// a second list and a second button, for a shape the server already
+    /// spells this way: `newJob.TTS` is a nested object on the image job for
+    /// exactly this reason.
+    ///
+    /// AND THE SERVER REFUSES THE MIX, which is why a speech job is built
+    /// from `Job::default()` rather than from whatever the image draft held:
+    /// `crossKind` compares a speech job's remaining fields against the zero
+    /// value and refuses the whole request if any is set, naming the index.
+    /// Every image field above is `skip_serializing_if` a zero, so a default
+    /// job carrying only this one posts `{"prompt":"","tts":{...}}` -- and
+    /// `prompt` is the zero value Go compares against, so it is not "a field
+    /// belonging to the other kind".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tts: Option<Utterance>,
+}
+
+/// One utterance to speak. The same shape ember accepts.
+///
+/// WHAT IT CANNOT NAME IS THE POINT, and it is shorter to say than what it
+/// can: there is no voice path, no espeak directory, no binary, no argv and no
+/// `extra`. The only way a request chooses a model is `voice_id`, which names
+/// an entry in a list the operator published -- so every seal in `node`,
+/// `exposure` and `loopback` stays upstream of anything this page can say,
+/// exactly as it does for an image.
+///
+/// THE FIVE PIPER PARAMETERS ARE NOT HERE, and that is an absence rather than
+/// an omission: `speaker`, `length_scale`, `noise_scale`, `noise_w` and
+/// `sentence_silence` are on the server's wire type as pointers, and none of
+/// them has been measured from this page. A control over an unmeasured value
+/// set is the `allowedCudaVersions` mistake, and a slider whose effect nobody
+/// has heard is the "reads as working" one. They stay reachable from
+/// `ember.yaml`.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct Utterance {
+    /// The operator's content, and it travels exactly as a prompt does: in
+    /// the request body and never on a command line.
+    pub text: String,
+
+    /// An id from `/api/config`'s `voices`, and never a path.
+    pub voice_id: String,
+
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+}
+
+impl Utterance {
+    /// Why this cannot be sent, where it cannot.
+    ///
+    /// THE VOICE HALF IS THE ONE WORTH HAVING. An empty `voice_id` is what a
+    /// `<select>` with no options posts, and the server's refusal for it
+    /// arrives after the operator has typed their text -- so a chooser that
+    /// quietly sent a blank id would be a control that reads as working. The
+    /// panel also defaults the chooser to the first published voice, which
+    /// means nothing here should be reachable through the page: two
+    /// mechanisms, and this is the one `cargo test` can hold.
+    ///
+    /// TRIMMED, because a text area holding a newline is not something to
+    /// rent a machine for -- and piper refuses it, which is the same answer
+    /// reached after a card.
+    pub fn refusal(&self) -> Option<String> {
+        if self.text.trim().is_empty() {
+            return Some("nothing to say: type some text".into());
+        }
+        if self.voice_id.is_empty() {
+            return Some(
+                "no voice chosen: pick one from the list ember published, or add a \
+                 tts.voices entry to ember.yaml"
+                    .into(),
+            );
+        }
+        None
+    }
 }
 
 /// One parameter of a past generation, as a page shows it.
@@ -914,6 +1152,36 @@ impl Job {
         }
     }
 
+    /// Whether this job's own parameters reached the page.
+    ///
+    /// FALSE FOR EVERY SPEECH JOB TODAY, and that is a gap in the server's
+    /// projection rather than a property of speech: `viewRequest` builds a
+    /// job's outbound shape from `newJob`, which has no `tts` field, and the
+    /// request view carries no `kind` either -- so a finished utterance
+    /// arrives here as one job with every field at its zero. `settings`
+    /// pushes `seed`, `sampler`, `scheduler`, `clip skip`, `eta`,
+    /// `flow shift` and `skip-layer guidance` unconditionally, so what the
+    /// page would otherwise render is seven rows of dashes under an empty
+    /// prompt: ember having lost the request, as far as anybody reading it
+    /// can tell.
+    ///
+    /// DERIVED FROM THE TYPE AND NOT FROM A LIST OF FIELD NAMES, which is
+    /// `newJob.sdFieldsSet`'s rule one language over: the field that would be
+    /// forgotten is whichever is added next. It also stops applying the
+    /// moment the projection sends an utterance, because a job carrying one
+    /// is no longer the default -- which is the right coupling, since whoever
+    /// adds that field has to add its rows.
+    ///
+    /// THE TEST IS "DID ANYTHING ARRIVE" AND NOT "IS THIS SPEECH", because
+    /// the page cannot tell: the kind is not on this wire either. An
+    /// all-default job is one the server said nothing about, and an image
+    /// generation cannot be one -- enqueue refuses a job with no prompt -- so
+    /// the two states are one state from here, and the honest sentence covers
+    /// both.
+    pub fn has_parameters(&self) -> bool {
+        *self != Job::default()
+    }
+
     /// One line identifying this job, the way ember's own output does.
     ///
     /// Deliberately the same shape as `sdserver.Job.Describe` in Go: a prompt
@@ -921,6 +1189,23 @@ impl Job {
     /// because the other would come from the server's default and "512x" would
     /// be a guess printed as a fact.
     pub fn describe(&self) -> String {
+        // THE UTTERANCE AND NOT THE PROMPT, where there is one. A speech job
+        // is built from `Job::default()`, so every field below it is zero and
+        // the image spelling would describe the whole batch as `""` -- a list
+        // of identical rows with a remove button each, which is the one thing
+        // a batch display must not be. Quoted and truncated the same way,
+        // because it is the same kind of thing: the operator's own text.
+        if let Some(u) = &self.tts {
+            let mut t = u.text.clone();
+            if t.chars().count() > 60 {
+                t = t.chars().take(57).collect::<String>() + "...";
+            }
+            let mut out = format!("{t:?}");
+            if !u.voice_id.is_empty() {
+                out += &format!(" as {}", u.voice_id);
+            }
+            return out;
+        }
         let mut p = self.prompt.clone();
         if p.chars().count() > 60 {
             p = p.chars().take(57).collect::<String>() + "...";
@@ -994,6 +1279,16 @@ pub fn human_bytes(n: i64) -> String {
 /// transit is a ceiling nobody trusts.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct NewRequest {
+    /// Which workload this request is for.
+    ///
+    /// ON THE REQUEST AND NOT ON A JOB, which is the server's shape and makes
+    /// a mixed batch unrepresentable rather than refused: one rental runs one
+    /// driver. Omitted when empty, because every body this page posted before
+    /// speech existed omitted it and the server resolves the absence to `sd`
+    /// -- so an image request on the wire is byte-for-byte what it was.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+
     pub provider: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub gpu: String,
@@ -1020,8 +1315,81 @@ pub struct ImageRef {
     pub bytes: i64,
     #[serde(default)]
     pub path: String,
+
+    /// What fetching `path` will declare these bytes to be.
+    ///
+    /// The server derives it from the blob key with the same closed switch the
+    /// route uses, so this and the `Content-Type` a browser receives are one
+    /// derivation -- see `webapi.imageRef.Media`. Empty where ember has no
+    /// answer, which is a row the route itself 500s for.
+    #[serde(default)]
+    pub media: String,
+
     #[serde(default)]
     pub preview: bool,
+}
+
+/// Which element an artifact is rendered with.
+///
+/// DECIDED FROM THE ARTIFACT AND NOT FROM THE REQUEST'S KIND, and the reason
+/// is that a kind is a property of the request while an element is a property
+/// of the file. They agree today, because a speech rental writes wavs and an
+/// image rental writes pngs; they stop agreeing the first time one kind writes
+/// two sorts of artifact -- a spectrogram beside a wav, a json sidecar -- and
+/// at that point a page switching on the kind renders every artifact as
+/// whichever one the kind implies. The server already answers this question
+/// once, for the `Content-Type` it is about to send, so reading that answer is
+/// the only spelling in which the element and the bytes cannot disagree.
+///
+/// THE TOP-LEVEL TYPE AND NOT THE WHOLE STRING, so a second image format --
+/// `image/jpeg`, which `output_format` can already ask sd-server for -- needs
+/// no change here. What it costs is nothing: `<img>` and `<audio>` are chosen
+/// by what the browser does with the bytes, and the browser decides that from
+/// the full type it is sent rather than from this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Artifact {
+    /// Something to look at.
+    Image,
+
+    /// Something to play.
+    Audio,
+
+    /// Bytes ember will not name, carrying the type it sent.
+    ///
+    /// NOT RENDERED AS AN IMAGE, which is the whole reason this arm exists
+    /// rather than a fallback to `Image`. An `<img>` whose fetch failed and an
+    /// `<audio>` whose source 404s both render perfectly and show nothing, so
+    /// guessing here produces a gallery that looks loaded and is empty -- the
+    /// "reads as working" defect in one element. The route answers 500 for an
+    /// artifact with no declared type, so this is a defect ember is already
+    /// refusing to serve, and saying so is the only honest render.
+    Unknown(String),
+}
+
+/// subtype is the half of a media type a person recognises.
+///
+/// `audio/wav` is "wav", which is what a download link should say -- and
+/// saying it from the declared type rather than from a literal is the same
+/// rule the element itself follows: ember writes one audio format today, so a
+/// hard-coded "wav" is right and goes on being printed over the first
+/// artifact that is not one. A type with no slash answers itself, which is
+/// what the empty case and a malformed one both come to.
+pub fn subtype(media: &str) -> String {
+    media.rsplit('/').next().unwrap_or(media).to_string()
+}
+
+impl ImageRef {
+    /// Which element this artifact wants.
+    pub fn artifact(&self) -> Artifact {
+        // Split on the slash rather than matching whole strings, so a
+        // parameter the server one day appends -- `audio/wav; rate=22050` --
+        // does not fall through to Unknown.
+        match self.media.split('/').next().unwrap_or_default() {
+            "image" => Artifact::Image,
+            "audio" => Artifact::Audio,
+            _ => Artifact::Unknown(self.media.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2790,6 +3158,7 @@ mod tests {
                     job: 1,
                     index: 0,
                     path: "/a".into(),
+                    media: "image/png".into(),
                     preview: false,
                     bytes: 2048,
                 },
@@ -2797,6 +3166,7 @@ mod tests {
                     job: 1,
                     index: 0,
                     path: "/p".into(),
+                    media: "image/png".into(),
                     preview: true,
                     bytes: 250,
                 },
@@ -3517,5 +3887,434 @@ mod tests {
         // Accrued and monthly are different claims. A store has the second
         // and not the first.
         assert!(n.stores[0].accrued.is_none());
+    }
+
+    // --- speech ---
+
+    /// A config publishing voices, as `/api/config` sends one.
+    fn speaking() -> Config {
+        serde_json::from_str(
+            r#"{"providers":[],"kinds":["sd","tts"],
+                "voices":[{"id":"lessac","name":"Lessac (en_US, medium)"},
+                          {"id":"thorsten","name":"Thorsten (de_DE, high)"}]}"#,
+        )
+        .expect("a config with a catalogue decodes")
+    }
+
+    /// Every arm of the control-set decision.
+    #[test]
+    fn a_kind_decides_which_controls_the_panel_shows() {
+        let c = speaking();
+
+        // The image controls, and an absent kind is an image generation --
+        // which is `genstore.KindOf`'s rule and is what every body this page
+        // posted before speech existed means.
+        assert_eq!(c.composing(""), Composing::Image);
+        assert_eq!(c.composing("sd"), Composing::Image);
+
+        // The speech controls, carrying the list the chooser needs. The list
+        // is in the value so that a view cannot reach the chooser without
+        // something to put in it.
+        match c.composing("tts") {
+            Composing::Speech(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0].id, "lessac");
+            }
+            other => panic!("a tts kind with voices published gave {other:?}"),
+        }
+    }
+
+    /// A process that publishes no voices refuses speech and names the key.
+    ///
+    /// NOT AN EMPTY CHOOSER, which is the defect this arm exists for: a
+    /// `<select>` with no options posts an empty `voice_id`, the server
+    /// refuses it after the operator has typed their text, and the control
+    /// looked like it worked the whole time.
+    #[test]
+    fn a_process_with_no_voices_says_so_rather_than_offering_an_empty_chooser() {
+        let c: Config = serde_json::from_str(r#"{"kinds":["sd","tts"],"voices":[]}"#)
+            .expect("a config publishing none decodes");
+        match c.composing("tts") {
+            Composing::Refused(why) => {
+                assert!(
+                    why.contains("tts.voices"),
+                    "the refusal does not name the key: {why}"
+                );
+                assert!(
+                    why.contains("restart"),
+                    "the refusal names no remedy: {why}"
+                );
+            }
+            other => panic!("a tts kind with no voices gave {other:?}"),
+        }
+    }
+
+    /// And a config nothing has answered yet is a WAIT and not that refusal.
+    ///
+    /// THE TWO REFUSALS ARE SEPARATE ASSERTIONS AND NOT ONE `is_refused`,
+    /// because the remedies differ: this one is a wait and the other is an
+    /// edit to `ember.yaml` and a restart. A test that only checked "speech is
+    /// refused" would pass against a page telling an operator whose file is
+    /// correct to go and change it.
+    ///
+    /// `Config::default()` is what the page holds between mounting and
+    /// `/api/config` answering. `kinds` cannot be empty in a real response --
+    /// `genstore.Kinds()` is derived from nothing, and
+    /// `TestConfig_PublishesAtLeastOneKind` is the exit code behind it -- so an
+    /// empty list is the unanswered state and nothing else.
+    #[test]
+    fn an_unanswered_config_is_a_wait_and_not_a_refusal() {
+        let c = Config::default();
+        match c.composing("tts") {
+            Composing::Refused(why) => {
+                assert!(why.contains("has not said"), "{why}");
+                // AND NOT THE OTHER SENTENCE. An operator whose ember.yaml is
+                // correct must not be sent to edit it.
+                assert!(
+                    !why.contains("tts.voices"),
+                    "a wait reads as a misconfiguration: {why}"
+                );
+            }
+            other => panic!("an unanswered config gave {other:?}"),
+        }
+        // The image controls still show, so the panel is usable in the window
+        // -- which is what it did before speech existed.
+        assert_eq!(c.composing(""), Composing::Image);
+    }
+
+    /// What cannot run is said once per state, and a speech-only config is
+    /// not told it runs nothing.
+    ///
+    /// THE SECOND ARM IS THE CORRECTION AND THE ONE WITH A DEFECT BEHIND IT.
+    /// This line was `!servable` and said "a queued request would have nowhere
+    /// to run" -- in red, above a compose panel that was about to work, for
+    /// the one configuration speech is for. Found by a browser lab, whose own
+    /// wait-for-a-refusal helper read it and stopped.
+    #[test]
+    fn a_speech_only_config_is_not_told_it_runs_nothing() {
+        let one = |servable: bool, voices: &str| -> Config {
+            serde_json::from_str(&format!(
+                r#"{{"providers":[{{"name":"local","free":true}}],
+                    "servable":{servable},"kinds":["sd","tts"],"voices":{voices}}}"#
+            ))
+            .expect("decodes")
+        };
+        let voiced = r#"[{"id":"lessac","name":"Lessac"}]"#;
+
+        // A servable config says nothing, whether or not it also speaks.
+        assert_eq!(one(true, "[]").unrunnable(), None);
+        assert_eq!(one(true, voiced).unrunnable(), None);
+
+        // Speech only: the sd half is named and the speech half is said to
+        // work, because the whole point of the line is what to expect.
+        let why = one(false, voiced)
+            .unrunnable()
+            .expect("an unservable config says so");
+        assert!(why.contains("image request"), "{why}");
+        assert!(why.contains("Speech still works"), "{why}");
+
+        // Neither: the original sentence, and it names both keys so the
+        // remedy is readable.
+        let why = one(false, "[]")
+            .unrunnable()
+            .expect("a config running nothing says so");
+        assert!(why.contains("sd:"), "{why}");
+        assert!(why.contains("tts.voices"), "{why}");
+        assert!(!why.contains("Speech still works"), "{why}");
+
+        // AND NOTHING BEFORE /api/config HAS ANSWERED. A default Config is
+        // not servable and publishes no voices, so an unguarded version
+        // shouts "this runs nothing" at every page load.
+        assert_eq!(Config::default().unrunnable(), None);
+    }
+
+    /// A kind from a newer ember is named rather than rendered as a blank
+    /// panel.
+    #[test]
+    fn a_kind_this_page_has_no_controls_for_is_named() {
+        match speaking().composing("video") {
+            Composing::Refused(why) => assert!(why.contains("video"), "{why}"),
+            other => panic!("an unknown kind gave {other:?}"),
+        }
+    }
+
+    /// A chooser option always has text to click on.
+    #[test]
+    fn a_voice_with_no_name_is_offered_by_its_id() {
+        assert_eq!(
+            Voice {
+                id: "lessac".into(),
+                name: "Lessac".into()
+            }
+            .label(),
+            "Lessac"
+        );
+        assert_eq!(
+            Voice {
+                id: "lessac".into(),
+                name: String::new()
+            }
+            .label(),
+            "lessac"
+        );
+    }
+
+    /// A speech request posts the utterance and NOTHING belonging to the
+    /// other kind.
+    ///
+    /// THIS IS THE ASSERTION THE SERVER'S `crossKind` WOULD OTHERWISE MAKE
+    /// FOR US, at the cost of a 400 the operator reads after typing. It
+    /// compares a speech job's remaining fields against the zero value, so
+    /// one geometry left over from the image draft refuses the whole request
+    /// naming an index -- and the panel's draft defaults are 512, 512 and 20,
+    /// which are exactly the values that would be left over.
+    #[test]
+    fn a_speech_request_names_its_kind_and_carries_no_image_parameters() {
+        let body = serde_json::to_string(&NewRequest {
+            kind: "tts".into(),
+            provider: "local".into(),
+            jobs: vec![Job {
+                tts: Some(Utterance {
+                    text: "Hello from ember.".into(),
+                    voice_id: "lessac".into(),
+                    output: "greeting".into(),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert!(body.contains(r#""kind":"tts""#), "{body}");
+        assert!(body.contains(r#""text":"Hello from ember.""#), "{body}");
+        assert!(body.contains(r#""voice_id":"lessac""#), "{body}");
+        assert!(body.contains(r#""output":"greeting""#), "{body}");
+
+        // The image half, in the spellings crossKind compares against a zero.
+        // `prompt` IS sent, as `""`, which is the zero value Go reads -- so it
+        // is asserted as present-and-empty rather than absent, because
+        // asserting its absence would be asserting a thing that is not true.
+        assert!(body.contains(r#""prompt":"""#), "{body}");
+        for leftover in [
+            "width",
+            "height",
+            "steps",
+            "seed",
+            "sampler",
+            "scheduler",
+            "cfg",
+            "guidance",
+            "batch_count",
+            "init_image",
+            "strength",
+            "clip_skip",
+            "slg",
+            "hires",
+            "vae_tiling",
+        ] {
+            assert!(
+                !body.contains(leftover),
+                "a speech job carries {leftover}, which crossKind refuses: {body}"
+            );
+        }
+        // And no path to a voice, ever: the type has no field for one.
+        assert!(!body.contains(".onnx"), "{body}");
+    }
+
+    /// An image request is byte-for-byte what it was before `kind` existed.
+    ///
+    /// The server resolves an absent kind to `sd`, so omitting it is what
+    /// keeps every older body valid -- and sending `"kind":"sd"` on every
+    /// generation would be a change to a wire nobody asked to change.
+    #[test]
+    fn an_image_request_still_names_no_kind() {
+        let body = serde_json::to_string(&NewRequest {
+            provider: "local".into(),
+            jobs: vec![Job {
+                prompt: "a cat".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!body.contains("kind"), "{body}");
+        assert!(!body.contains("tts"), "{body}");
+    }
+
+    /// An utterance nobody can say is refused here and not after a rental.
+    ///
+    /// The blank-voice case is the one with a defect behind it: an empty
+    /// `<select>` posts `""`, and the server's refusal for that arrives after
+    /// the operator has typed and pressed the button.
+    #[test]
+    fn an_utterance_with_no_text_or_no_voice_is_refused_before_anything_is_rented() {
+        let ok = Utterance {
+            text: "Hello from ember.".into(),
+            voice_id: "lessac".into(),
+            output: String::new(),
+        };
+        assert_eq!(ok.refusal(), None);
+
+        // Whitespace is not text. piper refuses it too, which is the same
+        // answer reached after a card has been paid for.
+        for blank in ["", "   ", "\n\t "] {
+            let u = Utterance {
+                text: blank.into(),
+                ..ok.clone()
+            };
+            let why = u.refusal().expect("blank text is refused");
+            assert!(why.contains("nothing to say"), "{why}");
+        }
+
+        let no_voice = Utterance {
+            voice_id: String::new(),
+            ..ok.clone()
+        };
+        let why = no_voice.refusal().expect("a blank voice id is refused");
+        assert!(why.contains("voice"), "{why}");
+        // And it names where a voice comes from, because the remedy differs
+        // from "you forgot to pick one": a process publishing none has an
+        // empty list and nothing to pick.
+        assert!(why.contains("tts.voices"), "{why}");
+    }
+
+    /// A batch row describes an utterance by what was said.
+    ///
+    /// A speech job is built from `Job::default()`, so the image spelling
+    /// would describe every row in the batch as `""` -- a list of identical
+    /// rows with a remove button each.
+    #[test]
+    fn a_batch_row_describes_an_utterance_and_not_an_empty_prompt() {
+        let j = Job {
+            tts: Some(Utterance {
+                text: "Hello from ember.".into(),
+                voice_id: "lessac".into(),
+                output: String::new(),
+            }),
+            ..Default::default()
+        };
+        let d = j.describe();
+        assert!(d.contains("Hello from ember."), "{d}");
+        assert!(d.contains("lessac"), "{d}");
+        assert!(!d.contains("0x0"), "{d}");
+    }
+
+    /// A job the server said nothing about is not described in dashes.
+    ///
+    /// The all-default case is every speech job today, because `viewRequest`
+    /// projects a job in the image shape and the view carries no `kind`
+    /// either. `settings` pushes seven rows unconditionally, so the block
+    /// this guards would be a summary of two dashes over an empty prompt and
+    /// seven more below it.
+    #[test]
+    fn a_job_the_server_said_nothing_about_has_no_parameters_to_show() {
+        assert!(!Job::default().has_parameters());
+
+        // Everything an ordinary generation sets, one at a time, because the
+        // guard has to stop applying for each of them on its own.
+        for j in [
+            Job {
+                prompt: "a cat".into(),
+                ..Default::default()
+            },
+            Job {
+                width: 512,
+                ..Default::default()
+            },
+            Job {
+                seed: 4242,
+                ..Default::default()
+            },
+            Job {
+                clip_skip: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(j.has_parameters(), "{j:?} reads as a job nobody described");
+        }
+
+        // AND IT STOPS APPLYING THE MOMENT AN UTTERANCE ARRIVES, which is the
+        // coupling: the day `newJob` carries a `tts` on the way out, this
+        // guard gets out of the way and whoever added the field has to add
+        // its rows. Asserted now so that change goes red here rather than
+        // shipping a block that says the parameters were not sent over
+        // parameters that were.
+        let spoken = Job {
+            tts: Some(Utterance {
+                text: "Hello".into(),
+                voice_id: "lessac".into(),
+                output: String::new(),
+            }),
+            ..Default::default()
+        };
+        assert!(spoken.has_parameters());
+    }
+
+    // --- which element an artifact wants ---
+
+    /// The download link names the format the server declared.
+    #[test]
+    fn a_download_link_names_the_declared_subtype() {
+        assert_eq!(subtype("audio/wav"), "wav");
+        assert_eq!(subtype("image/png"), "png");
+        // Neither of these is a type ember declares; both answer something
+        // rather than panicking, which is all this has to do.
+        assert_eq!(subtype("wav"), "wav");
+        assert_eq!(subtype(""), "");
+    }
+
+    /// The element is chosen from what the server will declare, each way.
+    #[test]
+    fn an_artifact_chooses_its_element_from_its_declared_type() {
+        let art = |media: &str| {
+            ImageRef {
+                media: media.into(),
+                ..Default::default()
+            }
+            .artifact()
+        };
+
+        assert_eq!(art("image/png"), Artifact::Image);
+        assert_eq!(art("audio/wav"), Artifact::Audio);
+        // A second image format needs no change here, which is why the match
+        // is on the top-level type: `output_format` can already ask sd-server
+        // for a jpeg.
+        assert_eq!(art("image/jpeg"), Artifact::Image);
+        // And a parameter the server one day appends does not fall through.
+        assert_eq!(art("audio/wav; rate=22050"), Artifact::Audio);
+    }
+
+    /// An artifact ember will not name is SAID and never guessed at.
+    ///
+    /// An empty `media` is the row `GET` on that path answers 500 for, so
+    /// rendering an `<img>` over it produces a gallery that looks loaded and
+    /// is empty -- which is the one failure mode `<img>` and `<audio>` share.
+    #[test]
+    fn an_artifact_ember_cannot_name_is_not_rendered_as_an_image() {
+        for media in ["", "application/octet-stream", "text/html"] {
+            let got = ImageRef {
+                media: media.into(),
+                ..Default::default()
+            }
+            .artifact();
+            assert_eq!(
+                got,
+                Artifact::Unknown(media.into()),
+                "media {media:?} must not be rendered as an image or played"
+            );
+        }
+    }
+
+    /// And the wire field is read, which is what the Go side sends.
+    #[test]
+    fn an_artifact_decodes_the_type_the_server_declared() {
+        let r: Request = serde_json::from_str(
+            r#"{"id":"req-1","images":[
+                {"job":1,"index":0,"bytes":44,
+                 "path":"/api/requests/req-1/images/1/0","media":"audio/wav"}]}"#,
+        )
+        .expect("a wav artifact decodes");
+        assert_eq!(r.results().count(), 1);
+        assert_eq!(r.images[0].artifact(), Artifact::Audio);
     }
 }

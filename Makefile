@@ -709,8 +709,11 @@ test-preview-lab:
 # Not part of test-image-labs-publish: a publish of the CUDA image must not
 # require an unrelated image to exist, which is the same sentence the video
 # lab is absent by.
-test-tts-lab:
-	@$(call LAB_SELECT,'TestTTS_|TestWorkloadImage_Speech|TestWorkloadImage_Speaks',4)
+# Depends on `web` because one of these labs drives the real page in a real
+# browser, which is the only thing that can see a frozen control or an <audio>
+# element over bytes that never arrived. A missing wasm is not a skip.
+test-tts-lab: web
+	@$(call LAB_SELECT,'TestTTS_|TestWorkloadImage_Speech|TestWorkloadImage_Speaks',5)
 	@docker image inspect $(TTS_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(TTS_IMAGE) is missing. Build it with:"; \
 		echo "  make workload-tts"; exit 1; }

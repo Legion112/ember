@@ -720,6 +720,31 @@ type imageRef struct {
 	Bytes int64  `json:"bytes"`
 	Path  string `json:"path"`
 
+	// Media is what `GET` on Path will declare these bytes to be, and it is
+	// here so a page can choose an element rather than guessing one.
+	//
+	// THE SAME `artifactType` THE ROUTE CALLS, over the same key, which is
+	// the whole reason this is a field rather than something the browser
+	// works out. A page cannot read the extension: `Path` deliberately has
+	// none -- the route is `/images/{job}/{index}` and the blob key is this
+	// process's business -- so the alternatives were a second derivation in
+	// Rust from the request's KIND, or this. A kind is the wrong input twice
+	// over: it is a property of the request and not of the file, so a kind
+	// that one day writes two sorts of artifact would render both as
+	// whichever the switch in the page guessed, and the page's answer and
+	// the response's `Content-Type` would be two readings that can disagree.
+	// One derivation, two readers -- which is `queue.Cost`'s rule applied to
+	// a media type.
+	//
+	// EMPTY WHERE THE SWITCH HAS NO ANSWER, and that is not a hole: the same
+	// key makes the route answer 500, because an extension nothing here
+	// writes means a writer and that switch have come apart. So an empty
+	// Media is a defect ember is already refusing to serve, and the page says
+	// so rather than rendering an element over bytes that will not arrive --
+	// which is the one thing an `<img>` and an `<audio>` both do perfectly
+	// over a failed fetch.
+	Media string `json:"media,omitempty"`
+
 	// Preview marks a progress frame rather than a result, so a gallery does
 	// not open on a latent: a `proj` preview of a 64x64 generation is an 8x8
 	// PNG of about 250 bytes, which is the latent and not a thumbnail.
@@ -784,8 +809,17 @@ func viewRequest(r genstore.Request, ims []genstore.Image) requestView {
 		v.Jobs = append(v.Jobs, out)
 	}
 	for _, im := range ims {
+		// The error is DROPPED and the field left empty, which is the one
+		// place this projection may not refuse: a request view that failed
+		// because one of twenty artifacts has an extension the switch does
+		// not know would take the other nineteen, the prompts, the cost and
+		// the reason it ended with it. The route still 500s for that one
+		// file, and the page still says it cannot name the type -- so the
+		// defect is reported twice and costs nothing that is not about it.
+		media, _ := artifactType(im.Key)
 		v.Images = append(v.Images, imageRef{
 			Job: im.Job, Index: im.Index, Bytes: im.Bytes, Preview: im.Preview,
+			Media: media,
 			// The URL a browser fetches, not the blob key. The key is this
 			// process's business and could be an S3 object tomorrow.
 			Path: fmt.Sprintf("/api/requests/%s/images/%d/%d%s",
