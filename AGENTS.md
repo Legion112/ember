@@ -2379,6 +2379,16 @@ that sentence made unrepresentable rather than merely tested.
   megabyte" was already 50% wrong before this and is its own issue; this makes
   it worse rather than causes it.
 
+  **AND A THIRD TREE SAYS THE ROUTER IS NOT WHAT COSTS IT**, which is the
+  measurement to read before believing the figure above: this branch with the
+  five-arm match replaced by static children -- `route.rs` and all four view
+  modules still compiled and instantiated -- is **1,558,267 bytes, 39,337
+  BELOW the base's 1,597,604** against the 1,921,981 it ships at, so the
+  routing and the pages cost nothing net and the whole +324,377 is the
+  `AnyView` erasure. Recorded because `+20.3%` is exactly the figure somebody
+  will one day blame the hand-rolled router for and propose deleting it over,
+  and the erasure is a property of matching on a route rather than of routing.
+
   **THE FAILURE MODE IS INVISIBLE BY CONSTRUCTION, so the assertion is a
   sentinel and the lab carries its own control.** A link the page does not
   intercept is a full document load: 1.9 MiB of wasm re-fetched under
