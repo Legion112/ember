@@ -456,15 +456,21 @@ func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhatACeilingCouldRefuse(t *testing.
 // already loads the tree through it, so this is the tool the repository
 // reaches for when a question is about identity rather than spelling.
 //
-// AND REASSIGNMENT IS THE ONE THING IDENTITY CANNOT ANSWER, because `cfg =
-// config.Config{}` leaves the object alone and changes its value -- which is
-// dataflow. It is refused rather than reasoned about: an object that is
-// ASSIGNED TO anywhere in the function, or whose ADDRESS is taken, is no
-// longer accepted, and the failure says so. That is the allow-list direction
-// and it is a refusal rather than an analysis, which is what keeps it from
-// becoming the scope-aware dataflow pass that would be the wrong tool here.
-// Measured: no production function in this package that builds a DirectRunner
-// does either, so it costs no false positive today.
+// AND A WRITE IS THE ONE THING IDENTITY CANNOT ANSWER, because `cfg =
+// config.Config{}` and `cfg.MaxDayUSD = ""` both leave the object alone and
+// change what is in it -- which is dataflow. It is refused rather than
+// reasoned about: an object the function WROTE TO is no longer accepted, and
+// the failure says which way. Written to means assigned to whole, written
+// through a field or an element, or had its address taken -- the field form
+// was the fourth walkaround and the most plausible of them, and the first
+// version of this sentence said "assigned to anywhere in the function" while
+// the code looked only for a bare identifier on the left. That is the allow-
+// list direction and a refusal rather than an analysis, which is what keeps it
+// from becoming the scope-aware dataflow pass that would be the wrong tool
+// here. Measured: no production function in this package that builds a
+// DirectRunner does any of them, and `internal/config` declares no
+// pointer-receiver method on `Config`, so there is no mutating method call to
+// catch either.
 //
 // WHAT IS STILL OPEN, and it is now the bound the prose claims rather than two
 // more: a config handed ACROSS A CALL. Any function or closure that TAKES a
@@ -485,10 +491,10 @@ func TestUp_ALedgerThatWillNotOpenRefusesOnlyWhatACeilingCouldRefuse(t *testing.
 // walkaround below it is red.
 //
 // What IS closed is every one-step version: a zero at the construction site, a
-// zero assigned into the parameter, a pointer taken to it, and a shadow in any
-// scope -- a block, a range clause, an if-statement initialiser or a closure
-// with no config parameter, none of which this guard has to know the syntax of,
-// because a shadow is a different object.
+// zero assigned into the parameter, a zero written into one of its FIELDS, a
+// pointer taken to it, and a shadow in any scope -- a block, a range clause, an
+// if-statement initialiser or a closure with no config parameter, none of which
+// this guard has to know the syntax of, because a shadow is a different object.
 //
 // A POSITIONAL literal is a FATAL rather than a skip, because the alternative
 // to failing on a literal this guard cannot read is reading straight past the
@@ -512,8 +518,15 @@ func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load internal/cli: %v", err)
 	}
+	// A BELT WHOSE BRACES ARE THE COMPILER, said accurately rather than
+	// credited with the catch: a type error in this package means no test
+	// binary at all, so `go test` fails before this line is ever reached.
+	// What this answers is the case go/packages reports without the compiler
+	// having an opinion -- a load that resolved nothing, which would otherwise
+	// reach the floor below as "no DirectRunner found" and blame the wrong
+	// thing.
 	if n := packages.PrintErrors(pkgs); n > 0 {
-		t.Fatalf("internal/cli does not type-check (%d error(s)), so this guard cannot read it", n)
+		t.Fatalf("internal/cli did not load cleanly (%d error(s)), so this guard cannot read it", n)
 	}
 
 	found := 0
@@ -543,6 +556,14 @@ func TestServe_WiresTheDaemonsOwnConfigIntoTheSubmittedRunGate(t *testing.T) {
 }
 
 // isDirectRunner reports whether a literal builds a queue.DirectRunner.
+//
+// ON THE SPELLING, where isConfigConfig below goes through the type checker,
+// and the asymmetry is safe rather than an oversight: this one decides which
+// literals to LOOK AT, so a miss lands on the `found == 0` floor and fails,
+// while isConfigConfig decides what to ACCEPT, where a miss would pass. An
+// import alias -- `q "…/internal/queue"` -- is therefore a red at the floor
+// and not a hole, which is the direction a selector match has to fail in to be
+// allowed to stay one.
 func isDirectRunner(lit *ast.CompositeLit) bool {
 	sel, ok := lit.Type.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "DirectRunner" {
@@ -559,11 +580,24 @@ type configBindings struct {
 	// and not by name.
 	bound map[types.Object]bool
 
-	// moved is every object that is assigned to, or whose address is taken,
-	// anywhere in the function. An object in here is not accepted even if it
-	// is bound: identity says which variable it is and says nothing about what
-	// is in it, so the honest answer to a variable that was written to is a
+	// moved is every object the function WROTE TO rather than merely read:
+	// assigned to whole, written to through a field or an element, or had its
+	// address taken. An object in here is not accepted even if it is bound,
+	// because identity says which variable it is and says nothing about what
+	// is in it -- so the honest answer to a variable that was written to is a
 	// refusal rather than a guess.
+	//
+	// THE FIELD CASE WAS THE FOURTH WALKAROUND AND IT IS THE MOST PLAUSIBLE OF
+	// THEM ALL. The first version of this looked only for an `*ast.Ident` on
+	// the left, so a `SelectorExpr` was skipped and `cfg.MaxDayUSD = ""` left
+	// the object `bound` and never `moved` -- measured green across the whole
+	// tree, with `CeilingsOf(r.Config)` getting two empty strings and
+	// `Tightest` composing a zero, which is #165 reinstated by two lines that
+	// read as normalisation. No shadow, no closure, no reassignment of the
+	// variable: the least contrived of the four and the only one that zeroes
+	// exactly the two fields that matter. So the left-hand side is reduced to
+	// its ROOT identifier, which is the variable being written to however many
+	// selectors, indices or dereferences stand between.
 	moved map[types.Object]string
 }
 
@@ -625,19 +659,60 @@ func configObjects(info *types.Info, fn *ast.FuncDecl) configBindings {
 			}
 			// Anything that is not a definition WRITES to what is already
 			// there, which is the one walkaround identity cannot see.
+			//
+			// THROUGH rootIdent, because the target does not have to be the
+			// bare variable: `cfg.MaxDayUSD = ""` has a SelectorExpr on the
+			// left and the first version skipped it, which was the fourth
+			// walkaround and the most plausible of them.
 			for _, l := range v.Lhs {
-				id, ok := l.(*ast.Ident)
-				if !ok {
+				id := rootIdent(l)
+				if id == nil {
 					continue
 				}
 				if obj := info.Uses[id]; obj != nil {
-					c.moved[obj] = "it is assigned to"
+					if _, ok := l.(*ast.Ident); ok {
+						c.moved[obj] = "it is assigned to"
+					} else {
+						c.moved[obj] = "something inside it is assigned to"
+					}
 				}
 			}
 		}
 		return true
 	})
 	return c
+}
+
+// rootIdent is the variable an assignment target names, with whatever
+// selectors, indices, dereferences and parentheses stand in front of it peeled
+// off.
+//
+// WHY A WALK AND NOT A TYPE SWITCH ON ONE LEVEL: `cfg.MaxDayUSD`, `cfg.SD.Serve`,
+// `cfgs[0].MaxDayUSD` and `(*p).MaxDayUSD` are all writes to something, and the
+// thing they are writes to is whatever is leftmost. Anything this cannot reduce
+// to an identifier answers nil and the caller records nothing, which is safe in
+// the one direction that matters: an unrecognised target is not a variable this
+// guard accepts at the construction site either, because acceptance needs the
+// value there to BE a bound object.
+func rootIdent(e ast.Expr) *ast.Ident {
+	for {
+		switch v := e.(type) {
+		case *ast.Ident:
+			return v
+		case *ast.SelectorExpr:
+			e = v.X
+		case *ast.IndexExpr:
+			e = v.X
+		case *ast.IndexListExpr:
+			e = v.X
+		case *ast.StarExpr:
+			e = v.X
+		case *ast.ParenExpr:
+			e = v.X
+		default:
+			return nil
+		}
+	}
 }
 
 // isConfigConfig reports whether t is internal/config.Config.

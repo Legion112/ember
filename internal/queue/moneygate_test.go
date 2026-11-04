@@ -552,7 +552,22 @@ func TestDirectRunner_ReChecksTheCeilingOnTheLoopWhereTheTotalIsComplete(t *test
 
 	close(release)
 
-	got := <-done
+	// BOUNDED, BECAUSE A WEDGE PRINTS NO `--- FAIL`. This was the one
+	// unbounded wait in this test: `Start` blocks in `Submit` until the drain
+	// loop receives, on `context.Background()`, so a loop that had somehow
+	// gone away would park it for ever and the only report would be the
+	// binary's own `-timeout` -- a goroutine dump naming nothing, which is the
+	// shape that cost round three a red nobody could name. Every other wait
+	// here already had a deadline; this one did not, and the fix is the rule
+	// the browser labs spell: race the thing you are waiting for against the
+	// thing that means it will never happen.
+	var got res
+	select {
+	case got = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Start never returned after the queued rental was released, so the submitted " +
+			"run was never taken by the drain loop")
+	}
 	if got.err != nil {
 		t.Fatalf("Start refused the submission, so it never reached the loop: %v", got.err)
 	}

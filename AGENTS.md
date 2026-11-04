@@ -6258,10 +6258,13 @@ A leaked node bills by the hour in silence. These are not style preferences.
   dropped, a struct selector, a conversion, a closure with no config parameter,
   **a reassignment of the parameter one line above the wiring**, **a shadow in
   an inner block**, a shadow through a range clause, a shadow through an
-  if-statement initialiser, the parameter's address taken, and a copy through a
-  second `:=`. Its greens: a closure that takes the config, an identifier from
-  `config.Load`, the fields reordered, and the one documented bound -- a config
-  handed across a call.
+  if-statement initialiser, the parameter's address taken, a copy through a
+  second `:=`, **a field write that zeroes exactly the two ceilings**, a nested
+  field write, a write through an index, a write through a parenthesised
+  dereference, a compound-assign to a field, and a field write inside a closure
+  with the construction outside it. Its greens: a closure that takes the
+  config, an identifier from `config.Load`, the fields reordered, and the one
+  documented bound -- a config handed across a call.
   **And the per-arm verdict is the proof the free-rental pair discriminates**:
   with `Binds` reverted to `IsZero`, the PAID arm and the no-ceiling arm stay
   **PASS** and only the FREE arm goes **FAIL**, so the free arm is doing the
@@ -6381,13 +6384,29 @@ A leaked node bills by the hour in silence. These are not style preferences.
   a name-keyed fix would have chased one syntax form at a time.
   `golang.org/x/tools/go/packages` is already a direct requirement and
   `TestNoProductionDeadCode` already loads the tree through it.
-  **Reassignment is the one thing identity cannot answer and it is REFUSED
-  rather than analysed**: `cfg = config.Config{}` leaves the object alone and
-  changes its value, which is dataflow -- so an object that is assigned to, or
-  whose address is taken, anywhere in the function is no longer accepted, and
-  the message says which. That is the allow-list direction, it is a refusal
-  rather than an analysis, and it costs no false positive today: no production
-  function here that builds a `DirectRunner` does either.
+  **A WRITE is the one thing identity cannot answer and it is REFUSED rather
+  than analysed**: `cfg = config.Config{}` and `cfg.MaxDayUSD = ""` both leave
+  the object alone and change what is in it, which is dataflow -- so an object
+  the function WROTE TO is no longer accepted, and the message says which way.
+  Written to means assigned to whole, written through a FIELD or an element, or
+  had its address taken. That is the allow-list direction, a refusal rather
+  than an analysis, and it costs no false positive today: no production
+  function here that builds a `DirectRunner` does any of them, and
+  `internal/config` declares no pointer-receiver method on `Config`, so there
+  is no mutating method call to catch either.
+  **AND THAT SENTENCE OVER-CLAIMED A FOURTH TIME -- "assigned to ... anywhere
+  in the function", while the code looked only for a bare identifier on the
+  left.** So `cfg.MaxDayUSD = ""` was skipped: the object stayed accepted, and
+  two lines that read as normalisation and zero exactly the two ceiling fields
+  were green across `go build`, `go vet`, `golangci-lint` and `go test ./...`
+  while `Tightest` composed a zero. It is the MOST plausible of the four
+  walkarounds and the least contrived -- no shadow, no closure, no
+  reassignment of the variable -- and it is the fourth consecutive round in
+  which this guard's prose described more than its code. The fix is a `rootIdent`
+  that peels selectors, indices, dereferences and parentheses off an assignment
+  target, so the thing recorded is the variable being written to however many
+  of them stand in front of it; what the prose is allowed to say is now what
+  seven measured forms do.
   **The bound is now one thing instead of three, and the inline form was
   closable and deliberately left**: any function or closure that TAKES a
   `config.Config` is accepted whatever its callers pass, so a config handed
@@ -6472,6 +6491,20 @@ A leaked node bills by the hour in silence. These are not style preferences.
   written it, which is the figure landing between the two reads that the whole
   defect is about. The order is settled by which call the test makes next and
   never by a sleep.
+  **AND ITS ONE UNBOUNDED WAIT IS BOUNDED, prompted by a red nobody could
+  name.** A soak of this package reported a failure at **632.7s** under
+  `-race -timeout 1800s -count=20 -cpu=1,2,8` whose name was lost to a
+  `tail -3` -- the truncated-report trap again -- and it is unreproduced in
+  roughly 265 later iterations across both tips, so it is not attributable and
+  is recorded against #158 rather than claimed here. What it did expose by
+  being unreadable is that this test had one wait with no deadline: `Start`
+  parks in `Submit` on `context.Background()` until the drain loop receives, so
+  a loop that had gone away would hang it until the binary's own `-timeout`
+  printed a goroutine dump naming nothing -- which is the shape of the report
+  that could not be read. Every other wait here already had one. It is a
+  `select` with a deadline and a named `t.Fatal` now. That does not make the
+  632s red this test's, and it does take this test out of the candidate set for
+  the next one.
 
   **What is NOT done, said rather than left to be found.** The gate counts
   rentals and not store standing charges, which is the gap the original entry
