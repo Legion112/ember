@@ -6213,15 +6213,19 @@ A leaked node bills by the hour in silence. These are not style preferences.
   failing on a literal this guard cannot classify is reading past the one that
   matters.
 
-  **Seventeen reinstatements, every one RED where expected, two negative
-  controls GREEN, controls at both ends, and every case ended in a `git diff`
-  against HEAD rather than in an exit code** -- HEAD being the pristine copy,
-  taken once, which is the fifth harness trap removed rather than guarded.
-  (The first wording of this sentence and of the commit message both said
-  SIXTEEN, over a list of seventeen written three lines below it -- which is
-  this file's own rule about a running total in prose, committed by the
+  **Thirty reinstatements across two passes, every one RED where expected,
+  five controls GREEN, controls at both ends of each, and every case ended in a
+  `git diff` against HEAD rather than in an exit code** -- HEAD being the
+  pristine copy, taken once, which is the fifth harness trap removed rather
+  than guarded. Twenty-three are the gate pass below; seven are the walkaround
+  pass on the wiring guard, whose three legitimate shapes are green beside
+  them.
+  (The first wording of this sentence and of the first commit message both
+  said SIXTEEN, over a list of seventeen written three lines below it -- which
+  is this file's own rule about a running total in prose, committed by the
   paragraph that counts the cases. A count over an enumerated list is at least
-  checkable, which is why it is corrected rather than dropped.) Red: the
+  checkable, which is why it is corrected rather than dropped, twice now.)
+  Red: the
   submitted gate deleted; its projection over the DAEMON's ttl; the same
   taking the LONGER of the two ttls; the daemon's ceiling alone; the run's
   alone; a zero projection; both parses naming the same file; the shell gate
@@ -6231,6 +6235,22 @@ A leaked node bills by the hour in silence. These are not style preferences.
   rental losing its exemption; the row adopted before the ceiling is checked;
   `cmd_serve` not wiring its own config; and a gate that refuses every rental
   there is. Green: two reworded comments.
+  **Six more after review, each red**: the shell no-ledger arm asking `IsZero`
+  again (the free-rental finding itself); `RefuseOverPeriod` asking `IsZero`
+  again, so its nil-ledger arm refuses a free rental; `Binds` forgetting the
+  price half; `Binds` forgetting the ceiling half, which refuses where nothing
+  is configured; the submitted run not re-checked on the loop; and
+  `UnreadableLedger` printing its cause with `%v` instead of wrapping it.
+  **And the per-arm verdict is the proof the free-rental pair discriminates**:
+  with `Binds` reverted to `IsZero`, the PAID arm and the no-ceiling arm stay
+  **PASS** and only the FREE arm goes **FAIL**, so the free arm is doing the
+  work rather than the three being satisfied by a refusal of everything --
+  which is what case K then shows from the other side, going red on the free
+  arm AND the no-ceiling arm when the condition is `true`.
+  **Two cases reported ANCHOR-MISS rather than a verdict on the first run of
+  the extended pass**, because the free-rental fix replaced the very line those
+  two were anchored on. Trap one working: a stale anchor reads exactly like a
+  clean run, and the harness refused to call it one.
 
   **Three cases reported BUILD-ERROR rather than a verdict on the first
   attempt, which is the harness refusing to read a non-compiling tree** -- two
@@ -6252,8 +6272,9 @@ A leaked node bills by the hour in silence. These are not style preferences.
   did.
 
   **The belt-and-braces measurement, because belt and braces reads exactly
-  like a dead gate.** With the three new gates removed, this change's own tests
-  removed (`internal/cli/moneygate_test.go` deleted and
+  like a dead gate.** With all three new gates removed -- the submitted run's,
+  its re-check on the loop, and the shell's -- this change's own tests removed
+  (`internal/cli/moneygate_test.go` deleted and
   `internal/queue/moneygate_test.go` reverted to master), and the two symbols
   that then had no caller removed with them, `go test ./...` is **exit 0**: so
   nothing that existed before this change reported the gap. The two
@@ -6262,6 +6283,13 @@ A leaked node bills by the hour in silence. These are not style preferences.
   `TestNoProductionDeadCode` names `DirectRunner.refuseOverPeriod` and then
   `Ceilings.Tightest`, one symbol at a time, which is the collateral #157
   already recorded for the same reason.
+  **The free-rental defect is the one exception to that sentence and it points
+  the wrong way**, which is why it is stated separately: a pre-existing test
+  did have an opinion about it, and the opinion was that the defect was
+  correct. Master's `TestAppPlanner_ChecksThePeriodCeilingBeforeRenting` is
+  GREEN over the defect and goes RED over the fix -- which is how the fix found
+  it, and is the sharpest form of "a test that asserts the bug" this file
+  records.
 
   **AND REVIEW FOUND TWO OF THESE GATES WRONG AFTER ALL, WHICH IS WHAT THE
   PARAGRAPH ABOVE SHOULD HAVE EXPECTED.** Seventeen reinstatements going red
@@ -6353,13 +6381,29 @@ A leaked node bills by the hour in silence. These are not style preferences.
   flight. The row already exists by then, so a refusal ENDS it rather than
   leaving a phantom reading `running`: `finish` routes through `classify`, the
   reason lands on `requests.err`, and `runOutcome` is what prints it to a
-  client still following the stream. **The test is deterministic and not a
-  race**, because a flaky money assertion teaches people to re-run rather than
-  to read: nothing receives from the handoff while `Start` runs, so `Submit`
-  parks for certain; the extra spend is seeded while it is parked; and the loop
-  is started only after that, so the re-check cannot read the store before the
-  seed. The order is settled by which call the test makes next and never by a
-  sleep.
+  client still following the stream.
+  **ITS TEST WAS A FLAKE ON THE FIRST ATTEMPT, AND `make cover-check` IS WHAT
+  CAUGHT IT.** That version started the drain loop AFTER the row was adopted --
+  which is the only way to make `Submit` park without a rental in flight -- so
+  `Run`'s startup `Interrupt` sweep raced the adopt and sometimes won, marking
+  the submitted row `interrupted`; the wait then returned that state, because
+  `interrupted` IS terminal, and the assertion read a row with no reason on it.
+  `go test ./...` was green; `make cover` runs the suite slower and turned it
+  red. That is the frequency this file already records as the worst a flake can
+  have, found because the full command set is run rather than the one command
+  the change was about -- and the sweep's interaction with `Adopt` is a
+  documented one that **production never has in that order**, since `ember
+  serve` sweeps once at startup, long before a client submits.
+  **So the test is the real scenario now rather than a simulated one**: the
+  loop starts FIRST, over an empty history, and is made busy with a queued
+  request whose `fakeRental` blocks -- so `Submit` parks because the one
+  goroutine that can rent is inside a rental, which is the actual shape of the
+  defect. Ten runs and five under `-race` are green, and the one thing the test
+  hands itself is said out loud: `fakeRental` emits no `run_cost`, so the
+  in-flight rental's cost is written at the moment releasing it would have
+  written it, which is the figure landing between the two reads that the whole
+  defect is about. The order is settled by which call the test makes next and
+  never by a sleep.
 
   **What is NOT done, said rather than left to be found.** The gate counts
   rentals and not store standing charges, which is the gap the original entry
@@ -6372,7 +6416,12 @@ A leaked node bills by the hour in silence. These are not style preferences.
   test that seeds a month's spend says in its own failure message that a UTC
   month turning over mid-test puts the seeded rental in the previous period.
   Injecting a clock would mean a production signature shaped by a test's
-  convenience, and the other two arms of that test read no clock at all.
+  convenience, and the other two arms of that test read no clock at all. The
+  exposure is the wall-clock length of one subtest against a UTC month, which
+  is why the MONTH ceiling is the one that arm uses: a day boundary is thirty
+  times likelier for the same test. Weighed again after review raised it and
+  left as it is, because the two clock-free arms carry the join and this one
+  carries only the ledger read.
 
   **AND THE STALE-TOTAL RACE IS CLOSED ONLY WHERE THERE IS A LOOP TO CLOSE IT
   ON.** `ember up` and `ember store sync` in a shell read the ledger and then

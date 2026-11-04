@@ -16,6 +16,7 @@ import (
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider/local"
+	"github.com/Legion112/ember/internal/report"
 )
 
 // The money gates in this package, and whether each of them can fail.
@@ -457,12 +458,29 @@ func TestDirectRunner_TheTTLItProjectsOverIsTheRunsAndNotTheDaemons(t *testing.T
 // completed cost of finished rentals" and "everything recorded" were the same
 // set; moving one onto a client's goroutine is what made that insufficient.
 //
-// THE TEST IS DETERMINISTIC AND NOT A RACE, which matters because a flaky
-// money assertion teaches people to re-run rather than to read. Nothing
-// receives from the handoff while `Start` runs, so `Submit` parks for certain;
-// the spend is seeded while it is parked; and only then is the loop started,
-// so the re-check cannot read the store before the seed. The order is settled
-// by which call the test makes next and not by a sleep.
+// IT IS THE REAL SCENARIO AND NOT A SIMULATED ONE, and the first version was
+// NEITHER -- it was a flake. That one started the drain loop AFTER the row was
+// adopted, so `Run`'s startup `Interrupt` sweep raced the adopt and sometimes
+// won, marking the submitted row `interrupted`; `waitForTerminal` then read
+// that transient state, because `interrupted` is terminal, and the assertion
+// saw a row with no reason on it. Caught by `make cover`, which runs the suite
+// slower, and not by any ordinary run -- which is the frequency AGENTS.md
+// records as the worst a flake can have. The sweep is a real and documented
+// interaction with `Adopt` and it only happens in that ORDER, which production
+// never has: `ember serve` sweeps once at startup, long before a client
+// submits.
+//
+// So the loop is started FIRST, before anything is adopted, and is made busy
+// the way the scenario says it is: a queued request, claimed, whose rental
+// blocks. `Submit` then parks for certain, because the one goroutine that can
+// rent is inside a rental -- and `Interrupt` has already run over an empty
+// history.
+//
+// WHAT STANDS IN FOR THE TEARDOWN WRITE, said plainly: `fakeRental` emits no
+// `run_cost`, so the cost of the rental in flight is written here, at the
+// moment releasing it would have written it. That is the one thing this test
+// hands itself, and it is the thing the whole defect is about -- a figure that
+// lands between the two reads.
 //
 // WHAT IT ASSERTS IS THE ROW, because `Start` has already answered the client
 // by then -- nil, with the id. So the refusal has to reach the operator
@@ -476,7 +494,30 @@ func TestDirectRunner_ReChecksTheCeilingOnTheLoopWhereTheTotalIsComplete(t *test
 	// $19 already recorded against a $20 day: the first read admits a $0.89
 	// rental at $19.89.
 	spentOn(t, st, at(17, 9), 19_000_000)
-	q := &Queue{Store: st, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
+
+	// BUFFERED BY ONE for TestRun_ReturnsOnlyAfterTheRentalIsDestroyed's
+	// reason: an unbuffered signal with a `default:` arm goes nowhere unless a
+	// receiver is already parked, which under the whole suite in parallel is a
+	// test that waits out its own timeout.
+	inFlight := make(chan struct{}, 1)
+	release := make(chan struct{})
+	pl := &fakePlanner{served: &fakeServed{progress: func(report.Sink, int) {
+		select {
+		case inFlight <- struct{}{}:
+		default:
+		}
+	}}, block: release}
+	q := &Queue{Store: st, Planner: pl, Outputs: t.TempDir()}
+	enqueue(t, st, "rtx2080ti", "a")
+
+	// The loop first, so Interrupt runs over a history with no adopted row in
+	// it, and then busy, so Submit has something to park behind.
+	aLoop(t, q)
+	select {
+	case <-inFlight:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the loop never started the queued rental, so Submit would not have parked")
+	}
 
 	r := paidRunner(t, q, st)
 	r.AllowPaid = true
@@ -496,14 +537,14 @@ func TestDirectRunner_ReChecksTheCeilingOnTheLoopWhereTheTotalIsComplete(t *test
 	// Adopt happens inside Start and immediately before Submit, so the row
 	// appearing is how this test knows the first gate has already passed --
 	// a refusal there writes no row, which is the other test's witness.
-	id := waitForRow(t, st)
+	id := waitForAdopted(t, st)
 
-	// The rental that was in flight finishes and records while the submission
-	// is parked. $19 + $1.50 is $20.50, so the honest total now refuses a
+	// The rental in flight records what it cost, which is what its teardown
+	// would do. $19 + $1.50 is $20.50, so the honest total now refuses a
 	// $0.89 rental and the stale one still admits it.
 	spentOn(t, st, at(17, 10), 1_500_000)
 
-	aLoop(t, q)
+	close(release)
 
 	got := <-done
 	if got.err != nil {
@@ -526,13 +567,22 @@ func TestDirectRunner_ReChecksTheCeilingOnTheLoopWhereTheTotalIsComplete(t *test
 	}
 }
 
-// waitForRow blocks until the history holds one request and answers its id.
+// waitForAdopted blocks until a row written by Adopt appears and answers its
+// id.
 //
 // A BOUND AND A t.Fatal RATHER THAN A SLEEP: what is being waited for is a
 // write another goroutine makes, and the thing that means it will never happen
 // is the deadline -- `orExited`'s rule as the browser labs spell it. A skip
 // here would report success for something that never ran.
-func waitForRow(t *testing.T, st genstore.Store) genstore.ReqID {
+//
+// THE PROVIDER IS THE DISCRIMINATOR AND IT HAS TO BE SOMETHING: `ClaimNext`
+// also writes `running`, so a wait that looked only at the status would pick
+// up the queued rental this test deliberately has in flight. `enqueue` writes
+// `local` and the submitted run names `runpod`, which tells them apart here.
+// `run_id` would be the more principled answer -- Adopt leaves it empty by
+// design -- and it is not available: `fakeRental` never mints one, so a
+// claimed row's is empty too and the two would be indistinguishable.
+func waitForAdopted(t *testing.T, st genstore.Store) genstore.ReqID {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -541,7 +591,7 @@ func waitForRow(t *testing.T, st genstore.Store) genstore.ReqID {
 			t.Fatal(err)
 		}
 		for _, r := range rs {
-			if r.Status == genstore.StatusRunning {
+			if r.Status == genstore.StatusRunning && r.Provider == "runpod" {
 				return r.ID
 			}
 		}
