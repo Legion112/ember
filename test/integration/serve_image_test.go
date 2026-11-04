@@ -1996,6 +1996,8 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// does not survive a restart -- so a lab using one would be measuring
 	// that instead.
 	port := freePort(t)
+	t0 := time.Now()
+	phase := func(what string) { t.Logf("PHASE %7.1fs %s", time.Since(t0).Seconds(), what) }
 	const token = "ember-lab-reconnect-token-0123456789"
 	first, srv, firstWait := startServeOn(t, l, port, token, "--log-level", "debug")
 	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
@@ -2075,6 +2077,7 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// own measurement is this text, byte for byte identical six seconds after
 	// the stream was gone.
 	step := waitForText(t, ctx, `.jobs li`, "step ", 8*time.Minute, console)
+	phase("step-seen")
 
 	// ABSENT WHILE THE SOCKET IS OPEN, which is half of what makes the line a
 	// signal: one that is always there is read as decoration, and an
@@ -2099,6 +2102,7 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// nothing else on this page reads them -- the queue table's two-second
 	// poll carries a status and a cost and no sampling step at all.
 	moved := waitForChange(t, ctx, `.jobs li`, step, 4*time.Minute, console)
+	phase("step-moved")
 	if !strings.Contains(moved, "step ") && !strings.Contains(moved, "file(s)") {
 		t.Errorf("the progress row reads %q after the stream came back, which is neither "+
 			"a step nor a finished job", moved)
@@ -2109,6 +2113,7 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// fold is idempotent per sequence number -- so the page renders the same
 	// either way and this is the only half that is not.
 	resumed := waitForResume(t, l, 60*time.Second)
+	phase("cursor-read")
 	if resumed <= 0 {
 		t.Fatalf("the reconnect asked for after=%d, which is the defect: "+
 			"Socket::open's one caller passed the literal 0", resumed)
@@ -2164,6 +2169,7 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	}
 	held := openedSockets(l)
 	note := noteOnALostStream(t, ctx, console)
+	phase("note-read")
 	if !strings.Contains(note, "last one that arrived") {
 		t.Errorf("the note does not say the step on screen is stale: %q", note)
 	}
@@ -2192,6 +2198,7 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// count is of handshakes that got as far as a watcher, which is the thing
 	// being claimed.
 	waitForNoStreamNote(t, ctx, 60*time.Second, console)
+	phase("note-cleared")
 	if back := openedSockets(l); back <= held {
 		t.Errorf("the note went away with the server still reporting %d handshake(s) "+
 			"against the %d it had while the page was held off: the line cleared with "+
@@ -2226,34 +2233,71 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// Queued BEFORE the cancel so the drain loop finds it when the batch
 	// ends and claims it onto the same rental: queued afterwards, `drain`
 	// would have returned, destroyed the node and had to rent again.
-	// SIX HUNDRED STEPS, AND THE SMALL NUMBER WAS A RACE THIS LAB LOST.
+	// SIX JOBS, AND A SINGLE JOB WAS A RACE THIS LAB LOST TWICE.
+	//
 	// "It is running now" is not "it will still be running in a moment", and
-	// the assertions below need a request the signal INTERRUPTS: at sixty
-	// steps the rider finished during the window and the restart arm's own
-	// window, so the row read `done`, which is terminal -- the premise
-	// passed -- and carries no reason at all, so the sentence this arm ends
-	// on could never appear. Measured rather than reasoned: the journal of a
-	// failing run held the watched request `cancelled` and the rider `done`.
-	// Six hundred cannot finish inside a lab that never waits for it, which
-	// is the same device as the sixty steps the watched request gets, and it
-	// costs nothing: the node is destroyed by the signal either way.
+	// the assertions below need a request the signal INTERRUPTS. Measured
+	// from the journal of two failing runs rather than reasoned: at sixty
+	// steps, and then at six hundred, the rider finished BEFORE the signal
+	// and the row read `done` -- terminal, so the premise passed, and
+	// carrying no reason, so the sentence this arm ends on could never
+	// appear and the failure surfaced sixty lines from its cause.
+	//
+	// WHAT MADE THE SECOND ATTEMPT FAIL TOO is that the gap is not one round
+	// trip: the arm's own two sixty-second waits and its ten-second window
+	// sit between the claim and the signal, so on a loaded machine a rider
+	// has minutes to finish, and `steps` only buys a linear multiple of
+	// something already fast. A batch cannot be got through at all -- ember
+	// submits one job at a time, so six of them is six serial generations --
+	// and it keeps the property the comment above argues for, which is that
+	// the rider rides the SAME rental rather than paying for a second one.
+	// Nothing waits for it either way: the signal destroys the node.
 	rider := queueJobs(t, srv, `{"provider":"local","jobs":[
-		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":2,"output":"light"}
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":2,"output":"l1"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":3,"output":"l2"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":4,"output":"l3"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":5,"output":"l4"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":6,"output":"l5"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":7,"output":"l6"}
 	]}`)
 
 	cancelResp := ask(t, "POST", srv, "/api/requests/"+id+"/cancel", "")
+	phase("cancel-sent")
 	if cancelResp.Status != http.StatusOK {
 		t.Fatalf("cancelling the watched request: %d %s", cancelResp.Status, cancelResp.Body)
 	}
-	waitForText(t, ctx, `.jobs li`, "cancelled", 60*time.Second, console)
-	// AND THE ROW IS TERMINAL SERVER-SIDE, which the jobs row above does not
-	// say: an envelope carrying `job_cancelled` carries whatever the request
-	// view was at that moment, and `finish` writes the status a beat later.
-	// The queue panel is fetch-fed at two seconds against a socket that polls
-	// at 250ms, so by the time this reads `cancelled` the watcher has had
-	// several chances at the same row -- which is the opposite of the window
-	// the shutdown offered.
-	waitForText(t, ctx, queuePanel, "cancelled", 60*time.Second, console)
+	// NOT A WAIT ON `.jobs li`, WHICH COST THIS LAB ITS WHOLE BUDGET TWICE.
+	// The first shape waited for that row to say "cancelled", on the reading
+	// that `job_cancelled` is folded into it -- and `waitForText` is
+	// `chromedp.Text`, which blocks until the CONTEXT ends when its selector
+	// resolves nothing rather than returning so the sixty-second bound can
+	// fire. Measured with a phase clock: arms one and two finish in 15s and
+	// the run then spent the remaining twenty minutes here, dying at the
+	// last assertion with "context deadline exceeded" -- which is the exact
+	// trap `waitForStreamNote`'s own comment in this file was written about,
+	// walked into by the file that documents it. So the signal is the queue
+	// panel's, whose selector always resolves, and the bound is therefore
+	// real.
+	// THE ROW IS TERMINAL SERVER-SIDE, READ OVER THE API AND NOT OFF THE
+	// PAGE. The watcher is its own route since #139 slice 3, so the queue
+	// table is not on this page at all -- and a `waitForText` against a
+	// selector that resolves nothing does not fail at its own bound, it
+	// blocks until the whole browser context ends. Measured: two runs spent
+	// their entire twenty-minute session here after arms one and two had
+	// finished in fifteen seconds. Reading the row over HTTP cannot hang,
+	// needs no navigation away from the watcher the assertions below are
+	// about, and answers the same question.
+	//
+	// WHAT IT BUYS is that the socket has had its chances: it polls at
+	// 250ms, so a row that HTTP already reports terminal has been offered to
+	// the watcher several times over. Evidence rather than proof -- the
+	// watcher's own belief has exactly one observable, which is whether it
+	// retries, and that is the assertion below -- and the whole difference
+	// from the shutdown window this arm was rebuilt to stop racing, where
+	// the row is written by a dying process and the socket may get no poll
+	// at all.
+	waitForStatus(t, srv, id, "cancelled", 60*time.Second)
+	phase("row-cancelled")
 
 	// SO THE STREAM IS ENDED UNDER IT AND THE PAGE MUST SAY NOTHING. Nothing
 	// more will be said about a request that is done, failed, cancelled or
@@ -2271,10 +2315,12 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	dropSocket(t, ctx, console)
 	requireNoStreamNote(t, ctx, 10*time.Second, console)
 	mendSockets(t, ctx)
+	phase("arm3-silence-done")
 
 	// AND IT IS GENERATING, so the signal below interrupts a rental with work
 	// in it rather than an idle server.
 	waitForStatus(t, srv, rider, "running", 4*time.Minute)
+	phase("rider-running")
 
 	// THE RESTART, which is the case the issue leads with -- the remediation
 	// ember's own cancel 409 prints, and how a config change is picked up.
@@ -2319,6 +2365,7 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	}
 
 	second, srv2, secondWait := startServeOn(t, l, port, token, "--log-level", "debug")
+	phase("restarted")
 	defer func() {
 		if err := second.Process.Signal(syscall.SIGINT); err != nil {
 			t.Errorf("signalling the second ember serve: %v", err)
@@ -2358,7 +2405,15 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// The same change is what took the note off this arm, so both halves of
 	// that commit land in one place: the reason appears and the note does
 	// not.
+	//
+	// AND IT IS READ AFTER EVERY WATCHER ASSERTION, LAST, because the queue
+	// table is a different route now and getting to it DISPOSES the watcher
+	// -- which is the very thing the three assertions above are about. A
+	// navigation here cannot invalidate them because they have already been
+	// made; one placed earlier would have measured a page that had left.
+	navTo(t, ctx, "the queue", queuePanel)
 	panel := waitForText(t, ctx, queuePanel, "context canceled", 60*time.Second, console)
+	phase("reason-on-screen")
 	if !strings.Contains(panel, "cancelled") {
 		t.Errorf("the queue table shows a reason without the terminal status it belongs "+
 			"to: %q", panel)

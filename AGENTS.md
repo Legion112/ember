@@ -4205,11 +4205,41 @@ that sentence made unrepresentable rather than merely tested.
   the row read `done`: terminal, so the premise passed, and carrying no reason
   at all, so the sentence the arm ends on could never appear and the failure
   surfaced sixty lines away from its cause. Measured from the journal of a
-  failing run -- the watched request `cancelled`, the rider `done`. Six
-  hundred steps cannot finish inside a lab that never waits for it, which is
-  the device the watched request already uses, and the premise now asserts
-  `cancelled` rather than merely terminal so that a rider which finishes early
-  is one named message instead of a confusing one later.
+  failing run -- the watched request `cancelled`, the rider `done` -- and the
+  premise now asserts `cancelled` rather than merely terminal, so a rider that
+  finishes early is one named message instead of a confusing one sixty lines
+  later.
+  **AND RAISING THE STEP COUNT DID NOT FIX IT, WHICH IS THE INSTRUCTIVE
+  HALF.** Sixty steps became six hundred and the next run's journal said
+  `done` again. The gap is not one round trip: the arm's own two
+  sixty-second waits and its ten-second window sit between the claim and the
+  signal, so on a loaded machine the rider has MINUTES, and `steps` only buys
+  a linear multiple of something already fast -- measured, sd15 at 192x512
+  runs about three steps a second, so six hundred is three minutes and the
+  windows ate it. What cannot be got through at all is a BATCH: ember submits
+  one job at a time, so six jobs is six serial generations, and it keeps the
+  property that made the rider ride the same rental rather than pay for a
+  second one. The general shape, met three times in this one change: a
+  precondition that reads a STATE is worth only as much as the gap between
+  reading it and depending on it, and the repair is to make the state unable
+  to change rather than to read it again closer to the moment.
+  **AND THE ARM'S OTHER PRECONDITION SPENT THE WHOLE BUDGET TWICE, ON THE
+  TRAP THIS FILE DOCUMENTS.** It waited for the watcher's `.jobs li` row to
+  say "cancelled", and `waitForText` is `chromedp.Text`, which **blocks until
+  the CONTEXT ends** when its selector resolves nothing instead of returning
+  so that its own sixty-second bound can fire -- which is precisely what
+  `waitForStreamNote` was written against and what the entry above records as
+  having once cost this lab twelve minutes. Measured with a phase clock
+  rather than guessed at, after two runs died at the LAST assertion with
+  "context deadline exceeded" and a raised backstop made the second one
+  slower rather than greener: arms one and two complete in **15 seconds**,
+  and the remaining twenty minutes were all in that one wait. The signal is
+  the queue panel's now, whose selector always resolves, so the bound is
+  real -- and the general rule, which this file had already written and this
+  change still walked into, is that a wait for something that may never
+  appear must be an evaluation that can answer "not there" rather than a
+  `Text` that can only answer late. Three documented hazards walked into in
+  one change is the argument for reading the file one is editing.
   **A SECOND REQUEST IS WHAT KEEPS #159 IN THE ARM**, queued before the cancel
   so the drain loop claims it onto the same rental rather than renting again.
   The shutdown then has a request it really interrupts, its row is read out of
