@@ -53,10 +53,15 @@ import (
 // was about DEPTH. With it, a pass at `/` and a failure at `/requests/abc` is
 // the defect and nothing else.
 //
-// IT RENTS NOTHING AND GENERATES NOTHING. The app is the same app at every
-// depth -- there is no router yet, which is why this slice is the one that
-// unblocks the rest -- so the id in the path is arbitrary and no request has
-// to exist for the page to be asked to load itself.
+// IT RENTS NOTHING AND GENERATES NOTHING, and since #139 slice 3 the id in
+// the path is read: that route is the request page, so this navigation mounts
+// a watcher for a request the store does not have. Which is still the right
+// shape for this lab and is deliberately NOT what it asserts -- what is in
+// question here is whether the page can load ITSELF at that depth, so the
+// assertions are the `<h1>`, the posture line and the stylesheet, all of which
+// are the header and the document rather than the page under it. Whether a
+// deep link renders the request it names is
+// TestServe_UINavigatesWithoutReloadingTheApp's, which has a request.
 func TestServe_UIMountsOnATwoSegmentRoute(t *testing.T) {
 	requireChrome(t)
 	l := harness.New(t)
