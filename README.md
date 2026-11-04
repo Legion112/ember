@@ -1994,7 +1994,7 @@ reason the sweep answers "not abandoned" for everything it cannot be sure of.
 **A row of its own, because a cell is not a place to put a sentence.** It used
 to render inside the status cell — one column of a six-column table, in the
 narrower half of the page's two-column grid. Measured at a 1280px viewport: the
-table is 407px, that cell gets 174px, and the store refusal — 183 characters
+table is 407px, that cell gets 174px, and the store refusal — 170 characters
 naming `ember store create` — came out 174px tall, nine lines of two or three
 words. Five failed requests filled the screen and the queue stopped being
 readable. Across the table the same sentence is four lines. Nothing is
