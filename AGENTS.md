@@ -6231,11 +6231,37 @@ A leaked node bills by the hour in silence. These are not style preferences.
   wrong, the list itself was: one red filed as evidence for a refusal its
   message does not name, and the green half of the same case recorded only in
   the prose below it, so neither side of the list reconciled with the pass that
-  produced it -- while the paragraph above said the lists were the record. A
-  list is not self-checking merely because nothing sums it; what checks it is
-  reading the pass's own messages back, case by case, which is what the three
-  families below are grouped by and what found the two misfilings named at the
-  end.
+  produced it -- while the paragraph above said the lists were the record.
+
+  **THE REASON NO AMOUNT OF ARITHMETIC COULD HAVE CAUGHT IT: A RED IS TWO
+  CLAIMS, AND ONLY ONE OF THEM WAS EVER BEING CHECKED.** A red says the case
+  failed *and* why it failed, and every check this paragraph has carried --
+  the total, then the per-family counts, then the reconciliation between list
+  and count -- sees the verdict alone. Both misfiled entries had a CORRECT
+  verdict and a wrong reason: the index case really is red, the parenthesised
+  dereference really is red, and both were filed as evidence for a mechanism
+  their own messages do not name. An exit code cannot tell those apart from a
+  correctly filed red, so no sum over exit codes can either. What makes a list
+  self-checking is that each entry's evidence is **the tool's own output read
+  back** -- then the classification stops being something the author is trusted
+  to have done and becomes something a reader re-derives, which is what the
+  three families below are grouped by and how the two misfilings at the end
+  were found.
+
+  **AND THE FORCE OF THAT IS THAT THE REVIEWER MADE THE IDENTICAL ERROR.** The
+  independent pass that checked this work captured
+  *"Config is set from `cfg` and its address is taken in the same function"*
+  for the parenthesised-dereference case -- the message was in its own output
+  -- and filed it as evidence for the `ParenExpr` and `StarExpr` arms anyway,
+  which is precisely the misreading it had just caught one case over in the
+  index entry. Two independent readers, the same mistake, one case apart, with
+  the disproving message sitting in both sets of output. That is the strongest
+  evidence in this whole sequence that the verdict-only check was the problem
+  rather than either reader's care, and it is why the remedy is structural --
+  group by the message -- rather than a resolution to read more carefully. The
+  `checkDirectRunnerConfig` refusal-site count below is the same lesson a third
+  time: both readers counted families, which is a reading, instead of sites,
+  which are lines in a function -- and both got a different wrong answer.
   **Every case RED where expected, every control GREEN, controls at both ends
   of each pass, and every case ended in a `git diff` against HEAD rather than
   in an exit code** -- HEAD being the pristine copy, taken once, which is the
@@ -6266,11 +6292,33 @@ A leaked node bills by the hour in silence. These are not style preferences.
   to write, which is what the walkaround pass writes. **The list is the record
   and nothing sums it**, and each entry sits under the refusal whose message it
   drew, because an entry filed under the wrong one is the mistake corrected at
-  the end of this paragraph. These entries draw three of them and not two,
-  which is a correction to this paragraph's own earlier shape: a field that is
-  not set has no value to classify at all. Three is what the entries reached,
-  not what the guard has -- the positional-field fatal named above is a fourth
-  that none of them draws.
+  the end of this paragraph. **`checkDirectRunnerConfig` refuses at six sites,
+  of which these entries draw four, and the figure is counted rather than
+  carried**: `Config is set from a %T` five times, `which is not an object this
+  function bound` six, `Config is set from %q and %s in the same function`
+  twelve, and `this queue.DirectRunner does not set Config` once, which is the
+  twenty-four reds. Two are never drawn and both are defensive -- the
+  positional-field fatal, and the fatal for an identifier the type checker has
+  no object for, which cannot happen in a package that type-checked.
+  **That is a different pair from the two named at the top of this paragraph,
+  and the overlap is one member**: "no defect available on the pristine tree"
+  asks which sites need code somebody would have to write, and the `moved`
+  refusal is one of those AND is drawn twelve times by code this pass writes;
+  "never drawn" asks which sites no entry reached at all. The positional fatal
+  is in both pairs, which is why the two sentences read as one claim and are
+  not.
+  **Both of the two readers who have counted this got it wrong, in different
+  directions, and neither was counting refusals**: this paragraph first said
+  three drawn and one defensive, because it counted its own FAMILIES, and the
+  not-an-object family draws two sites rather than one -- by AST kind where
+  there is no object to name, by name where there is. Review then said six
+  sites and accounted for five, keeping the family count and correcting the
+  defensive one. A family is a reading of the list; a site is a line in the
+  function, and only the second is countable. The written-to family's twelve
+  entries draw ONE site, whose `%s` carries the clause -- assigned to, address
+  taken, something inside it assigned, the same by a range clause, incremented
+  -- which is why counting messages and counting sites are different sums as
+  well.
 
   Red because the field is not set: the `Config` key dropped altogether.
 
@@ -6323,6 +6371,16 @@ A leaked node bills by the hour in silence. These are not style preferences.
   object is a `config.Config` value, a struct is not indexable, so
   `cfg[…] = x` is not legal Go. Those two arms are defensive, which their own
   comment now says, and no measurement here has ever taken them.
+  **The `ParenExpr` and `StarExpr` arms are defensive for a DIFFERENT reason,
+  and "nothing evidences them" was the weaker thing to say.** They can fire:
+  on a `*config.Config` held as a parameter or a return value, `(*p).MaxDayUSD
+  = ""` peels to `p`. What they cannot do is fire USEFULLY here, because a
+  pointer that aliases a tracked object can only be obtained by `&cfg`, and the
+  address clause records that first -- which is exactly why the parenthesised
+  case above draws the address message and not these arms. Unreachable in
+  principle and reachable but always pre-empted are two different kinds of
+  defensive, and a reader who finds only the index arms' reason will assume
+  these share it.
   **THE POINTER-RECEIVER FINDING IS NOT ONE OF THOSE GREENS AND USED TO BE
   LISTED AS ONE.** It was never a walkaround case: the pass prints its header
   and then says in place of a verdict that it is vacuous on this tree, because
