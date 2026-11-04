@@ -414,10 +414,45 @@ func TestServe_UI(t *testing.T) {
 		// The posture line: the one thing a person has to read before
 		// deciding whether to leave this running.
 		chromedp.WaitVisible(`.posture`),
+	); err != nil {
+		t.Fatalf("loading the page: %v\n%s", err, console.text())
+	}
+
+	// AND ITS TEXT, IN BOTH DIRECTIONS, because the wait above is a
+	// visibility check on the one line of this page that carries a security
+	// claim -- and it passed for the whole life of #29 over a line reading
+	// "no authentication: any page in this browser can reach this port",
+	// while `webapi.New` was already refusing a zero token and `checkOrigin`
+	// was already refusing another site's page. A working control reported as
+	// absent, to the operator deciding whether to walk away from a process
+	// that can rent GPUs.
+	//
+	// THE ABSENCE IS ASSERTED AS WELL AS THE PRESENCE: a check that only
+	// looked for the new sentence would pass against a page printing both,
+	// which is how a claim like that survives a fix. And the two halves of
+	// the new sentence are separate assertions, because dropping the limit
+	// would be the same defect inverted -- a control believed past its
+	// limits -- and one `Contains` over the whole clause could not tell the
+	// two apart.
+	posture, perr := chromedp.Run(ctx, chromedp.Text(`.posture`))
+	if perr != nil {
+		t.Fatalf("reading the posture line: %v\n%s", perr, console.text())
+	}
+	if !strings.Contains(posture, "every request needs a token") {
+		t.Errorf("the posture line does not say this server is authenticated:\n%s", posture)
+	}
+	if !strings.Contains(posture, "does not keep out your own uid or root") {
+		t.Errorf("the posture line does not say what the credential leaves open:\n%s", posture)
+	}
+	if strings.Contains(posture, "no authentication") {
+		t.Errorf("the posture line still claims there is no authentication:\n%s", posture)
+	}
+
+	if err := chromedp.Do(ctx,
 		chromedp.Click(`//button[contains(text(), "what is available")]`),
 		chromedp.WaitVisible(`table.offers tr`),
 	); err != nil {
-		t.Fatalf("loading the page: %v\n%s", err, console.text())
+		t.Fatalf("loading the offers: %v\n%s", err, console.text())
 	}
 
 	offers, oerr := chromedp.Run(ctx, chromedp.Text(`table.offers`))

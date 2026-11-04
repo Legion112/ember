@@ -1778,6 +1778,54 @@ that sentence made unrepresentable rather than merely tested.
   can pass for either reason proves neither, and that is how a working seal
   gets quietly weakened while the suite stays green -- the `AssertNoStray`
   failure, reached from a third direction.
+- **And the page told every operator there was no authentication for the whole
+  of that time, which is the `ember ls --all` class on an operator-facing
+  surface rather than in a comment (#167).** `web/src/views.rs`'s posture line
+  ended `· no authentication: any page in this browser can reach this port`,
+  unconditionally -- outside the `if c.allow_paid` above it, so on screen in
+  both postures on every page load -- and `Posture`'s own doc comment rested
+  the `--allow-paid` default on "what bounds the damage of there being no
+  authentication". A verbatim survival of the state #29 closed: `webapi.New`
+  refuses a zero token, a page on another site fails `checkOrigin` before the
+  credential is asked for, and `SameSite=Strict` means a cross-site request
+  carries no cookie at all, which is the half that clause was about. The other
+  instances of this class were read by whoever next edited the code; this one
+  was read by the operator, on the line that exists to help them decide
+  whether to walk away from a process that can rent GPUs, and it was wrong in
+  the direction that makes a working control look absent. `README.md`'s own
+  paragraph was corrected when the token landed and the page was not, which is
+  "a claim is worth exactly what the code does" with the two surfaces one
+  commit apart.
+  **The replacement is `announceToken`'s paragraph compressed to one clause,
+  and the reason it is on the page at all is #105's**: that paragraph prints
+  the control and its limit into a terminal, and the operator this page is for
+  may never see one -- the one-time URL means somebody had a shell, and
+  `ssh -L 7777:localhost:7777` means that shell is on the other machine. So
+  "every request needs a token; it does not keep out your own uid or root",
+  both halves, because a control whose limits are not printed is a control
+  that gets believed past them and a line that said only the first would be
+  the old defect inverted. Not a deletion, which was the other candidate: a
+  warning naming a condition the program cannot be in is worse than silence,
+  and that is an argument about the old clause rather than about a true one.
+  **A `WaitVisible` on the one line of that page carrying a security claim is
+  what let it stand.** `TestServe_UI` waited for `.posture` to appear and
+  asserted nothing about its text, so the lab written to drive the page an
+  operator reads passed against either wording for the life of the clause --
+  the same shape as the three cross-origin labs above it. It reads the text
+  now, and the **absence** of `no authentication` is asserted beside the
+  presence of the new sentence, because a check that only looked for the new
+  text would pass against a page printing both. The two halves of the new
+  sentence are separate assertions for the same reason: one `Contains` over
+  the whole clause cannot tell a dropped limit from a dropped control.
+  **The clause is static and there is therefore no `cargo test`, which is
+  stated rather than papered over.** The credential is mandatory, so there is
+  no state of this program a `Config` field could switch the sentence on --
+  the `Listing::answer` / `Rows::note` / `Stream::note` shape is for a
+  decision, and asserting a string literal against itself is the closed loop
+  this file refuses elsewhere. The exit code available is the lab's, and it
+  was **not run here** (a lab takes the flock on the one Docker daemon), so no
+  claim is made that it goes red with the old clause reinstated -- which is
+  exactly the claim this file has had to retract twice.
 - **A request may narrow the config's ceilings and never widen them.** `ember
   up`'s `applyFlags` *replaces*: `--max-hourly-usd 999` raises the ceiling,
   because the person typing it is the person who set it. A request is not that
