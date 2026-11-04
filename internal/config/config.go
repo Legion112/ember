@@ -19,6 +19,7 @@ import (
 
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 )
 
 // FileName is the config ember looks for in the working directory.
@@ -167,6 +168,26 @@ type Config struct {
 	//
 	// Use cmd, cmds or sd.serve -- never two of them.
 	SD SDConfig `yaml:"sd"`
+
+	// TTS is the `tts:` block: text to speech through piper.
+	//
+	// THE SECOND TYPED WORKLOAD, and the reason it is typed is not the reason
+	// `sd:` is. `sd:` exists for the resident model and the progress stream;
+	// speech has no stream to read -- a piper utterance emits nothing at all
+	// until it is finished -- and its resident win needs a held-open stdin
+	// ember's remote-command seam does not have. What it is typed FOR is the
+	// other half of the same argument: a browser cannot be handed argv.
+	// `extra` is structurally refused over HTTP, so an untyped speech path is
+	// not inconvenient from a web UI but unreachable -- and an operator who
+	// has to write `cmds: [["sh","-c","printf %s ... | piper ..."]]` is
+	// assembling a shell pipeline in YAML, which is the curl-in-a-config this
+	// repository already refuses once.
+	//
+	// internal/tts has the measurements: what piper emits, what one-shot
+	// costs, and why there is no server.
+	//
+	// Use cmd, cmds, sd.jobs or tts.jobs -- never two of them.
+	TTS TTSConfig `yaml:"tts"`
 
 	// Store names the persistent store this configuration uses, if any.
 	Store StoreConfig `yaml:"store"`
@@ -714,6 +735,140 @@ func (c Config) ParseSD() (sdserver.Run, error) {
 		run.Jobs = append(run.Jobs, job)
 	}
 	return run, nil
+}
+
+// TTSConfig is the `tts:` block.
+//
+// SHAPED LIKE `sd:` DOWN TO THE FIELD ORDER, because the two are the same kind
+// of thing from a config file's point of view: a per-rental setting or two and
+// then a list of jobs. What it has no equivalent of is `serve` and
+// `ready_timeout` -- there is no server to start and nothing to wait for --
+// and that absence is the whole difference between the two drivers.
+type TTSConfig struct {
+	// Voice is the .onnx voice on the node.
+	//
+	// ONE VOICE PER RENTAL, for the reason `sd.serve` is one server per
+	// rental: it is a file on the node, so it is the operator's to choose and
+	// a request's to know nothing about -- and the day this becomes resident
+	// there is exactly one process to hold open.
+	//
+	// Empty is the voice ember's own TTS image bakes in, so a configuration
+	// using that image needs no path at all. Named rather than discovered,
+	// because a directory scan on the node would make the voice a thing that
+	// changes when somebody writes to the store -- which is the channel
+	// between runs that asset digests exist to close.
+	Voice string `yaml:"voice"`
+
+	// EspeakData is piper's espeak-ng data directory on the node.
+	//
+	// It has a default for the same reason Voice does, and it is a key rather
+	// than a constant because an image that put it elsewhere would otherwise
+	// be unusable with no way to say so. AGENTS.md's rule that an image's ENV
+	// does not reach anything sshd starts is why ember names it on every
+	// invocation rather than trusting ESPEAK_DATA_PATH.
+	EspeakData string `yaml:"espeak_data"`
+
+	// Jobs are the utterances, in order, on one rental.
+	Jobs []TTSJob `yaml:"jobs"`
+}
+
+// DefaultVoice and DefaultEspeakData are where ember's own TTS image puts them.
+//
+// CONSTANTS HERE AND NOT IN internal/tts, because they are a fact about an
+// image this repository builds rather than about piper -- the same split that
+// keeps sd-server's flag spellings in internal/sdserver and the model path in
+// a config. A different image names its own paths and neither constant is
+// consulted.
+const (
+	DefaultVoice      = "/opt/voices/en_US-lessac-medium.onnx"
+	DefaultEspeakData = "/opt/piper/espeak-ng-data"
+)
+
+// TTSJob is one utterance.
+//
+// A TYPED SUBSET OF NOTHING, which is the opposite of SDJob and is worth
+// saying because the asymmetry looks like an omission. SDJob types eleven of
+// sd-server's forty-odd fields and carries the rest through `extra`, because
+// the server publishes more than ember should mirror. piper publishes six
+// options in total -- `--speaker`, `--length_scale`, `--noise_scale`,
+// `--noise_w`, `--sentence_silence` and the two paths -- so this block is the
+// WHOLE surface and there is nothing for an `extra` to carry. There is
+// therefore no `extra` here, which also means nothing has to be refused over
+// HTTP later: the thing a request could abuse does not exist.
+type TTSJob struct {
+	// Text is what to say.
+	Text string `yaml:"text"`
+
+	// Output is the filename stem, without an extension. ember numbers it and
+	// appends .wav.
+	Output string `yaml:"output"`
+
+	// Speaker picks a voice of a multi-speaker model.
+	//
+	// POINTERS, ALL OF THEM, because piper's defaults are 0, 1.0, 0.667, 0.8
+	// and 0.2 -- so for Speaker zero is a real speaker id and for the rest
+	// zero is a value an operator might mean. A zero sentinel would make the
+	// first speaker and the fastest speech this model will do unrequestable
+	// while looking exactly like a field that works, which is clip_skip's
+	// rule and the fifth time it has been reached from a different default.
+	Speaker         *int     `yaml:"speaker"`
+	LengthScale     *float64 `yaml:"length_scale"`
+	NoiseScale      *float64 `yaml:"noise_scale"`
+	NoiseW          *float64 `yaml:"noise_w"`
+	SentenceSilence *float64 `yaml:"sentence_silence"`
+}
+
+// ParseTTS turns the `tts:` block into the run a spoken batch needs.
+//
+// The shape of ParseSD and ParseAssets: a value receiver, no arguments, empty
+// is not an error, and every entry validated rather than only the one this run
+// reaches -- a config with nine good utterances and a tenth whose output is a
+// path would otherwise sit committed until the day somebody pays for the
+// tenth.
+//
+// Every refusal lives in internal/tts. This function is the loop and the two
+// defaults, which is what keeps the meaning in one place.
+func (c Config) ParseTTS() (tts.Run, error) {
+	if len(c.TTS.Jobs) == 0 {
+		// NOT an error when voice or espeak_data is set with no jobs, unlike
+		// `sd.serve` with no `sd.jobs`. That one rents a card, loads the
+		// weights and generates nothing -- it costs the whole TTL. A voice
+		// path with no utterances starts no process and costs nothing, so it
+		// is a line an operator left behind rather than a run that burns
+		// money, and refusing it would break `ember up --cmd` against a
+		// config that also happens to describe a voice.
+		return tts.Run{}, nil
+	}
+
+	run := tts.Run{
+		Voice:      firstNonEmpty(c.TTS.Voice, DefaultVoice),
+		EspeakData: firstNonEmpty(c.TTS.EspeakData, DefaultEspeakData),
+	}
+	for _, j := range c.TTS.Jobs {
+		run.Jobs = append(run.Jobs, tts.Job{
+			Text:            j.Text,
+			Output:          j.Output,
+			Speaker:         j.Speaker,
+			LengthScale:     j.LengthScale,
+			NoiseScale:      j.NoiseScale,
+			NoiseW:          j.NoiseW,
+			SentenceSilence: j.SentenceSilence,
+		})
+	}
+	// One call and not a check per field here, so the refusals exist once --
+	// and so the path a request would one day take gets the identical set.
+	if err := run.Validate(); err != nil {
+		return tts.Run{}, err
+	}
+	return run, nil
+}
+
+// firstNonEmpty is the default-if-blank rule, named once.
+func firstNonEmpty(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
 }
 
 func (c Config) rejectSecrets() error {

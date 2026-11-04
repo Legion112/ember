@@ -45,6 +45,20 @@ var publishLabsExcluded = []struct{ test, why string }{
 		"needs ember:sd, the CPU build, and a publish of the CUDA image must not require an unrelated image to exist; " +
 			"TestWorkloadImages_PinTheSameUpstreamRevision is what keeps the two honest",
 	},
+	{
+		"TestWorkloadImage_SpeaksOnACPUAndCarriesItsVoice",
+		"needs ember:tts, by the sentence above: a publish of the CUDA image must not require an " +
+			"unrelated image to exist. There is no revision to keep honest here, because the speech " +
+			"image shares no upstream with the sd ones -- `make test-tts-lab` is its gate",
+	},
+	{
+		"TestWorkloadImage_SpeechImageListensOnNothingButSSH",
+		"needs ember:tts, for the reason above. It is the only one of these exclusions that gives up " +
+			"something a publish would want: the listener assertion. What it costs is bounded -- the " +
+			"speech image is built FROM the node image, so it inherits that sshd configuration rather " +
+			"than repeating it, which is the asymmetry TestWorkloadImage_ListensOnNothingButSSH exists " +
+			"for in the CUDA image's case",
+	},
 }
 
 // TestPublishGateNamesEveryWorkloadImageLab checks the publish gate's test

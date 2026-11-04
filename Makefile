@@ -182,7 +182,7 @@ GO_LDFLAGS := -X github.com/Legion112/ember/internal/cli.Version=$(VERSION)
 # both the answer and its negation decide whether a seal reads the right
 # source. A floor below 100 on four lines would mean one of those four was
 # never run.
-COVER_PKGS := internal/repotree=100,internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=93,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99,internal/logx=100
+COVER_PKGS := internal/repotree=100,internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=98,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=93,internal/statestore=88,internal/tunnel=94,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99,internal/tts=100,internal/logx=100
 # cmd/reap-labs joins the other cmd mains here for their reason and one of its
 # own: every statement in it is a Docker call or a line of output, the decisions
 # it could get wrong live in test/integration/harness/labdaemon, and a unit test
@@ -322,6 +322,7 @@ IMAGE_LABS_LOG = $(LAB_LOG_DIR)/image-labs-sm$(CUDA_ARCH).log
 PUBLISH_LABS_LOG = $(LAB_LOG_DIR)/publish-labs-sm$(CUDA_ARCH).log
 PREVIEW_LAB_LOG := $(LAB_LOG_DIR)/preview-lab.log
 SERVE_LAB_LOG := $(LAB_LOG_DIR)/serve-lab.log
+TTS_LAB_LOG := $(LAB_LOG_DIR)/tts-lab.log
 
 # The tail of every lab target, in the SAME shell line as the `go test` whose
 # log it reads. $(1) is that log.
@@ -373,7 +374,7 @@ LAB_SELECT = sel=$$($(GO) test -tags='$(LAB_TAGS)' -list $(1) ./test/integration
 	fi; \
 	echo "selection: $$sel test(s) match $(1)"
 
-.PHONY: all build web web-check web-test test-serve-lab test test-race cover cover-check vet fmt lint docker-build test-integration reap-labs test-image-labs test-image-labs-publish test-preview-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local clean print-%
+.PHONY: all build web web-check web-test test-serve-lab test test-race cover cover-check vet fmt lint docker-build test-integration reap-labs test-image-labs test-image-labs-publish test-preview-lab test-tts-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local workload-tts clean print-%
 
 all: fmt vet test build
 
@@ -541,6 +542,22 @@ web-test:
 # nothing and has no store to mount.
 SD_IMAGE := ember:sd
 
+# The speech image.
+#
+# No per-architecture variant and no CUDA_ARCH, which is a measurement rather
+# than an omission: piper's released binary links onnxruntime's CPU execution
+# provider only, so there is no kernel for a card to be wrong about and nothing
+# for `images:` to key on. Measured on this machine -- en_US-lessac-medium
+# synthesises at a real-time factor of about 0.037, so 4.6 s of audio costs
+# 170 ms of one CPU -- which is why the whole driver is a CPU story. See
+# internal/tts.
+#
+# It carries its voice, which is the opposite of the rule for a diffusion
+# checkpoint and the same choice SD_IMAGE's Dockerfile makes for sd15: 60 MiB
+# against a 2.2 GB checkpoint, and what it buys is a local run that needs no
+# store, no mount and no sync.
+TTS_IMAGE := ember:tts
+
 # One image per architecture, so the tag carries it.
 #
 # Recursive (=), not simple (:=): the tag has to follow CUDA_ARCH when it is
@@ -590,6 +607,12 @@ workload-sd:
 	docker build -t $(SD_IMAGE) -f workload-sd.Dockerfile \
 		--build-arg NODE_IMAGE=$(LAB_IMAGE) --build-arg MODEL_PATH=.model.gguf . ; \
 	rc=$$?; rm -f .model.gguf; exit $$rc
+
+# The speech image. Seconds: a prebuilt binary and two downloads, both pinned
+# by digest, and no model to pass in because the voice is one of them.
+workload-tts:
+	docker build -t $(TTS_IMAGE) -f workload-tts.Dockerfile \
+		--build-arg NODE_IMAGE=$(LAB_IMAGE) .
 
 # The CUDA variant, for a rented GPU. Upstream publishes no prebuilt Linux
 # CUDA binary, so this compiles stable-diffusion.cpp against the toolkit --
@@ -674,6 +697,32 @@ test-preview-lab:
 		-timeout 25m ./test/integration/... \
 		-run 'TestPreview_' | tee $(PREVIEW_LAB_LOG); \
 	$(call LAB_CHECK,$(PREVIEW_LAB_LOG))
+
+# Text to speech end to end on the local provider, for nothing.
+#
+# Needs only ember:tts, which is built from ember:lab and takes seconds. There
+# is no CUDA variant to wait for, because piper is a CPU story -- so unlike
+# every other image lab here this one is cheap enough that the only reason it
+# is behind a tag at all is that `make docker-build` does not produce the
+# image.
+#
+# Not part of test-image-labs-publish: a publish of the CUDA image must not
+# require an unrelated image to exist, which is the same sentence the video
+# lab is absent by.
+test-tts-lab:
+	@$(call LAB_SELECT,'TestTTS_|TestWorkloadImage_Speech|TestWorkloadImage_Speaks',3)
+	@docker image inspect $(TTS_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(TTS_IMAGE) is missing. Build it with:"; \
+		echo "  make workload-tts"; exit 1; }
+	@docker image inspect $(LAB_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(LAB_IMAGE) is missing. Build it with:"; \
+		echo "  make docker-build"; exit 1; }
+	@mkdir -p $(LAB_LOG_DIR)
+	EMBER_TTS_IMAGE=$(TTS_IMAGE) \
+	EMBER_INTEGRATION=1 $(GO) test -tags='integration imagelab' -count=1 -v \
+		-timeout 20m ./test/integration/... \
+		-run 'TestTTS_|TestWorkloadImage_Speech|TestWorkloadImage_Speaks' | tee $(TTS_LAB_LOG); \
+	$(call LAB_CHECK,$(TTS_LAB_LOG))
 
 # `ember serve` end to end: one rental drained by a queue, and the real UI in
 # a real browser.
