@@ -79,8 +79,10 @@ pub fn App() -> impl IntoView {
 /// rule `cli.announceToken` states for the terminal, which the operator this
 /// page is for may never see: the one-time URL means somebody had a shell, and
 /// `ssh -L 7777:localhost:7777` means that shell is on the other machine. So
-/// the wording is that paragraph's, compressed to one clause, rather than a
-/// second account of the same control.
+/// the wording is that paragraph's rather than a second account of the same
+/// control -- its two limits and not its two mechanisms, which is a lossy
+/// compression and is said to be one at the clause itself rather than implied
+/// to be lossless here.
 ///
 /// WHAT THIS LINE USED TO SAY was "no authentication: any page in this browser
 /// can reach this port", unconditionally, in every `ember serve` from the one
@@ -128,11 +130,37 @@ fn Posture(config: RwSignal<Config>) -> impl IntoView {
             // credential is mandatory: there is no state of this program in
             // which a token is not required on this port, so there is nothing
             // here for a `Config` field to switch on and nothing for a
-            // `cargo test` to decide. The clause the lab reads is these two
-            // halves together -- the control and its limit -- because a line
+            // `cargo test` to decide. The clause the lab reads is these three
+            // spans -- the control and both of its limits -- because a line
             // that said only the first would be the old defect inverted: a
             // control believed past its limits rather than reported absent.
-            " · every request needs a token; it does not keep out your own uid or root"
+            //
+            // "ON THIS PORT" AND NOT "EVERY REQUEST", because `ServeSocket`
+            // answers the same routes with no token at all: the socket is
+            // 0600 in a 0700 directory, so `connect(2)` is the check and the
+            // operating system made it before ember saw a byte. A browser
+            // cannot open a unix socket, so the channel this reader is on is
+            // the one the sentence is about -- and three words are cheaper
+            // than leaving the next reader to re-derive the exception. As a
+            // claim about WHO can reach this server the shorter spelling was
+            // true anyway, since 0600 means the operator's own uid; it
+            // over-claimed only about HOW, by one channel, and a line that
+            // over-claims by a channel is how the one above it came to
+            // under-claim by a control.
+            //
+            // WHAT IS COMPRESSED AWAY AND WHAT IS NOT. `cli.announceToken`
+            // prints two limits and the mechanism of the first: your own uid
+            // or root, *which can read the token*, and no expiry, *restart
+            // ember to revoke it*. Both limits are here; both mechanisms are
+            // not, because a page gives the fact and the terminal and
+            // `README.md` give the how. Non-expiry is the one that was left
+            // out of the first version of this clause and it is the one that
+            // bears hardest on the decision this line exists for -- whether
+            // to leave the process running -- so "a terminal this operator
+            // may never see" cannot be the argument for printing the control
+            // here and the argument for withholding a limit of it.
+            " · every request on this port needs a token; it does not keep out your own uid or \
+             root, and it never expires"
         </p>
 
         <Show when=move || !config.get().servable && !config.get().providers.is_empty()>

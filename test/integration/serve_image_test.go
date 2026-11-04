@@ -429,20 +429,30 @@ func TestServe_UI(t *testing.T) {
 	//
 	// THE ABSENCE IS ASSERTED AS WELL AS THE PRESENCE: a check that only
 	// looked for the new sentence would pass against a page printing both,
-	// which is how a claim like that survives a fix. And the two halves of
-	// the new sentence are separate assertions, because dropping the limit
-	// would be the same defect inverted -- a control believed past its
-	// limits -- and one `Contains` over the whole clause could not tell the
-	// two apart.
+	// which is how a claim like that survives a fix. And the control and each
+	// of its two limits are separate assertions, because dropping a limit
+	// would be the same defect inverted -- a control believed past its limits
+	// -- and one `Contains` over the whole clause could not tell a dropped
+	// limit from a dropped control.
+	//
+	// MEASURED, and that split is why: with the old clause restored all three
+	// of the assertions below it then had fired, and dropping ONLY the limit
+	// half fired exactly one. All three firing together would have proved the
+	// suite went red and not why. The third span, non-expiry, was added after
+	// that measurement and is asserted on the same reasoning rather than on
+	// its own exit code.
 	posture, perr := chromedp.Run(ctx, chromedp.Text(`.posture`))
 	if perr != nil {
 		t.Fatalf("reading the posture line: %v\n%s", perr, console.text())
 	}
-	if !strings.Contains(posture, "every request needs a token") {
+	if !strings.Contains(posture, "every request on this port needs a token") {
 		t.Errorf("the posture line does not say this server is authenticated:\n%s", posture)
 	}
 	if !strings.Contains(posture, "does not keep out your own uid or root") {
-		t.Errorf("the posture line does not say what the credential leaves open:\n%s", posture)
+		t.Errorf("the posture line does not say who the credential leaves in:\n%s", posture)
+	}
+	if !strings.Contains(posture, "never expires") {
+		t.Errorf("the posture line does not say the credential does not expire:\n%s", posture)
 	}
 	if strings.Contains(posture, "no authentication") {
 		t.Errorf("the posture line still claims there is no authentication:\n%s", posture)
