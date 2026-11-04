@@ -58,11 +58,25 @@ header { border-bottom: 1px solid var(--line); padding-bottom: .8rem; margin-bot
 .posture .paid { color: var(--bad); font-weight: 600 }
 .posture .free { color: var(--good) }
 
+/* ONE COLUMN AT EVERY WIDTH, because there is one panel per page.
+ *
+ * This used to be `1.3fr 1fr` above 60rem with `.panel:nth-child(3)` spanning
+ * both -- four panels in one `<main>`, the queue squeezed into the narrow half
+ * (407px of a 1088px body, measured), the watcher placed by an index into its
+ * siblings, and, once the billing panel landed, the `1fr` column beside it
+ * EMPTY on every wide viewport. A route per panel leaves nothing to place: the
+ * grid is here for the gap between a panel and whatever a later page puts
+ * beside it, and `nth-child` is gone with the thing it was counting. */
 main { display: grid; gap: 1.2rem; grid-template-columns: 1fr }
-@media (min-width: 60rem) {
-  main { grid-template-columns: 1.3fr 1fr }
-  .panel:nth-child(3) { grid-column: 1 / -1 }
-}
+
+/* The way between the pages. The current one is not a link an operator needs
+ * to press, so it is marked rather than hidden -- `aria-current="page"` is
+ * what a screen reader reads and what this selects on, so there is one
+ * carrier for the state rather than a class beside it. */
+nav { display: flex; gap: 1rem; margin: .6rem 0 0; font-size: .85rem }
+nav a { color: var(--accent); text-decoration: none }
+nav a:hover { text-decoration: underline }
+nav a[aria-current="page"] { color: var(--fg); font-weight: 600; text-decoration: none }
 
 .panel {
   border: 1px solid var(--line);
@@ -70,7 +84,11 @@ main { display: grid; gap: 1.2rem; grid-template-columns: 1fr }
   padding: 1rem 1.1rem;
   background: var(--panel);
 }
-.panel.idle { opacity: .6 }
+/* `.panel.idle` WAS HERE AND HAS NOTHING LEFT TO DIM. It greyed the watcher
+ * at 60% opacity while nothing was being watched, which was a real state while
+ * that panel was on screen whether or not there was a request: the id lives in
+ * the path now, so the page exists because an address names a request and
+ * there is no empty case to render. */
 
 .row { display: flex; flex-wrap: wrap; gap: .7rem; align-items: flex-end; margin-bottom: .6rem }
 label { display: flex; flex-direction: column; gap: .2rem; font-size: .78rem; color: var(--dim) }
@@ -99,7 +117,14 @@ button {
 }
 button:hover { border-color: var(--accent) }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600 }
-button.link { border: 0; background: 0; padding: 0 .3rem; color: var(--accent); text-decoration: underline }
+/* ONE RULE FOR BOTH, because the queue's id cell is an `<a>` since the watcher
+ * became a page and it is the same control with an address on it. The selector
+ * was `button.link` alone, and an unstyled `<a>` is the browser's own blue --
+ * which against this panel in dark mode is close to unreadable. The cursor is
+ * named because `border: 0; background: 0` makes a button look like a link and
+ * only the anchor gets one for free. */
+button.link, a.link { border: 0; background: 0; padding: 0 .3rem; color: var(--accent);
+                      text-decoration: underline; cursor: pointer }
 
 table { border-collapse: collapse; width: 100%; font-size: .85rem }
 td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
@@ -108,18 +133,21 @@ td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
 .price { text-align: right; white-space: nowrap }
 .status { color: var(--dim) }
 /* ONE REQUEST IS A ROW GROUP, because it can be two rows: the request and,
-   when it ended with something to say, its reason. The highlight and the
-   outline are on the group so that they cover the pair -- on the rows they
-   would mark the request and leave its reason outside, which reads as the
-   reason belonging to the request below. */
+   when it ended with something to say, its reason. The highlight is on the
+   group so that it covers the pair -- on the row it would mark the request
+   and leave its reason outside, which reads as the reason belonging to the
+   request below.
+
+   THERE WERE TWO MARKS AND THERE IS ONE. `tbody.watching` drew an outline
+   around the request the watcher panel beside this table was showing, and
+   that panel is a page of its own now: on the queue page nothing is being
+   watched, so a mark saying otherwise would be a claim about a screen the
+   operator is not looking at. What the outline's own paragraph argued -- not
+   per cell, because the empty price and the absent cancel button rendered as
+   two trailing boxes; not per row, because that draws a seam through a pair
+   -- is recorded here rather than deleted with it, because it is the argument
+   whoever adds the next mark to this table has to make again. */
 .queue tbody.running td { background: color-mix(in oklab, var(--good) 12%, transparent) }
-/* THE GROUP IS OUTLINED, NOT EACH CELL AND NOT EACH ROW. Per-cell outlines
-   drew a box around every td, and the last two -- the price, empty on a free
-   provider, and the cancel button, absent unless a request is still queued --
-   rendered as two empty boxes trailing the row with nothing in them. Per-row
-   outlines draw a seam between a request and its own reason. One group, one
-   outline, and empty cells stay invisible. */
-.queue tbody.watching { outline: 1px solid var(--accent); outline-offset: -1px }
 
 /* ONE BORDER PER REQUEST, NOT PER ROW. `td` carries the rule globally, which
    is right for every other table here and wrong for the only one whose rows
