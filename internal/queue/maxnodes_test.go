@@ -622,3 +622,57 @@ func (b blockingSpoken) Say(_ context.Context, _ report.Sink, _ tts.Run, _ strin
 	b.in()
 	return nil
 }
+
+// TestHolding_ASlotHandsTheEntryOverRatherThanAccumulating.
+//
+// `held` is a SET across slots now, where it used to be one value the next
+// claim overwrote. A rental serves its requests in turn, so a rider that
+// simply ADDED to the set would leave every finished request on that rental
+// reported as held for the life of the node -- and `Holding` is what webapi
+// reads to choose between two 409s whose remediations are "wait, the rental is
+// coming up" and "restart the server that is renting". A finished request
+// answering the first would tell an operator to wait for a generation that
+// ended.
+//
+// It is harmless TODAY, because that choice is only made for a row that says
+// `running` and a finished row does not -- which is exactly the kind of
+// harmless that stops being so when somebody reads the field's name instead of
+// the paragraph beside it. The `holder` type is what makes one-entry-per-slot
+// structural, and this is its exit code.
+func TestHolding_ASlotHandsTheEntryOverRatherThanAccumulating(t *testing.T) {
+	var held []bool
+	served := &fakeServed{caps: sdserver.Capabilities{Model: "sd15"}}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+
+	a := enqueue(t, st, "rtx2080ti", "first")
+	b := enqueue(t, st, "rtx2080ti", "second")
+
+	// Sampled from inside each batch, where exactly one of the two is the
+	// request this slot is responsible for.
+	served.progress = func(report.Sink, int) {
+		held = append(held, q.Holding(a), q.Holding(b))
+	}
+
+	if _, err := q.claimAndRun(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(held) != 4 {
+		t.Fatalf("sampled %d holdings over two batches, want 4", len(held))
+	}
+	if !held[0] || held[1] {
+		t.Errorf("during the first batch Holding(a)=%v Holding(b)=%v, want true and false",
+			held[0], held[1])
+	}
+	if held[2] || !held[3] {
+		t.Errorf("during the second batch Holding(a)=%v Holding(b)=%v, want false and true: the "+
+			"slot has to hand the entry over as it takes the next rider, or a finished request "+
+			"is answered with \"the rental is coming up\" for the life of the node",
+			held[2], held[3])
+	}
+	// AND BOTH ARE GIVEN BACK, which is the other end of the same rule.
+	if q.Holding(a) || q.Holding(b) {
+		t.Error("a request was still held after the rental ended, which makes the restart " +
+			"advice unreachable for the state it IS true of")
+	}
+}
