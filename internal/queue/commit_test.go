@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/sdserver"
 )
 
 // The ledger race at max_nodes>1 (#204), and what Commitments does and does
@@ -195,4 +197,55 @@ func TestAdmit_RunsTheCheckUnderOneLock(t *testing.T) {
 	if len(in) != 2 {
 		t.Errorf("%d check(s) ran, want 2", len(in))
 	}
+}
+
+// TestOnce_ReleasesTheCommitmentWhenTheRentalIsOver, which is the slot's half
+// of the contract and the one no `Commitments` test can see.
+//
+// `AppPlanner.Plan` admits and the SLOT releases -- two types, one id, which
+// is a contract a reader has to be told about. A release that never ran would
+// shrink every later rental's headroom for the life of the process, and an
+// operator would read that as a ceiling that had stopped working rather than
+// as a leak: the ceiling's own message would name a committed figure for a
+// rental that ended an hour ago.
+//
+// IT DRIVES THE QUEUE AND NOT THE MAP. A `commit.Release(id)` in a test proves
+// the map forgets; what has to be proved is that the defer in `once` runs it,
+// so this admits through a planner, drains a rental to completion, and asks
+// what is outstanding afterwards.
+func TestOnce_ReleasesTheCommitmentWhenTheRentalIsOver(t *testing.T) {
+	commit := &Commitments{}
+	pl := &fakePlanner{served: &fakeServed{caps: sdserver.Capabilities{Model: "sd15"}}}
+	q, st := newQueue(t, pl)
+	q.Commit = commit
+
+	// The planner admits as AppPlanner does, under the request's own id, so
+	// what is being tested is the release rather than a second copy of the
+	// admit.
+	id := enqueue(t, st, "rtx2080ti", "a batch")
+	q.Planner = admittingPlanner{inner: pl, commit: commit}
+
+	if _, err := q.claimAndRun(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := commit.Committed(); got != 0 {
+		t.Errorf("%v is still committed after the rental ended, so the slot did not give it "+
+			"back: by then the teardown has emitted run_cost and the recorder has flushed it, "+
+			"so requests.cost holds the figure and this entry is subtracting headroom from "+
+			"every later rental for the life of the process (request %s)", got, id)
+	}
+}
+
+// admittingPlanner is a planner that commits what its rental will cost, which
+// is what AppPlanner.Plan does on its last statement.
+type admittingPlanner struct {
+	inner  Planner
+	commit *Commitments
+}
+
+func (a admittingPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error) {
+	if err := a.commit.Admit(r.ID, 890_000, func(node.MicroUSD) error { return nil }); err != nil {
+		return nil, err
+	}
+	return a.inner.Plan(ctx, r)
 }
