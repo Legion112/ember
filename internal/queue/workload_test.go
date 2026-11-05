@@ -4,9 +4,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/sdserver"
 )
 
 // TestDrivers_AreTheKindsTheStoreKnows holds the two lists of driver names
@@ -113,5 +115,67 @@ func TestNarrow_RefusesARowWhoseWorkloadChangedItsDriver(t *testing.T) {
 	}
 	if len(got.TTS.Voices) != 1 {
 		t.Errorf("the entry's tts block did not reach the plan: %+v", got.TTS)
+	}
+}
+
+// TestOnce_TwoRequestsForOneDeclaredWorkloadRideOneRental.
+//
+// THE QUEUE'S OWN HALF OF Compat, AND IT HAD NO EXIT CODE UNTIL A
+// REINSTATEMENT PASS SAID SO. `TestClaimNext_TwoWorkloadsSharingADriverAreTwoRentals`
+// proves the STORE honours the entry id, and it builds the `Compat` itself --
+// so nothing proved the DRAIN LOOP puts the entry in the one it hands over.
+// Measured: with `Compat.Workload` dropped from `once` and only the driver
+// left, `go test ./internal/... ./cmd/...` was exit 0.
+//
+// AND THE DEFECT POINTS THE OTHER WAY FROM THE OBVIOUS ONE, which is why the
+// assertion is the RIDE rather than the refusal. A compat with no workload
+// resolves through `WorkloadOf("", "sd")` to `"sd"`, which is an id no
+// declared file has unless the operator wrote one -- so the rider is refused
+// rather than wrongly admitted, and what is lost is the whole saving the
+// resident server exists for: every request on a declared workload would rent
+// its own node, paying for provisioning, the image pull, the asset verify and
+// the model load again. On a rented A100 that is about three minutes against
+// roughly a hundred seconds of generation.
+//
+// THE REFUSAL IS ASSERTED BESIDE IT AND IS NOT THE DISCRIMINATOR: it is
+// satisfied by a compat that refuses every rider there is, which is exactly
+// what the defect produces. Both halves are here because the pair is the rule;
+// the first is the exit code.
+func TestOnce_TwoRequestsForOneDeclaredWorkloadRideOneRental(t *testing.T) {
+	served := &fakeServed{caps: sdserver.Capabilities{Model: "flux2"}}
+	pl := &fakePlanner{served: served}
+	q, st := newQueue(t, pl)
+
+	enq := func(workload, prompt string) {
+		t.Helper()
+		if _, err := st.Enqueue(t.Context(), genstore.Request{
+			Kind: genstore.KindSD, Workload: workload,
+			Provider: "local", GPU: "rtx2080ti", TTL: time.Hour,
+			Jobs: []genstore.Job{{Prompt: prompt, Width: 64, Height: 64, Steps: 1}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	enq("flux", "first")
+	enq("flux", "second")
+	// Same driver, same provider, same card, another image -- which is what a
+	// declared file with two `sd` entries holds.
+	enq("sd15", "third")
+
+	if _, err := q.once(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(served.batches) != 2 {
+		t.Fatalf("the rental served %d batch(es), want the two requests for the same declared "+
+			"workload; a Compat that does not carry the entry id refuses its own riders and "+
+			"rents a node per request", len(served.batches))
+	}
+	prompts := []string{served.batches[0].Jobs[0].Prompt, served.batches[1].Jobs[0].Prompt}
+	for _, p := range prompts {
+		if p == "third" {
+			t.Errorf("a request for another workload rode this rental; it would reach a "+
+				"resident server holding another model (served %v)", prompts)
+		}
 	}
 }
