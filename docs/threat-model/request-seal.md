@@ -139,6 +139,92 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   browser cannot name. That is the same structural refusal the period ceilings
   get, applied to a count of cards.
 
+  **TWENTY-SIX REINSTATEMENTS, EACH FILED UNDER THE ASSERTION ITS OWN OUTPUT
+  NAMED**, with a control at both ends, one negative control reported as not
+  caught, one backup per path taken once, and every case ending in a byte
+  comparison against that backup rather than in an exit code. No total is
+  carried in prose here beyond this one, because this repository's own record
+  is that a running total is the thing it has been wrong about: the list is
+  what is checkable, and a reader who wants a number counts the names.
+
+  Red at the WIRING guard, `TestServe_WiresTheNodeCeilingIntoTheDrainLoop`:
+  `cmd_serve` not naming `MaxNodes`, and `MaxNodes` read off a config the
+  function wrote to one line above the literal.
+
+  Red at the CONFIG arms: `Load` accepting `max_nodes: 0`
+  (`TestLoad_RefusesFewerThanOneNode`), and `Default()` without it
+  (`TestDefault_HoldsTwoNodes` -- the whole-package run also reds a dozen
+  unrelated config tests, which is a true report about a tree where every
+  `Load` is refused, and is why the case was re-run scoped before being filed).
+
+  Red at the SUPERVISOR: an unbounded slot count
+  (`TestRun_HoldsNoMoreRentalsThanMaxNodes` and
+  `TestRun_AtOneNodeNeverHoldsTwoRentals`); `nodes()` pinned to one, which is
+  the opposite defect (`TestRun_CreatesASecondNodeForWorkTheFirstCannotServe`);
+  `defer wg.Wait()` removed (`TestRun_DoesNotReturnUntilEverySlotsDestroyHasRun`,
+  and the pre-existing `TestRun_ReturnsOnlyAfterTheRentalIsDestroyed` beside
+  it); and the handoff offered with every slot busy
+  (`TestSubmit_ARunAndAQueuedRequestCannotHoldRentalsAtOnce`, the pre-existing
+  one-rental assertion, which still holds because every literal in the suite is
+  at `max_nodes: 1`).
+
+  Red at PACKING: the create claim dropping `Live`
+  (`TestRun_PacksOntoALiveRentalRatherThanCreating`); the exclusion comparing
+  `kind` as a raw column in SQL and as a raw string in the fake, each red at
+  `TestClaimNext_AMigratedRowIsExcludedByAnSDRental` in the store it belongs to
+  and in that store ALONE, which is the conformance table doing its job.
+
+  **Red at the ORDER, and this one was SPLIT because its first form conflated
+  two defects.** Moving both `reserve` and the live registration into the slot
+  goroutine reds the Submit assertions as well -- a true report, because the
+  slot count is late too -- so the case was re-run with only the live
+  registration moved: every Submit assertion and every max-nodes assertion
+  PASSES, and `TestRun_RegistersWhatASlotWillServeBeforeTheNextClaim` is what
+  goes red. That is the attribution the designed case claimed and the first run
+  could not prove.
+
+  Red at CANCEL: `Cancel` not deleting its channel, which is
+  `TestCancel_IsSafeToAskTwice` at `panic: close of closed channel` -- read off
+  the stack rather than inferred, because a panic in a goroutine aborts the
+  binary without printing `--- FAIL` and the harness's detail column was empty.
+
+  Red at `Running`: one id instead of the list, and the sort reversed, both at
+  `TestRunning_NamesEveryRequestGeneratingNow`; `generate` not forgetting what
+  it registered, at `TestRunning_NamesWhatIsGeneratingNow`; the slot's held
+  entry accumulating instead of handing over, at
+  `TestHolding_ASlotHandsTheEntryOverRatherThanAccumulating`.
+
+  Red at the LEDGER RACE: `Admit` reduced to `check(0)`; the ceiling ignoring
+  the committed total; `Plan` reading instead of admitting; the slot never
+  releasing (`TestOnce_ReleasesTheCommitmentWhenTheRentalIsOver`); and a
+  refusal that names no committed figure.
+
+  Red across the WIRE: `running` sent as `null` rather than `[]`, which reds
+  three webapi tests at once because that is the shape a client whose field is
+  a list cannot decode. And through `cargo test`, at two different lines of one
+  test: the browser marking only the first generating request, and `nullable`
+  dropped so a null fails the whole envelope.
+
+  Green: a reworded comment.
+
+  **AND THE BELT-AND-BRACES MEASUREMENT, because belt and braces reads exactly
+  like a dead gate.** With each new guard DELETED and its defect still in
+  place, `go test ./...` is **exit 0** for the wiring guard, the config
+  refusal, the dropped `Live`, the raw-kind exclusion and -- once this change's
+  own tests are ALL out, including the two that live in a pre-existing file --
+  the ledger race. So nothing that existed before reports any of those. Two are
+  the other answer and are worth more than the exit codes: an unbounded slot
+  count is caught by the pre-existing
+  `TestSubmit_ARunAndAQueuedRequestCannotHoldRentalsAtOnce` and
+  `TestDirectRunner_ReChecksTheCeilingOnTheLoopWhereTheTotalIsComplete`, and a
+  missing `wg.Wait()` by the pre-existing
+  `TestRun_ReturnsOnlyAfterTheRentalIsDestroyed` -- the old one-rental
+  assertions are still live at `max_nodes: 1`, which is the mode every literal
+  in the suite is in. The M1 figure had to be measured twice: the first run
+  deleted `commit_test.go` and left this change's own tests in
+  `moneygate_test.go`, so it answered "something reported it" rather than the
+  question it was asked.
+
   **There are two kinds of work and one place the decision is made.**
   `ember up` submitted over the socket is not a queued request -- the four
   reasons it cannot be one are the entry below -- so it does not arrive through

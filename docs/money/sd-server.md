@@ -199,6 +199,35 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   version of it is the lab's twelve-second `sleep`. This is PR 151's own
   finding one slice later: the most expensive defect available in a change is
   not reliably the one the unit suite can see.
+
+  **A SEVENTH AND AN EIGHTH, both from #204's pass, and the seventh is the
+  Makefile defect this repository already records -- committed by the harness
+  written to find defects.** Every command the harness ran ended in a pipe to
+  `tail` or `grep`, and a shell pipeline reports the **last** command's status:
+  so `tail` exited 0 over every red suite and **24 of 26 cases were reported
+  GREEN with their own `--- FAIL` lines printed in the detail column beside
+  them**. That is exactly `pipefail` -- four lab targets exiting 0 over a red
+  suite, one of them the gate on a `docker push` -- in a Python harness instead
+  of a Makefile. What caught it is the rule that has now caught four of these:
+  the detail contradicted the verdict, so somebody asked why a case had gone
+  the way it did. **The lesson is not "set pipefail"**; it is that a harness
+  which prints evidence beside its verdict can be caught out by its own
+  output, and one that prints only a verdict cannot.
+
+  **The eighth is a RESTORE THAT REPAIRS THE SOURCE AND NOT THE ARTEFACT, and
+  it produced a false RED rather than a false green.** The harness restored
+  each file with `shutil.copy2`, which **preserves the backup's mtime** -- so
+  the restored source was OLDER than the build artefacts cargo had just
+  produced from the patched copy, cargo saw it as up to date, did not rebuild,
+  and ran the **previous case's** binary. Measured: the closing control failed
+  on a tree `git status` reported clean and `diff` reported byte-identical to
+  the backup, because the defect was in `target/`, not in `web/src/`. It is the
+  shape #138's pass already records for the wasm -- "a restore that repairs the
+  SOURCE and not the ARTEFACT, and it goes both ways" -- met through a
+  timestamp instead of a missing rebuild. **Go was never affected**, because
+  its build cache is keyed on content rather than on mtime, which is why only
+  the two cargo cases showed it and why a harness that drove Go alone would
+  have shipped with the bug intact. `shutil.copy` plus `os.utime(path, None)`.
 - **Nothing creates the run's output directory on a served path.** The
   fetching paths get it from `transfer.Fetch`'s own `MkdirAll`, and a served
   run never calls Fetch because the images arrive in the HTTP response instead
