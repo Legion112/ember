@@ -157,6 +157,15 @@ func waitForStatus(t *testing.T, srv served, id string, want string, within time
 //
 // It is asserted by counting "node ready" in ember's own output, which is the
 // only number that cannot be argued with: two of them is two machines.
+//
+// AND SINCE max_nodes IT IS THE LAB-LEVEL PROOF OF STRICT PACKING (#204). The
+// lab's config names no `max_nodes`, so this `ember serve` runs at the default
+// of TWO -- there is a free slot throughout, and the only thing keeping the
+// second request off a node of its own is the create-side claim asking for
+// work no live rental can serve (`genstore.Compat.Live`). Until #204 this
+// assertion was a consequence of there being one drain goroutine and could not
+// have failed; it is now the behaviour itself, against a real daemon, and it
+// goes red if packing ever becomes "prefer" rather than "strict".
 func TestServe_DrainsTheQueueOntoOneRental(t *testing.T) {
 	l := servableLab(t)
 	cmd, srv, wait := startServe(t, l)
@@ -2960,7 +2969,9 @@ func TestServe_GeneratesADifferentImageFromAnUploadedOne(t *testing.T) {
 			"not given, which is exactly the failure this path exists to avoid")
 	}
 
-	// And one rental served both, which is the saving the queue is for.
+	// And one rental served both, which is the saving the queue is for -- and
+	// since max_nodes it is also strict packing, because this serve runs at
+	// the default of two slots and the second request could have had one.
 	out := stop()
 	if n := strings.Count(out, "node ready"); n != 1 {
 		t.Errorf("ember rented %d node(s) for two requests, want 1. Output:\n%s", n, out)

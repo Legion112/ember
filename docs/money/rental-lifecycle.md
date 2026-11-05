@@ -34,6 +34,104 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
 - **Destroy runs on `context.WithoutCancel`.** Ctrl-C cancels the context the
   run was using, and a destroy call on that context fails instantly — the
   single most likely way to leak a GPU.
+- **`max_nodes` bounds how many rentals `ember serve` holds at once, it
+  defaults to 2, and that is a behaviour change for every existing
+  operator (#204).** Until it existed one rental was *structural*: there was
+  one drain goroutine and a rental lived inside one iteration of its loop. The
+  trade and what replaces it are in
+  [what a request may name](../threat-model/request-seal.md); what is money
+  here is the number. 2 doubles the worst case of an unattended `ember serve`,
+  which is why it is in `README.md` with the key and printed at startup beside
+  where the period ceilings stand. `max_nodes: 1` restores the old guarantee,
+  and anything below 1 is refused at load rather than clamped, because 0 reads
+  as "no ceiling" and means 1 to the queue.
+- **PACKING IS STRICT, AND THAT IS THE MEASUREMENT RATHER THAN A PREFERENCE.**
+  A queued request that any live rental can serve is **never** given a new
+  node, even if that rental is mid-batch. What it buys is the ~27 s of
+  per-rental overhead this shape exists to pay once, and — for a resident
+  model — a reload measured at **80–96 s per image** on a node that had to
+  re-read its weights off a store at 868 MiB/s. So *fit* beats *idle* by a
+  wide margin, which is the opposite of what a latency-oriented scheduler does
+  and is right here because what ember spends is wall-clock rental and not
+  contention.
+
+  **THE CONSEQUENCE IS COUNTER-INTUITIVE AND HAS TO BE STATED.** `max_nodes: 2`
+  buys concurrency across **incompatible** work only — a different provider, a
+  different card, or a different kind (`sd` beside `tts`) — and buys nothing at
+  all for a homogeneous queue, which behaves exactly as it did at one node. An
+  operator who queues two images for one card and expects two cards will
+  conclude ember is broken, so the startup announcement says it in words.
+
+  **THE ALTERNATIVE, REFUSED FOR WANT OF A FIGURE.** Letting a free slot take
+  work a busy compatible node would eventually get halves wall-clock for
+  roughly the same card-time plus one extra model load — which might be a good
+  trade and needs a measured per-rental overhead against a measured reload on
+  the same hardware, which ember does not have. Recorded as the decision and
+  the alternative so the next slice takes it with a number rather than a
+  preference.
+- **THE LEDGER RACE, WHICH IS THE SHARPEST MONEY CONSEQUENCE OF N > 1.**
+  `requests.cost` is written from `provision.WithNode`'s **deferred
+  teardown**, so a rental in flight contributes **zero** to the ledger a period
+  ceiling reads. With one rental that was bounded by one overshoot, and #165
+  closed even that by re-checking on the drain loop — which works *because the
+  loop is serial*: at the moment of the re-check nothing else of this process's
+  was renting, so "the completed cost of finished rentals" and "everything this
+  process has agreed to spend" were the same set.
+
+  At `max_nodes` > 1 they are not. Two slots can be inside `app.NewPlan` at the
+  same time, each reading a ledger in which the other's rental is worth
+  nothing, and the overshoot is bounded by N rather than by 1. Worked, with
+  N = 2: a $20 day, $19 recorded, two concurrent creates each projected at
+  $0.89 — both see $19.89, both admit, and the day ends at **$20.78**.
+
+  **`queue.Commitments` is what closes it.** One mutex, one
+  `map[ReqID]MicroUSD` keyed by the opener's request id — the same key
+  `requests.cost` is written under, so the handover from "committed here" to
+  "recorded there" is one id rather than a correlation. `Admit` runs the
+  ceiling check **with the lock held** and records the projection only if it
+  passes, which is `ClaimNext`'s one-statement argument with a mutex in place
+  of SQLite: a read, then a check, then a record is three statements with two
+  windows in them, and at N > 1 both windows are a second create. A mutex
+  across one SQLite `SUM` costs microseconds; what it protects is a GPU. The
+  slot that holds the rental releases it in a `defer`, after the teardown has
+  emitted `run_cost` and the recorder has flushed it urgently — so the ledger
+  has the figure by the time the entry goes. A nil `*Commitments` runs every
+  check against zero, which is exactly today's arithmetic and what every
+  existing caller and every `max_nodes: 1` daemon gets.
+
+  **THE RESIDUE, WRITTEN DOWN RATHER THAN PAPERED OVER**, because a money guard
+  believed past its bounds is worse than one nobody trusts:
+
+  - **The store fill is uncommitted.** `AppPlanner.fillStore` rents a machine
+    with no card, inside `Plan` and *before* the main `Admit`, so while that
+    sync runs a concurrent create reads a ledger that does not know about it.
+    It is projected against the same ceilings before it starts and recorded
+    when it finishes, so the unseen window is one **$0.06/hour** CPU machine
+    for as long as the fetch takes. Committing it would mean nesting an
+    `Admit` inside an `Admit`, or two entries under one request id, for a
+    figure two orders of magnitude below the thing being guarded.
+  - **Another ember process's in-flight rental is invisible**, and that is
+    unchanged by N: this is a map in one process's memory. Two `ember serve`s
+    over one `generations.db` see each other's *finished* rentals through the
+    ledger and neither sees the other's commitments. The honest fix is a
+    table — a migration, a fake method and conformance rows for a shape with
+    one reader — and it would still not cover the window between a create call
+    and its answer, which is what the journal's "write the record before the
+    create" rule exists for.
+  - **A store's standing charge is still not counted**, which is the gap the
+    period ceilings already had and is not about concurrency at all.
+  - **The shell paths cannot re-check at all.** `ember up` and
+    `ember store sync` in a shell read the ledger and then rent, with no loop
+    of this process's whose rentals could be in flight — so they pass a
+    committed total of zero, honestly, and a daemon's rental in flight reaches
+    them exactly as it did before.
+- **A refusal names the committed figure only when there is one.** An operator
+  reading a refusal over a half-spent day has to be able to reconcile it with
+  what `ember spend` says, and the only thing that explains the gap is a rental
+  this process is holding and has not recorded. At `max_nodes: 1`, and on every
+  shell path, it is always zero and the sentence stays byte-for-byte what it
+  was — which matters because `README.md` quotes it and a worked example that
+  drifts is a document nobody trusts.
 - **Ctrl-C on a SUBMITTED `ember up` detaches, so the `ttl` stops being a
   ceiling and becomes the exposure.** The entry above is about the process that
   holds the rental, and on the submitted path that is `ember serve` rather than
@@ -49,7 +147,7 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   Exit **0**, because detaching is what was asked for and a non-zero status
   would say something failed. The daemon's own shutdown is untouched and still
   destroys: `ember serve` waits for `queue.Run`, which does not return until
-  the deferred destroy has.
+  every slot's deferred destroy has, unbounded.
 - **No daemon means `up` rents here, and the two code paths are written down
   rather than discovered.** #146's own comment argued for a refusal, correctly,
   for a NEW verb -- "a direct fallback is two code paths for a command that

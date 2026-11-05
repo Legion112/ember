@@ -98,7 +98,7 @@ func TestClaimNext_IsExcludedByOneLiveRentalAndNotAnother(t *testing.T) {
 // TestClaimNext_AMigratedRowIsExcludedByAnSDRental, which is the expensive
 // direction of the empty-means-sd rule.
 //
-// A row written before schema version 6 holds `kind = ''` and a compat built
+// A row written before schema version 6 holds `kind = ”` and a compat built
 // from one holds `'sd'`. On the RIDE side, comparing the raw column refuses a
 // migrated row to the rental serving its siblings -- a permanently
 // unclaimable queue, which TestClaimNext_AMigratedRowHasNoKindAndIsStillClaimable

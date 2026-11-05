@@ -108,6 +108,11 @@ is using:
 - `max_hourly_usd`, `max_run_usd`, `max_day_usd` and `max_month_usd` bound a
   card, a rental and a calendar period; every path that can rent is projected
   against all four before anything is created.
+- `max_nodes` bounds how many rentals `ember serve` holds at once, and
+  defaults to **2**. Two rentals at once used to be unrepresentable; they are
+  bounded now, which is a trade taken at #204 rather than a seal that stopped
+  holding. Packing is strict, so N>1 parallelises only work no live rental can
+  serve.
 
 The measurements behind each of those, the crossover points that decide a
 design, and the options that were refused — [docs/money.md](docs/money.md).

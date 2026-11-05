@@ -490,7 +490,7 @@ func TestRun_DoesNotReturnUntilEverySlotsDestroyHasRun(t *testing.T) {
 	// two live nodes.
 	cancel()
 	select {
-	case <-done:
+	case <-done: //nolint:errcheck // the loop's own error is reported by its log; the subject is whether it returned
 		t.Fatal("Run returned while two rentals were still open: ember serve waits for this " +
 			"goroutine and nothing else, so it would have exited with two GPUs rented")
 	case <-time.After(250 * time.Millisecond):
@@ -498,7 +498,7 @@ func TestRun_DoesNotReturnUntilEverySlotsDestroyHasRun(t *testing.T) {
 
 	p.releaseAll()
 	select {
-	case <-done:
+	case <-done: //nolint:errcheck // as above
 	case <-time.After(30 * time.Second):
 		t.Fatal("Run did not return after every rental was released")
 	}

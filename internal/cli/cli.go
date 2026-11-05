@@ -90,7 +90,7 @@ func commands() []command {
 		{"up", "rent a node, run the jobs the config describes, destroy it", cmdUp},
 		{"down", "destroy a node by handle", cmdDown},
 		{"ls", "list nodes ember created, across every configured provider", cmdLs},
-		{"serve", "run the web UI and a queue that drains onto one rental", cmdServe},
+		{"serve", "run the web UI and a queue that drains onto up to max_nodes rentals", cmdServe},
 		{"reap", "destroy every node past its deadline", cmdReap},
 		{"spend", "report what the recorded generations cost", cmdSpend},
 		{"history", "list the generations ember has run, and measure or prune what they left", cmdHistory},
