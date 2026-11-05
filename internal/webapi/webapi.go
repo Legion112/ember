@@ -88,8 +88,13 @@ type Drain interface {
 	// Kick says there may be work. Never blocks.
 	Kick()
 
-	// Running is which request is generating right now, if any.
-	Running() (genstore.ReqID, bool)
+	// Running is which requests are generating right now, sorted.
+	//
+	// A LIST SINCE max_nodes (#204). It was `(ReqID, bool)` while one rental
+	// was structural; with several rentals in flight several requests
+	// generate at once, and a single id would mark one row in the queue table
+	// and leave the others looking queued.
+	Running() []genstore.ReqID
 
 	// Cancel stops one request's generation and reports whether it reached
 	// it. False means that request is not the one generating, which a caller
@@ -766,16 +771,28 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 		out = append(out, viewRequest(req, nil))
 	}
 
-	running, _ := s.running()
-	s.ok(w, map[string]any{"requests": out, "running": running})
+	s.ok(w, map[string]any{"requests": out, "running": s.running()})
 }
 
-func (s *Server) running() (string, bool) {
+// running is which requests are generating, as the wire carries them.
+//
+// NEVER NIL, which is not tidiness: Go marshals a nil slice as `null`, and a
+// client whose field is a list gets a type error that drops the WHOLE
+// envelope -- which cost this program its entire queue table once, over one
+// number the server could say and the browser could not hear. So this answers
+// `[]` for no queue and for an idle one alike, and `web/src/model.rs`
+// tolerates a null anyway, because the rule has to hold for a field somebody
+// adds later.
+func (s *Server) running() []string {
 	if s.opts.Queue == nil {
-		return "", false
+		return []string{}
 	}
-	id, ok := s.opts.Queue.Running()
-	return string(id), ok
+	ids := s.opts.Queue.Running()
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, string(id))
+	}
+	return out
 }
 
 func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {

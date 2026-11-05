@@ -245,7 +245,14 @@ func boundAndRecord(
 	// that was chosen and plan.Spec.TTL is the deadline the node will get
 	// after every override has had its say -- the two halves #157 measured as
 	// gates that cannot fail when either is a literal zero.
-	if err := queue.RefuseOverPeriod(ctx, cs, store, time.Now(), plan.Spec.TTL, plan.Offer.Price); err != nil {
+	//
+	// AND A COMMITTED TOTAL OF ZERO, which is honest rather than an omission:
+	// this is a shell, so there is no loop of this process's whose rentals
+	// could be in flight and unrecorded. Another `ember serve`'s in-flight
+	// rental is invisible here, which is the residue commit.go names and is
+	// unchanged by max_nodes -- a figure in one process's memory is not
+	// something a second process can read.
+	if err := queue.RefuseOverPeriod(ctx, cs, store, time.Now(), plan.Spec.TTL, plan.Offer.Price, 0); err != nil {
 		_ = store.Close()
 		return nil, nil, err
 	}

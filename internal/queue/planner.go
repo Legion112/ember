@@ -98,6 +98,15 @@ type AppPlanner struct {
 	// reaches this -- it guards the shape.
 	Runs RunStore
 
+	// Commit is what this process has agreed to spend and not yet recorded,
+	// shared with the drain loop and with DirectRunner.
+	//
+	// A FIELD HERE BECAUSE THIS IS WHERE THE PROJECTION IS KNOWN: it needs the
+	// offer, and the offer is chosen in Plan. Nil is today's arithmetic -- see
+	// commit.go -- which is what keeps every existing literal in the suite
+	// measuring what production measures at max_nodes: 1.
+	Commit *Commitments
+
 	// Now is injected because a ceiling is a question about a calendar
 	// period, and a test that could not choose the day could not ask it.
 	Now func() time.Time
@@ -213,7 +222,14 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 	// lookup and not a node of its own -- although a store fill above may
 	// already have rented and recorded one, which fillStore projects against
 	// these same ceilings before it does.
-	if err := p.refuseOverPeriod(ctx, cfg.TTL, plan.Offer.Price); err != nil {
+	//
+	// AND IT IS THE ADMITTING FORM, which is the last statement before this
+	// function hands back something that can rent: the check and the record
+	// happen under one lock, so a second slot planning concurrently cannot
+	// also see a half-spent day. Nothing stands between this and the return,
+	// so a commitment is never recorded for a plan that then failed; the slot
+	// that runs the rental releases it in a defer. See commit.go.
+	if err := p.admitOverPeriod(ctx, r.ID, cfg.TTL, plan.Offer.Price); err != nil {
 		return nil, err
 	}
 
@@ -359,7 +375,8 @@ func (p AppPlanner) recordSync(ctx context.Context, sync app.Plan, store string)
 }
 
 // refuseOverPeriod is this planner's half of the max_day_usd and
-// max_month_usd gate: its config, its ledger and its clock.
+// max_month_usd gate: its config, its ledger, its clock and what this process
+// has committed.
 //
 // THE RULE ITSELF IS RefuseOverPeriod's, and it is a package function rather
 // than a method here because three other rental paths need the same one --
@@ -367,12 +384,47 @@ func (p AppPlanner) recordSync(ctx context.Context, sync app.Plan, store string)
 // This method serves two of the five: Plan's own rental, and the store fill
 // above. A copy per caller is a copy of a money rule, and the one thing this
 // repository records about those is that the copies drift.
+//
+// IT READS THE COMMITTED TOTAL AND RECORDS NOTHING, which is the store fill's
+// half of commit.go's split. See admitOverPeriod for the other.
 func (p AppPlanner) refuseOverPeriod(ctx context.Context, ttl time.Duration, price node.Rate) error {
 	cs, err := CeilingsOf(p.Config)
 	if err != nil {
 		return err
 	}
-	return RefuseOverPeriod(ctx, cs, p.Ledger, p.now(), ttl, price)
+	return RefuseOverPeriod(ctx, cs, p.Ledger, p.now(), ttl, price, p.Commit.Committed())
+}
+
+// admitOverPeriod is the same gate for the rental this plan is FOR, and it
+// records what that rental will cost before another create can read the
+// ledger.
+//
+// TWO METHODS AND NOT A FLAG, because the two callers want different things
+// from one rule and the difference is money. The rental below is the one a
+// concurrent create must be able to see, so it is admitted under this
+// request's id and released by the slot that holds it; the store fill above is
+// deliberately NOT a commitment -- it is a $0.06/hour machine inside this same
+// Plan call, and committing it would mean nesting an Admit inside an Admit or
+// holding two entries under one request id. Both of those, and what the
+// residue costs, are written at the top of commit.go.
+//
+// THE PROJECTION IS DERIVED FROM THE PRICE AND THE TTL HERE AS WELL AS INSIDE
+// `Binds`, and that is one expression repeated rather than two rules: #157
+// measured a literal zero in either half as a gate that cannot fail, so there
+// is nowhere a caller could pass the answer instead of the two facts.
+func (p AppPlanner) admitOverPeriod(
+	ctx context.Context,
+	id genstore.ReqID,
+	ttl time.Duration,
+	price node.Rate,
+) error {
+	cs, err := CeilingsOf(p.Config)
+	if err != nil {
+		return err
+	}
+	return p.Commit.Admit(id, price.Cost(ttl), func(committed node.MicroUSD) error {
+		return RefuseOverPeriod(ctx, cs, p.Ledger, p.now(), ttl, price, committed)
+	})
 }
 
 // refusePaid is the --allow-paid gate.
