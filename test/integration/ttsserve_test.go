@@ -63,20 +63,39 @@ tts:
 		t.Fatalf("GET /api/config: %d %s", cfg.Status, cfg.Body)
 	}
 	var cv struct {
-		Kinds  []string `json:"kinds"`
-		Voices []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"voices"`
+		Workloads []struct {
+			ID     string `json:"id"`
+			Driver string `json:"driver"`
+			Voices []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"voices"`
+		} `json:"workloads"`
 	}
 	if err := json.Unmarshal(cfg.Body, &cv); err != nil {
 		t.Fatalf("decode /api/config: %v\n%s", err, cfg.Body)
 	}
-	if len(cv.Voices) != 1 || cv.Voices[0].ID != "lessac" {
-		t.Fatalf("voices = %+v, want the one this config publishes", cv.Voices)
+	// WHAT THIS SERVER DECLARES AND NOT WHAT THIS BUILD KNOWS (#200). This
+	// config has `tts.voices` and no `sd:` block, so it describes one
+	// servable workload -- and the image one is absent rather than offered
+	// and then explained in a red banner, which is what `genstore.Kinds()`
+	// published here before.
+	var drivers []string
+	for _, w := range cv.Workloads {
+		drivers = append(drivers, w.Driver)
+		if w.Driver != "tts" {
+			continue
+		}
+		if len(w.Voices) != 1 || w.Voices[0].ID != "lessac" {
+			t.Fatalf("voices = %+v, want the one this config publishes", w.Voices)
+		}
 	}
-	if !slices.Contains(cv.Kinds, "tts") {
-		t.Errorf("kinds = %v, want it to offer tts", cv.Kinds)
+	if !slices.Contains(drivers, "tts") {
+		t.Errorf("workloads = %+v, want one with the tts driver", cv.Workloads)
+	}
+	if slices.Contains(drivers, "sd") {
+		t.Errorf("workloads = %+v; this config has no sd: block and it is offered anyway",
+			cv.Workloads)
 	}
 	if strings.Contains(string(cfg.Body), "/opt/voices/") {
 		t.Errorf("/api/config publishes a path on the node:\n%s", cfg.Body)
@@ -86,7 +105,7 @@ tts:
 	// is the cheap half of the seal: the same mistake found at the node costs
 	// the create call, the wait for sshd and the image pull.
 	bad := ask(t, "POST", srv, "/api/requests",
-		`{"kind":"tts","provider":"local","jobs":[{"tts":{"text":"x","voice_id":"nope"}}]}`)
+		`{"workload":"tts","provider":"local","jobs":[{"tts":{"text":"x","voice_id":"nope"}}]}`)
 	if bad.Status != http.StatusBadRequest {
 		t.Errorf("an unpublished voice got %d, want 400: %s", bad.Status, bad.Body)
 	}
@@ -95,7 +114,7 @@ tts:
 	}
 
 	resp := ask(t, "POST", srv, "/api/requests",
-		`{"kind":"tts","provider":"local","jobs":[
+		`{"workload":"tts","provider":"local","jobs":[
 			{"tts":{"text":"Hello from the browser.","voice_id":"lessac","output":"greeting"}}]}`)
 	if resp.Status != http.StatusAccepted {
 		t.Fatalf("queueing an utterance failed: %d %s", resp.Status, resp.Body)

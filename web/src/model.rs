@@ -194,7 +194,99 @@ impl Voice {
     }
 }
 
-/// What the compose panel offers for a chosen kind.
+/// One workload this server declares, as `/api/config` publishes it.
+///
+/// THE OPERATOR'S OWN ENTRY AND NOT EMBER'S ENUM, which is #200. This page
+/// used to build its kind selector from `config.kinds`, which was
+/// `genstore.Kinds()` -- a literal in ember's Go source, sent unconditionally
+/// -- so a speech-only server offered an image tab and then explained itself
+/// in a red banner. A workload carries its own image on the server side, so
+/// this list is an answer about THIS server and every entry in it can be run.
+///
+/// THE IMAGE IS NOT HERE AND THERE IS NO FIELD FOR ONE. What a request names
+/// is `id`; the image, the argv, the mount and the serve command are in a file
+/// this page cannot reach. `label` is what the nav prints and `driver` is which
+/// form to draw -- the one thing on this type that is ember's rather than the
+/// operator's, because the two typed forms take different inputs and a page
+/// that did not know which it was looking at could only offer a form that
+/// swapped its fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Workload {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub driver: String,
+
+    /// This workload's own speech catalogue, empty for every other driver.
+    ///
+    /// PER WORKLOAD AND NOT PER PROCESS, which the image being per workload
+    /// forces: two declared speech workloads are two images with two voice
+    /// sets on them, and one list for the page would offer each one's ids for
+    /// the other's node.
+    #[serde(default, deserialize_with = "nullable")]
+    pub voices: Vec<Voice>,
+
+    #[serde(default)]
+    pub preview: String,
+    #[serde(default)]
+    pub preview_interval: i32,
+}
+
+impl Workload {
+    /// What the nav prints for it.
+    ///
+    /// The id where there is no label, for `Voice::label`'s reason: a link
+    /// with no text is a link nobody can click, and the server already
+    /// defaults `label` to the id -- so reaching this means an entry built in
+    /// Go rather than read from a file.
+    pub fn label(&self) -> &str {
+        if self.label.is_empty() {
+            &self.id
+        } else {
+            &self.label
+        }
+    }
+
+    /// Which set of controls this workload shows, and the refusal where it
+    /// shows none.
+    ///
+    /// ON THE WORKLOAD AND NOT ON THE CONFIG, which is the whole shape
+    /// change: there is one page per declared workload and the page is handed
+    /// the entry, so there is no "chosen kind" to be out of step with the
+    /// controls on screen. The `Composing` enum is unchanged, because what it
+    /// decides -- which form -- is unchanged.
+    ///
+    /// THE SPEECH REFUSAL IS THE SECOND MECHANISM AND NOT THE FIRST. The
+    /// server leaves an entry out of `/api/config` when it cannot be served,
+    /// and a `tts` entry with no voices is exactly that -- so this arm is
+    /// reachable only if that ever stops being true, or from a `Workload`
+    /// built in this crate. Containment twice, by two mechanisms, and
+    /// `cargo test` reaches this one because it is a state of this type
+    /// rather than of the DOM.
+    ///
+    /// A DRIVER THIS PAGE DOES NOT KNOW IS NAMED, which is a newer ember
+    /// behind an older page: the server's own list is the only source of
+    /// these, so reaching it means a driver this build has no controls for --
+    /// a sentence and not a blank panel.
+    pub fn composing(&self) -> Composing {
+        match self.driver.as_str() {
+            "sd" => Composing::Image,
+            "tts" if !self.voices.is_empty() => Composing::Speech(self.voices.clone()),
+            "tts" => Composing::Refused(
+                "this workload publishes no voices, so it serves no speech. Add a \
+                 tts.voices list to its ember.yaml entry and restart ember serve."
+                    .into(),
+            ),
+            other => Composing::Refused(format!(
+                "this page has no controls for a {other} workload; it is older than the \
+                 ember serve it is talking to."
+            )),
+        }
+    }
+}
+
+/// What the compose panel offers for a chosen workload.
 ///
 /// A METHOD'S ANSWER AND NOT A CHAIN OF `if` IN THE VIEW, which is the settled
 /// shape here (`Rows::note`, `Request::reason`, `Listing::answer`,
@@ -228,37 +320,31 @@ pub struct Config {
     #[serde(default)]
     pub allow_paid: bool,
 
-    /// Which workloads this process can run, in the order to offer them.
+    /// Which workloads THIS SERVER can be asked to run, in the order to offer
+    /// them, and every one of them can be run.
     ///
-    /// READ FROM THE SERVER AND NEVER SPELLED HERE, for the reason the voices
-    /// are: `genstore.Kinds()` is the one list, and a second copy in this
-    /// crate is a place for the kind added last to be forgotten.
+    /// READ FROM THE SERVER AND NEVER SPELLED HERE, which is stronger than it
+    /// was: this used to be `kinds`, which was ember's own enum, so the set
+    /// was a literal in Go and the page read "what this binary knows" as
+    /// "what this server can do". An entry is the operator's, and an entry
+    /// that cannot be served is left out by the server -- so there is nothing
+    /// to filter here and nothing for a red banner to explain.
     ///
-    /// EMPTY MEANS `/api/config` HAS NOT ANSWERED, not that this process runs
-    /// nothing -- the `caps` distinction one field over. `genstore.Kinds()`
-    /// is derived from nothing and cannot be empty, and
-    /// `TestConfig_PublishesAtLeastOneKind` is the exit code behind that, so
-    /// the only way this list is empty is that nothing has replaced
-    /// `Config::default()` yet.
+    /// EMPTY IS AN ANSWER AND NOT A SILENCE, which is the discriminator
+    /// moving. `Config::answered` is keyed on `providers`, which no real
+    /// response can empty because the registry always holds the local
+    /// provider -- so an empty list here means this server can be asked for
+    /// nothing, which `unrunnable` prints. The field it replaced could not be
+    /// filtered for exactly this reason, and the paragraph in
+    /// `internal/webapi/wire.go` that said so is where the trade is written
+    /// down.
     #[serde(default, deserialize_with = "nullable")]
-    pub kinds: Vec<String>,
+    pub workloads: Vec<Workload>,
 
-    /// The speech models this process publishes, which may legitimately be
-    /// none: an `ember serve` whose config has no `tts.voices` serves no
-    /// speech to a browser, and `POST /api/requests` refuses one naming that
-    /// key.
-    #[serde(default, deserialize_with = "nullable")]
-    pub voices: Vec<Voice>,
-    #[serde(default)]
-    pub servable: bool,
     #[serde(default)]
     pub store: String,
     #[serde(default)]
     pub mount: String,
-    #[serde(default)]
-    pub preview: String,
-    #[serde(default)]
-    pub preview_interval: i32,
 
     /// Absent until something has asked a generation server.
     ///
@@ -300,89 +386,56 @@ impl Config {
         }
     }
 
-    /// What this process cannot run, where that is worth saying in red.
+    /// Whether `/api/config` has answered.
     ///
-    /// ONE SENTENCE PER STATE AND NOT ONE FOR BOTH, which is the correction.
-    /// This was `!servable`, and the line it printed said "a queued request
-    /// would have nowhere to run" -- true while an image generation was the
-    /// only workload, and wrong for the configuration speech is FOR: a
-    /// `tts.voices` list with no `sd:` block runs speech perfectly. A warning
-    /// that is wrong about the thing the operator is looking at is worse than
-    /// no warning, which is the `proj` caption's rule and the false-abandoned
-    /// one.
-    ///
-    /// SILENT UNTIL `/api/config` HAS ANSWERED, keyed on `providers` as this
-    /// line always was: a default `Config` is not servable and publishes no
-    /// voices, so an unguarded version shouts "this configuration runs
-    /// nothing" at every page load for the moment before the fetch lands.
-    /// `kinds` is the discriminator `composing` uses and `providers` is the
-    /// one here, and they agree -- both are non-empty in every real response
-    /// -- so this is left as it was rather than changed under a sentence that
-    /// is about something else.
-    pub fn unrunnable(&self) -> Option<&'static str> {
-        if self.providers.is_empty() || self.servable {
-            return None;
-        }
-        if self.voices.is_empty() {
-            return Some(
-                "This configuration has no sd: block and no tts.voices, so there is \
-                 nothing for a queued request to run.",
-            );
-        }
-        Some(
-            "This configuration has no sd: block, so there is no generation server to \
-             start and a queued image request would have nowhere to run. Speech still \
-             works.",
-        )
+    /// `providers` AND NOT `workloads`, and that move is the whole reason this
+    /// method exists rather than being an `is_empty` at each call site. The
+    /// old discriminator was `kinds`, which could not be empty because it was
+    /// a literal in ember's source -- and #200's whole point is that the list
+    /// of workloads is now an answer about this server, which CAN be empty.
+    /// `providers` is the one field no real response can empty: the registry
+    /// always holds the local provider, which needs no credential, and
+    /// `TestConfig_AlwaysPublishesAProviderIsThePagesAnsweredDiscriminator` is
+    /// the exit code behind that.
+    pub fn answered(&self) -> bool {
+        !self.providers.is_empty()
     }
 
-    /// Which set of controls a kind shows, and the refusal where it shows
-    /// none.
+    /// The workload with this id, if this server declares one.
+    pub fn workload(&self, id: &str) -> Option<&Workload> {
+        self.workloads.iter().find(|w| w.id == id)
+    }
+
+    /// What this server cannot run, where that is worth saying in red.
     ///
-    /// AN EMPTY STRING IS `sd`, which is `genstore.KindOf`'s rule read from
-    /// the other side of the wire: every body this page has ever posted omits
-    /// `kind`, and the server resolves the absence to an image generation. So
-    /// the default state of this panel is the one that was there before
-    /// speech existed, and it is that way by the same comparison the server
-    /// makes rather than by a separate convention.
+    /// ONE STATE NOW AND NOT TWO, which is what the per-workload list bought.
+    /// This was two sentences -- "no sd: block and no tts.voices" and "no sd:
+    /// block, speech still works" -- because the page had to warn an operator
+    /// about a kind the selector was offering anyway. It offers only what the
+    /// server published, so a half-servable configuration needs no warning at
+    /// all: the tab that works is there and the one that does not never
+    /// appears.
     ///
-    /// SPEECH IS REFUSED WHERE THERE ARE NO VOICES, and the two reasons are
-    /// different sentences because the remedies are. `/api/config` not having
-    /// answered is a wait; a config with no `tts.voices` is an edit to
-    /// `ember.yaml` and a restart. Collapsing them would tell an operator
-    /// whose file is correct to go and change it, and an operator whose file
-    /// is empty to keep waiting.
+    /// WHAT THAT COSTS IS WRITTEN DOWN: an operator whose `speech` entry has
+    /// no voices sees one tab and no explanation of where the other went. The
+    /// explanation is on the channel that can give it -- `POST /api/requests`
+    /// answers a 409 naming the key the moment anything asks -- and
+    /// `ember serve` prints each entry's own reason at startup when NONE of
+    /// them can be served. A page cannot say it, because the server does not
+    /// publish an entry it would be about.
     ///
-    /// THE UNANSWERED ARM IS THE SECOND MECHANISM AND NOT THE FIRST.
-    /// `Compose`'s kind selector is built from `kinds`, which is empty until
-    /// the config lands -- so there is no option for an operator to pick and
-    /// the window cannot be entered through the page at all. This arm is what
-    /// holds if that ever stops being true: a `?kind=` in the URL, a
-    /// remembered choice, a default taken from somewhere else. Containment
-    /// twice, by two mechanisms, and `cargo test` reaches this one because it
-    /// is a state of this type rather than of the DOM.
-    ///
-    /// A KIND THIS BUILD DOES NOT KNOW IS NAMED. The server's own `kinds` is
-    /// the only source of the selector's options, so reaching it means the
-    /// server published something this page has no controls for -- a newer
-    /// ember behind an older page, which is a sentence and not a blank panel.
-    pub fn composing(&self, kind: &str) -> Composing {
-        match kind {
-            "" | "sd" => Composing::Image,
-            "tts" if !self.voices.is_empty() => Composing::Speech(self.voices.clone()),
-            "tts" if self.kinds.is_empty() => {
-                Composing::Refused("ember has not said which voices it publishes yet.".into())
-            }
-            "tts" => Composing::Refused(
-                "this ember serve publishes no voices, so it serves no speech. Add a \
-                 tts.voices list to ember.yaml and restart it."
-                    .into(),
-            ),
-            other => Composing::Refused(format!(
-                "this page has no controls for a {other} request; it is older than the \
-                 ember serve it is talking to."
-            )),
+    /// SILENT UNTIL `/api/config` HAS ANSWERED, keyed on `answered`: a default
+    /// `Config` declares nothing, so an unguarded version shouts "this server
+    /// runs nothing" at every page load for the moment before the fetch lands.
+    pub fn unrunnable(&self) -> Option<&'static str> {
+        if !self.answered() || !self.workloads.is_empty() {
+            return None;
         }
+        Some(
+            "This ember serve declares no workload it can run, so a queued request would \
+             have nowhere to go. Give ember.yaml an sd: block, a tts.voices list, or a \
+             workloads: entry, and restart it.",
+        )
     }
 }
 
@@ -1279,15 +1332,21 @@ pub fn human_bytes(n: i64) -> String {
 /// transit is a ceiling nobody trusts.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct NewRequest {
-    /// Which workload this request is for.
+    /// Which declared workload this request is for, by its id.
+    ///
+    /// THE OPERATOR'S ID AND NOT EMBER'S KIND. It names an entry in a file
+    /// this page cannot read, and the server resolves it there -- so a request
+    /// still names a provider, a card and a batch of jobs and nothing else: no
+    /// image, no argv, no path. It replaced `kind`, which was one of two
+    /// values ember was compiled with.
     ///
     /// ON THE REQUEST AND NOT ON A JOB, which is the server's shape and makes
     /// a mixed batch unrepresentable rather than refused: one rental runs one
-    /// driver. Omitted when empty, because every body this page posted before
-    /// speech existed omitted it and the server resolves the absence to `sd`
-    /// -- so an image request on the wire is byte-for-byte what it was.
+    /// driver and one image. Omitted when empty, because the server resolves
+    /// an absent id to `sd` -- which is the implicit entry's own name on every
+    /// file that declares no `workloads:`.
     #[serde(skip_serializing_if = "String::is_empty")]
-    pub kind: String,
+    pub workload: String,
 
     pub provider: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -3891,50 +3950,69 @@ mod tests {
 
     // --- speech ---
 
-    /// A config publishing voices, as `/api/config` sends one.
+    /// A config declaring both workloads, as `/api/config` sends one.
+    ///
+    /// TWO ENTRIES AND NOT TWO KINDS, which is the shape change: the server
+    /// publishes what IT can run, each with its own voices, so there is
+    /// nothing left for this page to filter.
     fn speaking() -> Config {
         serde_json::from_str(
-            r#"{"providers":[],"kinds":["sd","tts"],
-                "voices":[{"id":"lessac","name":"Lessac (en_US, medium)"},
-                          {"id":"thorsten","name":"Thorsten (de_DE, high)"}]}"#,
+            r#"{"providers":[{"name":"local","free":true}],"workloads":[
+                {"id":"image","label":"Images","driver":"sd","voices":[],
+                 "preview":"proj","preview_interval":5},
+                {"id":"speech","label":"Speech","driver":"tts","voices":[
+                    {"id":"lessac","name":"Lessac (en_US, medium)"},
+                    {"id":"thorsten","name":"Thorsten (de_DE, high)"}]}]}"#,
         )
-        .expect("a config with a catalogue decodes")
+        .expect("a config with two declared workloads decodes")
     }
 
     /// Every arm of the control-set decision.
     #[test]
-    fn a_kind_decides_which_controls_the_panel_shows() {
+    fn a_workloads_driver_decides_which_controls_its_page_shows() {
         let c = speaking();
 
-        // The image controls, and an absent kind is an image generation --
-        // which is `genstore.KindOf`'s rule and is what every body this page
-        // posted before speech existed means.
-        assert_eq!(c.composing(""), Composing::Image);
-        assert_eq!(c.composing("sd"), Composing::Image);
+        // The image controls, from the entry's own driver. There is no
+        // "absent kind means sd" here any more: the page is handed an entry,
+        // and the absence is resolved on the server by `genstore.WorkloadOf`.
+        assert_eq!(
+            c.workload("image").expect("declared").composing(),
+            Composing::Image
+        );
 
         // The speech controls, carrying the list the chooser needs. The list
         // is in the value so that a view cannot reach the chooser without
-        // something to put in it.
-        match c.composing("tts") {
+        // something to put in it -- and it is THIS entry's list, because the
+        // image entry's is empty.
+        match c.workload("speech").expect("declared").composing() {
             Composing::Speech(v) => {
                 assert_eq!(v.len(), 2);
                 assert_eq!(v[0].id, "lessac");
             }
-            other => panic!("a tts kind with voices published gave {other:?}"),
+            other => panic!("a tts workload with voices published gave {other:?}"),
         }
+
+        // AND AN ID THIS SERVER DOES NOT DECLARE IS NOT A WORKLOAD, which is
+        // what makes `/generate/nope` a sentence rather than an empty form.
+        assert!(c.workload("nope").is_none());
     }
 
-    /// A process that publishes no voices refuses speech and names the key.
+    /// A speech workload with no voices says so rather than offering an empty
+    /// chooser.
     ///
-    /// NOT AN EMPTY CHOOSER, which is the defect this arm exists for: a
-    /// `<select>` with no options posts an empty `voice_id`, the server
-    /// refuses it after the operator has typed their text, and the control
-    /// looked like it worked the whole time.
+    /// THE SECOND MECHANISM AND NOT THE FIRST, which is the one thing about
+    /// this arm that changed: the server leaves an unservable entry out of
+    /// `/api/config` entirely, so a `tts` entry with no voices does not reach
+    /// a page from a real response at all. This holds if that ever stops being
+    /// true, and `cargo test` reaches it because it is a state of the type.
+    /// The defect it is about is unchanged: a `<select>` with no options posts
+    /// an empty `voice_id`, the server refuses it after the operator has typed
+    /// their text, and the control looked like it worked the whole time.
     #[test]
-    fn a_process_with_no_voices_says_so_rather_than_offering_an_empty_chooser() {
-        let c: Config = serde_json::from_str(r#"{"kinds":["sd","tts"],"voices":[]}"#)
-            .expect("a config publishing none decodes");
-        match c.composing("tts") {
+    fn a_speech_workload_with_no_voices_says_so_rather_than_offering_an_empty_chooser() {
+        let w: Workload = serde_json::from_str(r#"{"id":"speech","driver":"tts","voices":[]}"#)
+            .expect("an entry publishing none decodes");
+        match w.composing() {
             Composing::Refused(why) => {
                 assert!(
                     why.contains("tts.voices"),
@@ -3945,97 +4023,94 @@ mod tests {
                     "the refusal names no remedy: {why}"
                 );
             }
-            other => panic!("a tts kind with no voices gave {other:?}"),
+            other => panic!("a tts workload with no voices gave {other:?}"),
         }
     }
 
-    /// And a config nothing has answered yet is a WAIT and not that refusal.
+    /// And a config nothing has answered yet is a WAIT, which is now a
+    /// different question from a refusal.
     ///
-    /// THE TWO REFUSALS ARE SEPARATE ASSERTIONS AND NOT ONE `is_refused`,
-    /// because the remedies differ: this one is a wait and the other is an
-    /// edit to `ember.yaml` and a restart. A test that only checked "speech is
-    /// refused" would pass against a page telling an operator whose file is
-    /// correct to go and change it.
-    ///
-    /// `Config::default()` is what the page holds between mounting and
-    /// `/api/config` answering. `kinds` cannot be empty in a real response --
-    /// `genstore.Kinds()` is derived from nothing, and
-    /// `TestConfig_PublishesAtLeastOneKind` is the exit code behind it -- so an
-    /// empty list is the unanswered state and nothing else.
+    /// THE DISCRIMINATOR MOVED, and that is what this test is about. It used
+    /// to be an empty `kinds`, which could not happen in a real response
+    /// because `genstore.Kinds()` was a literal in ember's source -- and
+    /// #200's whole point is that the published list is an answer about this
+    /// server and CAN be empty. So "has it answered" is `providers`, which no
+    /// real response can empty, and the two states are told apart by
+    /// `answered` rather than by a refusal arm inside the control decision.
     #[test]
     fn an_unanswered_config_is_a_wait_and_not_a_refusal() {
         let c = Config::default();
-        match c.composing("tts") {
-            Composing::Refused(why) => {
-                assert!(why.contains("has not said"), "{why}");
-                // AND NOT THE OTHER SENTENCE. An operator whose ember.yaml is
-                // correct must not be sent to edit it.
-                assert!(
-                    !why.contains("tts.voices"),
-                    "a wait reads as a misconfiguration: {why}"
-                );
-            }
-            other => panic!("an unanswered config gave {other:?}"),
-        }
-        // The image controls still show, so the panel is usable in the window
-        // -- which is what it did before speech existed.
-        assert_eq!(c.composing(""), Composing::Image);
+        assert!(!c.answered(), "a default Config reads as answered");
+        // No workload to compose for, so the page shows the waiting panel
+        // rather than a form or a refusal.
+        assert!(c.workload("tts").is_none());
+        // AND IT SAYS NOTHING IN RED. An operator whose server has not
+        // answered must not be told it runs nothing.
+        assert_eq!(c.unrunnable(), None);
+
+        // An answered server that declares nothing IS that sentence.
+        let empty: Config =
+            serde_json::from_str(r#"{"providers":[{"name":"local","free":true}],"workloads":[]}"#)
+                .expect("decodes");
+        assert!(empty.answered());
+        let why = empty
+            .unrunnable()
+            .expect("a server running nothing says so");
+        assert!(why.contains("sd:"), "{why}");
+        assert!(why.contains("tts.voices"), "{why}");
+        assert!(why.contains("workloads:"), "{why}");
     }
 
-    /// What cannot run is said once per state, and a speech-only config is
-    /// not told it runs nothing.
+    /// What cannot run is said once, and a server with a working tab is not
+    /// told it runs nothing.
     ///
-    /// THE SECOND ARM IS THE CORRECTION AND THE ONE WITH A DEFECT BEHIND IT.
-    /// This line was `!servable` and said "a queued request would have nowhere
-    /// to run" -- in red, above a compose panel that was about to work, for
-    /// the one configuration speech is for. Found by a browser lab, whose own
-    /// wait-for-a-refusal helper read it and stopped.
+    /// THE TWO SENTENCES BECAME ONE AND THAT IS WHAT THE LIST BOUGHT. This was
+    /// `!servable` and said "a queued request would have nowhere to run" -- in
+    /// red, above a compose panel that was about to work, for the one
+    /// configuration speech is for. The correction after that was two
+    /// sentences; the correction now is that a half-servable server needs none
+    /// at all, because the tab that works is published and the one that does
+    /// not never appears.
     #[test]
-    fn a_speech_only_config_is_not_told_it_runs_nothing() {
-        let one = |servable: bool, voices: &str| -> Config {
+    fn a_server_with_a_workload_it_can_run_is_not_told_it_runs_nothing() {
+        // Both workloads, one workload, either one: silence.
+        assert_eq!(speaking().unrunnable(), None);
+        let one = |driver: &str, voices: &str| -> Config {
             serde_json::from_str(&format!(
                 r#"{{"providers":[{{"name":"local","free":true}}],
-                    "servable":{servable},"kinds":["sd","tts"],"voices":{voices}}}"#
+                    "workloads":[{{"id":"w","driver":"{driver}","voices":{voices}}}]}}"#
             ))
             .expect("decodes")
         };
-        let voiced = r#"[{"id":"lessac","name":"Lessac"}]"#;
-
-        // A servable config says nothing, whether or not it also speaks.
-        assert_eq!(one(true, "[]").unrunnable(), None);
-        assert_eq!(one(true, voiced).unrunnable(), None);
-
-        // Speech only: the sd half is named and the speech half is said to
-        // work, because the whole point of the line is what to expect.
-        let why = one(false, voiced)
-            .unrunnable()
-            .expect("an unservable config says so");
-        assert!(why.contains("image request"), "{why}");
-        assert!(why.contains("Speech still works"), "{why}");
-
-        // Neither: the original sentence, and it names both keys so the
-        // remedy is readable.
-        let why = one(false, "[]")
-            .unrunnable()
-            .expect("a config running nothing says so");
-        assert!(why.contains("sd:"), "{why}");
-        assert!(why.contains("tts.voices"), "{why}");
-        assert!(!why.contains("Speech still works"), "{why}");
-
-        // AND NOTHING BEFORE /api/config HAS ANSWERED. A default Config is
-        // not servable and publishes no voices, so an unguarded version
-        // shouts "this runs nothing" at every page load.
-        assert_eq!(Config::default().unrunnable(), None);
+        assert_eq!(one("sd", "[]").unrunnable(), None);
+        assert_eq!(
+            one("tts", r#"[{"id":"lessac","name":"Lessac"}]"#).unrunnable(),
+            None
+        );
     }
 
-    /// A kind from a newer ember is named rather than rendered as a blank
+    /// A driver from a newer ember is named rather than rendered as a blank
     /// panel.
     #[test]
-    fn a_kind_this_page_has_no_controls_for_is_named() {
-        match speaking().composing("video") {
+    fn a_driver_this_page_has_no_controls_for_is_named() {
+        let w: Workload =
+            serde_json::from_str(r#"{"id":"clips","driver":"video"}"#).expect("decodes");
+        match w.composing() {
             Composing::Refused(why) => assert!(why.contains("video"), "{why}"),
-            other => panic!("an unknown kind gave {other:?}"),
+            other => panic!("an unknown driver gave {other:?}"),
         }
+    }
+
+    /// A label is what the nav prints, and the id where there is none.
+    #[test]
+    fn a_workload_with_no_label_is_printed_as_its_id() {
+        let w: Workload =
+            serde_json::from_str(r#"{"id":"speech","driver":"tts"}"#).expect("decodes");
+        assert_eq!(w.label(), "speech");
+        let w: Workload =
+            serde_json::from_str(r#"{"id":"speech","label":"Speech","driver":"tts"}"#)
+                .expect("decodes");
+        assert_eq!(w.label(), "Speech");
     }
 
     /// A chooser option always has text to click on.
@@ -4069,9 +4144,9 @@ mod tests {
     /// naming an index -- and the panel's draft defaults are 512, 512 and 20,
     /// which are exactly the values that would be left over.
     #[test]
-    fn a_speech_request_names_its_kind_and_carries_no_image_parameters() {
+    fn a_speech_request_names_its_workload_and_carries_no_image_parameters() {
         let body = serde_json::to_string(&NewRequest {
-            kind: "tts".into(),
+            workload: "speech".into(),
             provider: "local".into(),
             jobs: vec![Job {
                 tts: Some(Utterance {
@@ -4085,7 +4160,7 @@ mod tests {
         })
         .unwrap();
 
-        assert!(body.contains(r#""kind":"tts""#), "{body}");
+        assert!(body.contains(r#""workload":"speech""#), "{body}");
         assert!(body.contains(r#""text":"Hello from ember.""#), "{body}");
         assert!(body.contains(r#""voice_id":"lessac""#), "{body}");
         assert!(body.contains(r#""output":"greeting""#), "{body}");

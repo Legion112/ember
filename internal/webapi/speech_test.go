@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/tts"
 )
@@ -28,7 +29,7 @@ func TestSpeech_ARequestNamesAVoiceIdAndNeverAPath(t *testing.T) {
 	h := newHarness(t, withVoices)
 	srv := live(t, h)
 
-	body := `{"kind":"tts","provider":"local","jobs":[
+	body := `{"workload":"tts","provider":"local","jobs":[
 		{"tts":{"text":"Hello from ember.","voice_id":"lessac","output":"greeting"}}]}`
 	res := h.wire(t, srv, "POST", "/api/requests", "application/json", []byte(body))
 	if res.Status != http.StatusAccepted {
@@ -76,7 +77,7 @@ func TestSpeech_RefusesAVoiceTheOperatorDidNotPublish(t *testing.T) {
 	h := newHarness(t, withVoices)
 	srv := live(t, h)
 
-	body := `{"kind":"tts","provider":"local","jobs":[{"tts":{"text":"x","voice_id":"nope"}}]}`
+	body := `{"workload":"tts","provider":"local","jobs":[{"tts":{"text":"x","voice_id":"nope"}}]}`
 	res := h.wire(t, srv, "POST", "/api/requests", "application/json", []byte(body))
 	if res.Status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", res.Status, res.Body)
@@ -100,7 +101,7 @@ func TestSpeech_RefusesSpeechWhenThisProcessPublishesNone(t *testing.T) {
 	h := newHarness(t) // no Voices
 	srv := live(t, h)
 
-	body := `{"kind":"tts","provider":"local","jobs":[{"tts":{"text":"x","voice_id":"lessac"}}]}`
+	body := `{"workload":"tts","provider":"local","jobs":[{"tts":{"text":"x","voice_id":"lessac"}}]}`
 	res := h.wire(t, srv, "POST", "/api/requests", "application/json", []byte(body))
 	// A 409 AND NOT A 400, which is the status the sd arm of this gate always
 	// had right: the body is well-formed and the request is one ember
@@ -112,6 +113,20 @@ func TestSpeech_RefusesSpeechWhenThisProcessPublishesNone(t *testing.T) {
 	}
 	if !strings.Contains(string(res.Body), "tts.voices") {
 		t.Errorf("body = %q, want it to name tts.voices", res.Body)
+	}
+	// AND THE PAGE IS NEVER OFFERED IT, which is the half a 409 alone cannot
+	// prove: one method decides what `/api/config` publishes and what this
+	// route refuses, so a speech tab cannot exist on a server with no voices.
+	// Over the socket and not through the recorder: `live` moved this
+	// harness's port, so `do`'s hard-coded Host would be refused by
+	// checkHost and the decode would read a zero value as an answer.
+	cv := h.wire(t, srv, "GET", "/api/config", "", nil)
+	var got configView
+	if err := json.Unmarshal(cv.Body, &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, cv.Body)
+	}
+	if len(got.Workloads) != 1 || got.Workloads[0].Driver != config.DriverSD {
+		t.Errorf("workloads = %+v, want only the image one", got.Workloads)
 	}
 }
 
@@ -134,7 +149,7 @@ func TestSpeech_RefusesAJobBelongingToTheOtherKind(t *testing.T) {
 	}{
 		{
 			"a speech request carrying a prompt",
-			`{"kind":"tts","provider":"local","jobs":[
+			`{"workload":"tts","provider":"local","jobs":[
 				{"prompt":"a cat","tts":{"text":"x","voice_id":"lessac"}}]}`,
 			"also sets image parameters",
 		},
@@ -143,13 +158,13 @@ func TestSpeech_RefusesAJobBelongingToTheOtherKind(t *testing.T) {
 			// check exists for: a hand-written list of sd field names would
 			// not have had `vae_tiling` in it on the day it was added.
 			"a speech request carrying a nested image block",
-			`{"kind":"tts","provider":"local","jobs":[
+			`{"workload":"tts","provider":"local","jobs":[
 				{"vae_tiling":{"enabled":true},"tts":{"text":"x","voice_id":"lessac"}}]}`,
 			"also sets image parameters",
 		},
 		{
 			"a speech request carrying no utterance",
-			`{"kind":"tts","provider":"local","jobs":[{"prompt":"a cat"}]}`,
+			`{"workload":"tts","provider":"local","jobs":[{"prompt":"a cat"}]}`,
 			"carries no utterance",
 		},
 		{
@@ -158,9 +173,14 @@ func TestSpeech_RefusesAJobBelongingToTheOtherKind(t *testing.T) {
 			"carries an utterance",
 		},
 		{
-			"a kind ember does not run",
-			`{"kind":"stt","provider":"local","jobs":[{"prompt":"a cat"}]}`,
-			"is not one ember runs",
+			// IT USED TO BE A KIND EMBER DOES NOT RUN, and the field is an
+			// id this server does not declare now -- which is the same
+			// defect one authority over. A kind was ember's own enum, so the
+			// refusal could name the two values the binary held; an id is
+			// the operator's, so the refusal names what their file declares.
+			"a workload this server does not declare",
+			`{"workload":"stt","provider":"local","jobs":[{"prompt":"a cat"}]}`,
+			"no workload",
 		},
 	}
 	for _, c := range cases {
@@ -207,14 +227,19 @@ func TestSpeech_AnImageRequestIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestConfig_PublishesTheKindsAndTheVoicesAndNotTheirPaths.
+// TestConfig_PublishesTheWorkloadsAndTheirVoicesAndNotTheirPaths.
 //
-// A UI cannot guess either: a request names a voice by **id**, so the list of
-// ids is something only ember can produce out of the operator's config. And
-// the PATHS are deliberately absent, which is this file's own projection rule
-// -- a hand-written view means adding a field somewhere cannot publish it by
-// default.
-func TestConfig_PublishesTheKindsAndTheVoicesAndNotTheirPaths(t *testing.T) {
+// A UI cannot guess any of it: a request names a workload and a voice by
+// **id**, so the lists of ids are something only ember can produce out of the
+// operator's config. And the PATHS and the IMAGE are deliberately absent,
+// which is this file's own projection rule -- a hand-written view means adding
+// a field somewhere cannot publish it by default.
+//
+// THE VOICES ARE ON THE WORKLOAD AND NOT ON THE CONFIG, which the image moving
+// into the entry forces: two declared speech workloads are two images with two
+// voice sets on them, and one list for the process would offer each one's ids
+// for the other's node.
+func TestConfig_PublishesTheWorkloadsAndTheirVoicesAndNotTheirPaths(t *testing.T) {
 	h := newHarness(t, withVoices)
 	srv := live(t, h)
 
@@ -223,27 +248,51 @@ func TestConfig_PublishesTheKindsAndTheVoicesAndNotTheirPaths(t *testing.T) {
 		t.Fatalf("status = %d: %s", res.Status, res.Body)
 	}
 	var v struct {
-		Kinds  []string `json:"kinds"`
-		Voices []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"voices"`
+		Workloads []struct {
+			ID     string `json:"id"`
+			Label  string `json:"label"`
+			Driver string `json:"driver"`
+			Voices []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"voices"`
+		} `json:"workloads"`
 	}
 	if err := json.Unmarshal(res.Body, &v); err != nil {
 		t.Fatalf("decode: %v\n%s", err, res.Body)
 	}
-	// Every kind, from the one list, so a kind added later reaches a UI
-	// without anybody remembering this projection.
-	if len(v.Kinds) != len(genstore.Kinds()) {
-		t.Errorf("kinds = %v, want %v", v.Kinds, genstore.Kinds())
+	// TWO WORKLOADS AND NOT TWO KINDS: this config has an `sd:` block and a
+	// `tts.voices` list, so it describes two implicit entries sharing one
+	// image -- which is exactly today's behaviour written down. What has
+	// changed is that a config with ONE of those blocks now publishes one
+	// entry, where `genstore.Kinds()` published both unconditionally.
+	if len(v.Workloads) != 2 {
+		t.Fatalf("workloads = %+v, want the two this config describes", v.Workloads)
 	}
-	if len(v.Voices) != 1 || v.Voices[0].ID != "lessac" || v.Voices[0].Name != "Lessac (en_US)" {
-		t.Errorf("voices = %+v", v.Voices)
+	var spoke int
+	for _, w := range v.Workloads {
+		if w.ID == "" || w.Label == "" {
+			t.Errorf("workload %+v has no id or no label; a nav has nothing to print", w)
+		}
+		if w.Driver != config.DriverTTS {
+			if len(w.Voices) != 0 {
+				t.Errorf("workload %q has driver %q and voices %+v", w.ID, w.Driver, w.Voices)
+			}
+			continue
+		}
+		spoke++
+		if len(w.Voices) != 1 || w.Voices[0].ID != "lessac" ||
+			w.Voices[0].Name != "Lessac (en_US)" {
+			t.Errorf("voices = %+v", w.Voices)
+		}
 	}
-	for _, path := range []string{"/opt/voices/lessac.onnx", "espeak", "/e\""} {
+	if spoke != 1 {
+		t.Errorf("%d speech workload(s) published, want 1", spoke)
+	}
+	for _, path := range []string{"/opt/voices/lessac.onnx", "espeak", "/e\"", "sha256"} {
 		if strings.Contains(string(res.Body), path) {
-			t.Errorf("the config view publishes %q; a browser has no use for a path on the node:\n%s",
-				path, res.Body)
+			t.Errorf("the config view publishes %q; a browser has no use for a path or an "+
+				"image on the node:\n%s", path, res.Body)
 		}
 	}
 }
@@ -252,12 +301,20 @@ func TestConfig_PublishesTheKindsAndTheVoicesAndNotTheirPaths(t *testing.T) {
 // again: a client whose field is a list gets a type error from `null` and
 // drops the whole response -- which this repository has already paid a whole
 // queue panel for.
+//
+// IT IS THE SD ENTRY'S OWN LIST NOW. A workload with no speech driver has no
+// voices, and that has to arrive as `[]` for exactly the same reason: the page
+// reads every one of these through a `nullable`, and the field that is empty
+// on every image workload there is is the one most likely to go out as null.
 func TestConfig_PublishesAnEmptyVoiceListAndNeverNull(t *testing.T) {
 	h := newHarness(t) // no voices
 	srv := live(t, h)
 	res := h.wire(t, srv, "GET", "/api/config", "", nil)
 	if !strings.Contains(string(res.Body), `"voices":[]`) {
-		t.Errorf("want \"voices\":[] for a process publishing none:\n%s", res.Body)
+		t.Errorf("want \"voices\":[] on a workload publishing none:\n%s", res.Body)
+	}
+	if !strings.Contains(string(res.Body), `"workloads":[`) {
+		t.Errorf("want a workloads list:\n%s", res.Body)
 	}
 }
 
@@ -269,4 +326,17 @@ func TestConfig_PublishesAnEmptyVoiceListAndNeverNull(t *testing.T) {
 // files reaching past New, so the suite could not tell "the production value
 // is missing" from "this test did not set it". A mutator goes through the same
 // New the daemon calls.
-func withVoices(o *Options) { o.Voices = labVoices() }
+//
+// AND IT WRITES THE CONFIG RATHER THAN THE CATALOGUE, which is one step
+// further in the same direction: the harness derives `Options.Workloads` from
+// `Options.Config` exactly as cmd_serve does, so a test that publishes voices
+// drives the real derivation instead of handing the server an answer nothing
+// produced. The voices land on the `tts:` block, which is the implicit entry's
+// -- so this harness declares no `workloads:` and is the back-compatible
+// shape every committed configuration has.
+func withVoices(o *Options) {
+	v := labVoices()[0]
+	o.Config.TTS.Voices = []config.TTSVoice{
+		{ID: v.ID, Name: v.Name, Voice: v.Voice, EspeakData: v.EspeakData},
+	}
+}

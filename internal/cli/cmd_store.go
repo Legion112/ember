@@ -372,6 +372,7 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 	fs.SetOutput(out)
 	cfgPath := fs.String("config", config.FileName, "path to ember.yaml")
 	vcpu := fs.Int("vcpu", 0, "cores to rent; the minimum for the family when unset")
+	workload := fs.String("workload", "", "which declared workload's image to rent, by its id")
 	dryRun := fs.Bool("dry-run", false, "say what would be rented and fetched, and do neither")
 	fs.Usage = func() {
 		outf(out, "ember store sync fetches the configured assets onto the store.\n\n")
@@ -391,6 +392,18 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 	}
 	if len(cfg.Assets) == 0 {
 		return usageError{fmt.Errorf("no assets are listed in %s, so there is nothing to fetch", *cfgPath)}
+	}
+
+	// WHICH IMAGE DOWNLOADS THEM, and it is a real choice rather than
+	// bookkeeping. This rental runs `embernode fetch` and nothing else, which
+	// every ember image carries -- so any declared workload's image would
+	// work, and they are not the same size: measured, `ember:sd` is 2.87 GB
+	// and `ember:tts` is 286 MB. Picking silently would mean pulling ten
+	// times the bytes onto a machine rented by the minute, so a file
+	// declaring more than one workload is asked.
+	cfg, _, err = cfg.Select(*workload)
+	if err != nil {
+		return usageError{err}
 	}
 
 	// The same pipeline `ember up` runs, asked for a machine with no card.

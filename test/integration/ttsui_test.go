@@ -15,6 +15,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -60,10 +61,9 @@ func TestTTS_ServeUISpeaksWhatTheOperatorTyped(t *testing.T) {
 	l.WriteConfig(map[string]string{"image": image, "ttl": "20m"})
 	// TWO VOICES AND NOT ONE, which is what makes the chooser a chooser: a
 	// `<select>` with one entry cannot show that the list came from the server
-	// rather than from a literal in the page, and the panel hides the kind
-	// selector below two kinds for the same reason. The second entry points at
-	// the same file on purpose -- this lab is about which ids reach a browser
-	// and which one comes back, and a second voice model would be a second
+	// rather than from a literal in the page. The second entry points at the
+	// same file on purpose -- this lab is about which ids reach a browser and
+	// which one comes back, and a second voice model would be a second
 	// download for nothing.
 	l.AppendConfig(`
 tts:
@@ -128,46 +128,80 @@ tts:
 
 	if err := chromedp.Do(ctx,
 		chromedp.WaitVisible(`h1`),
-		// The kind selector, which is the control this feature adds to the
-		// panel. It is built from `/api/config`'s `kinds` and from nothing
-		// else, so it being here at all is the first half of the join.
-		chromedp.WaitVisible(kindSelect),
+		// THE NAV TAB FOR THIS SERVER'S ONE WORKLOAD, which is what the kind
+		// selector became (#200). It is built from `/api/config`'s
+		// `workloads` and from nothing else, so it being here at all is the
+		// first half of the join -- and `/` canonicalising to its address is
+		// what gets the form on screen with no click.
+		chromedp.WaitVisible(generateTab),
 	); err != nil {
 		t.Fatalf("loading the page: %v\n%s", err, console.text())
+	}
+
+	// AND THERE IS NO IMAGE TAB, which is the defect #200 is about and the
+	// reason this whole shape changed. This config has `tts.voices` and no
+	// `sd:` block: it serves speech perfectly and could never serve an image
+	// generation, and the page used to offer `sd` in a dropdown anyway and
+	// then explain itself in a red banner. The nav is now what the SERVER
+	// declares, so the tab that cannot work is absent rather than present and
+	// apologised for.
+	tabs, terr := chromedp.Run(ctx, chromedp.Evaluate[[]string](`
+		Array.from(document.querySelectorAll('nav a')).map(function (a) {
+			return a.getAttribute('href');
+		})`))
+	if terr != nil {
+		t.Fatalf("reading the nav: %v\n%s", terr, console.text())
+	}
+	if !slices.Contains(tabs, "/generate/tts") {
+		t.Errorf("the nav = %v, want a tab for the workload this server declares", tabs)
+	}
+	for _, href := range tabs {
+		if strings.HasPrefix(href, "/generate/") && href != "/generate/tts" {
+			t.Errorf("the nav offers %q on a server with no sd: block; the page must not "+
+				"offer what the server cannot do", href)
+		}
+	}
+
+	// AND THE ADDRESS BAR NAMES THE PAGE THAT IS ON SCREEN. `/` is an alias
+	// that renders the first declared workload, canonicalised away with
+	// `replace_state` so a copied link does not name a page whose identity
+	// depends on which server reads it -- and so the nav can mark the current
+	// tab at all.
+	where, werr := chromedp.Run(ctx, chromedp.Evaluate[string](`location.pathname`))
+	if werr != nil {
+		t.Fatalf("reading the address: %v\n%s", werr, console.text())
+	}
+	if where != "/generate/tts" {
+		t.Errorf("the address is %q after loading /, want the workload's own address", where)
 	}
 
 	// AND THE HEADER DOES NOT SAY THIS CONFIGURATION RUNS NOTHING, which is a
 	// defect this lab found rather than one it was written for. The warning
 	// was `!servable` and said "a queued request would have nowhere to run" --
 	// true while an image generation was the only workload, and wrong for the
-	// one configuration speech is for: a `tts.voices` list with no `sd:` block
-	// runs speech perfectly. In red, above a panel that was about to work.
+	// one configuration speech is for.
 	//
-	// Both directions, because a check for the new wording alone would pass
-	// against a header printing both.
+	// IT NOW SAYS NOTHING AT ALL, and both of the sentences this used to check
+	// are asserted absent. The correction after the defect was two sentences,
+	// one of them "Speech still works"; with a per-workload list there is
+	// nothing to warn about -- the tab that works is published and the one
+	// that does not never appears -- so a header that still printed either
+	// would be apologising for a tab it is not showing.
 	header, herr := chromedp.Run(ctx, chromedp.Text(`header`))
 	if herr != nil {
 		t.Fatalf("reading the header: %v\n%s", herr, console.text())
 	}
-	if !strings.Contains(header, "Speech still works") {
-		t.Errorf("the header does not say speech runs on a config with no sd: block; "+
-			"it says:\n%s", header)
-	}
-	if strings.Contains(header, "nothing for a queued request to run") {
-		t.Errorf("the header says this configuration runs nothing, over a published "+
-			"voice catalogue:\n%s", header)
-	}
-
-	// BEFORE: the image controls, which is "exactly what is there today".
-	// Asserted so the absence below means the panel SWITCHED rather than that
-	// this lab cannot find a width box.
-	if !visible(t, ctx, labelled("width")) {
-		t.Fatalf("the panel does not open on the image controls\n%s", console.text())
+	for _, stale := range []string{
+		"nothing for a queued request to run",
+		"Speech still works",
+		"declares no workload it can run",
+	} {
+		if strings.Contains(header, stale) {
+			t.Errorf("the header says %q over a server that serves speech:\n%s", stale, header)
+		}
 	}
 
-	selectKind(t, ctx, "tts", console)
-
-	// AFTER: the speech controls, and the image ones gone.
+	// THE SPEECH CONTROLS, AND THE IMAGE ONES NOWHERE.
 	//
 	// BOTH DIRECTIONS, because each is a different defect. A voice chooser
 	// that never appeared is a feature that is not there; a width box left
@@ -295,8 +329,14 @@ tts:
 	}
 }
 
-// kindSelect is the panel's kind selector.
-const kindSelect = `//label[span[@class="help" and text()="kind"]]/select`
+// generateTab is a nav link to a declared workload's compose page.
+//
+// THE NAV AND NOT A SELECTOR, which is #200: there is one page per declared
+// workload and the header links to each, so the control that used to decide
+// which form the one panel drew is gone. It reads the href rather than the
+// label, because the label is the operator's own text and the address is
+// ember's.
+const generateTab = `nav a[href^="/generate/"]`
 
 // labelled is one control's LABEL, named by the help text inside it.
 //
@@ -344,42 +384,6 @@ func visible(t *testing.T, ctx context.Context, xpath string) bool {
 		t.Fatalf("asking whether %s is on screen: %v", xpath, err)
 	}
 	return got
-}
-
-// selectKind drives the panel's kind selector.
-//
-// A REAL `change` EVENT, DISPATCHED EXPLICITLY, and not `chromedp.SetValue`.
-// AGENTS.md records measuring that SetValue does dispatch a bubbling `input`
-// and `change` when the attribute is named `value` -- which is true, and is a
-// property of the pinned v0.21.0's embedded JavaScript rather than of anything
-// here. This lab does not rest on it. What proves the change reached the
-// signal is the panel switching, which is what the two directions of assertion
-// above report: a change that went nowhere leaves the width box on screen and
-// the voice chooser absent.
-//
-// IT REPORTS A MISSING OPTION RATHER THAN SUCCEEDING QUIETLY. Assigning a
-// value a `<select>` does not have leaves the element's value unchanged, so a
-// page whose kinds list lost `tts` would otherwise dispatch a change that
-// meant nothing and the lab would blame the panel.
-func selectKind(t *testing.T, ctx context.Context, kind string, console *consoleLog) {
-	t.Helper()
-	js := fmt.Sprintf(`(function () {
-		var r = document.evaluate(%q, document, null,
-			XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-		var n = r.singleNodeValue;
-		if (!n) { return "there is no kind selector"; }
-		n.value = %q;
-		if (n.value !== %q) { return "the selector has no such option"; }
-		n.dispatchEvent(new Event("change", {bubbles: true}));
-		return "";
-	})()`, kindSelect, kind, kind)
-	why, err := chromedp.Run(ctx, chromedp.Evaluate[string](js))
-	if err != nil {
-		t.Fatalf("choosing the %s kind: %v\n%s", kind, err, console.text())
-	}
-	if why != "" {
-		t.Fatalf("choosing the %s kind: %s\n%s", kind, why, console.text())
-	}
 }
 
 // pageRefusal is whatever sentence the page is showing instead of working.

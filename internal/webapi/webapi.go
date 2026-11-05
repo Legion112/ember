@@ -111,22 +111,30 @@ type Options struct {
 	// ceiling and everything a request may not choose.
 	Config config.Config
 
-	// Voices is the speech catalogue a request's voice id is checked
-	// against, derived from Config at startup by the one function that reads
-	// it.
+	// Workloads is what this server can be asked to run: the entries the
+	// operator's file declares, resolved once at startup by the one function
+	// that reads them.
+	//
+	// THIS IS THE ANSWER `/api/config` PUBLISHES, and it is the whole of
+	// what replaced `genstore.Kinds()` there. That list was every workload
+	// the BUILD knows, sent unconditionally -- so a speech-only server
+	// offered an image tab and then explained itself in a red banner, and the
+	// page read "what this binary can do" as "what this server can do". An
+	// entry carries its own image, so this list is an answer about this
+	// process.
 	//
 	// A FIELD AND NOT A READ OF Config IN THE HANDLER, which is #105's lesson
 	// applied before it costs anything: GET /api/nodes answered 501 in every
 	// shipped `ember serve` because Options had no Scan field and the three
 	// assignments in the tree were all in test files reaching past the
 	// constructor. The trap is available here too -- a handler calling
-	// s.opts.Config.TTSCatalogue() would work, and then the queue's copy and
-	// this one would be two derivations of one file that could come apart.
-	// One derivation, wired once in cmd_serve, handed to both.
+	// s.opts.Config.WorkloadCatalogue() would work, and then the queue's copy
+	// and this one would be two derivations of one file that could come
+	// apart. One derivation, wired once in cmd_serve, handed to both.
 	//
-	// Empty means this process publishes no speech, which validateSpoken
-	// refuses with a sentence naming tts.voices rather than with a 501.
-	Voices tts.Catalogue
+	// Empty means this server can be asked for nothing, which postRequest
+	// refuses with a sentence naming the keys rather than with a 501.
+	Workloads []config.Workload
 
 	// Registry is what this process can reach. A provider with no credential
 	// is deliberately absent, so the UI does not offer a button that cannot
@@ -516,7 +524,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	} else if ok {
 		caps = &c
 	}
-	s.ok(w, viewConfig(s.opts.Config, s.registry(), s.opts.AllowPaid, caps, s.opts.Voices))
+	s.ok(w, viewConfig(s.opts.Config, s.registry(), s.opts.AllowPaid, caps, s.opts.Workloads))
 }
 
 func (s *Server) getOffers(w http.ResponseWriter, r *http.Request) {
@@ -602,7 +610,24 @@ func (s *Server) postRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, err := body.toRequest()
+	// THE ID IS RESOLVED BEFORE THE BODY IS READ INTO A ROW, because the
+	// entry is what says which driver the jobs have to be shaped for. A
+	// request names a declared entry's id and nothing else new -- never an
+	// image, an argv or a path -- and the server resolves it against the
+	// operator's own file, which is what internal/tts already does for a
+	// voice id.
+	//
+	// A 400, because an id this server does not declare is something the
+	// request got wrong and a different body would fix. Whether the entry can
+	// actually be served is the operator's file's business and is the 409
+	// below.
+	wl, err := workloadFor(s.opts.Workloads, body.Workload)
+	if err != nil {
+		s.fail(w, http.StatusBadRequest, err)
+		return
+	}
+
+	req, err := body.toRequest(wl)
 	if err != nil {
 		s.fail(w, http.StatusBadRequest, err)
 		return
@@ -617,10 +642,10 @@ func (s *Server) postRequest(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusForbidden, err)
 		return
 	}
-	// CAN THIS SERVER RUN THIS KIND? Per kind, because the two have different
-	// answers: an image needs `sd.serve` and an utterance needs a voice in
-	// `tts.voices`, and a configuration with one of them can serve one of
-	// them.
+	// CAN THIS SERVER RUN THIS WORKLOAD? Per entry, because the two drivers
+	// have different answers: an image needs `sd.serve` and an utterance
+	// needs a voice in `tts.voices`, and a configuration with one of them can
+	// serve one of them.
 	//
 	// IT USED TO ASK ONLY ABOUT sd.serve, which was the same question while
 	// there was one kind -- and the second kind made it a wall: a server
@@ -630,11 +655,16 @@ func (s *Server) postRequest(w http.ResponseWriter, r *http.Request) {
 	// check; both were invisible to `go test ./...`, which builds a
 	// `webapi.Options` directly and never asks whether the configuration
 	// behind it could serve anything.
-	if err := s.canServe(genstore.KindOf(req.Kind)); err != nil {
-		s.fail(w, http.StatusConflict, err)
+	//
+	// ONE ANSWER AND TWO READERS: `config.Workload.Unservable` is the same
+	// method `/api/config` leaves an entry out of what it offers by, so a
+	// page cannot show a tab this will then refuse. The 409 is for a client
+	// that is not that page.
+	if why := wl.Unservable(); why != "" {
+		s.fail(w, http.StatusConflict, fmt.Errorf("workload %q cannot be served: %s", wl.ID, why))
 		return
 	}
-	if err := s.validateJobs(r.Context(), req); err != nil {
+	if err := s.validateJobs(r.Context(), req, wl); err != nil {
 		s.fail(w, http.StatusBadRequest, err)
 		return
 	}
@@ -693,7 +723,7 @@ func (s *Server) refusePaid(name string) error {
 // with it. sdserver.MaxAxis is the static bound that closes it; the samplers,
 // the schedulers and the format lists have no static answer, because a list
 // ember has not been told is not a list it can check against.
-func (s *Server) validateJobs(ctx context.Context, req genstore.Request) error {
+func (s *Server) validateJobs(ctx context.Context, req genstore.Request, wl config.Workload) error {
 	// SPEECH IS VALIDATED AGAINST THE CATALOGUE AND RETURNS, because none of
 	// what follows is about it: there is no preview, no sampler list and no
 	// cached capabilities -- piper publishes nothing, so the only thing a
@@ -702,7 +732,7 @@ func (s *Server) validateJobs(ctx context.Context, req genstore.Request) error {
 	// static validation over a job with no prompt and refuse every utterance
 	// there is.
 	if genstore.KindOf(req.Kind) == genstore.KindTTS {
-		return s.validateSpoken(req)
+		return s.validateSpoken(req, wl)
 	}
 
 	preview, err := sdserver.ParsePreview(req.Preview)
@@ -1185,7 +1215,17 @@ func (s *Server) failStore(w http.ResponseWriter, err error) {
 // A refusal here costs nothing. The same mistake found at the node costs a
 // rental: the create call, the wait for sshd, the probe and the image pull,
 // all of it billed, to discover that an id has a typo in it.
-func (s *Server) validateSpoken(req genstore.Request) error {
+func (s *Server) validateSpoken(req genstore.Request, wl config.Workload) error {
+	// THE ENTRY'S OWN CATALOGUE AND NOT A PROCESS-WIDE ONE, which the image
+	// being per workload forces: two declared speech workloads are two images
+	// with two voice sets on them, and one catalogue for the process would
+	// accept each one's ids for the other's node. Derived from the entry by
+	// the one function that reads a `tts:` block, so the id rules and the
+	// espeak fallback exist once.
+	cat, err := wl.TTSCatalogue()
+	if err != nil {
+		return err
+	}
 	// AN EMPTY CATALOGUE IS ITS OWN SENTENCE AND NOT "no voice <id>". An
 	// operator who has not configured speech asked for something this process
 	// cannot do; one who has, and typed an id wrong, needs the list. Lookup
@@ -1207,37 +1247,29 @@ func (s *Server) validateSpoken(req genstore.Request) error {
 		// numbers are the SAME function the node will apply -- one authority,
 		// and a refusal an operator reads once rather than twice in different
 		// words.
-		if _, err := j.TTS.Resolve(s.opts.Voices); err != nil {
+		if _, err := j.TTS.Resolve(cat); err != nil {
 			return fmt.Errorf("jobs[%d]: %w", i, err)
 		}
 	}
 	return nil
 }
 
-// canServe answers whether this configuration can run one kind.
+// canServe IS GONE AND `config.Workload.Unservable` IS THE ONE ANSWER.
 //
-// A 409 AND NOT A 400, which the status it replaced already had right: the
-// body is well-formed and the request is one ember understands -- what is
-// missing is a block in the operator's own file, which no edit to the request
-// can fix. A 400 would tell a page to change what it sent.
+// It asked a kind -- the build's enum -- which of two top-level blocks the
+// configuration had, so it could only ever answer about the one unnamed
+// workload a file describes. The question is per declared entry now, because
+// the image is: a file may declare two speech workloads of which one publishes
+// voices, and a process-wide answer cannot tell them apart.
 //
-// The speech arm is deliberately NOT "is there a tts: block": a configuration
-// with `tts.jobs` and no `tts.voices` can run `ember up` and cannot serve a
+// A 409 AND NOT A 400 is unchanged and was always right: the body is
+// well-formed and the request is one ember understands -- what is missing is a
+// block in the operator's own file, which no edit to the request can fix. A
+// 400 would tell a page to change what it sent, and postRequest keeps the 400
+// for the thing a page CAN change, which is naming an entry that is not there.
+//
+// THE SPEECH ARM IS STILL NOT "is there a tts: block": a configuration with
+// `tts.jobs` and no `tts.voices` can run `ember up` and cannot serve a
 // browser, because a request names an id and there would be none to name. The
 // catalogue is the thing a request needs, so the catalogue is what is asked
-// about.
-func (s *Server) canServe(kind string) error {
-	switch kind {
-	case genstore.KindTTS:
-		if len(s.opts.Voices) == 0 {
-			return errors.New("this configuration publishes no tts.voices, so there is no voice " +
-				"a request could name: add a tts.voices list to ember.yaml")
-		}
-	default:
-		if len(s.opts.Config.SD.Serve) == 0 {
-			return errors.New("this configuration has no sd.serve block, so there is no " +
-				"generation server to start and a queued request would have nowhere to run")
-		}
-	}
-	return nil
-}
+// about -- see Unservable, which is where that sentence now lives.

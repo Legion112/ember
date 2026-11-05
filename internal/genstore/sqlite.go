@@ -34,7 +34,7 @@ const FileName = "generations.db"
 // internal/statestore's reason: reading a newer layout as an older one drops
 // columns, and the column it would drop is the one that says a request is
 // still running.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // migrations takes an existing file forward, one version per entry:
 // migrations[0] moves a version-1 file to version 2.
@@ -210,6 +210,21 @@ var migrations = [][]string{
 		`ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE jobs ADD COLUMN tts TEXT NOT NULL DEFAULT ''`,
 	},
+
+	// 6 -> 7: which declared workload the request named.
+	//
+	// AN EMPTY `workload` NAMES THE IMPLICIT ENTRY, which is why the default
+	// is '' and nothing is backfilled. A configuration that declares no
+	// `workloads:` describes one entry per driver out of its top-level keys,
+	// and each of those entries is named after its own driver -- so
+	// WorkloadOf resolves '' to KindOf(kind), which is exactly the id of the
+	// entry such a row would have named. A migration that stamped a literal
+	// would be guessing at an id the operator may since have chosen for
+	// themselves, which is the `UPDATE requests SET kind='sd'` mistake one
+	// column over.
+	{
+		`ALTER TABLE requests ADD COLUMN workload TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 // defaultLimit bounds a listing that did not ask for one.
@@ -288,10 +303,20 @@ CREATE TABLE IF NOT EXISTS requests (
 	id            TEXT PRIMARY KEY,
 	created_unix  INTEGER NOT NULL,
 	status        TEXT    NOT NULL,
-	-- Which workload this request is for. '' is an image generation, which
-	-- is every row written before schema version 6; see KindOf, which is the
-	-- one place that reading lives.
+	-- Which DRIVER this request is for. '' is an image generation, which is
+	-- every row written before schema version 6; see KindOf, which is the one
+	-- place that reading lives.
 	kind          TEXT    NOT NULL DEFAULT '',
+	-- Which declared workload the operator's file named, which is a different
+	-- question from the one above and is answered by a different authority.
+	-- kind is what the STORE knows without reading ember.yaml -- it is what
+	-- the ledger prints about a row whose entry has since been renamed or
+	-- deleted. workload is the entry id, and it means nothing without the
+	-- operator's file: it is what resolves to an image. '' is every row
+	-- written before schema version 7 and every request against a file that
+	-- declares no workloads; see WorkloadOf, which is the one place that
+	-- reading lives.
+	workload      TEXT    NOT NULL DEFAULT '',
 	provider      TEXT    NOT NULL,
 	gpu           TEXT    NOT NULL DEFAULT '',
 	offer         TEXT    NOT NULL DEFAULT '',
@@ -602,10 +627,11 @@ func (s *SQLite) insert(ctx context.Context, r Request, started time.Time) error
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO requests
-			(id, created_unix, status, kind, provider, gpu, offer, ttl_ns, max_hourly, max_run,
-			 preview, preview_every, started_unix)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		string(r.ID), r.Created.UnixMilli(), string(r.Status), r.Kind, r.Provider, r.GPU, r.Offer,
+			(id, created_unix, status, kind, workload, provider, gpu, offer, ttl_ns, max_hourly,
+			 max_run, preview, preview_every, started_unix)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		string(r.ID), r.Created.UnixMilli(), string(r.Status), r.Kind, r.Workload,
+		r.Provider, r.GPU, r.Offer,
 		int64(r.TTL), int64(r.MaxHourly), int64(r.MaxRun), r.Preview, r.PreviewInterval,
 		unixOrZero(started))
 	if err != nil {
@@ -662,7 +688,7 @@ const requestColumns = `id, created_unix, status, kind, provider, gpu, offer, tt
 	started_unix, ended_unix, cost, rate, elapsed_ns, billable_ns,
 	load_measured_ns, load_reported_ns,
 	mem_cgroup, mem_limit, mem_current, mem_total, mem_cached, asset_bytes,
-	model, err`
+	model, err, workload`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -681,7 +707,7 @@ func scanRequest(sc scanner) (Request, error) {
 		memCgroup                     int
 		provider, gpu, offer          string
 		preview, runID, nodeID, errTx string
-		model, kind                   string
+		model, kind, workload         string
 		previewEvery                  int
 	)
 	if err := sc.Scan(&id, &created, &status, &kind, &provider, &gpu, &offer, &ttl,
@@ -689,7 +715,7 @@ func scanRequest(sc scanner) (Request, error) {
 		&started, &ended, &cost, &rate, &elapsed, &billable,
 		&loadMeasured, &loadReported,
 		&memCgroup, &memLimit, &memCurrent, &memTotal, &memCached, &assets,
-		&model, &errTx); err != nil {
+		&model, &errTx, &workload); err != nil {
 		return Request{}, err
 	}
 	r = Request{
@@ -697,6 +723,7 @@ func scanRequest(sc scanner) (Request, error) {
 		Created:         time.UnixMilli(created).UTC(),
 		Status:          Status(status),
 		Kind:            kind,
+		Workload:        workload,
 		Provider:        provider,
 		GPU:             gpu,
 		Offer:           offer,
@@ -871,15 +898,22 @@ func (s *SQLite) ClaimNext(ctx context.Context, runID string, c Compat) (Request
 
 	where, args := "", []any{string(StatusRunning), runID, s.at().UnixMilli(), string(StatusQueued)}
 	if !c.IsZero() {
-		// THE KIND IS COMPARED THROUGH KindOf AND NOT AS A COLUMN, which is
-		// the one place the empty-means-sd rule has to reach into SQL. A
-		// plain `AND kind = ?` would refuse every row written before schema
-		// version 6 to an sd rental -- they hold '' and the compat holds
-		// 'sd' -- so a restart after an upgrade would leave an operator's
-		// queue permanently unclaimable. Rewriting the rows was the
-		// alternative and is the thing this schema never does.
-		where = ` AND (CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ? AND gpu = ?`
-		args = append(args, KindSD, KindOf(c.Kind), c.Provider, c.GPU)
+		// THE WORKLOAD IS COMPARED THROUGH WorkloadOf AND NOT AS A COLUMN,
+		// which is the one place the two empty-means rules have to reach into
+		// SQL. A plain `AND workload = ?` would refuse every row written
+		// before schema version 7 to any rental at all -- they hold '' and
+		// the compat holds an entry id -- so a restart after an upgrade would
+		// leave an operator's queue permanently unclaimable. Rewriting the
+		// rows was the alternative and is the thing this schema never does.
+		//
+		// The nested CASE is WorkloadOf spelled in SQL: an empty workload
+		// falls back to the kind, and an empty kind to 'sd'. Both stores
+		// spell the same rule, which is what the conformance table exists to
+		// hold.
+		where = ` AND (CASE WHEN workload = '' THEN ` +
+			`(CASE WHEN kind = '' THEN ? ELSE kind END) ELSE workload END) = ?` +
+			` AND provider = ? AND gpu = ?`
+		args = append(args, KindSD, WorkloadOf(c.Workload, c.Kind), c.Provider, c.GPU)
 	}
 
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(pick, where), args...)

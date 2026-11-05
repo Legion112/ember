@@ -371,7 +371,12 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 	if err != nil {
 		return "", err
 	}
-	ask.Overrides.Apply(&cfg)
+	// It can refuse, and the one thing it refuses is a `--workload` naming no
+	// declared entry: the selection is resolved against the file the operator
+	// named, so a name that is not in it must not become an image.
+	if err := ask.Overrides.Apply(&cfg); err != nil {
+		return "", err
+	}
 
 	plan, err := app.NewPlan(ctx, app.Request{
 		Config: cfg, Deps: r.Deps, Hold: ask.Hold, Log: r.Log,

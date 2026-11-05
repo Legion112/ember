@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/Legion112/ember/internal/app"
+	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/tts"
@@ -98,16 +99,25 @@ type Queue struct {
 	Store   genstore.Store
 	Planner Planner
 
-	// Voices is the catalogue a speech request's voice id is resolved
-	// against, from the operator's config.
+	// Workloads is what the operator's file declares, resolved once at
+	// startup by the one function that reads it.
 	//
 	// ON THE QUEUE AND READ NOWHERE ELSE ON THIS PATH, which is where the
-	// seal lands: a stored job carries an id and no path, so this is the only
-	// thing that can turn one into a filename -- and it comes from the config
-	// this process was started with, never from a request. Empty means this
-	// process serves no speech, which `webapi` refuses at enqueue so that no
-	// row reaches the loop that could not be resolved.
-	Voices tts.Catalogue
+	// seal lands: a stored row carries an entry **id** and no image and no
+	// path, so this is the only thing that can turn one into a voice filename
+	// -- and it comes from the config this process was started with, never
+	// from a request. The IMAGE is resolved from the same file one layer down,
+	// by `Narrow`, which is the planner's business and not the loop's.
+	//
+	// IT WAS A `tts.Catalogue` FOR THE WHOLE PROCESS, which stopped being
+	// right when the image moved into the entry: two declared speech
+	// workloads are two images with two voice sets on them, and one list
+	// would offer each one's ids for the other's node.
+	//
+	// Empty means this process can be asked for nothing, which `webapi`
+	// refuses at enqueue so that no row reaches the loop that could not be
+	// resolved.
+	Workloads []config.Workload
 
 	// Outputs is the directory requests write into.
 	//
@@ -425,12 +435,18 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 		return true, fmt.Errorf("request %s: %w", first.ID, err)
 	}
 
-	// THE KIND IS IN Compat, so a speech request cannot ride an sd rental.
+	// THE WORKLOAD IS IN Compat, so a speech request cannot ride an sd rental
+	// and a request for one declared image workload cannot ride another's.
 	// Without it the provider and the GPU would match, the claim would
 	// succeed, and the drain loop would hand an utterance to a resident
-	// sd-server that has no route for it -- after a card had been paid for.
+	// sd-server that has no route for it -- or a FLUX batch to a server
+	// holding SD1.5 -- after a card had been paid for. See genstore.Compat
+	// for why the entry id and not the driver.
 	compat := genstore.Compat{
-		Kind: genstore.KindOf(first.Kind), Provider: first.Provider, GPU: first.GPU,
+		Workload: genstore.WorkloadOf(first.Workload, first.Kind),
+		Kind:     genstore.KindOf(first.Kind),
+		Provider: first.Provider,
+		GPU:      first.GPU,
 	}
 
 	// Released after the rental returns and not inside it: the rental's cost
@@ -448,6 +464,16 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 	var rentErr error
 	switch genstore.KindOf(first.Kind) {
 	case genstore.KindTTS:
+		// THE ENTRY'S OWN CATALOGUE, resolved from the file this process was
+		// started with. Narrow has already refused a row whose entry no
+		// longer has this driver, so the lookup below cannot land on an sd
+		// entry -- and a miss here is a row whose entry was deleted between
+		// the claim and now, which is a refusal rather than a rental.
+		cat, cerr := q.voicesFor(first)
+		if cerr != nil {
+			q.endIfUnfinished(first.ID, cerr)
+			return true, cerr
+		}
 		rentErr = rental.WithSpoken(ctx, q.lifecycle(first.ID), func(ctx context.Context, sp app.Spoken) error {
 			// NO PutCaps, and that is the absence rather than an omission:
 			// piper publishes no capabilities, so there is nothing to cache
@@ -455,7 +481,7 @@ func (q *Queue) once(ctx context.Context) (bool, error) {
 			// internal/tts does not already check before anything is
 			// rented. A `caps` row written here would be an sd server's
 			// shape holding a speech rental's facts.
-			return q.drain(ctx, ttsRunner{sp: sp, cat: q.Voices}, lease, compat, first, &served)
+			return q.drain(ctx, ttsRunner{sp: sp, cat: cat}, lease, compat, first, &served)
 		})
 	default:
 		rentErr = rental.WithServed(ctx, q.lifecycle(first.ID), func(ctx context.Context, s app.Served) error {
@@ -907,3 +933,32 @@ func (s *sink) flush() {
 // the sampling share of the bill -- are the ones an event loop could never
 // have reached. Two cost-summing paths would have been the "two sources of
 // truth for one number" mistake Offer.VCPU exists to avoid, so there is one.
+
+// voicesFor is the catalogue the request's own declared workload publishes.
+//
+// RESOLVED FROM THE ENTRY AND NOT FROM A PROCESS-WIDE FIELD, which is what the
+// image moving into the entry forces: two declared speech workloads are two
+// images with two voice sets on them. The lookup is `WorkloadOf`'s, so a row
+// written before the column and a row naming the implicit entry resolve the
+// same way the claim did.
+//
+// A REFUSAL AND NOT A FALLBACK for an id that is not there. It can only happen
+// when the operator deleted or renamed the entry between the claim and here,
+// and the honest answer is that this row names a workload this process does not
+// have -- a fallback to any other entry would rent a machine for a voice set
+// nobody asked for.
+func (q *Queue) voicesFor(r genstore.Request) (tts.Catalogue, error) {
+	id := genstore.WorkloadOf(r.Workload, r.Kind)
+	for _, w := range q.Workloads {
+		if w.ID != id {
+			continue
+		}
+		cat, err := w.TTSCatalogue()
+		if err != nil {
+			return nil, fmt.Errorf("the voices workload %q publishes: %w", id, err)
+		}
+		return cat, nil
+	}
+	return nil, fmt.Errorf("this request names workload %q and this ember serve declares no "+
+		"such workload; nothing has been rented", id)
+}

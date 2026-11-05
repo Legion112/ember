@@ -56,8 +56,29 @@ use wasm_bindgen::prelude::*;
 /// they can no longer see in a message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
-    /// What to rent and what to generate.
-    Compose,
+    /// The landing address, which renders the first workload this server
+    /// declares.
+    ///
+    /// AN ALIAS AND NOT A PAGE, and it is canonicalised away the moment
+    /// `/api/config` answers: `App` replaces it with the first workload's own
+    /// address through `replace_state`, so the address bar, a copied link and
+    /// the nav's `aria-current` all name the page that is on screen. A
+    /// `push_state` there would make the back button walk through an alias
+    /// that redirects again.
+    ///
+    /// It exists because `/` is where the one-time token URL lands and where
+    /// an operator types a port from memory, and a server with one workload
+    /// must not need a click to reach its form.
+    Home,
+
+    /// One declared workload's compose page, by its id.
+    ///
+    /// THE ID IS THE OPERATOR'S AND THE ROUTER DOES NOT VALIDATE IT, which is
+    /// the same division `/requests/{id}` already uses: this type says what
+    /// address is being asked for and `App` says whether this server declares
+    /// it. A router that checked would need the config, which arrives after
+    /// the first parse.
+    Generate(String),
 
     /// What is queued, running and finished.
     Queue,
@@ -110,9 +131,10 @@ impl Route {
     pub fn parse(pathname: &str) -> Route {
         let segments: Vec<&str> = pathname.split('/').filter(|s| !s.is_empty()).collect();
         match segments[..] {
-            [] => Route::Compose,
+            [] => Route::Home,
             ["queue"] => Route::Queue,
             ["nodes"] => Route::Nodes,
+            ["generate", id] => Route::Generate(id.to_string()),
             ["requests", id] => Route::Request(id.to_string()),
             _ => Route::Unknown(pathname.to_string()),
         }
@@ -128,7 +150,8 @@ impl Route {
     /// the app, and the app would render "there is no page here".
     pub fn path(&self) -> String {
         match self {
-            Route::Compose => "/".to_string(),
+            Route::Home => "/".to_string(),
+            Route::Generate(id) => format!("/generate/{id}"),
             Route::Queue => "/queue".to_string(),
             Route::Request(id) => format!("/requests/{id}"),
             Route::Nodes => "/nodes".to_string(),
@@ -136,14 +159,22 @@ impl Route {
         }
     }
 
-    /// nav is the pages the header links to, in the order the flow runs.
+    /// nav is the pages the header links to that are the same on every
+    /// server, in the order the flow runs.
     ///
-    /// NOT EVERY ROUTE, and the two that are missing are missing for different
+    /// NOT EVERY ROUTE, and the four that are missing are missing for three
     /// reasons: `Request` needs an id, which only a queue row or a generation
-    /// can supply, and `Unknown` is not a page anybody should be sent to.
+    /// can supply; `Unknown` is not a page anybody should be sent to; `Home`
+    /// is an alias the app canonicalises away; and `Generate` needs an id this
+    /// function cannot know, because it comes from the operator's own file.
+    ///
+    /// THE GENERATE TABS ARE BUILT FROM THE CONFIG AND NOT FROM HERE, which is
+    /// #200: a server declares what it can run, and a nav spelled in this
+    /// crate would be ember's own list again -- the thing that made a
+    /// speech-only server offer an image tab. `views::Nav` reads them out of
+    /// the config signal, inside the closure that renders them.
     pub fn nav() -> Vec<(Route, &'static str)> {
         vec![
-            (Route::Compose, "generate"),
             (Route::Queue, "the queue"),
             (Route::Nodes, "what is billing"),
         ]
@@ -211,6 +242,31 @@ pub fn install() -> RwSignal<Route> {
     on_pop.forget();
 
     route
+}
+
+/// replace moves to a route WITHOUT a history entry.
+///
+/// FOR THE ONE ALIAS AND NOTHING ELSE. `/` renders the first declared
+/// workload, and leaving the address bar at `/` would mean a copied link names
+/// a page whose identity depends on which server reads it, and the nav's
+/// `aria-current` matches nothing. `go` is wrong for it: a pushed entry would
+/// put `/` back in the history, where pressing back lands on the alias and is
+/// redirected forward again -- a back button that cannot leave.
+///
+/// `replace_state` IS ON THE `History` BINDING web-sys ALREADY HAS for
+/// `push_state`, so this costs no feature and no crate.
+pub fn replace(route: RwSignal<Route>, to: Route) {
+    if route.get_untracked() == to {
+        return;
+    }
+    let path = to.path();
+    if let Some(h) = web_sys::window().and_then(|w| w.history().ok()) {
+        // Ignored for `go`'s reason: a refused history write leaves the page
+        // rendering the right thing under the wrong address, which is all a
+        // browser refusing history can ever cost.
+        let _ = h.replace_state_with_url(&JsValue::NULL, "", Some(&path));
+    }
+    route.set(to);
 }
 
 /// go moves to a route, as a navigation the browser can come back from.
@@ -288,11 +344,15 @@ pub fn Link(
 mod tests {
     use super::{intercepts, Route};
 
-    /// The three pages the nav links to, and the root.
+    /// The pages the nav links to, and the root.
     #[test]
     fn a_path_is_the_page_it_names() {
-        assert_eq!(Route::parse("/"), Route::Compose);
-        assert_eq!(Route::parse(""), Route::Compose);
+        assert_eq!(Route::parse("/"), Route::Home);
+        assert_eq!(Route::parse(""), Route::Home);
+        assert_eq!(
+            Route::parse("/generate/speech"),
+            Route::Generate("speech".to_string())
+        );
         assert_eq!(Route::parse("/queue"), Route::Queue);
         assert_eq!(Route::parse("/nodes"), Route::Nodes);
         assert_eq!(
@@ -389,8 +449,37 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            3,
-            "the nav is not the three pages it was: {seen:?}"
+            2,
+            "the nav's fixed pages are not the two it has: {seen:?}"
+        );
+    }
+
+    /// AND SO DOES A GENERATE TAB, which `Route::nav` cannot carry because its
+    /// id comes from the operator's own file.
+    ///
+    /// THE SAME SILENT DEFECT AS ABOVE, reached through the config instead of
+    /// through a literal: `views::Nav` builds one `Link` per declared
+    /// workload, so an href this parser does not read back would render "there
+    /// is no page here" for a tab the header prints. The round trip is the
+    /// only thing between those two spellings.
+    #[test]
+    fn a_generate_path_round_trips() {
+        for id in ["image", "speech", "sd", "tts", "a.b_c-1"] {
+            let r = Route::Generate(id.to_string());
+            assert_eq!(Route::parse(&r.path()), r, "{id}");
+            assert_eq!(r.path(), format!("/generate/{id}"));
+        }
+        // AND `/generate` ALONE IS NOT A WORKLOAD, for the reason
+        // `/requests/` is not a request: a page that rendered a form for an
+        // empty id would post a request naming no workload from an address
+        // that looks like it names one.
+        assert_eq!(
+            Route::parse("/generate"),
+            Route::Unknown("/generate".to_string())
+        );
+        assert_eq!(
+            Route::parse("/generate/"),
+            Route::Unknown("/generate/".to_string())
         );
     }
 

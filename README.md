@@ -565,6 +565,88 @@ whoever else is on that host, and on this one readable by every other account.
 `serve_token`, which is `ember serve`'s own credential, lives in the same file
 for that reason and has no flag either.
 
+### Declaring what this ember serve can run
+
+One `ember.yaml` names one `image:`, and each workload image carries exactly
+one binary — measured: `ember:sd` has `/usr/local/bin/sd-server` and no piper,
+`ember:tts` has `/usr/local/bin/piper` and no sd-server. So one `ember serve`
+serves one workload, and until
+[#200](https://github.com/Legion112/ember/issues/200) the web UI did not know
+that: `/api/config` published every workload *this build* knows, so a
+speech-only server offered an image tab and then explained itself in a red
+banner.
+
+A workload is a declared entry now. Each entry has its own id, its own image
+and its own driver block:
+
+```yaml
+# ember.yaml
+provider: local
+ttl: 1h
+
+workloads:
+  - id: image
+    label: Images
+    driver: sd
+    image: ghcr.io/legion112/ember-sd:v3-sm89@sha256:...
+    sd:
+      serve: ["sd-server", "--diffusion-model", "/models/flux2-dev.gguf"]
+      preview: proj
+      preview_interval: 5
+
+  - id: speech
+    label: Speech
+    driver: tts
+    image: ghcr.io/legion112/ember-tts:v1@sha256:...
+    tts:
+      voices:
+        - id: lessac
+          name: Lessac (en_US, medium)
+          voice: /opt/voices/en_US-lessac-medium.onnx
+```
+
+- `id` is the opaque string a request names: lowercase letters, digits, dot,
+  underscore and dash, at most 64 bytes. It is what the web UI's address bar
+  carries (`/generate/speech`) and what `POST /api/requests` sends as
+  `workload`. It never reaches a path, and an id that is nothing but dots is
+  refused rather than cleaned.
+- `label` is what the nav prints. Free text; it defaults to the id.
+- `driver` is which typed code path runs it: `sd` or `tts`. These are ember's
+  and not the operator's — a driver is what ember knows how to speak.
+- `image` and `images` mean exactly what the top-level keys mean, including
+  that they are not alternatives and that a card with no `images:` entry
+  refuses rather than falling back to `image:`.
+- `sd:` and `tts:` are the driver's own block. A block the entry's driver does
+  not read is refused rather than ignored.
+
+**A file either declares workloads or writes the top-level keys, never both.**
+`workloads:` beside a top-level `image:`, `images:`, `sd:`, `tts:`, `cmd:` or
+`cmds:` is refused naming each key it found: the top-level keys *are* the one
+unnamed workload a file without `workloads:` describes, so a file with both
+declares a workload no request can name beside ones it can. `cmd` and `cmds`
+have no entry form yet, so a file that runs argv does not declare workloads.
+
+**Every configuration committed here declares none, and nothing about them
+changed.** A file with `image:` and an `sd:` block describes one image
+workload; one with `tts.voices` describes one speech workload; one with both
+describes both, sharing the one image, which is what it always did. The
+implicit entries are named after their own drivers — `sd` and `tts` — which is
+also what a request stored before this change named, so an upgrade claims the
+queue it already had.
+
+`ember up` and `ember store sync` rent one machine with one image, so a file
+declaring more than one workload is asked which: `--workload <id>`. A file
+declaring none needs nothing, which is why no measurement in this document
+changed.
+
+The web UI shows one tab per workload **this server can actually serve**, with
+the operator's own label on it. An entry whose driver is `sd` and which has no
+`sd.serve`, or whose driver is `tts` and which publishes no `tts.voices`, is
+left out of `/api/config` entirely — so there is no tab for it and
+`POST /api/requests` answers 409 naming the key if anything asks. `ember serve`
+refuses to start only when *no* entry can be served, and then prints each
+entry's own reason.
+
 ### The committed configurations
 
 Every command reads `ember.yaml` in the working directory by default, so
@@ -1151,22 +1233,28 @@ tts:
       voice: /opt/voices/de_DE-thorsten-high.onnx
 ```
 
-`GET /api/config` publishes `kinds` and `voices` — the ids and their display
-names, and **not** the paths — so a UI can offer a list it could not have
-guessed. The compose panel's kind selector and voice chooser are built from
-those two lists and from nothing else; see
+`GET /api/config` publishes a `workloads` list, and each entry carries its own
+`voices` — the ids and their display names, and **not** the paths — so a UI can
+offer a list it could not have guessed. The nav's tabs and each page's voice
+chooser are built from that list and from nothing else; see
 [speaking instead of generating](#speaking-instead-of-generating). A request
 then looks like this:
 
 ```json
 {
-  "kind": "tts",
+  "workload": "tts",
   "provider": "local",
   "jobs": [
     {"tts": {"text": "Hello from ember.", "voice_id": "lessac", "output": "greeting"}}
   ]
 }
 ```
+
+`workload` is the declared entry's id. A file that declares no `workloads:`
+names its entries after their own drivers, so `tts` is the id on every
+configuration committed here — which is also why a request stored before
+the field existed resolves to the same entry. See
+[declaring what this ember serve can run](#declaring-what-this-ember-serve-can-run).
 
 `id` is lowercase letters, digits, dot, underscore and dash, and an id that is
 nothing but dots is refused: it reaches no path today, and the allow-list is
@@ -1188,10 +1276,10 @@ argv, an image, a store, a mount, a port, a probe, assets or `extra`. Every one
 of those stays in `ember.yaml`, which is what keeps the exposure and
 containment rules upstream of anything a browser can say.
 
-The two shapes cannot be mixed. `kind` is on the **request** and not on a job,
-so one rental runs one driver and a batch holding an image job and an utterance
-is not something a body can express; a job carrying the other kind's fields is
-refused in both directions, naming the index.
+The two shapes cannot be mixed. `workload` is on the **request** and not on a
+job, so one rental runs one driver and one image and a batch holding an image
+job and an utterance is not something a body can express; a job carrying the
+other driver's fields is refused in both directions, naming the index.
 
 | what | `sd` | `tts` |
 |---|---|---|
@@ -2244,7 +2332,7 @@ least. Every field in the form explains itself on hover.
 | the `hires`, `vae_tiling` and `slg` blocks | `lora` |
 | an image it has already uploaded, by digest, and its `strength` | the voice **file** and espeak's data directory |
 | preview mode and interval | piper's `speaker`, `length_scale`, `noise_scale`, `noise_w` and `sentence_silence` |
-| the `kind`, and for speech the text and a **voice id** from `tts.voices` | |
+| the declared `workload`'s id, and for speech the text and a **voice id** from that entry's `tts.voices` | the entry's `image:`, `driver:` and driver block |
 
 **A request that failed says why, in the row and in the watcher.** The reason
 is already a column — `requests.err`, written whether the refusal came before
@@ -2313,18 +2401,18 @@ does not.
 
 ### Speaking instead of generating
 
-The compose panel's first control is **kind**, and choosing `tts` replaces the
-image controls with a text area and a voice chooser. The geometry, the sampler,
-the steps, the seed and the preview mode go: they are parameters of a sampling
-pass and piper has no pass, so a control for them over a speech request would
-accept a value the server refuses — `kind` is on the request, and a job setting
-the other kind's fields is rejected naming its index — or, worse, one the
-server drops, which reads as a model that ignored it. Choosing `sd` gives back
-exactly the panel that was there before. The submit button says **speak**.
+Speech is a tab of its own, labelled with the operator's own name for the
+workload, at its own address (`/generate/speech`). The page has a text area and
+a voice chooser and nothing else: the geometry, the sampler, the steps, the
+seed and the preview mode are not hidden, they are not on that page — they are
+parameters of a sampling pass and piper has no pass, so a control for them over
+a speech request would accept a value the server refuses, or worse one the
+server drops, which reads as a model that ignored it. The submit button says
+**speak**.
 
 ```bash
 make web
-ember serve        # pick tts, type a sentence, press speak
+ember serve        # click the speech tab, type a sentence, press speak
 ```
 
 The chooser's entries are the `tts.voices` list from `GET /api/config`, by
@@ -2336,19 +2424,23 @@ names the key, rather than showing an empty dropdown: a `<select>` with no
 options posts a blank voice id, and the refusal for that arrives after the
 operator has typed their sentence.
 
-**Changing the kind empties the batch.** One rental runs one driver, so a batch
-holding an image job and an utterance is not something the wire can carry; the
-page not building one is cheaper than a 400 naming a job index nobody can see.
+**A batch does not survive leaving the page.** One rental runs one driver and
+one image, so a batch holding an image job and an utterance is not something
+the wire can carry; a workload is a page of its own, so navigating to another
+one disposes the batch rather than mixing it. That disposal is the same known
+gap the image page has — the form comes back empty and nothing says why — and
+[#139](https://github.com/Legion112/ember/issues/139) is where lifting the
+draft above the route lives.
 
-**The selector offers every kind this build knows, not every kind your config
-can run.** `GET /api/config`'s `kinds` is a static list, so a speech-only
-configuration still offers a pickable `sd` — and picking it gives the image
-controls and a request that fails once a node is up, because there is no
-generation server to start. What warns you is the red line under the header,
-which says a configuration with no `sd:` block has nothing for an image
-request to run. The other direction is closed: a configuration with no
-`tts.voices` offers `tts` and then refuses it in the panel, naming the key,
-before anything is rented.
+**The tabs are what this server can serve, not what this build knows.** That is
+[#200](https://github.com/Legion112/ember/issues/200), and before it the
+selector offered every kind ember was compiled with: a speech-only
+configuration still offered a pickable `sd`, picking it gave the image controls
+and a request that failed once a node was up, and what warned you was a red line
+under the header. `GET /api/config` publishes the declared entries this server
+can actually run, so an entry with no `sd.serve` or no `tts.voices` has no tab
+— and `POST /api/requests` answers 409 naming the key if anything asks for it
+anyway, which is the same method deciding both.
 
 **The artifact plays in the page.** A finished utterance is an `<audio
 controls>` beside the gallery's `<img>` for an image, and the element is chosen
@@ -2362,8 +2454,8 @@ declares no type for is **said** rather than guessed at, because an `<img>` and
 an `<audio>` both render perfectly over a fetch that failed and show nothing.
 
 **What the page cannot do is show an utterance's own text back.** A request's
-jobs are projected to the browser in the image shape — no `tts`, and no `kind`
-on the request view either — so a finished speech request arrives as one job
+jobs are projected to the browser in the image shape — no `tts`, and no
+`workload` on the request view either — so a finished speech request arrives as one job
 with every field at its zero, and the page cannot tell it from an empty one.
 Its **what it ran with** block says the parameters were not sent rather than
 printing seven rows of dashes under an empty prompt. Queueing and playing work;

@@ -1,8 +1,10 @@
 package webapi
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/Legion112/ember/internal/app"
@@ -58,82 +60,50 @@ type configView struct {
 	// where it stops.
 	Ceilings ceilings `json:"ceilings"`
 
-	// Kinds is every workload THIS BUILD KNOWS, and Voices the speech models
-	// this configuration publishes.
+	// Workloads is what THIS SERVER can be asked to run, in the order a UI
+	// should offer them, and every entry in it can be served.
 	//
-	// NOT "WHAT THIS PROCESS CAN RUN", which is what this line used to say and
-	// which the code does not do: `viewConfig` sends `genstore.Kinds()`
-	// unconditionally, so a config with no `sd:` block still offers `sd` and
-	// one with no `tts.voices` still offers `tts`. The sentence persuaded about
-	// a filtering nobody wired, which is the shape this repository keeps
-	// recording: an argument a reader believes about a mechanism that is not
-	// there. The field is the static list rather than an answer about this
-	// configuration.
+	// IT REPLACED `kinds`, WHICH WAS A LITERAL IN EMBER'S SOURCE. That field
+	// was `genstore.Kinds()` -- every workload this BUILD knows -- sent
+	// unconditionally, and the paragraph that used to be here said so and
+	// then wrote down the residual rather than closing it: on a speech-only
+	// server `sd` was still a kind the selector offered, picking it gave the
+	// image controls, and the only thing that warned an operator was a red
+	// line above a panel that was about to work. The reason it could not be
+	// filtered then is that a configuration named ONE image, so "can this run"
+	// had one answer for two kinds and no honest way to split it.
 	//
-	// AND THE GUARD CAUGHT THE FIRST WORDING OF THIS PARAGRAPH, which is worth
-	// one line because it is the same rule twice. That wording named the
-	// deleted flag as the precedent, with `ember` and a backticked `--all` on
-	// one line, and `TestComments_CiteNoFlagThatNoFlagSetDeclares` reported it
-	// -- so the comment correcting a claim about an unimplemented mechanism
-	// was itself citing a command nobody can type.
+	// WHAT CLOSED IT IS THE IMAGE MOVING INTO THE ENTRY. A declared workload
+	// carries its own image and its own driver block, so `Unservable` is a
+	// question with a per-entry answer -- and an entry that cannot be served
+	// is simply not in this list. A server with one entry publishes one, the
+	// page builds one tab from it, and there is nothing left for a banner to
+	// explain.
 	//
-	// WHERE THE RUNNABLE QUESTION IS ANSWERED, since it is not here. For
-	// speech, by `Voices` below and the two readers of it: the page's
-	// `Config::composing` refuses the kind naming `tts.voices`, and
-	// `POST /api/requests` refuses the request the same way, so a browser
-	// cannot get past a kind it has no voice for. For images, by `Servable`
-	// and the Posture line `Config::unrunnable` drives, which says a
-	// configuration with no `sd:` block has no generation server to start.
+	// AND THE DISCRIMINATOR THAT PARAGRAPH WORRIED ABOUT IS NOT THIS FIELD.
+	// It warned that filtering would collide with the page's "has
+	// /api/config answered yet" test, which read an empty `kinds` as
+	// unanswered -- so a config able to run neither kind would publish `[]`
+	// and the page would wait for ever. The page reads `providers` for that
+	// now, which is non-empty in every answer this server can give (the
+	// registry always holds the local provider), and an empty `workloads` is
+	// therefore an answer rather than a silence: `Config::unrunnable` says
+	// this server can be asked for nothing.
 	//
-	// THE RESIDUAL, PLAINLY: on a speech-only server `sd` is still a kind the
-	// selector offers and an operator can pick, and the only thing that warns
-	// them is that Posture line. Picking it gives the image controls and a
-	// request that fails once a node is up, because there is no server to
-	// start. Filtering the list would close it -- and would make `kinds` an
-	// answer about this configuration, which is a second place for "can this
-	// run" to be decided and the first direction a drift would show up in. It
-	// would collide with the page's own "has /api/config answered yet"
-	// discriminator, which reads an empty `kinds` as unanswered: a config able
-	// to run NEITHER kind would publish `[]` and the page would sit waiting for
-	// ever. `TestConfig_PublishesAtLeastOneKind` is the exit code behind that
-	// one case, and only that one -- a speech-only config filtered to `["tts"]`
-	// is non-empty and stays green -- so it is a floor under the worst
-	// narrowing rather than a guard against the whole idea. The residual is
-	// therefore written down rather than fixed here, and whoever wants the
-	// narrower list decides again with this paragraph in front of them.
-	//
-	// WHY A UI HAS TO BE TOLD RATHER THAN KNOWING. A request names a voice by
-	// **id** and nothing else -- the whole seal is that it cannot name a path
-	// -- so the list of ids is something only ember can produce, out of the
-	// operator's own config. A page that guessed would offer a choice that is
-	// refused after a card is rented.
-	//
-	// Voices is EMPTY when this configuration publishes none, and a UI must
-	// read that as "this process serves no speech" rather than as an empty
-	// dropdown: `POST /api/requests` refuses a speech request against an
-	// empty catalogue, naming `tts.voices`. The alternative -- an implicit
-	// entry pointing at ember's own image -- would offer a voice that cannot
-	// work wherever `image:` is not the speech one.
-	Kinds  []string    `json:"kinds"`
-	Voices []voiceView `json:"voices"`
+	// WHY A UI HAS TO BE TOLD RATHER THAN KNOWING. A request names an id and
+	// nothing else -- the whole seal is that it cannot name an image or a
+	// path -- so the list of ids is something only ember can produce, out of
+	// the operator's own file. A page that guessed would offer a choice that
+	// is refused after a card is rented.
+	Workloads []workloadView `json:"workloads"`
 
 	// AllowPaid says whether this process was started with --allow-paid. A UI
 	// that did not know would offer a card it cannot rent and surface the
 	// refusal as a failure.
 	AllowPaid bool `json:"allow_paid"`
 
-	// Servable says whether the config has an sd.serve block. Without one
-	// there is no generation server to start, so a queued request has nowhere
-	// to run -- and saying so at load is better than saying it after a card
-	// has been rented.
-	Servable bool   `json:"servable"`
-	Store    string `json:"store,omitempty"`
-	Mount    string `json:"mount,omitempty"`
-
-	// Preview and PreviewInterval are the config's defaults, which a UI uses
-	// as the starting position of its own controls.
-	Preview         string `json:"preview"`
-	PreviewInterval int    `json:"preview_interval"`
+	Store string `json:"store,omitempty"`
+	Mount string `json:"mount,omitempty"`
 
 	// Caps is what the generation server reported, once something has asked
 	// one. Absent before this process's first rental, which is why it is a
@@ -141,6 +111,45 @@ type configView struct {
 	// different answers, and a UI treating the first as the second would grey
 	// out every control.
 	Caps *capsView `json:"caps,omitempty"`
+}
+
+// workloadView is one declared workload as a UI reads it.
+//
+// THE IMAGE IS NOT ON IT, which is the projection doing its job rather than an
+// omission: this file's own header says a hand-written projection means adding
+// a field somewhere cannot publish it by default, and `config.Workload` holds
+// an OCI reference and a whole driver block. A UI needs an id to send, a label
+// to print, a driver to know which form to draw, and whatever that driver's
+// form cannot work without. The operator knows what is behind them.
+//
+// THE DRIVER IS PUBLISHED AND THE PAGE SWITCHES ON IT, which is the one thing
+// here a reader might expect to be hidden. It has to be: the two typed drivers
+// take different inputs, so a page that did not know which it was looking at
+// could only offer a form that swapped its fields -- which is the shape #200
+// is written against. It is a driver name and not an image, so it names what
+// ember can speak rather than what the node will run.
+type workloadView struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+
+	// Driver is which typed form this workload takes: "sd" or "tts".
+	Driver string `json:"driver"`
+
+	// Voices is this workload's speech catalogue, empty for every other
+	// driver. PER ENTRY, because the image is: two declared speech workloads
+	// are two images with two voice sets on them, and one list for the
+	// process would offer each one's ids for the other's node.
+	//
+	// Never null, for the reason ws.go gives: a client whose field is a list
+	// gets a type error from `null` and drops the whole response.
+	Voices []voiceView `json:"voices"`
+
+	// Preview and PreviewInterval are this workload's configured defaults,
+	// which a UI uses as the starting position of its own controls. Zero and
+	// empty for a driver with no preview, which the page reads as "no such
+	// control" because it draws no such control.
+	Preview         string `json:"preview"`
+	PreviewInterval int    `json:"preview_interval"`
 }
 
 // voiceView is one catalogue entry as a UI reads it.
@@ -236,7 +245,7 @@ type limitView struct {
 // offering ids the loop cannot resolve, and the trigger would be the next
 // --config reload somebody adds rather than anything in today's code.
 func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps *sdserver.Capabilities,
-	voices tts.Catalogue,
+	workloads []config.Workload,
 ) configView {
 	hourly, run, _ := cfg.Budgets()
 
@@ -246,20 +255,41 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 		// whole response.
 		Providers: []providerView{},
 		// Empty lists and never null, for the same reason.
-		Kinds:           genstore.Kinds(),
-		Voices:          []voiceView{},
-		Ceilings:        ceilings{TTL: dur(cfg.TTL), MaxHourly: rate(hourly), MaxRun: usd(run)},
-		AllowPaid:       allowPaid,
-		Servable:        len(cfg.SD.Serve) > 0,
-		Store:           cfg.Store.Name,
-		Preview:         cfg.SD.Preview,
-		PreviewInterval: cfg.SD.PreviewInterval,
+		Workloads: []workloadView{},
+		Ceilings:  ceilings{TTL: dur(cfg.TTL), MaxHourly: rate(hourly), MaxRun: usd(run)},
+		AllowPaid: allowPaid,
+		Store:     cfg.Store.Name,
 	}
 	if m, err := cfg.StoreMount(); err == nil && cfg.HasStore() {
 		v.Mount = m.String()
 	}
-	for _, e := range voices {
-		v.Voices = append(v.Voices, voiceView{ID: e.ID, Name: e.Name})
+	for _, wl := range workloads {
+		// AN ENTRY THAT CANNOT BE SERVED IS LEFT OUT, which is the whole of
+		// what fixed the lying selector: the page offers what this list holds
+		// and `POST /api/requests` refuses what `Unservable` refuses, so one
+		// method answers both and a tab cannot exist for a workload the next
+		// click would be refused for.
+		if wl.Unservable() != "" {
+			continue
+		}
+		e := workloadView{
+			ID: wl.ID, Label: wl.LabelOrID(), Driver: wl.Driver,
+			Voices:          []voiceView{},
+			Preview:         wl.SD.Preview,
+			PreviewInterval: wl.SD.PreviewInterval,
+		}
+		// The error is dropped and the voices go empty, which is the one
+		// place this projection may not refuse: a catalogue that will not
+		// resolve is refused at load, so reaching this means an entry built
+		// in Go rather than read from a file -- and taking the whole config
+		// view down for it would leave a page unable to say anything at all.
+		// `Unservable` has already answered that the list is non-empty.
+		if cat, err := wl.TTSCatalogue(); err == nil {
+			for _, vo := range cat {
+				e.Voices = append(e.Voices, voiceView{ID: vo.ID, Name: vo.Name})
+			}
+		}
+		v.Workloads = append(v.Workloads, e)
 	}
 	for _, p := range reg.All() {
 		c := p.Caps()
@@ -402,16 +432,36 @@ type inputView struct {
 // config never mentioned. The seal is structural: the field does not exist
 // here, and genstore.Job has none either.
 type newRequest struct {
-	// Kind is which workload this request is for: "sd" (or absent) for an
-	// image, "tts" for speech.
+	// Workload is the id of a workload the operator's file declares, and it
+	// is the whole of what a request may say about WHAT to run.
+	//
+	// IT REPLACED `kind`, WHICH WAS EMBER'S OWN ENUM. That field named one of
+	// two values this binary was compiled with, so the set of things a
+	// request could ask for was a literal in ember's source -- and because a
+	// configuration names one image, the two values were a claim about the
+	// build rather than about this server. An id is the operator's, resolved
+	// against their file by workloadFor, which is exactly what
+	// `internal/tts` already does for a voice id.
+	//
+	// NOT AN IMAGE, AND THERE IS NO FIELD FOR ONE. A request names a
+	// provider, a card, a batch of jobs and this id; the image, the argv, the
+	// mount, the ports and the serve command are the entry's, in a file no
+	// request can reach. That is what keeps every seal in `node`, `exposure`
+	// and `loopback` upstream of anything a browser can say.
 	//
 	// ON THE REQUEST AND NOT ON A JOB, which makes a mixed batch
-	// UNREPRESENTABLE rather than refused: one rental runs one driver, so an
-	// image job and an utterance in one request would need two of them on one
-	// node. ABSENT MEANS "sd" for compatibility -- every body the page has
-	// ever posted omits it -- and `genstore.KindOf` is the one place that
-	// reading lives.
-	Kind string `json:"kind,omitempty"`
+	// UNREPRESENTABLE rather than refused: one rental runs one driver and one
+	// image, so an image job and an utterance in one request would need two of
+	// them on one node.
+	//
+	// ABSENT MEANS "sd", through `genstore.WorkloadOf`, and that is
+	// compatibility rather than a default worth defending: every body the
+	// page posted before this omitted `kind`, and a file that declares no
+	// `workloads:` describes its entries named after their own drivers -- so
+	// the absent value names the same image generation it always did. A file
+	// that declares entries of its own is asked, because `sd` is then not an
+	// id it has.
+	Workload string `json:"workload,omitempty"`
 
 	Provider string `json:"provider"`
 	GPU      string `json:"gpu,omitempty"`
@@ -634,13 +684,24 @@ func (j newJob) params() sdserver.Params {
 // queue.Narrow, against the config this process was started with, because
 // that is the last thing before a create call and the only place that knows
 // the operator's own numbers.
-func (n newRequest) toRequest() (genstore.Request, error) {
-	if err := n.crossKind(); err != nil {
+func (n newRequest) toRequest(wl config.Workload) (genstore.Request, error) {
+	if err := n.crossKind(wl.Driver); err != nil {
 		return genstore.Request{}, err
 	}
 
 	r := genstore.Request{
-		Kind:            n.Kind,
+		// THE DRIVER AND THE ENTRY, which are two facts and not one. The
+		// driver is what the jobs' shape was validated against and what the
+		// store can answer about a row whose entry has since been renamed;
+		// the entry id is what resolves to an image and means nothing without
+		// the operator's file. See genstore.Request.Workload.
+		//
+		// The id is stored AS POSTED and not as resolved, so that an absent
+		// one stays absent: `WorkloadOf` is the one place that knows what
+		// empty means, and writing "sd" into the column here would be a
+		// second spelling of it.
+		Kind:            wl.Driver,
+		Workload:        n.Workload,
 		Provider:        n.Provider,
 		GPU:             n.GPU,
 		Preview:         n.Preview,
@@ -673,7 +734,7 @@ func (n newRequest) toRequest() (genstore.Request, error) {
 	}
 
 	for _, j := range n.Jobs {
-		if genstore.KindOf(n.Kind) == genstore.KindTTS {
+		if wl.Driver == config.DriverTTS {
 			// ONLY THE UTTERANCE, and nothing from the image half even if the
 			// body carried it -- which crossKind has already refused, so this
 			// is the second mechanism rather than the first. Copying the sd
@@ -705,12 +766,15 @@ func (n newRequest) toRequest() (genstore.Request, error) {
 //
 // The refusal names the kind and the index, because a batch of twenty composed
 // by a page is not something an operator can bisect by reading it.
-func (n newRequest) crossKind() error {
-	if !genstore.KindValid(n.Kind) {
-		return fmt.Errorf("kind %q is not one ember runs; it is %q or %q",
-			n.Kind, genstore.KindSD, genstore.KindTTS)
-	}
-	tts := genstore.KindOf(n.Kind) == genstore.KindTTS
+func (n newRequest) crossKind(driver string) error {
+	// THE DRIVER IS THE ENTRY'S AND IS NOT VALIDATED HERE. workloadFor found
+	// the entry in the catalogue the operator's file produced, and
+	// `config.Workload.validate` refused an unknown driver at load -- so the
+	// old `KindValid` check on a posted string has nothing left to guard. The
+	// one remaining way a driver can be a name this build does not know is a
+	// newer ember's file read by an older one, which `Unservable` answers as
+	// a 409 rather than as a cross-kind complaint about the jobs.
+	tts := driver == config.DriverTTS
 	for i, j := range n.Jobs {
 		switch {
 		case tts && j.TTS == nil:
@@ -1036,4 +1100,53 @@ func viewFinding(f reconcile.Finding) findingView {
 		v.Monthly = &m
 	}
 	return v
+}
+
+// workloadFor resolves the id a request named against what this server
+// declares.
+//
+// THE RESOLUTION IS THE SEAL. A request carries an id and the server turns it
+// into a whole workload -- an image, a driver and that driver's block -- out
+// of the operator's own file, which is the same move `tts.Ask.Resolve` makes
+// from a voice id to two paths on the node. Nothing a browser sends is
+// consulted about the image, so every refusal in `node`, `exposure` and
+// `loopback` is upstream of this.
+//
+// AN EMPTY ID IS `genstore.WorkloadOf`'s ANSWER, which is "sd", and that is
+// compatibility rather than a default worth defending: every body the page
+// posted before this field existed omitted `kind`, a file that declares no
+// `workloads:` names its entries after their own drivers, so an absent id
+// names the image generation it always did. A file that declares entries of
+// its own has no entry called `sd` unless the operator wrote one, and is
+// therefore asked -- which is a refusal naming the ids rather than a guess at
+// which of them was meant.
+//
+// IT NAMES WHAT IS DECLARED AND NOT WHAT IS SERVABLE, because the two
+// refusals are different answers and the remedies differ: an id that is not
+// there is something the request got wrong, and an id that is there and cannot
+// run is an edit to ember.yaml. postRequest answers the first 400 and the
+// second 409, and a reader of the first message needs the ids they could have
+// named rather than the subset that happens to work today.
+func workloadFor(ws []config.Workload, id string) (config.Workload, error) {
+	want := genstore.WorkloadOf(id, "")
+	for _, w := range ws {
+		if w.ID == want {
+			return w, nil
+		}
+	}
+	if len(ws) == 0 {
+		return config.Workload{}, errors.New("this ember serve declares no workload, so there " +
+			"is nothing a request could name: give ember.yaml a workloads: entry, or an sd: or " +
+			"tts: block")
+	}
+	ids := make([]string, 0, len(ws))
+	for _, w := range ws {
+		ids = append(ids, w.ID)
+	}
+	if id == "" {
+		return config.Workload{}, fmt.Errorf("this request names no workload, which means %q, "+
+			"and this ember serve declares %s: name one", want, strings.Join(ids, ", "))
+	}
+	return config.Workload{}, fmt.Errorf("no workload %q is declared here; this ember serve "+
+		"declares %s", id, strings.Join(ids, ", "))
 }
