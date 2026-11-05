@@ -2139,18 +2139,23 @@ whatever the socket said when it connected.
 **A watcher whose stream ends reconnects, from the sequence number it had
 reached.** The page says so while it is trying — one line under *what is
 happening*, saying the step on screen is the last one that arrived — and the
-line goes away when the socket is back. The cases are an `ember serve` that
-was restarted, a laptop that slept, and a forwarded port that blipped; in all
-three the generation may well still be running and billing, so a watcher that
-simply froze was a picture of a generation captioned as though the card were
-sampling. The retry is **bounded** at about forty seconds of backoff —
-long enough to outlast a restart typed by hand, short enough that a tab left
-open against a server that has gone says it is not coming back and that
-reloading is what fixes it. A request that has already ended is not retried at
-all: everything that was going to be said has been. Resuming is safe to
-overlap, because folding an event is idempotent on its sequence number, and
-`ember serve --log-level debug` records the cursor each watcher resumed from —
-the one thing about a reconnect that is otherwise invisible from either end.
+line goes away when the socket is back. The cases are a laptop that slept, a
+forwarded port that blipped, and an `ember serve` restart over a request that
+server was not generating; in all of them the generation may well still be
+running and billing, so a watcher that simply froze was a picture of a
+generation captioned as though the card were sampling. The retry is
+**bounded** at about forty seconds of backoff — long enough to outlast a
+restart typed by hand, short enough that a tab left open against a server that
+has gone says it is not coming back and that reloading is what fixes it. A
+request that has already ended is not retried at all: everything that was
+going to be said has been. That is also why the restart case above is worded
+the way it is rather than being an exception to this one — stopping
+`ember serve` **ends** the request whose rental it was holding, with its
+reason, so a tab watching that one is not looking at anything stale and the
+page says nothing. Resuming is safe to overlap, because folding an event is
+idempotent on its sequence number, and `ember serve --log-level debug` records
+the cursor each watcher resumed from — the one thing about a reconnect that is
+otherwise invisible from either end.
 
 **One page is served on every route the app owns**, so a reload on a path the
 app made up gets the app rather than a 404 — which is any path whose last
