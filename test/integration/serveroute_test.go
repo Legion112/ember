@@ -589,11 +589,11 @@ func TestServe_UILeavingAReconnectingWatcherDoesNotTrapTheWasm(t *testing.T) {
 // `ember serve` answers a 404 rather than the page, the handshake has no 101
 // and the browser calls `onclose`. A closed port would do it too and would
 // mean finding one that stays closed for the length of the lab.
-//
 // ONE NAME FOR THE PATH, not one per call site, which is the journal's
-// "nodes" subdirectory rule: two labs break these sockets now, and a second
-// spelling of the path is a second thing to keep in step with what
-// `ember serve` actually 404s.
+// "nodes" subdirectory rule: two labs break these sockets -- this one and the
+// reconnect lab's `noteOnALostStream`, which sets it inline because its set,
+// read and clear have to be one round trip -- and a second spelling is a
+// second thing to keep in step with what `ember serve` actually 404s.
 const brokenSocketPath = "/api/no-such-socket"
 
 func breakSockets(t *testing.T, ctx context.Context) {
@@ -610,30 +610,6 @@ func breakSockets(t *testing.T, ctx context.Context) {
 	if got != "broken" {
 		t.Fatalf("the socket wrapper reported %q, so the re-opens below are not being "+
 			"refused and the backoff window is a race", got)
-	}
-}
-
-// mendSockets lets the page's websockets reach the real route again.
-//
-// THE OTHER HALF OF ONE SWITCH, and it exists because the second lab to use
-// this mechanism needs the page to RECOVER: the disposed-owner window only
-// ever needs the retry loop to keep failing, while the note about a lost
-// stream has to appear and then go away, and "it went away" is the only thing
-// on the page that says the socket is open again.
-func mendSockets(t *testing.T, ctx context.Context) {
-	t.Helper()
-	got, err := chromedp.Run(ctx, chromedp.Evaluate[string](
-		`(function () {
-			if (!window.__emberSockets) { return "not wrapped"; }
-			window.__emberBreak = "";
-			return "mended";
-		})()`))
-	if err != nil {
-		t.Fatalf("mending the page's websockets: %v", err)
-	}
-	if got != "mended" {
-		t.Fatalf("the socket wrapper reported %q, so the page is not being let back "+
-			"onto the real route", got)
 	}
 }
 
