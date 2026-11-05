@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -234,48 +233,6 @@ func TestRecorder_RecordsNoImageRowWithoutAKey(t *testing.T) {
 	}
 }
 
-// TestRecorder_LeavesAStepOutOfTheJobsTable.
-//
-// A `cmds` step emits unit_started and unit_cost with Unit == "step", and
-// those must reach no job row: a step is not a job, and the figures that table
-// exists for -- images, passes, steps per second -- are not things an ffmpeg
-// invocation has. The assertion is on the store's own call log rather than on
-// the rows, because `UpdateJob` against a jobless run FAILS: the row that
-// would be written is not there, so the real cost of getting this wrong is a
-// warning per step and a figure nowhere.
-func TestRecorder_LeavesAStepOutOfTheJobsTable(t *testing.T) {
-	st, rec, stream := adopted(t)
-
-	stream.Emit(report.Event{
-		Kind: report.KindUnitStarted, Unit: report.UnitStep,
-		Index: 1, Total: 2, Desc: "ffmpeg -i in.mp4 out.mp4",
-	})
-	stream.Emit(report.Event{
-		Kind: report.KindUnitCost, Unit: report.UnitStep,
-		Index: 1, Total: 2, Cost: node.MicroUSD(1000), Spent: node.MicroUSD(1000),
-	})
-	rec.Flush(context.Background())
-
-	for _, c := range st.Calls {
-		if strings.HasPrefix(c, "UpdateJob") {
-			t.Errorf("a step reached the jobs table: %v", st.Calls)
-			break
-		}
-	}
-	// The cost is not lost: it is in the event stream, which is where a
-	// step's own figures live.
-	es, err := st.Events(context.Background(), rec.Req, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(es) != 2 {
-		t.Fatalf("stored %d event(s), want 2", len(es))
-	}
-	if es[1].Cost != node.MicroUSD(1000) {
-		t.Errorf("the step's cost is not in the stream either: %+v", es[1])
-	}
-}
-
 // TestRecorder_FinishClassifiesHowARunEnded.
 //
 // A cancelled context is NOT a failure: the operator pressed Ctrl-C, or the
@@ -297,7 +254,7 @@ func TestRecorder_FinishClassifiesHowARunEnded(t *testing.T) {
 			// Buffered and never flushed by the caller, which is the ordering
 			// Finish has to get right: a status written over an unflushed
 			// buffer is a row saying "done" above events that never arrived.
-			stream.Emit(report.Event{Kind: report.KindUnitStarted, Unit: report.UnitStep, Index: 1, Total: 1})
+			stream.Emit(report.Event{Kind: report.KindUnitStarted, Unit: report.UnitJob, Index: 1, Total: 1})
 			rec.Finish(context.Background(), c.err)
 
 			got := reqOf(t, st, rec)

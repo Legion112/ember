@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"time"
 
 	"github.com/Legion112/ember/internal/assets"
 	"github.com/Legion112/ember/internal/blob"
@@ -29,10 +28,6 @@ import (
 type Request struct {
 	Config config.Config
 	Deps   Deps
-
-	// Hold ends the session after this long instead of waiting for the
-	// context. Zero waits.
-	Hold time.Duration
 
 	// CPUOnly narrows this run to a machine with no card, which is what
 	// `ember store sync` rents: a GPU idling while a download runs is a GPU
@@ -143,8 +138,6 @@ type Plan struct {
 	// field for an image input -- carries an empty one and the resolution
 	// path is unreachable from it by construction rather than by a check.
 	InputsDir string
-
-	Hold time.Duration
 }
 
 // NewPlan resolves everything a run needs and rents nothing.
@@ -218,28 +211,6 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	}
 	if req.Budget != nil {
 		opts.Budget = *req.Budget
-	}
-
-	// Said before anything is rented, because that is the only moment it is
-	// useful, and said rather than refused.
-	//
-	// workload.NonLoopbackBinds has the whole argument. The short version:
-	// nothing is published for a workload port -- exposure.PortRequest's
-	// `public` field is unexported and only SSHPort() sets it -- so an
-	// operator who writes `--host 0.0.0.0` has concluded something false
-	// about what ember exposed, and on the local provider that belief is
-	// partly true, since a Docker bridge makes the bind reachable from this
-	// machine. A refusal would be ember claiming to know a flag grammar it
-	// deliberately does not learn.
-	//
-	// sd.serve is not read here: sdserver.ServeCommand owns that argv's
-	// listen address and refuses a command that names it, which is a seal
-	// rather than advice.
-	for _, b := range cmdBinds(cfg) {
-		opts.Log.Warn("this workload asks to listen somewhere other than the node's own loopback",
-			"flag", b.Flag, "address", b.Addr, "argv", b.Index,
-			"published", "nothing: a workload port is never published, and the post-create check destroys a node whose provider published one",
-			"reachable", "the forward only, except on the local provider, where a Docker bridge makes the bind reachable from this machine")
 	}
 
 	// THE WEIGHTS, BEFORE THE CARD.
@@ -340,10 +311,9 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 
 	// ONE KIND, NEVER TWO, AND HERE RATHER THAN IN node.NewSpec.
 	//
-	// That function already refuses any two of `cmd`, `cmds` and `sd.serve`,
-	// through namedWorkloads, with the right argument: a config with two has
-	// two answers to "what does this node run", and picking one silently is
-	// how an operator watches the wrong thing execute. It cannot see this one,
+	// A config with two kinds has two answers to "what does this node
+	// generate", and picking one silently is how an operator watches the wrong
+	// thing execute. node.NewSpec cannot see this one,
 	// because `node.Spec` HAS NO SPEECH FIELD -- and that is the seal rather
 	// than a gap. A spec field is a thing a request could one day be consulted
 	// about; the typed batch travels beside the spec for the same reason
@@ -351,9 +321,9 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	// is what TestNodeImportsNothing holds.
 	//
 	// So the refusal is a layer up, which is where the two kinds are both in
-	// scope. Without it `Plan.serve` would reach `len(p.Spec.Cmds) > 0` first
-	// and run the commands, leaving an operator who wrote both with a rental
-	// that said nothing and no line anywhere saying why.
+	// scope. Without it `Plan.batchOf` would pick one of the two and the
+	// other would be silently dropped, leaving an operator who wrote both
+	// with a rental that generated the wrong thing and no line saying why.
 	if len(spoken.Jobs) > 0 {
 		if other := spec.Workload(); other != "" {
 			return Plan{}, Usage(fmt.Errorf("tts.jobs and %s are both set; use one", other))
@@ -363,7 +333,6 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	if req.CPUOnly {
 		// This rental runs `embernode fetch` and nothing else, and brings
 		// nothing home: the bytes land on the store, which is the point.
-		spec.Cmds = nil
 		spec.Outputs = nil
 	}
 
@@ -376,27 +345,11 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 		Options:   opts,
 		Paths:     ps,
 		ImageFrom: from,
-		Hold:      req.Hold,
 		// Empty for every shape but a queued request, which is the only one
 		// that can name an image input: `ember up` reads its jobs from
 		// ember.yaml, and config.SDJob has no field for one.
 		InputsDir: inputsDir(req, ps),
 	}, nil
-}
-
-// cmdBinds collects the non-loopback binds across every step of a run.
-//
-// Every entry of `cmds` and not only the first, for the reason BuildSpec
-// validates every entry's argv: a batch whose seventh step publishes is a
-// batch where the finding arrives after six steps have been paid for -- and
-// here it would never arrive at all, because the warning is printed once
-// before the rental rather than per step.
-func cmdBinds(cfg config.Config) []workload.NonLoopbackBind {
-	out := workload.NonLoopbackBinds(cfg.Cmd)
-	for _, c := range cfg.Cmds {
-		out = append(out, workload.NonLoopbackBinds(c)...)
-	}
-	return out
 }
 
 // Filter is the offer filter this config and store describe.
@@ -524,10 +477,6 @@ func ResolveImage(cfg config.Config, offer node.Offer) (string, string, error) {
 
 // BuildSpec turns a config and what was resolved from it into a validated Spec.
 func BuildSpec(cfg config.Config, r Resolved) (node.Spec, error) {
-	ports, err := cfg.ParsePorts()
-	if err != nil {
-		return node.Spec{}, err
-	}
 	outputs, err := cfg.ParseOutputs()
 	if err != nil {
 		return node.Spec{}, err
@@ -537,21 +486,11 @@ func BuildSpec(cfg config.Config, r Resolved) (node.Spec, error) {
 	if r.Filter.CPUOnly {
 		probe = nil
 	}
-	// Checked before anything is rented. A command ember cannot send is a
-	// config error, and finding a config error after the create call is
-	// finding it after the billing started.
-	if err := workload.Validate(cfg.Cmd); err != nil {
-		return node.Spec{}, err
-	}
-	// Every step, for the same reason: an argv the remote shell cannot be
-	// handed safely is a config error, and finding it at step seven means
-	// six steps of a rented card have already been paid for.
-	for i, c := range cfg.Cmds {
-		if err := workload.Validate(c); err != nil {
-			return node.Spec{}, fmt.Errorf("cmds[%d]: %w", i, err)
-		}
-	}
-	// And the server, for the same reason -- plus the listen address, which
+	// Checked before anything is rented. An argv the remote shell cannot be
+	// handed safely is a config error, and finding a config error after the
+	// create call is finding it after the billing started.
+	//
+	// The server, plus the listen address, which
 	// ember appends and refuses to let the config choose. A serve command
 	// passing --listen-ip 0.0.0.0 would put an unauthenticated generator,
 	// with arbitrary file paths in its request body, on a rented machine's
@@ -599,9 +538,6 @@ func BuildSpec(cfg config.Config, r Resolved) (node.Spec, error) {
 		// still applies the pin rule -- now to the entry that was chosen
 		// rather than to a scalar that might not have been the one that ran.
 		Image:   r.Image,
-		Cmd:     cfg.Cmd,
-		Cmds:    cfg.Cmds,
-		Ports:   ports,
 		Filter:  r.Filter,
 		TTL:     cfg.TTL,
 		Outputs: outputs,

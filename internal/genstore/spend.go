@@ -23,8 +23,8 @@ import (
 // So per-job cost and timing existed nowhere ember could query, and the only
 // aggregate in the program was a Go loop over one request's entire event
 // stream. `grep -rn 'SUM(\|GROUP BY' internal/genstore/` returned nothing.
-// Every measurement in README -- the nine rented-card rows, the cmds-against-
-// sd.jobs crossover the whole `sd:` block rests on, ember's own 7% per-rental
+// Every measurement in README -- the nine rented-card rows, the resident-model
+// crossover the whole `sd:` block rests on, ember's own 7% per-rental
 // overhead -- was computed by hand from a run somebody watched, which means
 // nothing trends it and nobody would notice ember's own overhead regressing.
 //

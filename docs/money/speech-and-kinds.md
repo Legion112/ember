@@ -8,12 +8,8 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
 - **ember has a second typed workload, the seam it needed is ONE method, and
   every number below was measured before any of the design (#190, #36).** #36
   asks whether a second typed integration is worth its cost and says the
-  crossover "should come before the design"; #190 supersedes its framing with
-  "`cmds` stays the mechanism and stops being the interface". Both are
-  answered here for speech, and the sentence this file already carries --
-  "`cmds` stays as the general mechanism, because a typed sd path cannot run
-  `ffmpeg`" -- is **unchanged**: what changed is that `cmds` is no longer the
-  only answer for anything that is not stable diffusion.
+  crossover "should come before the design". Both are answered here for
+  speech.
 
   **THE BINARY IS piper AND THE PIN IS NOT MERELY AGAINST DRIFT.**
   `2023.11.14-2` is the last release that ships a self-contained C++ binary
@@ -91,25 +87,20 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   it. `Describe` is why it is an interface and not a func type: a refusal that
   cannot name its kind is one an operator has to work out.
   **`runServed`'s body did NOT move**, deliberately: it is 300 lines with a
-  server process, a forward, a poll loop and a cancel channel in it, and
-  rewriting it to fit an interface in the commit that introduces the interface
-  would mean the seam and its first implementation were verified by the same
-  tests at once.
+  server process, a poll loop and a cancel channel in it, and rewriting it to
+  fit an interface in the commit that introduces the interface would mean the
+  seam and its first implementation were verified by the same tests at once.
 
   **`node.Spec` GAINS NO FIELD, AND THAT IS WHY THE ONE-KIND REFUSAL MOVED UP
   A LAYER.** The typed batch travels beside the spec, as `Plan.Jobs` already
   does, so a request can never be consulted about a voice -- the seal this
   file states as "a request names a provider, a card and a batch of jobs, and
   nothing else" holds with nothing added to it. The consequence is that
-  `node.NewSpec`'s `namedWorkloads` **cannot see** this kind, and without a
-  refusal in `app.NewPlan` a config naming both would reach
-  `len(p.Spec.Cmds) > 0` first and run the commands -- an operator who wrote
-  both with a rental that said nothing and no line anywhere saying why.
-  `node.Spec.Workload` is what lets that message name the other key, and it
-  collapses `cmd` and `cmds` into one answer on purpose: `NewSpec` folds the
-  first into the second, so naming one of the two would name the wrong key for
-  half of all configs, and an operator looking for a key that is not in their
-  file concludes the message is about somebody else's.
+  `node.NewSpec` **cannot see** this kind, and without a refusal in
+  `app.NewPlan` a config naming both would have one of the two silently
+  dropped -- an operator who wrote both with a rental that generated the wrong
+  thing and no line anywhere saying why. `node.Spec.Workload` is what lets
+  that message name the other key.
 
   **THE ARTIFACT PATH WAS A LITERAL, which is #36's fifth decision.**
   `getImage` declared `image/png` unconditionally -- true of everything ember
@@ -193,19 +184,12 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   the defect this whole seam exists to make impossible -- is `go test ./...`
   exit 0.** Every `runSpoken` test drives the driver or its adapter directly,
   where the dispatch is not consulted at all, so the defect lives in one line
-  of `Plan.serve` that only a real rental reaches: a speech run falls through
-  to `session.Serve`, holds the node until its deadline and says nothing. The
-  lab is what reports it, at **exit 2** on "the output does not mention
-  `speaking:`" and "no greeting-01.wav among []". That is this file's own "the
-  most expensive defect available in a change is not reliably the one the unit
-  suite can see", met again -- and the reason the lab exists rather than being
-  coverage.
-  **Its failure takes TEN MINUTES, and that is ember being right rather than
-  the lab being slow**: the fall-through is the interactive branch, which holds
-  the session open by design, so the run is bounded by the config's `ttl` and
-  the lab by its own `-timeout`. Worth writing down because a ten-minute red
-  reads like a wedge, which this file records as the report that names nothing
-  a reviewer can act on -- here it names both.
+  of `Plan.serve` that only a real rental reaches: a speech run generates
+  nothing and says nothing. The lab is what reports it, at **exit 2** on "the
+  output does not mention `speaking:`" and "no greeting-01.wav among []". That
+  is this file's own "the most expensive defect available in a change is not
+  reliably the one the unit suite can see", met again -- and the reason the
+  lab exists rather than being coverage.
 
   **THE VOICE IS BAKED IN, WHICH IS THE OPPOSITE OF THE RULE FOR A
   CHECKPOINT.** This file's measurement is that a `COPY`'d model gets a layer

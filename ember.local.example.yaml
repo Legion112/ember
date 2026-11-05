@@ -1,8 +1,9 @@
-# ember, generating on the GPU in this machine.
+# ember, generating FLUX.2 on the GPU in this machine.
 #
-# The same assets and digests as ember.flux2.yaml with the provider changed
-# and --offload-to-cpu added: weights in system RAM, streamed into VRAM per
-# layer. Not fast, and free, which is what prompt iteration wants.
+# The same assets and digests as ember.sd-server.example.yaml with the
+# provider changed and --offload-to-cpu added: weights in system RAM, streamed
+# into VRAM per layer. Not fast, and free, which is what prompt iteration
+# wants.
 #
 # WHY IT IS SLOW, why the geometry is 1024 and not 1536, and why `verify` is
 # `present` here and `always` on the rented path: docs/configurations.md.
@@ -50,9 +51,9 @@ assets:
 # make the free path the slow one to start.
 verify: present
 
-# The same two-question probe the rented config carries, and it matters more
-# here: the published image genuinely cannot run on the wrong card, and this
-# is what turns that into a refusal instead of a silent CPU fallback. An empty
+# The two-question probe the rented config carries, and it matters more here:
+# the published image genuinely cannot run on the wrong card, and this is what
+# turns that into a refusal instead of a silent CPU fallback. An empty
 # /etc/ember-cuda-arch FAILS the test rather than passing it.
 gpu_probe:
   - sh
@@ -60,43 +61,56 @@ gpu_probe:
   - "arch=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ' .'); img=$(cat /etc/ember-cuda-arch 2>/dev/null); echo \"card is sm_$arch, image is sm_$img\"; test -n \"$img\" && test \"$arch\" = \"$img\" && sd-cli --list-devices | grep -qi cuda"
 gpu_probe_timeout: 1m
 
-cmd:
-  - sd-cli
-  - --diffusion-model
-  - /models/flux2-dev-Q8_0.gguf
-  - --llm
-  - /models/Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf
-  - --vae
-  - /models/flux2-ae.safetensors
+sd:
+  # ember appends --listen-ip 127.0.0.1 --listen-port 1234 itself and refuses
+  # a serve command that names either: a config choosing 0.0.0.0 would publish
+  # an unauthenticated generator on this machine's LAN interface.
+  #
+  # --diffusion-model and not --model: FLUX.2 names its diffusion model, text
+  # encoder and VAE separately, and the flag that works for a whole checkpoint
+  # in one file silently cannot load a standalone DiT.
+  serve:
+    - sd-server
+    - --diffusion-model
+    - /models/flux2-dev-Q8_0.gguf
+    - --llm
+    - /models/Mistral-Small-3.2-24B-Instruct-2506-Q8_0.gguf
+    - --vae
+    - /models/flux2-ae.safetensors
 
-  # The whole reason this configuration is possible: 56 GiB of weights in a
-  # 125 GiB machine behind an 11 GiB card.
-  - --offload-to-cpu
+    # The whole reason this configuration is possible: 56 GiB of weights in a
+    # 125 GiB machine behind an 11 GiB card.
+    - --offload-to-cpu
 
-  - --prompt
-  - "A detailed anime illustration of a young woman alone on the open-air platform of a rural railway station at dusk. Cel-shaded with crisp linework, warm rim light from the setting sun behind her, cool blue tones in the shadows."
-  - --sampling-method
-  - euler
-  - --cfg-scale
-  - "1.0"
-  - --guidance
-  - "4.0"
-  - --steps
-  - "28"
+    - --diffusion-fa
+    - -v
 
-  # 1024, not 1536: the DiT's compute buffer alone was 4412 MiB at 1536x1536
-  # on a card with 80 GiB to spare. Raise it once a run has proved it fits.
-  - -W
-  - "1024"
-  - -H
-  - "1024"
+  # 56 GiB read off this machine's own disk and then streamed into VRAM a
+  # layer at a time. Generous, and still a deadline: a server that died wants
+  # noticing rather than waiting out the ttl.
+  ready_timeout: 20m
 
-  - --seed
-  - "20261030"
-  - --diffusion-fa
-  - -v
-  - -o
-  - /workspace/out/local.png
+  # `proj` projects the latent rather than decoding it, so it costs almost
+  # nothing per frame; tae and vae run a real decode per frame, which on a
+  # card this size is most of the generation.
+  preview: proj
+  preview_interval: 5
+
+  jobs:
+    - prompt: "A detailed anime illustration of a young woman alone on the open-air platform of a rural railway station at dusk. Cel-shaded with crisp linework, warm rim light from the setting sun behind her, cool blue tones in the shadows."
+      sampler: euler
+      cfg: 1.0
+      guidance: 4.0
+      steps: 28
+
+      # 1024, not 1536: the DiT's compute buffer alone was 4412 MiB at
+      # 1536x1536 on a card with 80 GiB to spare. Raise it once a run has
+      # proved it fits.
+      width: 1024
+      height: 1024
+
+      seed: 20261030
+      output: local
 
 outputs:
   - /workspace/out:renders

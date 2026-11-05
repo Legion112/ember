@@ -26,14 +26,17 @@ provider: runpod
 gpu: rtx4090
 image: ghcr.io/you/ember-sd:v1       # sshd + embernode + the model
 ttl: 30m
-cmd: [sd-cli, -m, /opt/models/sd15.gguf, -p, "a lovely orange cat", -o, /workspace/out/cat.png]
+sd:
+  serve: [sd-server, -m, /opt/models/sd15.gguf]
+  jobs:
+    - prompt: "a lovely orange cat"
+      output: cat
 outputs: [/workspace/out:renders]
 ```
 
-That rents a node, waits for it, runs the command with its output streaming to
-your terminal, fetches `/workspace/out` back over SSH, and destroys the node —
-including when you interrupt it. Leave `cmd` out and it forwards the ports
-instead and holds, which is the interactive shape.
+That rents a node, waits for it, starts the generation server, sends it the
+jobs with their progress streaming to your terminal, brings each image home
+over SSH, and destroys the node — including when you interrupt it.
 
 Every run reports what it cost, and `ember ls` reports what each node has cost
 so far — the figure that turns "an orphaned H100 burns about 175 ₽/hour in
@@ -61,12 +64,12 @@ measurements instead of by spec sheets.
 
 `ember up --provider local` works end to end today: it rents a container on
 your own Docker daemon, authenticates against a host key ember minted and
-injected, forwards the ports you asked for to loopback, holds them, and
-destroys the node — including after Ctrl-C.
+injected, runs what the config describes, brings the results home and destroys
+the node — including after Ctrl-C.
 
 ```
 make docker-build
-ember up --provider local --image ember:lab --port demo:22 --ttl 30m
+ember up --config ember.local.sd-server.example.yaml
 ```
 
 ember runs **one container that is both the node and the workload**, so the
@@ -83,7 +86,7 @@ different image would prove nothing about what the provider pulls.
 | `internal/hostkey` | sealed trust — `InsecureIgnoreHostKey` cannot be typed in |
 | `internal/exposure` | what may face the internet — a public port cannot be spelled |
 | `internal/keys` | the operator's SSH identity, agent fallback |
-| `internal/tunnel` + `sshdial` | the forward and the one place a host-key callback is set |
+| `internal/tunnel` + `sshdial` | reaching a node's own loopback over SSH, and the one place a host-key callback is set |
 | `internal/provider` + `local` | provider seam and the free Docker-backed one |
 | `internal/provider/runpod` | RunPod: wire types, pure mapping, thin client |
 | `internal/httpx` | one place for timeouts, body closing and readable API errors |
@@ -107,7 +110,7 @@ Every verb `ember` dispatches, with the one-line summary it prints for itself:
 | verb | what it does |
 |---|---|
 | `version` | print the ember version |
-| `up` | rent a node, forward its ports to loopback, destroy it |
+| `up` | rent a node, run the jobs the config describes, destroy it |
 | `down` | destroy a node by handle |
 | `ls` | list nodes ember created, across every configured provider |
 | `serve` | run the web UI and a queue that drains onto one rental |
@@ -144,9 +147,9 @@ of them invents a tag.
 
 ## Two properties that outrank features
 
-**Nothing of yours is reachable from the internet.** Every forwarded port binds
-to loopback on your machine; the only thing ember asks a provider to expose is
-sshd,
+**Nothing of yours is reachable from the internet.** Every listener ember opens
+binds to loopback on your machine; the only thing ember asks a provider to
+expose is sshd,
 key-only, verified against a host key ember generated and injected itself.
 `net.Listen` appears in exactly one package and a test fails the build if that
 changes. A public port cannot be *spelled*: the type carrying one has no
@@ -468,15 +471,15 @@ why that distinction has already cost this repository money.
 
 There is also a stateful fake of RunPod's API (`test/integration/runpodfake`)
 whose control plane is pretend and whose data plane is a real container: the
-provider, the exposure check, the SSH handshake against the minted host key,
-the forward and the output fetch all run for real against it. It reproduces
+provider, the exposure check, the SSH handshake against the minted host key
+and the output fetch all run for real against it. It reproduces
 the behaviours that cost money to discover — no host key reported, `ssh.direct`
 appearing after the status reads RUNNING, and the web terminal port RunPod
 publishes unbidden — so none of them can come back silently.
 
 The labs run the real `ember` binary against a real Docker daemon: a real
-sshd, a real SSH handshake against a pinned host key, a real forward, and a
-`SIGKILL` mid-provision to produce the orphan that `ls` and `reap` exist to
+sshd, a real SSH handshake against a pinned host key, a real remote exec, and
+a `SIGKILL` mid-provision to produce the orphan that `ls` and `reap` exist to
 find. Nothing in them skips — a missing daemon or image is a hard failure
 naming the command that fixes it, because a lab that skips itself reports
 success for a security control that never ran.
@@ -545,7 +548,7 @@ command is how one of them ends up without the flags.
 
 ## Configuration
 
-`ember.yaml` holds image names, GPU filters, ports and budgets, and is safe to
+`ember.yaml` holds image names, GPU filters, jobs and budgets, and is safe to
 commit. Credentials are not in it: they come from the environment
 (`RUNPOD_API_KEY`, `VAST_API_KEY`) or from `~/.config/ember/credentials.yaml`,
 where the same two are spelled `runpod_api_key` and `vast_api_key`, and which
@@ -568,33 +571,30 @@ for that reason and has no flag either.
 ### The committed configurations
 
 Every command reads `ember.yaml` in the working directory by default, so
-`--config` is for naming one of the others rather than for ordinary use. Five
-are committed, and they are the four shapes `{this machine, a rented card} ×
-{one process per run, one resident server}` plus the starter:
+`--config` is for naming one of the others rather than for ordinary use. Four
+are committed: the starter, and FLUX.2 on a rented card, on the card in this
+machine, and sd15 on this machine for nothing.
 
 | file | runs on | job shape |
 |---|---|---|
-| `ember.example.yaml` | a rented 4090 | none — holds the node open with its ports forwarded |
-| `ember.flux2.yaml` | a rented 80 GiB card | `cmd:` — one `sd-cli` per `ember up` |
-| `ember.sd-server.example.yaml` | the same card and store | `sd:` — one resident `sd-server`, a list of jobs |
-| `ember.local.example.yaml` | the GPU in this machine | `cmd:` |
+| `ember.example.yaml` | a rented 4090 | none — rent, prove the card, fetch `outputs:`, destroy |
+| `ember.sd-server.example.yaml` | a rented 80 GiB card, on a store | `sd:` — one `sd-server`, a list of jobs |
+| `ember.local.example.yaml` | the GPU in this machine | `sd:` — the same weights, streamed off this disk |
 | `ember.local.sd-server.example.yaml` | this machine, free | `sd:` — what `ember serve` needs |
 
 A configuration holds configuration: a comment in one says what a wrong value
 costs, in a line or two. Every measurement that chose a value — the store's
-$4.90-a-month standing charge, the per-image cost of a resident model against
-a fresh process at four batch sizes, the two runs that paid for `gpu_probe` —
-is in [the committed configurations](docs/configurations.md), along with the
-two shapes that are written down and cannot be run yet because one's image is
-a sentence and the other's asset digest is a placeholder.
+$4.90-a-month standing charge, the per-image cost of a resident model at four
+batch sizes, the two runs that paid for `gpu_probe` — is in
+[the committed configurations](docs/configurations.md).
 
-The durable half of `ember.flux2.yaml` and `ember.sd-server.example.yaml` is
-identical — same images, store, assets, probe and ceilings — and that
-duplication is not something a config can currently remove: `node.NewSpec`
-refuses `cmd`, `cmds` and `sd.serve` together — a run with both would start a
-server, hold the weights in VRAM and then run a separate `sd-cli` that loads
-them a second time — so one file describes one job shape. See
-[#144](https://github.com/Legion112/ember/issues/144).
+A configuration describes **one** kind of job. `sd.jobs` and `tts.jobs` in one
+file is refused before anything is rented: a run with two answers to "what
+does this node generate" is one where you watch the wrong thing happen. The
+durable half of the rented and local FLUX.2 files is otherwise identical —
+same assets, digests, probe and store shape — and that duplication is not
+something a config can currently remove, because `sd.serve` is a single argv.
+See [#144](https://github.com/Legion112/ember/issues/144).
 
 ### What a flag may do that a config key may not
 
@@ -603,9 +603,9 @@ A flag **replaces** the config's value for that run rather than narrowing it.
 because the person typing it is the person who set the ceiling. Nothing that
 takes a value from somewhere else may reuse that rule: a request arriving at
 `ember serve` can only ever ask for **less**, and the smaller of the two
-values wins. `--provider`, `--image`, `--gpu`, `--ttl` and `--port` replace
-the same way, and `--image` also clears an `images:` map, so a one-off pin
-cannot be silently ignored on a config that has one.
+values wins. `--provider`, `--image`, `--gpu` and `--ttl` replace the same
+way, and `--image` also clears an `images:` map, so a one-off pin cannot be
+silently ignored on a config that has one.
 
 `ember offers --max-hourly-usd 1.50` is the same flag read through the same
 code, and all it does there is hide rows — it rents nothing, which makes it
@@ -614,10 +614,9 @@ it. A second `offers`-only ceiling would read as the friendlier design and
 would let a listing show an offer `up` then refuses, which is the one thing a
 preview of a price must not do.
 
-`ember up --cmd` is `cmd:` typed at a command line, **one word per flag, in
-order**: `--cmd sd-cli --cmd -p --cmd "a lovely orange cat"`. A single string
-would have to be split by a quoting rule ember does not own, and a remote
-command is argv. There is no flag for `cmds`.
+The jobs themselves have no flags, and that is deliberate: a prompt, a
+sampler and a seed are a record of what a measurement ran with, so they belong
+in a file somebody can commit and compare rather than in a shell history.
 
 Those were documented nowhere. `AGENTS.md`'s last line names three things to
 document in the commit that changes them — a CLI flag, a config key and a
@@ -723,92 +722,54 @@ disagree, or whose offers say nothing at all.
 
 ### Several results from one rental
 
-`cmd` runs one thing. `cmds` runs several, in sequence, on one node:
+A rental serves a list of jobs, and every per-rental cost is paid once instead
+of once per result: waiting for the machine, pulling the image, reading and
+verifying the weights, loading them. Measured on a rented A100 that is about
+three minutes against roughly 100 seconds of generation, so ten images rented
+ten times spend more than half the bill re-doing setup.
 
-```yaml
-cmds:
-  - [sd-cli, --diffusion-model, /models/flux2.gguf, --prompt, "a cat",  -o, /workspace/out/01.png]
-  - [sd-cli, --diffusion-model, /models/flux2.gguf, --prompt, "a dog",  -o, /workspace/out/02.png]
-```
+**Results come home as they are produced, not once at the end.** A ten-job
+batch is over an hour on a rented card, and collecting only at the end means
+an expired deadline or a closed laptop loses all of it rather than everything
+so far. An operator watching the price accumulate can also stop paying for the
+rest.
 
-Every per-rental cost is paid once instead of once per result: waiting for the
-machine, pulling the image, reading and verifying the weights, loading them.
-Measured on a rented A100 that is about three minutes against roughly 100
-seconds of generation, so ten images rented ten times spend more than half the
-bill re-doing setup.
+A failed job stops the batch, and whatever it produced is still collected: the
+job that failed is often the one whose output explains why.
 
-Still opaque argv, deliberately — ember does not know what `sd-cli`'s flags
-mean, the same reason `gpu_probe` is a command rather than a built-in check.
-Use `cmd` or `cmds`, never both.
-
-**Outputs come home after each step, not once at the end.** A ten-step batch
-is over an hour on a rented card, and fetching only at the end means an
-expired deadline or a closed laptop loses all of it rather than everything so
-far. The first step fetches everything; each later one fetches only what is
-newer than the previous fetch, bounded by a marker file touched on the node —
-a file rather than a timestamp, because ember's clock and the node's are not
-the same clock.
-
-A failed step stops the batch, and its output is still collected: the step
-that failed is often the one whose output explains why.
-
-**A step's output stays on the node, so a later step can read it.** The fetch
-is a read — `tar` streams the files out and nothing removes them, and the
-marker bounds only what is *sent* — so the node's filesystem carries every
-earlier step's output for the whole rental. A `cmds` entry can therefore name
-a file an earlier entry wrote:
-
-```yaml
-cmds:
-  - [sd-cli, ..., -o, /workspace/out/01.png]
-  - [sh, -c, "convert /workspace/out/01.png -resize 50% /workspace/out/01-small.png"]
-```
-
-That is documented because configurations may rely on it, not because it is
-encouraged. ember still does not read argv, so it does not know that entry 2
-depends on entry 1: nothing checks that the filename is right, a typo is found
-at step 7 of a rental whose first six steps are paid for, and the dependency
-is invisible to every figure ember prints. For a long video — twelve clips,
-each continued from the last frame of the one before — those costs dominate
-and the chain belongs somewhere ember can read a result. See
-[Long video is a pipeline](docs/long-video-is-a-pipeline.md).
-
-Each step reports what it cost, and the total so far:
+Each job reports what it cost, and the total so far:
 
 ```
-step 2/3: sd-cli --diffusion-model /models/flux2.gguf --prompt 'a dog' ...
-workload finished in 1m43s
-fetching 1 output path(s) into ~/ember/outputs/20261101-0912-5f3a...
-fetched 1 file(s), 1.4 MiB
-step 2/3 took $0.0261 of card time, $0.0519 so far
+job 2/3: a dog, 1024x1024, 28 steps, euler, seed 20261102
+job 2/3 took $0.0261 of card time, $0.0519 so far
 ```
 
-The figure covers the fetch as well as the generation, because the card is
-rented for both — on the minutes of video the store was built for, the
-transfer is not a rounding error.
+The figure covers bringing the result home as well as the generation, because
+the card is rented for both — on the minutes of video the store was built for,
+the transfer is not a rounding error.
 
-**Card time, not the step's share of the bill.** The rental also paid for
+**Card time, not the job's share of the bill.** The rental also paid for
 provisioning, the image pull and the asset verify, and a batch pays those once
-for all of it rather than once per step — which is the whole point. Counting
-them into a per-step figure would overstate what batching saves.
+for all of it rather than once per job — which is the whole point. Counting
+them into a per-job figure would overstate what batching saves.
 
-`max_run_usd` is not affected by a batch and never reports a step: it is
+`max_run_usd` is not affected by a batch and never reports a job: it is
 checked against the offer's price times the TTL *before* anything is rented,
-so it bites at selection and there is no step to name yet. A batch that needs
+so it bites at selection and there is no job to name yet. A batch that needs
 longer needs a larger `ttl`, and the ceiling then refuses or admits the whole
-rental exactly as it did for one command.
+rental exactly as it did for one.
 
 ### One resident model instead of one process per image
 
-`cmds` pays each per-rental cost once. It cannot pay the **model load** once,
-because every entry is a fresh `sd-cli` that reads the weights into VRAM again.
-`sd:` starts one `sd-server` on the node, holds the weights, and drives it over
-the same SSH connection.
+The **model load** is the cost a batch would otherwise pay per image, because
+a fresh process reads the weights into VRAM again every time. `sd:` starts one
+`sd-server` on the node, holds the weights there, and drives it over the same
+SSH connection.
 
 Measured on an RTX 2080 Ti, sd15 Q8_0 at 256x256 and four steps, same prompts
-and seeds both ways — all sixteen images byte-identical:
+and seeds either way — all sixteen images byte-identical:
 
-| jobs | `cmds` | `sd.jobs` | |
+| jobs | a process per image | one resident server | |
 |---|---|---|---|
 | 1 | 3.68 s | 9.72 s | starting a server costs ~6 s |
 | 3 | 7.37 s | 10.60 s | |
@@ -816,9 +777,8 @@ and seeds both ways — all sixteen images byte-identical:
 | 16 | 30.82 s | 16.23 s | 47% faster |
 
 **Each job costs 0.43 s instead of 1.81 s**, so the crossover is around five
-jobs and the saving grows after that. Below five, `cmds` is the faster choice
-and the simpler one — this is for batches, and for models whose load dominates
-a short generation.
+jobs and the saving grows after that — and it is worth most on a model whose
+load dominates a short generation, which is where the figures above come from.
 
 ```yaml
 sd:
@@ -856,16 +816,16 @@ encoder and VAE as separate files. A single-file checkpoint such as sd15 needs
 `--model` instead; the wrong one of the two fails with
 `get sd version from file failed`.
 
-Use `cmd`, `cmds` **or** `sd.serve` — never two. A served run is refused before
-anything is rented if the jobs and the server are not both there, and every job
-is checked against what the server reports it can do before the first one is
-submitted, so a mistyped `sampler` costs the model load and nothing else.
+`sd.serve` and `sd.jobs` come as a pair: a run is refused before anything is
+rented if the jobs and the server are not both there, and every job is checked
+against what the server reports it can do before the first one is submitted,
+so a mistyped `sampler` costs the model load and nothing else.
 
-**This is the one place ember understands a workload's arguments.** Everywhere
-else a command is opaque argv on purpose. That position does not survive
-progress streaming: a program that will not read its own payload cannot report
-that job two is fourteen steps into its first pass, and a `curl` in a config
-file is not an integration — it is the same knowledge, maintained by hand.
+**ember reads the generation's own payload, and that is why it can report
+progress.** A program that will not understand what it is submitting cannot
+say that job two is fourteen steps into its first pass — and a `curl` in a
+config file is not an integration, it is the same knowledge maintained by
+hand.
 
 ### What a job can be told
 
@@ -1130,9 +1090,9 @@ default applies rather than a copy of it ember could come to disagree with:
 all five are pointers all the way down: an omitted key and a key set to zero
 are different requests.
 
-Use `cmd`, `cmds`, `sd.jobs` **or** `tts.jobs` — never two. A config naming two
-is refused before anything is rented, because a run with two answers to "what
-does this node run" is one where an operator watches the wrong thing execute.
+Use `sd.jobs` **or** `tts.jobs` — never both. A config naming two is refused
+before anything is rented, because a run with two answers to "what does this
+node generate" is one where an operator watches the wrong thing execute.
 
 #### Asking for speech from the browser
 
@@ -1595,8 +1555,7 @@ That second rental is **its own row** in the generation history, so
 chose to make with nobody at the keyboard, which is exactly the spending a
 ledger exists for — an operator reconciling an invoice would otherwise find a
 line nothing here could account for. It shows up as a run with no card, no
-jobs and a dash for images and card time, which is the same shape a `cmds` run
-has, and it is counted once on its own row rather than folded into the cost of
+jobs and a dash for images and card time, and it is counted once on its own row rather than folded into the cost of
 the request that triggered it: that column is one rental's cost, and the
 requests after the first get the filled store for free. Nothing records which
 request caused it. `ember store sync` is recorded the same way, because it is
@@ -2238,7 +2197,7 @@ least. Every field in the form explains itself on hover.
 |---|---|
 | provider, card, region | `image:` and the `images:` map |
 | `ttl`, up to the config's | `store:` and its mount |
-| `max_hourly_usd` and `max_run_usd`, up to the config's | `ports:`, `max_day_usd` and `max_month_usd` |
+| `max_hourly_usd` and `max_run_usd`, up to the config's | `max_day_usd` and `max_month_usd` |
 | prompt, size, steps, batch count, seed, sampler, scheduler, cfg, guidance, output name | `sd.serve`, `gpu_probe`, `assets:`, `verify:` |
 | clip skip, eta, flow shift, shifted timestep, output format and compression | `extra` |
 | the `hires`, `vae_tiling` and `slg` blocks | `lora` |
@@ -2726,9 +2685,9 @@ doing) for exactly as long as the daemon is busy.
 **The config path travels, and that is a deliberate reversal.** Everywhere else
 in `ember serve` the config is read once at startup and never from a request —
 *"or the browser would be naming which file sets its own limits"*. This route
-accepts one, and `--max-hourly-usd`, `--ttl`, `--image`, `--gpu`, `--provider`,
-`--port` and `--cmd` **replace** the file's values rather than narrowing them,
-which is what they do in your own shell. The reversal is sound for one reason
+accepts one, and `--max-hourly-usd`, `--ttl`, `--image`, `--gpu` and
+`--provider` **replace** the file's values rather than narrowing them, which
+is what they do in your own shell. The reversal is sound for one reason
 only: the route is on the **socket's** route table and not the port's, so the
 caller is an account `connect(2)` has already proved is yours, with the same
 authority as typing the command. A page, a `curl` on port 7777 and anything
@@ -3091,14 +3050,13 @@ deliberate:
 
 | `ember up` | what is recorded |
 |---|---|
-| with `sd:` jobs | the rental, and a row per job: its cost, span, images, passes and steps, as a queued generation gets |
-| with `cmds` | the rental, and each step's cost and span **as events**. No job rows: a step is not a job, and images-per-step and steps-per-second are not things an `ffmpeg` invocation has |
-| forwarding ports | the rental. That is the whole record, and it is the cheapest thing ember does and the easiest to leak |
+| with `sd:` or `tts:` jobs | the rental, and a row per job: its cost, span, images, passes and steps, as a queued generation gets |
+| with no jobs at all | the rental. That is the whole record, and it is the cheapest thing ember does and the easiest to leak |
 
-The last two have no jobs, so their per-job columns are a **dash** and never a
+The second has no jobs, so its per-job columns are a **dash** and never a
 zero, and both readers say how many rows they had to leave out. A column of
-zeros in a money ledger reads as free. They are no longer the only jobless
-rows: the machine with no card that fills a store has none either, and the
+zeros in a money ledger reads as free. It is not the only jobless
+row: the machine with no card that fills a store has none either, and the
 footnote names all three because nothing in a row says which it was.
 
 Two things are not recorded and are worth naming. A run refused **before** the
@@ -3157,19 +3115,18 @@ request paid for it to exist.
 them, or without a job completing -- so their images and card time are a dash
 rather than zero. Nothing backfills them.
 1 request(s) have no jobs, so their per-job columns are a dash rather than
-zero: there was never anything to report. That is an `ember up` forwarding
-ports or running `cmds`, and the machine with no card that fills a store --
-which `ember serve` rents on its own initiative and `ember store sync` rents
-by hand. The rental is the whole record in each case; a `cmds` run's
-per-step costs are the one thing beyond it, in its event stream.
+zero: there was never anything to report. That is an `ember up` whose config
+describes none, and the machine with no card that fills a store -- which
+`ember serve` rents on its own initiative and `ember store sync` rents by
+hand. The rental is the whole record in each case.
 1 request(s) have no model: they never reached a node, or they ran before
 ember recorded which model served a request. Nothing backfills them -- the only
 stored copy of a past model is a cached capability row the next rental
 overwrites.
 ```
 
-The last row is an `ember up` that forwarded a port for ninety seconds: no
-jobs, no images, seven cents of rental. It is in the table because the
+The last row is an `ember up` whose config described no jobs: ninety seconds
+of a node, no images, seven cents of rental. It is in the table because the
 alternative is a rental nothing can see, and its per-job cells are dashes
 because there was never a per-job figure to lose — which is a different fact
 from the row above it, where there was one and it went missing. The two have
@@ -3207,7 +3164,7 @@ the table for the reason the other two are — a column of dashes otherwise
 reads as ember having lost the names. A row with no jobs is left out of that
 count on purpose: it started no generation server, so there was no
 `/capabilities` response to read a model from, and counting it would have made
-the footnote claim an `ember up` that forwarded a port successfully "never
+the footnote claim an `ember up` that rented a node successfully "never
 reached a node".
 
 **It reports what each node said about its memory.** `--memory` prints the
@@ -3466,8 +3423,7 @@ place appears — the shape `TestNoListenOutsideLoopback` already uses for
 
 Every line written inside a rental carries `run=<id>`, attached once in
 `provision.WithNode` and inherited by everything handed that logger — the SSH
-session, the forwards, the GPU probe, the generation server and ember's own
-pipeline. `ember serve` adds `request=<id>` where a queued request is what the
+session, the GPU probe, the generation server and ember's own pipeline. `ember serve` adds `request=<id>` where a queued request is what the
 rental is serving.
 
 ```
@@ -3561,14 +3517,10 @@ payload, because a span of a generation carries the prompt.
 
 ## Video
 
-The [video configuration](docs/configurations.md#video-from-a-model-on-a-store)
-is what the store exists for. It is written down rather than committed as an
-`ember*.yaml`, because its asset digest is a placeholder on purpose and so it
-refuses before anything is rented — a configuration that cannot be run is a
-worked example. Wan 2.2's experts are 14 GB each, which could not be
-baked into an image if anybody wanted to — the registry refuses a layer above
-about 10 GB — so the weights go on a volume and the node verifies them before
-the GPU is asked to do anything.
+**Video is what the store exists for, and it is not built.** Wan 2.2's experts
+are 14 GB each, which could not be baked into an image if anybody wanted to —
+the registry refuses a layer above about 10 GB — so the weights would go on a
+volume and the node would verify them before the GPU is asked to do anything.
 
 The pinned `stable-diffusion.cpp` supports it: `-M vid_gen`, `--video-frames`,
 Wan's own latent format and the Wan 2.2 S2V audio encoder are all in the
@@ -3576,192 +3528,26 @@ binary this repository builds, asserted by a lab so the answer cannot quietly
 stop being true when the pin moves. Both images are pinned to the same
 upstream commit, which the same lab checks.
 
-Two things that configuration does not do, deliberately:
-
-**It generates one clip, not a minute.** No open-weight model generates a
+**A clip is not a minute.** No open-weight model generates a
 minute in one pass — 81 frames at 16 fps is about five seconds, and the frame
 counts that map to clean latent lengths are 33, 77 and 81. A minute is twelve
-clips chained on the last frame of the one before, which is a pipeline rather
-than a command and does not belong in `cmd:`. The seams between those clips,
-not the fidelity within them, are what makes a long video hard.
-
-#### If you are about to reach for `cmds` to make a long clip
-
-It will work, and you should not.
-
-Twelve `cmds` entries *do* chain: a step's output stays on the node, so entry
-*n+1* can name the file entry *n* wrote. That is stated above under `cmds` and
-asserted by a lab. What it costs is everything ember cannot see:
-
-- Each seam needs the previous clip's **last frame**, so a real chain is
-  twenty-three entries — twelve generations and eleven `ffmpeg` decodes,
-  written by hand in YAML, with nothing checking that entry 7 names the file
-  entry 6 wrote. A typo there surfaces at step 7 of a rental whose first six
-  steps have been paid for.
-- A clip is **minutes of sampling reported as one line**. `cmds` prints a
-  description, a duration and a cost per entry; there is no step counter and
-  no preview, so a clip that is working and a clip that is wedged look the
-  same for as long as it takes.
-- The clips come home as they are produced, but **the chain's state dies with
-  the node**. A failure at clip 7 leaves six clips on your disk and clip 6's
-  last frame on a machine that is being destroyed; resuming means paying for
-  the first six again. So `ttl` has to cover all twelve and `max_run_usd` —
-  checked against the offer's price times that `ttl`, before anything is
-  rented — is one decision made up front about a rental of hours.
-
-The chain belongs on the served path, which is the one place ember reads its
-own payload and so the one place that can take the last frame of job *n* and
-hand it to job *n+1*. That is not built, and it is not *sized* either: what a
+clips chained on the last frame of the one before, and the seams between those
+clips — not the fidelity within them — are what makes a long video hard. That
+chain belongs on the served path, which is the one place ember reads its own
+payload and so the one place that could take the last frame of job *n* and
+hand it to job *n+1*. It is not built, and it is not *sized* either: what a
 `vid_gen` response even carries decides whether a seam needs a decode at all,
-and the captured `capabilities.json` answers that for `img_gen` only. The
-reasoning, the measurement that corrected the original premise, and the list
-of numbers that cannot be estimated before one real clip exists are in
-[Long video is a pipeline](docs/long-video-is-a-pipeline.md).
+and the captured `capabilities.json` answers that for `img_gen` only.
 
-One thing `cmds` is good for here: two identical clips as two entries, and the
-difference between the two per-step card-time lines is the per-clip model
-reload — the number a served path would be removing, which nobody has.
-
-**Nothing has run it end to end.** It is written from the measured API shapes
-and the flags in this repository's own image. The first real run is a
-calibration — it costs money, and what it produces is a number and a fixture
-rather than a pass or a fail.
-
-## An open code model, over one forward
-
-The [code-model configuration](docs/configurations.md#an-open-code-model-over-one-forward)
-serves an
-open code model on a rented card and forwards it to `127.0.0.1:8080`, so an
-editor or a coding agent on this machine talks to an open model. It needed no
-new code: the forwards run *alongside* the workload rather than instead of it,
-so a server as the `cmd` and a `ports` entry beside it has always been a
-supported shape. `llama-server` does not exit, so [a node rented to run
-something stops when it has run it](#two-properties-that-outrank-features)
-never fires, and the node holds until Ctrl-C, `--hold`, or the TTL.
-
-```yaml
-cmd:   [llama-server, --model, /models/coder.gguf, --host, 127.0.0.1, --port, "8080"]
-ports: [llm:8080]
-ttl:   8h
-```
-
-**The TTL is a hard stop, not a session length.** This is the part to decide
-before you start rather than to discover at hour eight. The deadline is
-written in three places — the provider's label, the local journal record, and
-the node's own self-destruct timer — and the third is armed from an
-environment variable that `embernode` reads *once*, at container start.
-Nothing on the node listens for a change, so a running node's deadline is not
-re-armable. At the deadline the endpoint your editor is pointed at goes away,
-mid-sentence if that is where you are, and the remedy is a new node, another
-read of the weights off the store, and a new forward. The ceiling above
-whatever you write is a day.
-
-That stays the answer rather than becoming a feature, and the three copies are
-why: three copies computed at three call sites are three copies that can
-disagree, and the one that disagrees is the one that does not stop the bill. A
-re-arm has to update all three atomically — including a timer armed from an
-immutable environment variable, which means changing *how* a node learns its
-deadline — and that is the one invariant the money discipline here rests on.
-Trading it for not having to restart a session is not a trade this repository
-makes quietly.
-
-**Nothing stops the bill while you read.** A coding agent's card is busy while
-a completion streams and idle while you read it, think, edit and run tests —
-the lowest duty cycle any workload here has been pointed at, billed by the
-hour of wall clock. There is no idle-stop, and ember cannot infer one from the
-tunnel: `tunnel.Forwarder` pipes bytes with `io.Copy` and counts none of them,
-and an idle TCP connection is still a connection, so an editor holding a
-keep-alive open looks identical to one being typed into. What "idle" means
-here is "no tokens generated for N minutes", which lives in the server's own
-payload — the thing ember reads only for `sd:`, and only with a written
-reason. So `ttl` and `--hold` are the whole of it, and the honest use of this
-configuration is a session you intended to have rather than one left running.
-
-### What it does not protect you from
-
-The forward is loopback on **both** ends and neither end is configurable. The
-local end can only be named through `loopback.Bind`, whose field is unexported
-— and both families are bound, so a client that resolves `localhost` to `::1`
-first does not read connection-refused on a working tunnel. The remote end is
-built by `tunnel.RemoteLoopback(port)`, which takes a port and not an address,
-because SSH's `direct-tcpip` connects anywhere the node can reach — another
-tenant, the provider's metadata service, the open internet — and a free-form
-remote host would make every ember node an open relay billed to you.
-
-So nothing off this machine can reach the model. What is left:
-
-- **Every uid on your own machine can.** The endpoint has no authentication,
-  and a loopback port is not a boundary between local users. That is the same
-  threat `ember serve`'s token is about, arriving from the other direction.
-- **The provider has root on the node.** Your prompts are your source code,
-  and they travel to a machine somebody else owns. SSH protects them in
-  transit and from nobody else; `runpod_cloud: COMMUNITY` makes the owner a
-  stranger rather than a company.
-- **`--host 0.0.0.0` is not what would publish it, and ember now says so.** A
-  workload port is never published — `exposure.PortRequest`'s `public` field is
-  unexported, only `SSHPort()` sets it, and the post-create check destroys the
-  node if the provider published anything else. An operator who writes
-  `0.0.0.0` has concluded something false, so ember prints a warning naming the
-  flag, the address and its position in the argv, before anything is rented. It
-  is a warning and not a refusal because `cmd` is opaque argv on purpose:
-  refusing would be ember claiming to know what `--host` means to a program it
-  has never heard of. On the **local** provider the belief is partly true — the
-  container sits on a Docker bridge, so a `0.0.0.0` bind really is reachable
-  from this machine at the container's address.
-- **A store is a channel between runs.** It is writable by every node that
-  mounts it and there is no read-only mount, so the digest in `assets:` is what
-  stands in for one. It matters more here than anywhere else in this
-  repository: a substituted image model produces a picture that looks wrong, and
-  a substituted code model produces code you paste.
-
-### The image is the one piece that does not exist
-
-An ember workload image has to carry `embernode` and sshd — ember runs the
-workload as `ssh host command`, so an image that is only a server has nothing
-to connect to — and this repository builds no such image for an LLM server.
-An off-the-shelf `llama.cpp` image cannot be used as it stands for that
-reason. So the `image:` line in that configuration is a sentence rather than a
-value, and ember refuses it by the rule that already exists:
-
-```
-ember: image "EMBER-HAS-NO-LLM-WORKLOAD-IMAGE-SEE-THIS-FILES-HEADER" has no
-tag: pin it to a tag or a digest, or two runs will not have measured the same
-software
-```
-
-Everything else in it is real. The weights are pinned to a digest that
-was read from Hugging Face rather than guessed — the tree API's `lfs.oid` and
-the `X-Linked-ETag` on a HEAD of the resolve URL both answer it, which is two
-independent confirmations for two requests and no bytes downloaded — and
-`store create`, `store push`, `store ls` and `store verify` need no node and
-no image, so the store half can be done today. That is deliberate: a committed
-example whose placeholder reads as a value is what
-[#18](https://github.com/Legion112/ember/issues/18) is about, and the loudest
-placeholder is one whose refusal quotes itself.
-
-It is also why this one is written down in `docs/` rather than committed as an
-`ember*.yaml`: a configuration that refuses by construction is a worked
-example, not an alternate configuration an operator would run.
-
-### Whether to do this at all
-
-An eight-hour working day at $1.00/hour is $8.00, and twenty of them is about
-$160 a month for a card that is idle most of those eight hours. That figure is
-as much the point of this configuration as the endpoint is: this is the
-workload where renting is least favourable, and ember exists to make that a
-decision backed by a measurement instead of a spec sheet. `ember spend` is
-where the number lands, and it is worth having even when it argues against the
-feature.
+**Nothing has run any of it.** The support above is read from the binary this
+repository builds; the first real clip is a calibration — it costs money, and
+what it produces is a number and a fixture rather than a pass or a fail.
 
 ## Design notes
 
 Things worked out but not built, kept where the reasoning was fresh rather
 than in a commit message nobody will search for.
 
-- [Long video is a pipeline](docs/long-video-is-a-pipeline.md) — **not built,
-  and deliberately not sized.** Where a twelve-clip chain goes, why it is not
-  `cmds` even though `cmds` turns out to chain, and which numbers cannot be
-  estimated before one real clip has been generated.
 - [Collecting GPU availability over time](docs/gpu-availability-history.md) —
   **built**, as `ember catalogue snapshot` and `ember catalogue report`; the
   note is kept as the reasoning the implementation follows, and says where the

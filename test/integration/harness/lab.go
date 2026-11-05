@@ -29,7 +29,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1047,32 +1046,6 @@ func (l *Lab) WaitNoNodes(ctx context.Context, within time.Duration, detail func
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-}
-
-// ReadBanner dials a forwarded port and reads what the far end sends first.
-//
-// Used against a forward pointed at the node's own sshd: the banner is bytes
-// that provably crossed the tunnel from inside the container, which a
-// successful TCP accept on the local listener does not demonstrate. go-tun's
-// lesson applies here -- a tunnel that passes a connect and drops payload
-// passes a weaker test and fails in production.
-func (l *Lab) ReadBanner(port int, within time.Duration) (string, error) {
-	d := net.Dialer{Timeout: within}
-	conn, err := d.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = conn.Close() }()
-
-	if err := conn.SetReadDeadline(time.Now().Add(within)); err != nil {
-		return "", err
-	}
-	buf := make([]byte, 256)
-	n, err := conn.Read(buf)
-	if n > 0 {
-		return strings.TrimSpace(string(buf[:n])), nil
-	}
-	return "", err
 }
 
 // NodeSpec describes a node the lab starts itself, bypassing ember.

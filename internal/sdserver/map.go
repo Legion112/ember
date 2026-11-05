@@ -922,8 +922,8 @@ func (j Job) Body(preview string, interval int) (map[string]any, error) {
 // mergeExtra merges the operator's raw object into the request, refusing any
 // key ember already set.
 //
-// A refusal and not a precedence rule, for the reason NewSpec refuses a config
-// carrying both cmd and cmds: two answers to one question, and picking one
+// A refusal and not a precedence rule, for the reason app.NewPlan refuses a
+// config naming two kinds: two answers to one question, and picking one
 // silently is how somebody watches the wrong thing run. Here it would be
 // worse than watching -- a seed or a step count resolved the wrong way makes
 // two runs that claim to be the same measurement produce different images.

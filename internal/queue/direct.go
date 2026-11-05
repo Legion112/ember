@@ -27,9 +27,9 @@ import (
 //     `up` that enqueued would be served by whichever drain loop got there
 //     first, and would serve the web UI's backlog on the way -- billing a
 //     measurement run for somebody else's batch.
-//  2. Enqueue refuses a request with no jobs, and TWO of `up`'s three shapes
-//     have none: a plain forwarded session, and a `cmds` run. `up` cannot be
-//     expressed as an enqueue at all for those.
+//  2. Enqueue refuses a request with no jobs, and a configuration that
+//     describes none is a shape `up` has. It cannot be expressed as an
+//     enqueue at all.
 //  3. Run marks everything it finds running as interrupted, which is right
 //     for a restarting server and wrong for a second process.
 //  4. `up`'s overrides REPLACE where Narrow narrows, so --max-hourly-usd 999
@@ -374,7 +374,7 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 	ask.Overrides.Apply(&cfg)
 
 	plan, err := app.NewPlan(ctx, app.Request{
-		Config: cfg, Deps: r.Deps, Hold: ask.Hold, Log: r.Log,
+		Config: cfg, Deps: r.Deps, Log: r.Log,
 	}, r.out())
 	if err != nil {
 		return "", err
@@ -615,11 +615,10 @@ func RunGPU(plan app.Plan) string {
 
 // RunJobs is the batch as the history records it.
 //
-// Only the served shape has any. A `cmds` run's steps and a plain forwarded
-// session are recorded as the request row and its events and as no job rows at
-// all -- see record.go, which argues it: a step is not a job, and the figures
-// the jobs table exists for (images, passes, steps per second) are not things
-// an `ffmpeg` invocation has.
+// Only a typed batch has any. A configuration that describes no jobs is
+// recorded as the request row and its events and as no job rows at all -- see
+// record.go, which argues it: the figures the jobs table exists for (images,
+// passes, steps per second) are not things that rental produced.
 func RunJobs(plan app.Plan) []genstore.Job {
 	jobs := make([]genstore.Job, 0, len(plan.Jobs.Jobs))
 	for _, j := range plan.Jobs.Jobs {

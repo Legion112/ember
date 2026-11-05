@@ -805,8 +805,8 @@ func TestRunServed_TheWholeLifecycle(t *testing.T) {
 	}
 }
 
-// The saving said out loud, and only when there is one: with cmds this load
-// would be paid again for every job after the first.
+// The saving said out loud, and only when there is one: a process per image
+// would pay this load again for every job after the first.
 func TestRunServed_SaysWhatBeingResidentSaves(t *testing.T) {
 	shrinkPoll(t)
 	f := newFakeSD(t)
@@ -825,7 +825,7 @@ func TestRunServed_SaysWhatBeingResidentSaves(t *testing.T) {
 	}
 	// And the span is ember's own, not the server's load_elapsed_seconds,
 	// which the fake reports as 12.5s. sd-server reported 551ms for a 56 GiB
-	// FLUX.2 model on the first real run while the cmds arm of the same
+	// FLUX.2 model on the first real run while the other arm of the same
 	// measurement was spending 80-96s per image re-reading those weights, so
 	// the field names something other than the cost of becoming resident.
 	// Reinstating `load` here puts the fake's 12.5s back in the output.

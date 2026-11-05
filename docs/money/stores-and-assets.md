@@ -177,7 +177,7 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
 
   **The two callers want opposite things from one fact, which is why it is a
   type.** `ember up` refuses with `*AssetsMissingError`, because an
-  interactive command must not rent a second machine nobody asked for;
+  command somebody typed must not rent a second machine nobody asked for;
   `AppPlanner` catches it and fills the store on a CPU box first, because a
   queue drains unattended and is where nobody is watching to type the command.
   A plain error would make the second one a string match. The sync is a rental

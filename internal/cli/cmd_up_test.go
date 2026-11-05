@@ -71,11 +71,16 @@ func TestUp_RefusesAnUnknownProvider(t *testing.T) {
 	}
 }
 
-func TestUp_RefusesAMalformedPort(t *testing.T) {
+// TestUp_RefusesAnUnpinnedImageAsAUsageError.
+//
+// A config error that came off the command line, which is what makes the exit
+// code the assertion: these refusals come back from internal/app, which cannot
+// build this package's usage type.
+func TestUp_RefusesAnUnpinnedImageAsAUsageError(t *testing.T) {
 	var out bytes.Buffer
-	err := runUp([]string{"--image", "x:v1", "--port", "nonsense"}, &out, labDeps(t))
+	err := runUp([]string{"--image", "unpinned"}, &out, labDeps(t))
 	if err == nil {
-		t.Fatal("a malformed port spec was accepted")
+		t.Fatal("an image with no tag was accepted")
 	}
 	// The exit code, not just the error. These refusals now come back from
 	// internal/app, which cannot build this package's usage type, so the
@@ -93,7 +98,7 @@ func TestUp_DryRunCreatesNothing(t *testing.T) {
 	e := d.Engine.(*dockerengine.RecordingEngine)
 
 	var out bytes.Buffer
-	if err := runUp([]string{"--image", "x:v1", "--port", "p:8188", "--dry-run"}, &out, d); err != nil {
+	if err := runUp([]string{"--image", "x:v1", "--dry-run"}, &out, d); err != nil {
 		t.Fatal(err)
 	}
 	if len(e.Containers()) != 0 || len(e.Networks()) != 0 {
@@ -126,7 +131,7 @@ func TestUp_DryRunStillEnforcesTheBudget(t *testing.T) {
 func TestUp_ReadsTheConfigFile(t *testing.T) {
 	d := labDeps(t)
 	cfg := filepath.Join(t.TempDir(), "ember.yaml")
-	body := "image: ghcr.io/example/wl:v2\nports:\n  - demo:8188\nttl: 15m\n"
+	body := "image: ghcr.io/example/wl:v2\nttl: 15m\n"
 	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +190,7 @@ func TestUp_HelpExplainsTheLoopbackGuarantee(t *testing.T) {
 	var out bytes.Buffer
 	_ = runUp([]string{"-h"}, &out, labDeps(t))
 	got := out.String()
-	for _, want := range []string{"127.0.0.1", "SSH", "destroys"} {
+	for _, want := range []string{"internet", "sshd", "SSH", "destroys"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("help should mention %q:\n%s", want, got)
 		}

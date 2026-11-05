@@ -86,7 +86,7 @@ which an exporter could ever be adopted. Indexed from `AGENTS.md`.
   exporter is therefore not the connection but the **payload**: a span of a
   generation naturally carries the prompt, the seed and the output path, which
   is operator content, and the rule for operator content is an allow-list and
-  never a deny-list -- `rejectSecrets` deliberately not scanning `cmd`/`cmds`
+  never a deny-list -- `rejectSecrets` deliberately not scanning a prompt
   because "a token of affection" is a legitimate prompt is the precedent for
   why. A collector on 127.0.0.1 is not a posture change at all and is where
   #34 independently arrived for the browser half. Anything else is a third

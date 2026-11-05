@@ -1,12 +1,11 @@
 # ember, several images from one resident model.
 #
-# The same weights, store and card as ember.flux2.yaml, driven the other way:
-# that file runs one sd-cli per `ember up`, this one starts one sd-server and
-# sends it a list of jobs. The durable half of the two files is identical,
-# which is the duplication #144 is about.
+# FLUX.2 [dev] on a network volume, a card chosen by VRAM and the budget
+# ceiling, one sd-server holding the weights for a list of jobs.
+# ember.local.example.yaml is the same weights on the card in this machine.
 #
-# WHAT THAT BUYS, with the per-image cost table at four batch sizes, the
-# crossover, and the variance it removes: docs/configurations.md.
+# WHAT THE RESIDENT MODEL BUYS, with the per-image cost table at four batch
+# sizes and the crossover: docs/configurations.md.
 #
 # LICENSE: FLUX.2 [dev] is non-commercial. This repository's MIT licence does
 # not extend to the output of this file.
@@ -67,7 +66,7 @@ assets:
 
 verify: always
 
-# The same probe ember.flux2.yaml carries: a card that cannot initialise is a
+# The probe ember.local.example.yaml carries too: a card that cannot initialise is a
 # billed CPU, and `sd-cli --list-devices` alone passes on a wrong-architecture
 # image because listing devices launches no kernel. It runs before sd-server
 # is started, which is the cheap-failure order -- a dead card costs the probe

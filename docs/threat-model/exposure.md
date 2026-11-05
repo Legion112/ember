@@ -8,9 +8,9 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
 - **Every listener is loopback, and `loopback.Bind` is the only way to name
   one.** `Bind`'s field is unexported with no literal path, so the only Binds
   in the program came from `Port`, `Port6` or `ParseBind`. The bug: a `bind:`
-  string in a config reaching `net.Listen` as `":8188"` publishes ComfyUI —
-  which has arbitrary file read and arbitrary code execution through custom
-  nodes — to the whole coffee-shop LAN.
+  string in a config reaching `net.Listen` as `":8188"` publishes a
+  generation server, with file paths in its request body, to the whole
+  coffee-shop LAN.
 - **`net.Listen` appears in exactly one package**, and
   `TestNoListenOutsideLoopback` walks the tree and fails otherwise. Every guard
   above it is worth nothing if a provider package opens its own listener

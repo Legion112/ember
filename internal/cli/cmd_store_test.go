@@ -191,7 +191,7 @@ func TestUp_RefusesWhenTheNamedStoreDoesNotExist(t *testing.T) {
 	cfg := storeConfig(t, d, storeBlock)
 
 	var out bytes.Buffer
-	err := runUp([]string{"-config", cfg, "--cmd", "/bin/true"}, &out, d)
+	err := runUp([]string{"-config", cfg}, &out, d)
 	if err == nil {
 		t.Fatal("up ran with a store that does not exist")
 	}

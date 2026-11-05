@@ -1,47 +1,15 @@
-# Forwards and the progress socket
+# Reaching a node, and the progress socket
 
-The remote end of a forward is built, never parsed from input. And the socket
-that noticed its own close and never re-opened.
+The far end of a connection into a node is built, never parsed from input.
+And the socket that noticed its own close and never re-opened.
 
 Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS.md)
 
-- **The remote end of a forward is built by `tunnel.RemoteLoopback(port)` and
-  never parsed from input.** `direct-tcpip` connects anywhere the node can
-  reach, including the provider's metadata service; a free-form remote host
-  makes every ember node an open relay billed to the operator.
-- **A non-loopback bind in `cmd` is reported, and the report is about a belief
-  rather than a hole.** `sdserver.ServeCommand` can refuse a listen flag
-  outright because it knows it is building sd-server's argv and appends the
-  address itself. A `cmd`-based server has no such seal -- the operator writes
-  the argv -- and `llama-server --host 0.0.0.0` on a rented machine *looks*
-  like the ComfyUI exposure this threat model is written against. It is not:
-  `exposure.PortRequest`'s `public` field is unexported, only `SSHPort()` sets
-  it, a workload port goes through `exposure.Internal`, and the post-create
-  check destroys a node whose provider published anything else. So what
-  `--host 0.0.0.0` reveals is that somebody concluded the bind address is what
-  makes their endpoint reachable, and `workload.NonLoopbackBinds` says so
-  before anything is rented. **A warning and not a refusal**, because `cmd` is
-  opaque argv on purpose: refusing would be ember claiming to know what
-  `--host` means to a program it has never heard of, and the first config
-  whose `--host` names the server to *talk to* would be a config ember will
-  not run. "A warning is not a security control" still holds and is exactly
-  why this is not one -- the control is the unexported field. The one place
-  the belief is partly true is the local provider, where the container sits on
-  a Docker bridge and the bind is reachable from this machine at the
-  container's address, which is not an internet exposure and is not nothing.
-- **`netip` decides, so this is not `rejectSecrets`' mistake reached from the
-  other side.** That function deliberately does not scan `cmd`, because a
-  prompt is arbitrary English and "a token of affection" is a legitimate
-  prompt. Nothing here pattern-matches a string: a value is reported only
-  after its flag name matched a short allow-list of listen spellings *and*
-  `netip` parsed it as an address that is not loopback. A prompt is one argv
-  element, so it can never be mistaken for a flag name, and single-letter
-  flags are excluded outright -- `-b` is a bind address to one program and a
-  batch size to llama.cpp, and a finding about a batch size is the false
-  positive that teaches an operator to stop reading these. The limit is
-  written down rather than hidden: `--host localhost` is not reported,
-  although a name is never proof of loopback, because it is the node's
-  resolver that would answer and not this machine's.
+- **The far end is built by `tunnel.RemoteLoopback(port)` and never parsed
+  from input.** `direct-tcpip` connects anywhere the node can reach, including
+  the provider's metadata service; a free-form remote host makes every ember
+  node an open relay billed to the operator. It takes a port and not an
+  address, so there is nothing for a config or a request to name.
 - **The progress socket noticed its own close, wrote a signal nothing read,
   and never re-opened -- and the parameter that would have made a reconnect
   lossless had one caller passing the literal `0`.** `connected` was an

@@ -3,6 +3,7 @@ package runpod
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -297,9 +298,8 @@ func TestOffers_ReportsAFailure(t *testing.T) {
 func request(t *testing.T) node.CreateRequest {
 	t.Helper()
 	spec, err := node.NewSpec(node.SpecOptions{
-		Image: "ghcr.io/example/comfyui:v0.3.1",
+		Image: "ghcr.io/example/sd:v0.3.1",
 		TTL:   time.Hour,
-		Ports: []node.PortMap{{Name: "comfyui", Remote: 8188, Local: 8188}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -617,21 +617,6 @@ func readAll(r *http.Request) ([]byte, error) {
 	return io.ReadAll(r.Body)
 }
 
-// TestCreate_RefusesAWorkloadPortOfZero, at the provider edge rather than
-// trusting the spec to have been validated somewhere upstream.
-func TestCreate_RefusesAWorkloadPortOfZero(t *testing.T) {
-	p := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("the create call reached RunPod with a bad port set")
-		_, _ = w.Write([]byte(`{"id":"x","status":"PROVISIONING"}`))
-	})
-
-	req := request(t)
-	req.Spec.Ports = []node.PortMap{{Name: "broken", Remote: 0}}
-	if _, err := p.Create(t.Context(), req); err == nil {
-		t.Fatal("a zero workload port was accepted")
-	}
-}
-
 // TestCreate_MultiGPUAsksForTheCountTheOfferCarries, and never zero: RunPod's
 // minimum is 1, and a body asking for 0 GPUs is rejected at the API with a
 // message about a field the operator never set.
@@ -770,25 +755,26 @@ func TestCaps_DeclaresRunPodsWebTerminalPort(t *testing.T) {
 	}
 }
 
-// TestCreate_RefusesAWorkloadOnThePlatformPort. ember tolerates 19123 only
-// because nothing listens there; a workload binding it is precisely the case
-// that stops being true, and RunPod's proxy would serve it with no
-// authentication at all.
-func TestCreate_RefusesAWorkloadOnThePlatformPort(t *testing.T) {
-	p := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("the create call reached RunPod with a workload on the proxy port")
+// TestCreate_DeclaresNothingButSSHWhateverTheSpecSays. ember tolerates
+// RunPod's 19123 only because nothing in the node image listens there, and the
+// reason nothing else can reach that proxy is that nothing else is declared:
+// the create body names 22/tcp and no other port, from exposure.Requests,
+// which a spec cannot influence.
+func TestCreate_DeclaresNothingButSSHWhateverTheSpecSays(t *testing.T) {
+	var body createPodRequest
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		_, _ = w.Write([]byte(`{"id":"x","status":"PROVISIONING"}`))
 	})
 
-	req := request(t)
-	req.Spec.Ports = []node.PortMap{{Name: "comfyui", Remote: WebTerminalPort, Local: 8188}}
-
-	_, err := p.Create(t.Context(), req)
-	if err == nil {
-		t.Fatal("a workload on the public proxy port was accepted")
+	if _, err := p.Create(t.Context(), request(t)); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "proxy.runpod.net") {
-		t.Errorf("the error does not say what makes this dangerous: %v", err)
+	if len(body.Ports) != 1 || body.Ports[0] != "22/tcp" {
+		t.Fatalf("the create body declares %v, want exactly [22/tcp]", body.Ports)
+	}
+	if strings.Contains(strings.Join(body.Ports, ","), fmt.Sprint(WebTerminalPort)) {
+		t.Errorf("the create body declares RunPod's own proxy port: %v", body.Ports)
 	}
 }
 
