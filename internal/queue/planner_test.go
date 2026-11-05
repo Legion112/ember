@@ -183,8 +183,8 @@ func TestNarrow_LeavesEverythingARequestMayNotTouch(t *testing.T) {
 	cfg := config.Config{
 		Provider: "local", TTL: time.Hour,
 		Image:    "ghcr.io/example/sd@sha256:" + strings.Repeat("a", 64),
+		Outputs:  []string{"/workspace/out:renders"},
 		Images:   map[string]string{"sm_75": "ghcr.io/example/sd:sd-cuda-sm75"},
-		Ports:    []string{"ui:8188"},
 		Store:    config.StoreConfig{Name: "models", Mount: "/models"},
 		Assets:   []config.AssetConfig{{URL: "https://example.invalid/w", SHA256: strings.Repeat("a", 64), As: "w"}},
 		Verify:   "present",
@@ -202,8 +202,8 @@ func TestNarrow_LeavesEverythingARequestMayNotTouch(t *testing.T) {
 	if len(got.Images) != 1 {
 		t.Error("the images map was changed")
 	}
-	if len(got.Ports) != 1 {
-		t.Error("the ports were changed")
+	if len(got.Outputs) != 1 {
+		t.Error("the outputs were changed")
 	}
 	if got.Store.Name != "models" || got.Store.Mount != "/models" {
 		t.Error("the store or its mount was changed")

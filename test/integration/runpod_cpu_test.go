@@ -22,12 +22,11 @@ import (
 // `ember store sync` rents to pull weights onto a store, where the job is
 // bound by the network and paying for a GPU would cost fifteen times what it
 // meant to.
-func cpuSpec(t *testing.T, port int) node.Spec {
+func cpuSpec(t *testing.T) node.Spec {
 	t.Helper()
 	s, err := node.NewSpec(node.SpecOptions{
 		Image:  harness.LabImage,
 		TTL:    10 * time.Minute,
-		Ports:  []node.PortMap{{Name: "sshd", Remote: 22, Local: uint16(port)}},
 		Filter: node.Filter{CPUOnly: true},
 	})
 	if err != nil {
@@ -199,11 +198,10 @@ func TestRunPod_CPUOnlyIsExclusiveInBothDirections(t *testing.T) {
 // mutually exclusive on this API and exactly one must be set, so a CPU-only
 // run that sent `gpu` would either be refused or, worse, be given a card.
 func TestRunPod_ACPUOnlyRunRentsAMachineWithNoCard(t *testing.T) {
-	port := harness.FreePort(t)
 	p, f, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 	opts := labOptions(t, l)
 
-	spec := cpuSpec(t, port)
+	spec := cpuSpec(t)
 	offer := pickedOffer(t, p, spec, opts)
 	if !offer.IsCPU() {
 		t.Fatalf("a CPU-only filter picked %s", offer)
@@ -270,7 +268,6 @@ func TestRunPod_ACPUOnlyRunRentsAMachineWithNoCard(t *testing.T) {
 // refuses the pod, which is what makes the create below evidence of the clamp
 // rather than of nothing.
 func TestRunPod_ClampsACPUPodsContainerDisk(t *testing.T) {
-	port := harness.FreePort(t)
 	p, f, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 	// More than a CPU pod will take, which is not an odd thing to configure:
 	// the default is 50, because a GPU run that fills its disk mid-pull fails
@@ -278,7 +275,7 @@ func TestRunPod_ClampsACPUPodsContainerDisk(t *testing.T) {
 	p.DiskGiB = 100
 	opts := labOptions(t, l)
 
-	spec := cpuSpec(t, port)
+	spec := cpuSpec(t)
 	offer := pickedOffer(t, p, spec, opts)
 	err := provision.WithNode(t.Context(), p, spec, offer, opts,
 		func(context.Context, provision.Session) error { return nil })
@@ -297,12 +294,11 @@ func TestRunPod_ClampsACPUPodsContainerDisk(t *testing.T) {
 // weights are why 50 is the default: one video checkpoint is tens of
 // gigabytes.
 func TestRunPod_AGPUPodsContainerDiskIsNotClamped(t *testing.T) {
-	port := harness.FreePort(t)
 	p, f, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 	p.DiskGiB = 100
 	opts := labOptions(t, l)
 
-	spec := runpodSpec(t, port)
+	spec := runpodSpec(t)
 	offer := pickedOffer(t, p, spec, opts)
 	if offer.IsCPU() {
 		t.Fatalf("a GPU filter picked %s", offer)

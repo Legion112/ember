@@ -101,11 +101,7 @@ type RunBody struct {
 	GPU          string `json:"gpu,omitempty"`
 	MaxHourlyUSD string `json:"max_hourly_usd,omitempty"`
 
-	TTL  string `json:"ttl,omitempty"`
-	Hold string `json:"hold,omitempty"`
-
-	Ports []string `json:"ports,omitempty"`
-	Cmd   []string `json:"cmd,omitempty"`
+	TTL string `json:"ttl,omitempty"`
 }
 
 // RunAccepted is the 202.
@@ -123,21 +119,14 @@ func (b RunBody) toAsk() (app.RunAsk, error) {
 	if err != nil {
 		return app.RunAsk{}, err
 	}
-	hold, err := parseDur("hold", b.Hold)
-	if err != nil {
-		return app.RunAsk{}, err
-	}
 	ask := app.RunAsk{
 		Config: b.Config,
-		Hold:   hold,
 		Overrides: app.Overrides{
 			Provider:     b.Provider,
 			Image:        b.Image,
 			GPU:          b.GPU,
 			MaxHourlyUSD: b.MaxHourlyUSD,
 			TTL:          ttl,
-			Ports:        b.Ports,
-			Cmd:          b.Cmd,
 		},
 	}
 	// Validated here as well as in Start, because this is the layer that can

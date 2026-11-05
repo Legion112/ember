@@ -10,37 +10,27 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   own self-destruct timer; three copies computed at three call sites are three
   copies that can disagree, and the one that disagrees is the one that does not
   stop the bill.
-- **The deadline is not re-armable, and an interactive session restarts
-  instead.** Asked for by #37, and refused: `cmd` plus `ports` already serves
-  a code model to an editor over one forward, so the thing that does not
-  survive a multi-hour session is the TTL. `cmd/embernode`'s `armDeadline`
-  reads `EMBER_TTL_SECONDS` **once**, at container start, and nothing on the
-  node listens for a change -- so a re-arm is not a flag, it is a change to
-  *how* a node learns its deadline (a file it re-reads, or a heartbeat it
-  requires), plus two more copies to update atomically. That is the one
-  invariant above, traded for not having to restart a session. So the answer
-  is "pick the hours you mean and accept them", written down rather than
-  implied: `ttl` is a hard stop and not a session length, the endpoint goes
-  away mid-sentence if that is where you are, and the remedy is a new node, a
-  new read of the weights and a new forward. A follow-up that wants it has to
-  design the deadline's delivery first and the CLI second.
-- **There is no idle-stop, and nothing in ember can see the traffic that
-  would justify one.** The other half of #37, refused for a different reason:
-  a code model held open with nobody typing is the lowest-duty-cycle workload
-  here, billed by the hour of wall clock, which is exactly the failure "a node
-  rented to run something stops when it has run it" exists to prevent. But
-  `tunnel.Forwarder.pipe` joins the two ends with `io.Copy` and discards both
-  byte counts, and nothing else observes a forward at all -- so the only
-  signal available today is "a connection exists", which an editor holding a
-  keep-alive open satisfies forever. Bytes would not be enough either: a
-  heartbeat and a streaming completion are both bytes. What "idle" means for
-  an interactive session is "no tokens generated for N minutes", which lives
-  in the server's own payload -- the thing ember reads only for `sd:`, and
-  only with a written reason. An `--idle-stop` built on the wrong signal
-  destroys a node mid-thought, which is the one mistake that would make the
-  feature not worth having. Same shape as the false-"abandoned" refusal: it
-  answers "not idle" for everything it cannot be sure of, and here that is
-  everything.
+- **The deadline is not re-armable, and that is one invariant rather than a
+  missing flag.** `cmd/embernode`'s `armDeadline` reads `EMBER_TTL_SECONDS`
+  **once**, at container start, and nothing on the node listens for a change
+  -- so a re-arm is not a flag, it is a change to *how* a node learns its
+  deadline (a file it re-reads, or a heartbeat it requires), plus two more
+  copies to update atomically. That is the entry above, traded away. So the
+  answer is "pick the hours you mean and accept them", written down rather
+  than implied: `ttl` is a hard stop and the node goes away at it, whatever it
+  was in the middle of. A follow-up that wants it has to design the deadline's
+  delivery first and the CLI second.
+- **There is no idle-stop, and nothing in ember can see the work that would
+  justify one.** A rental is bounded by the jobs it was given: a node rented
+  to generate something stops when it has, which is what makes an idle node
+  unrepresentable rather than merely discouraged. The one shape where an idle
+  figure would mean anything is a server held open with nothing submitted, and
+  what "idle" means there is "no tokens generated for N minutes" -- a fact
+  inside the server's own payload rather than anything ember's own layers can
+  observe. An `--idle-stop` built on a weaker signal destroys a node
+  mid-generation, which is the one mistake that would make the feature not
+  worth having. Same shape as the false-"abandoned" refusal: it answers "not
+  idle" for everything it cannot be sure of.
 - **Destroy runs on `context.WithoutCancel`.** Ctrl-C cancels the context the
   run was using, and a destroy call on that context fails instantly — the
   single most likely way to leak a GPU.

@@ -314,15 +314,11 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   and two hundredths of a cent** a sync cost to learn that the older node
   image read `embernode fetch` as "be a node"; **EUR-IS-1 is the only one of
   the ten S3 datacentres with three cards at 80 GiB or more**; the per-image
-  dollar table for a resident model against a fresh process at four batch
-  sizes on an RTX PRO 6000 at $2.49/hr (`cmds` $0.1936/$0.1895/$0.1696/$0.1075
-  against `sd.jobs` $0.2378/$0.1302/$0.1249/$0.1055, crossover between one and
-  two images); **sd15 Q8_0 at 256x256, 0.44 s per job served against 1.91 s
-  fresh**; **56 GiB of weights in a 125 GiB machine behind an 11 GiB card**;
-  and, for the code model, **18,556,689,568 bytes / 17.28 GiB**, its digest
-  `fadc3e5f…` confirmed twice for two requests and no bytes, **37 minutes to
-  push at 67 Mbps**, about **20 seconds to verify at 868 MiB/s**, and **$8.00
-  a day, $160 a month** for a card idle most of an eight-hour session. The
+  dollar table for a resident model at four batch sizes on an RTX PRO 6000 at
+  $2.49/hr ($0.2378/$0.1302/$0.1249/$0.1055, crossover between one and two
+  images); **sd15 Q8_0 at 256x256, 0.44 s per job served against 1.91 s
+  fresh**; and **56 GiB of weights in a 125 GiB machine behind an 11 GiB
+  card**. The
   ones that already had a home in `README.md`, `AGENTS.md`, `docs/` or a Go
   comment -- 67 Mbps, 868 MiB/s, $1.79, 4412 MiB, 35 GB per step, the $0.37
   CPU-fallback run and its 122-second text encoder, 14 GB per Wan expert, the

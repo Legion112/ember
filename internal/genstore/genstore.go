@@ -433,12 +433,10 @@ func (r Request) Validate() error { return r.validate(true) }
 // two of these. Validate refuses a batch with none because such a row would
 // sit in the queue being skipped forever: it "would rent a card, load the
 // weights and generate nothing", which is a statement about work nobody has
-// done yet. Two of the three shapes `ember up` has have never had a job at
-// all -- a forwarded session has ports and no batch, and a `cmds` run has
-// argv ember deliberately does not read -- so applying that refusal to a
-// record of what already ran would refuse to record the cheapest thing ember
-// does and the easiest to leak. Zero jobs there is a fact, not a request
-// nothing can satisfy.
+// done yet. An `ember up` whose configuration describes no jobs has never had
+// one, so applying that refusal to a record of what already ran would refuse
+// to record the cheapest thing ember does and the easiest to leak. Zero jobs
+// there is a fact, not a request nothing can satisfy.
 func (r Request) ValidateRun() error { return r.validate(false) }
 
 func (r Request) validate(needJobs bool) error {

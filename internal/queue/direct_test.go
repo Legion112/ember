@@ -494,7 +494,7 @@ func writeRunConfig(t *testing.T, body string) string {
 
 const (
 	runImage       = "ghcr.io/example/wl:v1"
-	localRunConfig = "provider: local\nimage: " + runImage + "\nttl: 10m\ncmd: [echo, hi]\n"
+	localRunConfig = "provider: local\nimage: " + runImage + "\nttl: 10m\n"
 )
 
 // TestDirectRunner_StartAdoptsTheRowAndHandsTheRunToTheLoop.
@@ -680,7 +680,7 @@ func TestDirectRunner_StartRefusesWhatItCannotRun(t *testing.T) {
 		{
 			name:   "an unpinned image",
 			runner: func() DirectRunner { return directRunner(t, q, st) },
-			ask:    app.RunAsk{Config: writeRunConfig(t, "provider: local\nimage: wl:latest\nttl: 10m\ncmd: [echo, hi]\n")},
+			ask:    app.RunAsk{Config: writeRunConfig(t, "provider: local\nimage: wl:latest\nttl: 10m\n")},
 			want:   "latest",
 		},
 	}
@@ -752,7 +752,7 @@ func TestDirectRunner_StartRefusesAPaidProviderWithoutAllowPaid(t *testing.T) {
 }
 
 // paidRunConfig names a provider that costs money.
-const paidRunConfig = "provider: runpod\nimage: " + runImage + "\nttl: 10m\ncmd: [echo, hi]\n"
+const paidRunConfig = "provider: runpod\nimage: " + runImage + "\nttl: 10m\n"
 
 // paidRunner is a runner that can plan against RunPod and reach an OFFER.
 //

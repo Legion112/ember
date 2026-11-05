@@ -1,18 +1,18 @@
 # Batching and per-rental overhead
 
-What the overhead is per rental rather than per result, what `cmds` can and
-cannot do, and what a resident model is worth.
+What the overhead is per rental rather than per result, and what a resident
+model is worth.
 
 Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
 
-- **A resident model is worth 3% or 36%, and ember cannot tell which it bought.**
+- **A resident model removes a variance of 81s and $0.056 per image, and what
+  caused that variance is still not known.**
   FLUX.2 [dev] Q8_0 at 2048x2048, 28 steps, on a rented RTX PRO 6000 at
-  $2.49/hr with the weights on a network volume: eight runs, four batch sizes,
-  both paths, same prompts and seeds, all eight images byte-identical across
-  the two arms. `sd.jobs` is flat -- every job after the first took
-  140.80-140.88s, on every node. `cmds` split in two: on a node that kept the
-  56 GiB in page cache each step took 145.3s, and on one that did not, 226.6s,
-  because every step re-read the whole model off the store at a measured
+  $2.49/hr with the weights on a network volume, four batch sizes, same
+  prompts and seeds. A resident server is flat -- every job after the first
+  took 140.80-140.88s, on every node. Reading the weights per image was not:
+  on a node that kept the 56 GiB in page cache that read cost 145.3s, and on
+  one that did not, 226.6s, because it came off the store at a measured
   868 MiB/s. That is 81s and $0.056 per image of variance between two runs of
   the same configuration against the same card in the same datacentre, and
   what causes it is **still not known** -- the caching run was the last of the
@@ -36,7 +36,7 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   sampling rather than half a second.
 - **`load_elapsed_seconds` is not the cost of becoming resident.** sd-server
   reported **551ms** for a model whose weights are 56 GiB, so ember printed
-  "551ms of loading is paid once rather than 8 times" while the `cmds` arm of
+  "551ms of loading is paid once rather than 8 times" while the other arm of
   the same measurement was spending 80-96s per image re-reading those weights
   -- understating the feature by two orders of magnitude, in the one line an
   operator would size a batch from. The field was believed because api.md
@@ -107,60 +107,51 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   same shape is about three minutes per rental -- provisioning, image pull,
   store read and verify, model load -- against roughly 100 seconds of
   generation, so ten images rented ten times spend more than half the bill
-  re-doing setup. `cmds` runs them on one node and pays it once. The cost was
+  re-doing setup. A batch runs them on one node and pays it once. The cost was
   worst exactly where ember is supposed to help.
-- **A batch brings each result home as it is produced.** Fetching once at the
-  end means an expired TTL, a dropped connection or a closed laptop loses
+- **A batch brings each result home as it is produced.** Collecting once at
+  the end means an expired TTL, a dropped connection or a closed laptop loses
   everything rather than everything so far -- and an operator cannot look at
-  the third image and decide to stop paying for the other seven. A ten-step
+  the third image and decide to stop paying for the other seven. A ten-job
   batch is over an hour of a rented card, which is a long time to be holding
   every result on a machine that is about to be destroyed.
-- **The fetch bound is a file on the node, never a timestamp from here.**
-  ember's clock and the node's are different clocks, so `--newer=@<unix
-  computed here>` sends too much or too little whenever they disagree -- and
-  "too little" is silent data loss. A marker touched on the node is compared
-  against mtimes from that same clock, so skew cannot enter. GNU tar spells it
-  `--newer`; `--newer-than` is not a flag and fails the whole command, found by
-  running it against the node image rather than by reading the man page.
-- **A failed step stops the batch, and that step's output is still fetched.**
-  A batch where step 3 failed and 4 through 10 ran anyway is a batch nobody can
-  trust, and the remaining steps bill for work the operator no longer wants.
-  The output of the step that failed is often the one that explains why, so it
+- **A failed job stops the batch, and that job's output is still collected.**
+  A batch where job 3 failed and 4 through 10 ran anyway is a batch nobody can
+  trust, and the remaining jobs bill for work the operator no longer wants.
+  The output of the job that failed is often the one that explains why, so it
   is collected before the stop -- on a context that survives Ctrl-C, for the
-  reason every other fetch is. **A marker that cannot be touched is wasteful,
-  not fatal:** the next fetch sends everything again, which costs bandwidth and
-  loses nothing.
-- **A step reports card time, not its share of the bill.** The rental also
+  reason every other fetch is.
+- **A job reports card time, not its share of the bill.** The rental also
   paid for provisioning, the image pull and the asset verify, and a batch pays
-  those once for all of it rather than once per step -- which is the entire
-  saving. Folding them into a per-step figure would overstate it, so the
-  wording says "of card time". It is timed across the fetch as well as the
-  workload, and not from `workload.Run`'s own duration: the card stays rented
-  while the output comes over the wire, so a figure that stopped at the
-  workload would understate every step that moved anything large -- which is
-  the direction a money figure must never be wrong in.
-- **`max_run_usd` cannot name the step it bit on, because it bites before any
-  step exists.** The issue asked for that message; the premise was wrong.
+  those once for all of it rather than once per job -- which is the entire
+  saving. Folding them into a per-job figure would overstate it, so the
+  wording says "of card time". It is timed across bringing the result home as
+  well as the generation: the card stays rented while the output comes over
+  the wire, so a figure that stopped at the generation would understate every
+  job that moved anything large -- which is the direction a money figure must
+  never be wrong in.
+- **`max_run_usd` cannot name the job it bit on, because it bites before any
+  job exists.** The issue asked for that message; the premise was wrong.
   `Budget.Allow` is checked against the offer's price times the TTL at
   selection time, so a batch does not make it fire later -- it is a ceiling on
   the rental, not a running meter. A batch that needs longer needs a larger
   `ttl`. Written down because the request looks reasonable and implementing it
   would have meant inventing a mid-run meter nothing else needs.
-- **`rejectSecrets` does not scan `cmd` or `cmds`, and should not.** The
-  markers are substring matches on lowercase -- `secret`, `token`, `password`
-  -- and a workload's argv carries prompts, which are arbitrary English. "A
-  token of affection" is a legitimate prompt and refusing it would be a false
-  positive on the one field an operator edits most. The argv rule is enforced
-  where it belongs instead: ember passes no *credential* as a flag, and
-  `/proc/<pid>/cmdline` being world-readable is why.
+- **`rejectSecrets` does not scan a prompt, and should not.** The markers are
+  substring matches on lowercase -- `secret`, `token`, `password` -- and a
+  prompt is arbitrary English. "A token of affection" is a legitimate prompt
+  and refusing it would be a false positive on the one field an operator edits
+  most. The argv rule is enforced where it belongs instead: ember passes no
+  *credential* as a flag, and `/proc/<pid>/cmdline` being world-readable is
+  why.
 
-- **One cost `cmds` cannot remove, and the one place ember stops being
-  workload-agnostic.** Each entry in `cmds` is a fresh `sd-cli` that reads the
-  weights into VRAM again; `sd.serve` holds one `sd-server` and they stay
-  resident. Measured on an RTX 2080 Ti with sd15 Q8_0 at 256x256 and four
-  steps, same prompts and seeds both ways:
+- **One resident server instead of a process per image, and the one place
+  ember stops being agnostic about what it is running.** The weights are read
+  into VRAM once when `sd.serve` starts and held there for every job after
+  it. Measured on an RTX 2080 Ti with sd15 Q8_0 at 256x256 and four steps,
+  same prompts and seeds either way:
 
-  | jobs | `cmds` | `sd.jobs` |
+  | jobs | a process per image | one resident server |
   |---|---|---|
   | 1 | 3.68 s | 9.72 s |
   | 3 | 7.37 s | 10.60 s |
@@ -171,51 +162,13 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   1→16, against a fixed **~6 s** to start the server. So the crossover is at
   about **five jobs**, and above it the saving grows -- 22% at eight, 47% at
   sixteen, approaching 4.2x per job. All sixteen images are byte-identical
-  between the two paths, which is what makes the comparison a comparison.
+  either way, which is what makes the comparison a comparison.
   **The ~8% this was planned around was arithmetic from the issue's A100
   table, and it was wrong in both directions**: the per-job saving is far
   larger than 8%, and there is a fixed cost that makes a short batch slower.
-  The cost of getting it is that ember now knows what a sampler is: progress
+  The cost of getting it is that ember knows what a sampler is: progress
   streaming is impossible for a program that refuses to read its own payload,
-  and a `curl` in a config is the same knowledge maintained by hand. `cmds`
-  stays as the general mechanism, because a typed sd path cannot run `ffmpeg`.
-- **`cmds` does chain, through the node's filesystem, and chaining video with
-  it is still wrong.** #20 was filed on the premise that `cmds` entries have
-  "no way to name a file the step before produced" -- which was a reasonable
-  reading of "opaque argv, fetched home between steps" and is false. The fetch
-  is a *read*: `TarCommand` builds `tar -czf - -C dir --newer=marker -- base`,
-  there is no `--remove-files`, and the marker bounds what is **sent** and not
-  what **exists**. So every step after the first starts with every earlier
-  step's output underneath it. Checked rather than reasoned about, on the
-  local provider for nothing: step 2 listed `clip01.txt`, read it, wrote a
-  file derived from it, and the two fetches carried 18 B and 31 B -- each file
-  exactly once. What `cmds` cannot do is the part that needs ember to
-  understand a result: a filename it did not know in advance, a last frame it
-  would have to decode, a step counter inside a clip that samples for minutes.
-  That is the same seal as the entry above, and it is the claim worth keeping.
-  The reasons not to chain video there anyway are an `ffmpeg` seam per clip
-  maintained by hand in YAML (the `curl`-in-a-config again, eleven times),
-  and a chain whose intermediate state dies with the node -- so a failure at
-  clip 7 can only be resumed by paying for clips 1-6 again, and the `ttl` and
-  `max_run_usd` decision is made once, up front, over a rental of hours. Per-
-  clip overhead is **not estimable** from the figures above: both are images,
-  Wan 2.2 is two 14 GB experts, and scaling an sd15 number would be the "~8%"
-  mistake. `cmds` is the instrument that settles it -- two identical clips,
-  and the difference between the per-step card-time lines is the reload.
-  `docs/long-video-is-a-pipeline.md` has the rest.
-- **Nothing warns an operator whose `cmds` entries look like a chain, and the
-  reason is not only the seal.** Detecting one means reading argv, and a
-  heuristic over a prompt and an output path would be the `NormalizeGPU`
-  substring failure with deliberately arbitrary input. The stronger reason is
-  that the warning would be **false**: the entries do chain. Teaching an
-  operator to distrust a mechanism that works is the cost
-  `allow_interruptible` already pays for reading like a safety switch while
-  guarding nothing. The real gap was that the persistence was an accident of
-  implementation nothing stated and nothing checked, so it is written into
-  `README.md` beside `cmds` and asserted by
-  `TestTransfer_AFetchLeavesTheOutputsOnTheNode`. The tidy-up that would
-  break it is obvious -- `tar --remove-files` to spare the node's disk, or an
-  `rm` between steps -- and without the lab it would land green.
+  and a `curl` in a config is the same knowledge maintained by hand.
 - **The client's own poll interval hid the entire saving, and only a
   measurement found it.** A flat two-second poll noticed a 0.3-second job up
   to two seconds late, so the marginal cost per job came to 2.08 s served

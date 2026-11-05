@@ -39,17 +39,12 @@ func runUp(args []string, out io.Writer, d deps) error {
 		maxHourly    = fs.String("max-hourly-usd", "", "refuse any offer dearer than this per hour")
 		cfgPath      = fs.String("config", config.FileName, "path to ember.yaml")
 		dryRun       = fs.Bool("dry-run", false, "say what would be rented and create nothing")
-		holdFor      = fs.Duration("hold", 0, "stop after this long instead of waiting for Ctrl-C")
 	)
 	logs := addLogFlags(fs)
-	var ports multiFlag
-	fs.Var(&ports, "port", "forward a port, as name:remote or name:remote:local (repeatable)")
-	var cmdArgs multiFlag
-	fs.Var(&cmdArgs, "cmd", "a word of the command to run on the node (repeatable, in order)")
 
 	fs.Usage = func() {
-		outf(out, "ember up rents a node, forwards its ports to loopback, and destroys it.\n\n")
-		outf(out, "Every forwarded port is bound to 127.0.0.1 and reached over SSH.\nNothing ember creates is reachable from the internet.\n\n")
+		outf(out, "ember up rents a node, runs the jobs this config describes, and destroys it.\n\n")
+		outf(out, "Nothing ember creates is reachable from the internet: the only port a node\npublishes is sshd, and ember reaches everything else over that one SSH connection.\n\n")
 		outf(out, "WITH AN ember serve RUNNING, this submits the run to it over its unix socket\nand streams the result, so the run survives this terminal -- and Ctrl-C then\nDETACHES rather than destroying, which makes the ttl the only thing that stops\nthe bill. With no ember serve, it rents here and Ctrl-C destroys the node, as\nit always has. A paid provider needs that ember serve to have been started\nwith --allow-paid; --dry-run never asks one.\n\n")
 		fs.PrintDefaults()
 	}
@@ -86,8 +81,6 @@ func runUp(args []string, out io.Writer, d deps) error {
 		GPU:          *gpu,
 		MaxHourlyUSD: *maxHourly,
 		TTL:          *ttl,
-		Ports:        ports,
-		Cmd:          cmdArgs,
 	}
 
 	// A RUNNING `ember serve` IS ASKED TO DO THIS INSTEAD, and a dry run never
@@ -119,7 +112,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 			sctx, sstop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer sstop()
 			return upOverSocket(sctx, out, sock, app.RunAsk{
-				Config: abs, Overrides: ov, Hold: *holdFor,
+				Config: abs, Overrides: ov,
 			})
 		}
 	}
@@ -130,7 +123,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	// the offer, the image for the card that offer names, the jobs, the spec.
 	// Nothing is rented until Do.
 	plan, err := app.NewPlan(context.Background(), app.Request{
-		Config: cfg, Deps: d, Hold: *holdFor, Log: logOpts,
+		Config: cfg, Deps: d, Log: logOpts,
 	}, out)
 	if err != nil {
 		return err
@@ -343,15 +336,7 @@ func dryRunUp(out io.Writer, plan app.Plan) error {
 	spec, run := plan.Spec, plan.Jobs
 	outf(out, "dry-run: would rent %s from %s at %v for %v\n",
 		plan.Offer.Token, plan.Provider.Name(), plan.Offer.Price, spec.TTL)
-	outf(out, "dry-run: would run %s (%s) and forward %d port(s)\n",
-		spec.Image, plan.ImageFrom, len(spec.Ports))
-	for i, c := range spec.Cmds {
-		if len(spec.Cmds) > 1 {
-			outf(out, "dry-run: step %d/%d: %s\n", i+1, len(spec.Cmds), workload.Describe(c))
-			continue
-		}
-		outf(out, "dry-run: would execute: %s\n", workload.Describe(c))
-	}
+	outf(out, "dry-run: would run %s (%s)\n", spec.Image, plan.ImageFrom)
 	if len(spec.Serve) > 0 {
 		outf(out, "dry-run: would serve: %s\n", workload.Describe(spec.Serve))
 		// The listen address is printed because ember appended it rather than
@@ -377,14 +362,13 @@ func dryRunUp(out io.Writer, plan app.Plan) error {
 // place, so there is one implementation of each and the privileged socket
 // route CALLS this one rather than growing a second copy. See
 // app.Overrides, which has the whole argument.
-func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, ttl time.Duration, ports multiFlag) {
+func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, ttl time.Duration) {
 	app.Overrides{
 		Provider:     providerName,
 		Image:        image,
 		GPU:          gpu,
 		MaxHourlyUSD: maxHourly,
 		TTL:          ttl,
-		Ports:        ports,
 	}.Apply(cfg)
 }
 

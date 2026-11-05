@@ -1,10 +1,5 @@
 # ember — conventions
 
-ember rents a GPU machine from a provider, runs one workload on it, brings the
-results home and destroys the machine. It is a **control plane**: what runs on
-the node is the operator's business, and ember's job is to make the rental
-efficient, bounded, and impossible to leak.
-
 **This file is the index.** Each rule below is one line. The argument behind it,
 the defect that motivated it and the measurement that settled it are in the
 linked document — go there when you need the detail, not before.
@@ -87,7 +82,9 @@ tested:
 - No secret ever reaches argv. `ember serve` requires a token, and it is
   mandatory rather than advisory.
 - **A request names a provider, a card, a kind and a batch of jobs, and nothing
-  else** — no image, no store, no mount, no ports, no argv, no assets.
+  else** — no image, no store, no mount, no argv, no assets. Nothing an
+  operator writes in a config reaches a node as a command either: every argv
+  ember sends over SSH is one ember built.
 - A tar stream from a rented machine is untrusted input; containment is
   enforced twice, by two different mechanisms.
 

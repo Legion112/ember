@@ -1,6 +1,6 @@
 // Package config resolves where ember keeps things and what the defaults are.
 //
-// The file is committed-safe: it holds image names, GPU filters, ports and
+// The file is committed-safe: it holds image names, GPU filters, jobs and
 // budgets, and nothing else. Credentials come from the environment or from a
 // 0600 file beside it, never from here and never from a command line, because
 // /proc/<pid>/cmdline is world-readable.
@@ -55,9 +55,6 @@ type Config struct {
 
 	// TTL bounds a node's life.
 	TTL time.Duration `yaml:"ttl"`
-
-	// Ports are "name:remote" or "name:remote:local" entries.
-	Ports []string `yaml:"ports"`
 
 	// GPU and MinVRAMGiB narrow the offers considered.
 	GPU        string `yaml:"gpu"`
@@ -127,46 +124,20 @@ type Config struct {
 	// Outputs are the paths to retrieve from the node before it dies.
 	Outputs []string `yaml:"outputs"`
 
-	// Cmd is the workload: what the node was rented to run. Empty holds the
-	// node open with its ports forwarded, which is the interactive shape.
-	// Set, ember runs it, brings the outputs home and destroys the node.
-	Cmd []string `yaml:"cmd"`
-
-	// Cmds are several workloads run in sequence on one rental.
-	//
-	// Every per-rental cost is paid once per `ember up`, not once per
-	// result: waiting for the machine, pulling the image, reading and
-	// verifying the weights, loading them. On a rented A100 that is about
-	// three minutes against roughly 100 seconds of generation, so ten images
-	// rented ten times spend more than half the bill on setup.
-	//
-	// Still opaque argv, deliberately. ember does not know what sd-cli's
-	// flags mean and should not learn them -- that knowledge belongs in this
-	// file, beside the image it describes, for the same reason gpu_probe is
-	// a command rather than a built-in check.
-	//
-	// Outputs are fetched after each entry rather than once at the end, so a
-	// batch that dies on its deadline has already delivered what it finished.
-	//
-	// Use cmd or cmds, never both.
-	Cmds [][]string `yaml:"cmds"`
-
-	// SD is the resident-server shape: one sd-server started on the node,
+	// SD is the image-generation workload: one sd-server started on the node,
 	// holding the weights, driven over the SSH connection for a list of jobs.
 	//
-	// The difference from Cmds is one cost. Each entry in Cmds is a fresh
-	// sd-cli that reads the weights into VRAM again; a server loads them
-	// once. Measured on a rented RTX PRO 6000 running FLUX.2 at 2048x2048:
-	// 4.5s per image when the node caches the weights, 86s when it re-reads
-	// them off the store, and nothing tells ember which node it has.
+	// ONE SERVER AND NOT A PROCESS PER JOB, and the difference is one cost. A
+	// fresh sd-cli reads the weights into VRAM again for every image; a server
+	// loads them once. Measured on a rented RTX PRO 6000 running FLUX.2 at
+	// 2048x2048: 4.5s per image when the node caches the weights, 86s when it
+	// re-reads them off the store, and nothing tells ember which node it has.
 	//
-	// It is also the one place ember knows what a sampler is. Every other
-	// workload here is opaque argv on purpose, and that position does not
-	// survive progress streaming: a program that will not understand its own
-	// payload cannot report that job two is fourteen steps into its first
-	// pass. See internal/sdserver.
+	// It is also why ember knows what a sampler is: a program that will not
+	// understand its own payload cannot report that job two is fourteen steps
+	// into its first pass. See internal/sdserver.
 	//
-	// Use cmd, cmds or sd.serve -- never two of them.
+	// Use sd.jobs or tts.jobs -- never both.
 	SD SDConfig `yaml:"sd"`
 
 	// TTS is the `tts:` block: text to speech through piper.
@@ -176,17 +147,13 @@ type Config struct {
 	// speech has no stream to read -- a piper utterance emits nothing at all
 	// until it is finished -- and its resident win needs a held-open stdin
 	// ember's remote-command seam does not have. What it is typed FOR is the
-	// other half of the same argument: a browser cannot be handed argv.
-	// `extra` is structurally refused over HTTP, so an untyped speech path is
-	// not inconvenient from a web UI but unreachable -- and an operator who
-	// has to write `cmds: [["sh","-c","printf %s ... | piper ..."]]` is
-	// assembling a shell pipeline in YAML, which is the curl-in-a-config this
-	// repository already refuses once.
+	// other half of the same argument: a browser cannot be handed argv, so
+	// every parameter a request may set has to be a field.
 	//
 	// internal/tts has the measurements: what piper emits, what one-shot
 	// costs, and why there is no server.
 	//
-	// Use cmd, cmds, sd.jobs or tts.jobs -- never two of them.
+	// Use sd.jobs or tts.jobs -- never both.
 	TTS TTSConfig `yaml:"tts"`
 
 	// Store names the persistent store this configuration uses, if any.
@@ -625,14 +592,41 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// removedKeys are the top-level keys ember used to accept, each with the
+// sentence an operator who wrote one gets instead of yaml's.
+//
+// A SLICE AND NOT A MAP, so a file carrying two of them reads the same way
+// every time: a refusal whose clauses change order between runs is one nobody
+// can paste into an issue.
+//
+// The list may only shrink. A table of removed keys maintained by hand is the
+// thing this repository refuses -- what makes it earn its place is that it is
+// bounded by what was once documented, so it cannot grow except by a removal,
+// and an entry nobody can still be carrying is a paragraph nobody needs.
+var removedKeys = []struct{ Key, Why string }{
+	{"cmd", "ember runs AI model jobs, described by the sd: or tts: block. " +
+		"Delete the line and write the jobs you want run; README.md has both shapes"},
+	{"cmds", "ember runs AI model jobs, described by the sd: or tts: block. " +
+		"Delete the line and write the jobs you want run; README.md has both shapes"},
+	{"ports", "ember runs AI model jobs and brings their results home as files, so there is " +
+		"nothing on a node to forward. Delete the line; outputs: is what retrieves a run's files"},
+	{"min_cuda", "ember could not honour it anywhere: api.runpod.io/v2/pods, where ember creates, " +
+		"has no CUDA field and answered 422 to the allowedCudaVersions ember used to send, and the " +
+		"per-GPU cudaVersions its catalogue does report tracks whether the card has capacity rather " +
+		"than what a host can run -- a card that is rentable in one datacentre reports every CUDA " +
+		"version unavailable -- so narrowing offers by it would refuse a card for every value of " +
+		"min_cuda, including values the card satisfies.\n" +
+		"Delete the line. To refuse a host that cannot run the image, use gpu_probe: it runs on the " +
+		"node and fails before any workload does, costing the probe rather than the run"},
+}
+
 // rejectRemovedKeys answers for a top-level key ember used to accept.
 //
 // KnownFields(true) already refuses an unknown key, so a removal is not
-// silence -- but what it says is "field min_cuda not found in type
-// config.Config", which names a Go type an operator should never see and no
-// remedy at all. `min_cuda` was in README for the life of the key, so the
-// person who hits this is precisely the one who followed the documentation,
-// and the remedy is specific: gpu_probe.
+// silence -- but what it says is "field cmds not found in type config.Config",
+// which names a Go type an operator should never see and no remedy at all.
+// Every key below was in README for the life of the key, so the person who
+// hits this is precisely the one who followed the documentation.
 //
 // (This comment cited a flag that has never existed as its precedent, and
 // TestComments_CiteNoFlagThatNoFlagSetDeclares reported it on the first run of
@@ -641,16 +635,16 @@ func Load(path string) (Config, error) {
 // was reaching for needs no citation: a documented thing nobody can use is
 // worse than no documented thing.)
 //
-// Presence and not emptiness, which is why this is a map rather than a struct
-// of pointers: `min_cuda:` with no value decodes as null and leaves a pointer
-// nil, so the one spelling that would be waved through is the one an operator
-// reaches for when they want to turn the key off without deleting the line.
+// Presence and not emptiness, which is why this reads yaml.Node values rather
+// than decoding into a struct of pointers: a key written with no value decodes
+// as null and leaves a pointer nil, so the one spelling that would be waved
+// through is the one an operator reaches for when they want to turn a key off
+// without deleting the line.
 //
-// One entry, and the list may only shrink. A table of removed keys maintained
-// by hand is the thing this repository refuses -- what makes it earn its place
-// is that it is bounded by what was once documented, so it cannot grow except
-// by a removal, and an entry nobody can still be carrying is a paragraph
-// nobody needs.
+// EVERY KEY THE FILE CARRIES, not the first one found. An operator who wrote
+// two of them and is told about one edits the file, runs it again, and is told
+// about the next -- which is the same work split across as many runs as they
+// made mistakes.
 func rejectRemovedKeys(raw []byte) error {
 	var top map[string]yaml.Node
 	if err := yaml.Unmarshal(raw, &top); err != nil {
@@ -659,18 +653,16 @@ func rejectRemovedKeys(raw []byte) error {
 		// anything here would describe the wrong problem.
 		return nil //nolint:nilerr // the strict decode below reports it with a line number
 	}
-	if _, ok := top["min_cuda"]; !ok {
+	var found []string
+	for _, k := range removedKeys {
+		if _, ok := top[k.Key]; ok {
+			found = append(found, fmt.Sprintf("%s is no longer a config key, because %s", k.Key, k.Why))
+		}
+	}
+	if len(found) == 0 {
 		return nil
 	}
-	return errors.New("min_cuda is no longer a config key, because ember could not honour it " +
-		"anywhere: api.runpod.io/v2/pods, where ember creates, has no CUDA field and answered " +
-		"422 to the allowedCudaVersions ember used to send, and the per-GPU cudaVersions its " +
-		"catalogue does report tracks whether the card has capacity rather than what a host can " +
-		"run -- a card that is rentable in one datacentre reports every CUDA version " +
-		"unavailable -- so narrowing offers by it would refuse a card for every value of " +
-		"min_cuda, including values the card satisfies.\n" +
-		"Delete the line. To refuse a host that cannot run the image, use gpu_probe: it runs on " +
-		"the node and fails before any workload does, costing the probe rather than the run")
+	return errors.New(strings.Join(found, "\n\n"))
 }
 
 // rejectSecrets fails when the file looks like it holds a credential.
@@ -888,8 +880,8 @@ func (c Config) ParseTTS() (tts.Run, error) {
 		// weights and generates nothing -- it costs the whole TTL. A voice
 		// path with no utterances starts no process and costs nothing, so it
 		// is a line an operator left behind rather than a run that burns
-		// money, and refusing it would break `ember up --cmd` against a
-		// config that also happens to describe a voice.
+		// money, and refusing it would refuse a config whose image-generation
+		// half is the one being run.
 		return tts.Run{}, nil
 	}
 
@@ -1055,58 +1047,6 @@ func (c Config) PeriodCeilings() (day, month node.MicroUSD, err error) {
 		month = v
 	}
 	return day, month, nil
-}
-
-// ParsePorts turns the "name:remote[:local]" entries into port maps.
-//
-// The local port defaults to the remote one, which is what an operator means
-// by "forward 8188" — and both are validated by node.NewSpec afterwards.
-func (c Config) ParsePorts() ([]node.PortMap, error) {
-	out := make([]node.PortMap, 0, len(c.Ports))
-	for _, s := range c.Ports {
-		pm, err := ParsePort(s)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, pm)
-	}
-	return out, nil
-}
-
-// ParsePort reads one "name:remote[:local]" entry.
-func ParsePort(s string) (node.PortMap, error) {
-	parts := strings.Split(strings.TrimSpace(s), ":")
-	if len(parts) < 2 || len(parts) > 3 {
-		return node.PortMap{}, fmt.Errorf("port %q: write it as name:remote or name:remote:local", s)
-	}
-	name := strings.TrimSpace(parts[0])
-	if name == "" {
-		return node.PortMap{}, fmt.Errorf("port %q has no name", s)
-	}
-	remote, err := parsePortNumber(parts[1])
-	if err != nil {
-		return node.PortMap{}, fmt.Errorf("port %q: remote %w", s, err)
-	}
-	local := remote
-	if len(parts) == 3 {
-		local, err = parsePortNumber(parts[2])
-		if err != nil {
-			return node.PortMap{}, fmt.Errorf("port %q: local %w", s, err)
-		}
-	}
-	return node.PortMap{Name: name, Remote: remote, Local: local}, nil
-}
-
-func parsePortNumber(s string) (uint16, error) {
-	s = strings.TrimSpace(s)
-	var n int
-	if _, err := fmt.Sscanf(s, "%d", &n); err != nil || fmt.Sprint(n) != s {
-		return 0, fmt.Errorf("%q is not a port number", s)
-	}
-	if n < 1 || n > 65535 {
-		return 0, fmt.Errorf("%d is outside 1..65535", n)
-	}
-	return uint16(n), nil
 }
 
 // ParseOutputs turns the configured output paths into OutputPaths.

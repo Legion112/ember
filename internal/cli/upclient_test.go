@@ -191,7 +191,7 @@ func created(d deps) int {
 func upConfig(t *testing.T, home string) string {
 	t.Helper()
 	p := filepath.Join(home, "ember.yaml")
-	body := "provider: local\nimage: ghcr.io/example/wl:v1\nttl: 10m\ncmd: [echo, hi]\n" +
+	body := "provider: local\nimage: ghcr.io/example/wl:v1\nttl: 10m\n" +
 		"config_dir: " + filepath.Join(home, "config") + "\n" +
 		"state_dir: " + filepath.Join(home, "state") + "\n" +
 		"output_dir: " + filepath.Join(home, "out") + "\n"

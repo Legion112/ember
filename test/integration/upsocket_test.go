@@ -39,18 +39,25 @@ import (
 // the direct path, which is the "it reads as working" failure this repository
 // keeps recording. So the names are short and the reason is here.
 
-// upRunConfig is a workload long enough to be interrupted while it runs, and
-// an sd: block because `ember serve` refuses to start without one.
-//
-// `sleep` and not a generation: what is under test is the handoff and the
-// detach, and a run that needed a model would need ember:sd and twenty
-// seconds of sampling to assert a property that has nothing to do with
-// either.
+// upRunConfig is the sd: block `ember serve` refuses to start without.
 const upRunConfig = `
 sd:
   serve: [sd-server, --model, /opt/models/sd15.gguf]
   jobs:
     - prompt: placeholder
+`
+
+// slowProbe is a rental long enough to be interrupted while it is still
+// going.
+//
+// NOT A TEST HOOK: `gpu_probe` is the config key an operator writes for a card
+// that needs time to come up, doing exactly what it says, on a node that has
+// no card. What is under test is the handoff and the detach, and a run that
+// needed a model would need ember:sd and twenty seconds of sampling to assert
+// a property that has nothing to do with either.
+const slowProbe = `
+gpu_probe: [sh, -c, "sleep 12"]
+gpu_probe_timeout: 2m
 `
 
 // upConfigFile writes the config the CLIENT names, and naming one is the
@@ -76,7 +83,7 @@ func upConfigFile(t *testing.T, l *harness.Lab) string {
 		"config_dir: " + filepath.Join(l.Dir, "config"),
 		"state_dir: " + l.StateDir(),
 		"output_dir: " + l.OutputDir(),
-		"",
+		slowProbe,
 	}, "\n")
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -142,8 +149,7 @@ func TestServe_UpOverTheSocket(t *testing.T) {
 	// with. runRaw because Lab.Start inserts the lab's own --config, and the
 	// whole point here is a different one.
 	client, clientOut := l.StartRaw(t.Context(), "up",
-		"--config", upConfigFile(t, l),
-		"--cmd", "sh", "--cmd", "-c", "--cmd", "sleep 12; echo the-run-finished")
+		"--config", upConfigFile(t, l))
 	id := submittedID(t, l)
 
 	// INTERRUPTED WHILE THE RUN IS STILL GOING, which is the property. The
@@ -252,18 +258,27 @@ func TestServe_UpOverTheSocket(t *testing.T) {
 func TestServe_UpWithNoDaemon(t *testing.T) {
 	l := harness.New(t)
 
-	res := l.Run(t.Context(), "up", "--cmd", "echo", "--cmd", "ran-here")
+	// A PROBE THAT FAILS ONCE AND THEN SUCCEEDS, because the assertion below
+	// is about a line whose content came from the node. gpucheck buffers a
+	// probe's own output and prints it only if the card never comes up, so a
+	// probe that passes first time reaches the terminal with nothing; one
+	// that needed a second attempt makes ember say so, on the io.Writer, with
+	// a figure it could only have got by running something there.
+	l.AppendConfig("gpu_probe: [sh, -c, \"test -f /tmp/ember-probed || " +
+		"{ touch /tmp/ember-probed; exit 1; }\"]\ngpu_probe_timeout: 2m\n")
+
+	res := l.Run(t.Context(), "up")
 	if res.ExitCode != 0 {
 		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
 	}
 	if strings.Contains(res.Combined(), "submitted to the ember serve") {
 		t.Errorf("the client claimed to submit a run with no daemon listening:\n%s", res.Combined())
 	}
-	// The node's output on this path goes straight to the terminal, through
-	// an io.Writer and not through an event -- which is the difference the
-	// two paths have and the reason report.Writer is only on the other one.
-	if !strings.Contains(res.Combined(), "ran-here") {
-		t.Errorf("the workload's output did not reach the terminal:\n%s", res.Combined())
+	// The node's facts on this path go straight to the terminal, through an
+	// io.Writer and not through an event -- which is the difference the two
+	// paths have and the reason report.Writer is only on the other one.
+	if !strings.Contains(res.Combined(), "the GPU became usable after") {
+		t.Errorf("nothing the node answered reached the terminal:\n%s", res.Combined())
 	}
 	if n := len(l.Nodes(t.Context())); n != 0 {
 		t.Errorf("%d node(s) survived a clean direct run", n)

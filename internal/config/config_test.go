@@ -1,11 +1,8 @@
 package config
 
 import (
-	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -72,22 +69,21 @@ func TestLoad_RefusesSomethingThatLooksLikeACredential(t *testing.T) {
 func TestLoad_ReadsEverySetting(t *testing.T) {
 	cfg, err := Load(write(t, `
 provider: runpod
-image: ghcr.io/example/comfyui:v1
+image: ghcr.io/example/sd:v1
 ttl: 30m
-ports:
-  - comfyui:8188
-  - jupyter:8888:18888
 gpu: "NVIDIA GeForce RTX 4090"
 min_vram_gib: 20
 allow_interruptible: true
 region: eu
 max_hourly_usd: "0.50"
 max_run_usd: "1.00"
+outputs:
+  - /workspace/out:renders
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "runpod" || cfg.TTL != 30*time.Minute || len(cfg.Ports) != 2 {
+	if cfg.Provider != "runpod" || cfg.TTL != 30*time.Minute || len(cfg.Outputs) != 1 {
 		t.Fatalf("not read back: %+v", cfg)
 	}
 
@@ -176,53 +172,6 @@ func TestBudgets_NameTheKeyAndWhatToWrite(t *testing.T) {
 				t.Errorf("%s: error %q does not carry %q", tc.key, err, want)
 			}
 		}
-	}
-}
-
-func TestParsePort(t *testing.T) {
-	got, err := ParsePort("comfyui:8188")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// "forward 8188" means the same port both ends.
-	if got.Name != "comfyui" || got.Remote != 8188 || got.Local != 8188 {
-		t.Errorf("got %+v", got)
-	}
-
-	got, err = ParsePort("jupyter:8888:18888")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Remote != 8888 || got.Local != 18888 {
-		t.Errorf("got %+v", got)
-	}
-}
-
-func TestParsePort_Refuses(t *testing.T) {
-	for name, in := range map[string]string{
-		"no port":       "comfyui",
-		"too many":      "a:1:2:3",
-		"no name":       ":8188",
-		"remote zero":   "a:0",
-		"remote words":  "a:eight",
-		"remote high":   "a:70000",
-		"local zero":    "a:8188:0",
-		"local words":   "a:8188:eight",
-		"trailing junk": "a:8188x",
-	} {
-		if got, err := ParsePort(in); err == nil {
-			t.Errorf("%s: ParsePort(%q) = %+v, want an error", name, in, got)
-		}
-	}
-}
-
-func TestParsePorts_PropagatesFailures(t *testing.T) {
-	if _, err := (Config{Ports: []string{"ok:1", "bad"}}).ParsePorts(); err == nil {
-		t.Fatal("a malformed entry was skipped")
-	}
-	got, err := (Config{Ports: []string{"a:1", "b:2"}}).ParsePorts()
-	if err != nil || len(got) != 2 {
-		t.Fatalf("got %v, %v", got, err)
 	}
 }
 
@@ -735,32 +684,23 @@ func mustFailSD(t *testing.T, cfg Config) error {
 }
 
 // TestExampleConfigs_LoadAndParse reads every configuration this repository
-// commits, wherever it is written down.
+// commits.
 //
 // KnownFields(true) means a misspelled key is a hard failure, so a committed
 // example with a typo in it is an example that cannot be run -- and the
 // person who finds out is whoever copies it. These are hand-written and long,
 // which is exactly the size where a key gets misremembered.
 //
-// TWO SOURCES, because #144 moved the two shapes that cannot be run out of
-// the root and into prose: one's image: is a sentence and the other's asset
-// digest is a placeholder, both deliberately, so neither is an alternate
-// configuration an operator would run. A fenced block is loaded by nothing,
-// so demoting them would have cost exactly this check over 85 lines of
-// hand-written YAML -- and the rule the guard needs is not a directory, it is
-// "every ember configuration this repository commits", which is derivable:
-// a ```yaml fence under docs/ is one. That is the LAB_TAGS rule rather than a
-// second hand-maintained list, and a fence that is NOT an ember config fails
-// here, which is the signal to retag or move it.
-//
-// A yaml fence that is not a whole ember configuration is a fence to retag
-// or to move, and docs/long-video-is-a-pipeline.md's `cmds` chain is why the
-// rule holds rather than being a burden: it is a real, small, loadable
-// config, and it is checked here for free.
-//
-// ParseAssets is deliberately not called. The video block carries
-// REPLACE_WITH_THE_DIGEST_PUSH_PRINTS where a digest goes, on purpose, and a
-// placeholder that refuses is the point of it.
+// WHAT THIS RULE NARROWS, written beside it rather than left to be
+// discovered: "every ember configuration this repository commits" is the
+// sentence, and "every ember*.yaml at the repository root" is the code. The
+// difference is a configuration written inside a document -- README.md holds
+// yaml fences of its own, and so may docs/ -- and none of those is read here.
+// README's are partial by design, a two-line illustration is not a
+// configuration, and deciding which of them are would be the hand-maintained
+// list this guard exists not to be. The glob is the whole of the pattern, so
+// there is nothing left in it to narrow by accident except the ember prefix,
+// which the floor below reports.
 func TestExampleConfigs_LoadAndParse(t *testing.T) {
 	for _, p := range committedConfigs(t, filepath.Join("..", "..")) {
 		t.Run(filepath.Base(p), func(t *testing.T) {
@@ -771,8 +711,8 @@ func TestExampleConfigs_LoadAndParse(t *testing.T) {
 			if _, err := cfg.ParseSD(); err != nil {
 				t.Errorf("sd: block does not parse: %v", err)
 			}
-			if _, err := cfg.ParsePorts(); err != nil {
-				t.Errorf("ports: does not parse: %v", err)
+			if _, err := cfg.ParseTTS(); err != nil {
+				t.Errorf("tts: block does not parse: %v", err)
 			}
 			if _, err := cfg.ParseOutputs(); err != nil {
 				t.Errorf("outputs: does not parse: %v", err)
@@ -791,18 +731,14 @@ func TestExampleConfigs_LoadAndParse(t *testing.T) {
 }
 
 // committedConfigs is every configuration this repository commits: the
-// ember*.yaml files at the root, and the ```yaml fences under docs/.
+// ember*.yaml files at the root.
 //
-// BOTH FLOORS ARE OVER THE ANSWER AND NOT OVER AN INTERMEDIATE, which is the
+// THE FLOOR IS OVER THE ANSWER AND NOT OVER AN INTERMEDIATE, which is the
 // whole care in this function. Load() answers Default() and a NIL error for a
 // file that is not there, so a source that contributed nothing would pass
 // every assertion in the caller -- and a floor on a local slice that is then
-// not returned is the same hole one line further down: the first shape of
-// this helper counted `fenced` and could have returned `paths` alone, GREEN,
-// with nothing saying the demoted configurations went unread. So the two
-// counts are taken over the list that is handed back, told apart by whether
-// the path is one of the temp files fencedConfigs wrote. They are separate
-// numbers because either source could be the one that broke.
+// not returned is the same hole one line further down. So the count is taken
+// over the list that is handed back.
 func committedConfigs(t *testing.T, root string) []string {
 	t.Helper()
 
@@ -810,177 +746,12 @@ func committedConfigs(t *testing.T, root string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	extracted := t.TempDir()
-	all = append(all, fencedConfigs(t, filepath.Join(root, "docs"), extracted)...)
-
-	var fromRoot, fromDocs int
-	docs := map[string]bool{}
-	for _, p := range all {
-		if filepath.Dir(p) != extracted {
-			fromRoot++
-			continue
-		}
-		fromDocs++
-		// The extractor names each file <document>-line<N>.yaml, so the
-		// document that contributed it is readable off the answer -- which is
-		// what keeps this floor over the answer like the other two.
-		base := filepath.Base(p)
-		if i := strings.LastIndex(base, "-line"); i > 0 {
-			base = base[:i]
-		}
-		docs[base] = true
-	}
-	if fromRoot < 3 {
-		t.Fatalf("%d of the %d configuration(s) came from an ember*.yaml at the "+
-			"repository root, want at least 3; this test is checking nothing if "+
-			"that glob is wrong or its result is not read", fromRoot, len(all))
-	}
-	if fromDocs < 2 {
-		t.Fatalf("%d of the %d configuration(s) came from a ```yaml fence under "+
-			"docs/, want at least 2; the two configurations #144 demoted out of "+
-			"the root live there, and an extractor that finds none -- or a result "+
-			"nothing reads -- is checking nothing", fromDocs, len(all))
-	}
-	// AT LEAST TWO DOCUMENTS, AND THAT IS THE FLOOR THE FIRST VERSION GOT
-	// WRONG. It asked for one fenced configuration, which
-	// docs/long-video-is-a-pipeline.md satisfies on its own -- so moving
-	// docs/configurations.md to docs/reference/configurations.md left this
-	// test at EXIT 0 with 6 of 8 configurations loaded and both demoted
-	// blocks unread, which is the whole property the guard exists for,
-	// silently undone by a file move. Measured, not reasoned.
-	//
-	// The *mdx reinstatement could not see it because that one zeroed the
-	// count: a narrowing that still finds something is invisible to a floor
-	// no single source can fail to satisfy. So the floor is "no one document
-	// carries it" rather than a census of blocks, which would be the
-	// hand-maintained list this guard's own comment argues against.
-	//
-	// WHAT THIS FLOOR CANNOT DO, because a limitation nobody can read out of
-	// the code is a limitation that will be forgotten: it counts documents
-	// and can never name the one that matters. Measured, both halves. On the
-	// tree as it stands, an extractor that skips configurations.md by name is
-	// RED -- "1 of the 6 configuration(s) came from a ```yaml fence" -- but
-	// that is the two-configuration floor answering, not this one, and it
-	// holds only while long-video-is-a-pipeline.md is the sole other page
-	// with a fence. Plant a second docs/ page carrying one and skip
-	// configurations.md: EXIT 0, seven configurations loaded, and ZERO of
-	// them from configurations.md -- both demoted blocks unread with every
-	// floor satisfied. Latent rather than present, and it stays latent only
-	// by an accident of how many pages under docs/ happen to hold YAML.
-	//
-	// NOT CLOSED, and the trade is the reason. The only fix is naming
-	// `configurations` -- one hand-maintained filename, which is exactly what
-	// the paragraph above refuses, and the LAB_TAGS argument says a list
-	// checked against nothing is worse than the gap it covers. With Glob gone
-	// there is no pattern left to narrow by accident, so reaching this needs a
-	// deliberate skip of that one name rather than a plausible edit. That is
-	// the TestConformance_CannotCatchARederivedRunID arrangement: the suite
-	// states what it cannot see, so whoever adds the second fenced page reads
-	// this and decides again.
-	if len(docs) < 2 {
-		t.Fatalf("every fenced configuration came from %v, want at least 2 "+
-			"documents under docs/; one document satisfying this floor on its "+
-			"own is how a file move leaves the demoted configurations unread "+
-			"with this test green", keysOf(docs))
+	if len(all) < 3 {
+		t.Fatalf("%d configuration(s) matched ember*.yaml at the repository root, "+
+			"want at least 3; this test is checking nothing if that glob is wrong "+
+			"or its result is not read", len(all))
 	}
 	return all
-}
-
-// keysOf names the documents a floor failed over, because "want at least 2"
-// without saying which one answered sends the reader to count fences.
-func keysOf(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// fencedConfigs writes every ```yaml block under dir into tmp and returns the
-// paths, so Load -- which takes a path and nothing else -- can read a
-// configuration that lives inside a document.
-//
-// tmp is the caller's rather than its own, because the caller tells a fenced
-// configuration from a root one by its directory.
-//
-// The file name carries the document and the line the fence opened on,
-// because a subtest called "block" names nothing a reader can go and look at.
-//
-// The opening fence is matched as the whole line and not as a prefix: a
-// ```yaml-ish word would otherwise open a block that never closes, and the
-// remainder of the document would be handed to the YAML decoder as one
-// configuration. Everything else -- ```bash, ```, ```text -- is left alone,
-// which is what keeps a captured log or a curl command out of the set.
-//
-// A WALK AND NOT A GLOB, because a glob is a pattern and a pattern narrows.
-// filepath.Glob(dir, "*.md") is not recursive, so moving this document to
-// docs/reference/ left the guard green with both demoted configurations
-// unread -- and narrowing the same pattern to "l*.md" does it too. There is
-// no pattern left here to narrow except the .md suffix, and dropping that
-// finds nothing at all, which every floor in the caller reports.
-//
-// WHAT THIS RULE NARROWS, written beside it rather than left to be
-// discovered: it reads docs/ and NOT README.md, which holds 14 yaml fences of
-// its own -- 12 of which would pass unchanged, including the starter
-// `# ember.yaml` block that is the first thing anybody copies. So the rule as
-// stated ("every ember configuration this repository commits") is wider than
-// the rule as implemented ("every ```yaml fence under docs/"), and the
-// difference is README. That is the imagelabs shape in miniature, which is
-// why it is a sentence here instead of a surprise: widening it is cheap and
-// the only reason it was not done with #144 is that README's fences are
-// partial by design -- a two-line `cmd:`/`ports:` illustration is not a
-// configuration, and deciding which of the 14 are would be the
-// hand-maintained list this guard exists not to be.
-func fencedConfigs(t *testing.T, dir, tmp string) []string {
-	t.Helper()
-
-	var docs []string
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") {
-			docs = append(docs, p)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var out []string
-	for _, d := range docs {
-		raw, err := os.ReadFile(d) //nolint:gosec // a committed document
-		if err != nil {
-			t.Fatal(err)
-		}
-		lines := strings.Split(string(raw), "\n")
-		for i := 0; i < len(lines); i++ {
-			if strings.TrimRight(lines[i], "\r") != "```yaml" {
-				continue
-			}
-			start := i + 1
-			end := start
-			for end < len(lines) && strings.TrimRight(lines[end], "\r") != "```" {
-				end++
-			}
-			if end == len(lines) {
-				t.Fatalf("%s: the ```yaml block opened at line %d is never closed",
-					filepath.Base(d), i+1)
-			}
-			name := fmt.Sprintf("%s-line%d.yaml",
-				strings.TrimSuffix(filepath.Base(d), ".md"), i+1)
-			p := filepath.Join(tmp, name)
-			body := strings.Join(lines[start:end], "\n") + "\n"
-			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			out = append(out, p)
-			i = end
-		}
-	}
-	return out
 }
 
 // TestLoad_RefusesADuplicateKey pins a behaviour of the YAML library rather
@@ -1253,6 +1024,114 @@ func TestLoad_RefusesAMinCUDAWithNoValue(t *testing.T) {
 		if !strings.Contains(err.Error(), "gpu_probe") {
 			t.Errorf("a min_cuda line with no value got yaml's unknown-field error "+
 				"rather than ember's remedy: %v\n%s", err, body)
+		}
+	}
+}
+
+// TestLoad_RefusesTheWorkloadKeysByNameRatherThanAsUnknownFields is the
+// operator-facing half of #203.
+//
+// ember runs AI model jobs, so a config describes them with `sd:` or `tts:`
+// and a node publishes nothing but sshd. Deleting the three keys that said
+// otherwise answers the behaviour by itself, because KnownFields(true) refuses
+// a key that is not a field -- but what yaml.v3 then says is "field cmds not
+// found in type config.Config", which names a Go type an operator should never
+// see and offers no remedy. All three were in README for their whole life, so
+// the person who hits this is the one who followed the documentation.
+//
+// THE REMEDY IS ASSERTED AND NOT ONLY THE KEY, which is what distinguishes
+// ember's sentence from yaml's: the generic message contains the key too, so a
+// check for the key alone passes against the state this exists to replace.
+// Each key's own remedy is a separate want, because one wording for all three
+// would send an operator whose `ports:` line is the problem looking for a
+// block to write.
+func TestLoad_RefusesTheWorkloadKeysByNameRatherThanAsUnknownFields(t *testing.T) {
+	base := "provider: local\nimage: ember-sd:1\nttl: 10m\n"
+	for _, tc := range []struct {
+		key  string
+		body string
+		want []string
+	}{
+		{"cmd", "cmd: [sd-cli, -p, a cat]\n", []string{"cmd", "sd:", "tts:"}},
+		{"cmds", "cmds:\n  - [sd-cli, -p, one]\n", []string{"cmds", "sd:", "tts:"}},
+		{"ports", "ports:\n  - sshd:22:18022\n", []string{"ports", "outputs:"}},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			_, err := Load(write(t, base+tc.body))
+			if err == nil {
+				t.Fatalf("%s was accepted", tc.key)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal does not name %q: %v", want, err)
+				}
+			}
+			if strings.Contains(err.Error(), "config.Config") {
+				t.Errorf("the refusal is yaml's unknown-field message rather than ember's: %v", err)
+			}
+		})
+	}
+
+	// The negative control: a refusal that fired on every file would satisfy
+	// every assertion above.
+	if _, err := Load(write(t, base)); err != nil {
+		t.Fatalf("a config that named none of them was refused: %v", err)
+	}
+}
+
+// TestLoad_RefusesAWorkloadKeyWithNoValue is the spelling a struct of pointers
+// cannot see, for the three keys #203 removed.
+//
+// `cmds:` with nothing after it decodes as null, so a check written as
+// `*string != nil` reads it as absent -- and it is exactly what an operator
+// reaches for when they want a key off without deleting the line. An empty
+// sequence is the other one, and `len(...) > 0` reads that as absent too.
+//
+// IT ASSERTS THE MESSAGE AND NOT MERELY AN ERROR, because KnownFields(true)
+// refuses a key that is not a field whatever rejectRemovedKeys concluded: `err
+// != nil` holds against the defect as happily as against the fix. What tells
+// the two apart is whose sentence it is.
+func TestLoad_RefusesAWorkloadKeyWithNoValue(t *testing.T) {
+	base := "provider: local\nimage: ember-sd:1\nttl: 10m\n"
+	for _, tc := range []struct {
+		body string
+		want string
+	}{
+		{"cmd:\n", "sd:"},
+		{"cmd: []\n", "sd:"},
+		{"cmds:\n", "sd:"},
+		{"cmds: []\n", "sd:"},
+		{"ports:\n", "outputs:"},
+		{"ports: []\n", "outputs:"},
+	} {
+		_, err := Load(write(t, base+tc.body))
+		if err == nil {
+			t.Errorf("a key with no value was accepted:\n%s", tc.body)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q got yaml's unknown-field error rather than ember's remedy: %v",
+				tc.body, err)
+		}
+	}
+}
+
+// TestLoad_NamesEveryRemovedKeyTheFileCarries.
+//
+// An operator who wrote two of them and is told about one edits the file, runs
+// it again, and is told about the next -- the same work split across as many
+// runs as they made mistakes. A loop that returned on the first hit would
+// satisfy every other assertion in this file, because each of those writes one
+// key.
+func TestLoad_NamesEveryRemovedKeyTheFileCarries(t *testing.T) {
+	_, err := Load(write(t, "provider: local\nimage: ember-sd:1\nttl: 10m\n"+
+		"cmd: [true]\nports:\n  - sshd:22\nmin_cuda: \"12.6\"\n"))
+	if err == nil {
+		t.Fatal("three removed keys were accepted")
+	}
+	for _, want := range []string{"cmd ", "ports ", "min_cuda "} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal stops before %q: %v", want, err)
 		}
 	}
 }

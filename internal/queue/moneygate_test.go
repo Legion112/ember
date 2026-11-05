@@ -279,7 +279,7 @@ func TestAppPlanner_ProjectsTheChosenCardsPriceAgainstThePeriodCeilings(t *testi
 // submittedRunConfig is `paidRunConfig` over a whole hour, so the projection
 // at $0.89/hr is exactly $0.89 and the figures in the assertions below are
 // readable rather than a rounded fraction of an hour.
-const submittedRunConfig = "provider: runpod\nimage: " + runImage + "\nttl: 1h\ncmd: [echo, hi]\n"
+const submittedRunConfig = "provider: runpod\nimage: " + runImage + "\nttl: 1h\n"
 
 // aLoop runs the drain goroutine for as long as the test needs one and waits
 // for its deferred destroy on the way out.

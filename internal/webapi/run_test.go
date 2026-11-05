@@ -273,8 +273,7 @@ func TestRun_AServerWithNoRentalLoopSaysSoRatherThanPanicking(t *testing.T) {
 func TestRunBody_RoundTripsEveryOverride(t *testing.T) {
 	in := RunBody{
 		Config: "/home/op/ember.yaml", Provider: "runpod", Image: "x@sha256:abc",
-		GPU: "h100-80g", MaxHourlyUSD: "2.49", TTL: "2h", Hold: "15m",
-		Ports: []string{"ui:8188"}, Cmd: []string{"sd-cli", "--help"},
+		GPU: "h100-80g", MaxHourlyUSD: "2.49", TTL: "2h",
 	}
 	raw, err := json.Marshal(in)
 	if err != nil {
@@ -297,17 +296,12 @@ func TestRunBody_RoundTripsEveryOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ask.Config != in.Config || ask.Hold.Minutes() != 15 || ask.Overrides.TTL.Hours() != 2 {
+	if ask.Config != in.Config || ask.Overrides.TTL.Hours() != 2 {
 		t.Errorf("toAsk lost something: %+v", ask)
 	}
-	if len(ask.Overrides.Ports) != 1 || ask.Overrides.Ports[0] != "ui:8188" {
-		t.Errorf("ports = %v", ask.Overrides.Ports)
-	}
-	if len(ask.Overrides.Cmd) != 2 || ask.Overrides.Cmd[1] != "--help" {
-		t.Errorf("cmd = %v", ask.Overrides.Cmd)
-	}
-	if ask.Overrides.MaxHourlyUSD != "2.49" {
-		t.Errorf("max_hourly_usd = %q", ask.Overrides.MaxHourlyUSD)
+	if ask.Overrides.Provider != "runpod" || ask.Overrides.Image != in.Image ||
+		ask.Overrides.GPU != "h100-80g" || ask.Overrides.MaxHourlyUSD != "2.49" {
+		t.Errorf("toAsk lost an override: %+v", ask.Overrides)
 	}
 }
 

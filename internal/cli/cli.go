@@ -87,7 +87,7 @@ type command struct {
 func commands() []command {
 	return []command{
 		{"version", "print the ember version", cmdVersion},
-		{"up", "rent a node, forward its ports to loopback, destroy it", cmdUp},
+		{"up", "rent a node, run the jobs the config describes, destroy it", cmdUp},
 		{"down", "destroy a node by handle", cmdDown},
 		{"ls", "list nodes ember created, across every configured provider", cmdLs},
 		{"serve", "run the web UI and a queue that drains onto one rental", cmdServe},
@@ -128,7 +128,7 @@ func run(args []string, out io.Writer) error {
 }
 
 func usage(out io.Writer) {
-	outf(out, "ember rents a GPU node, runs a container on it, and destroys it.\n\nusage: ember <subcommand> [flags]\n\n")
+	outf(out, "ember rents a GPU node, runs an AI model job on it, and destroys it.\n\nusage: ember <subcommand> [flags]\n\n")
 	cs := commands()
 	sort.Slice(cs, func(i, j int) bool { return cs[i].name < cs[j].name })
 	// Width from the longest name rather than a literal. It was %-8s, and

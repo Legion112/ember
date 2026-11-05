@@ -15,8 +15,8 @@ import (
 // before anything was rented.
 //
 // WHY IT IS A TYPE AND NOT A SENTENCE. The two callers want opposite things
-// from the same fact. `ember up` refuses with it, because an interactive
-// command must not rent a second machine nobody asked for; `ember serve`
+// from the same fact. `ember up` refuses with it, because a command somebody
+// typed must not rent a second machine nobody asked for; `ember serve`
 // catches it and fills the store on a machine with no card, which is the
 // whole saving. A plain error would make the second one a string match.
 type AssetsMissingError struct {

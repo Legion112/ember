@@ -105,7 +105,7 @@ func TestQueue_ACtrlCdBatchRecordsWhyThroughFinish(t *testing.T) {
 		failNth: map[int]error{0: context.Canceled},
 		progress: func(sink report.Sink, _ int) {
 			sink.Emit(report.Event{
-				Kind: report.KindJobProgress, Unit: report.UnitStep,
+				Kind: report.KindJobProgress, Unit: report.UnitJob,
 				Index: 1, Pass: 1, Step: 3, TotalSteps: 4,
 			})
 		},
