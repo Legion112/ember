@@ -74,11 +74,36 @@ pub fn App() -> impl IntoView {
     // Which page is on screen, and the one authority for it.
     let route = route::install();
 
+    // `/` IS AN ALIAS AND IT IS CANONICALISED AWAY, which is the one piece of
+    // routing that needs the config. The landing address renders the first
+    // workload this server declares -- it is where the one-time token URL
+    // lands and where an operator types a port from memory, so a server with
+    // one workload must not need a click to reach its form -- and leaving the
+    // address bar at `/` would mean a copied link names a page whose identity
+    // depends on which server reads it, with the nav marking nothing current.
+    //
+    // `replace` AND NOT `go`: a pushed entry would put `/` back in the
+    // history, where pressing back lands on the alias and is redirected
+    // forward again, which is a back button that cannot leave.
+    //
+    // IT READS `route` REACTIVELY ON PURPOSE, so a back-navigation to `/`
+    // is canonicalised too, and it writes `route` -- which terminates because
+    // the write makes its own condition false: one re-run, `Route::Home` no
+    // longer matches, nothing more.
+    Effect::new(move |_| {
+        if route.get() != Route::Home {
+            return;
+        }
+        if let Some(first) = config.get().workloads.first() {
+            route::replace(route, Route::Generate(first.id.clone()));
+        }
+    });
+
     view! {
         <header>
             <h1>"ember"</h1>
             <Posture config=config />
-            <Nav route=route />
+            <Nav config=config route=route />
         </header>
 
         <Show when=move || !fatal.get().is_empty()>
@@ -95,7 +120,24 @@ pub fn App() -> impl IntoView {
             // watcher's socket and is also the hazard `views::request` is
             // written around.
             {move || match route.get() {
-                Route::Compose => view! { <Compose config=config route=route /> }.into_any(),
+                // THE WORKLOAD IS LOOKED UP AND NOT ASSUMED, which is what
+                // makes a typed `/generate/nope` a sentence rather than an
+                // empty form. The three answers are different states and the
+                // page says which: this server declares it, this server has
+                // answered and does not declare it, or ember has not said yet.
+                Route::Home => view! { <Waiting /> }.into_any(),
+                Route::Generate(id) => {
+                    let c = config.get();
+                    match c.workload(&id) {
+                        Some(wl) => view! {
+                            <Compose wl=wl.clone() config=config route=route />
+                        }.into_any(),
+                        None if c.answered() => {
+                            view! { <NoWorkload id=id config=config route=route /> }.into_any()
+                        }
+                        None => view! { <Waiting /> }.into_any(),
+                    }
+                }
                 Route::Queue => view! { <Queue route=route /> }.into_any(),
                 // THE ID COMES FROM THE PATH AND FROM NOWHERE ELSE, so a deep
                 // link, a reload, the back button and a queue row are one code
@@ -121,13 +163,86 @@ pub fn App() -> impl IntoView {
 /// a link to a page the router does not own renders "there is no page here"
 /// rather than failing.
 #[component]
-fn Nav(route: RwSignal<Route>) -> impl IntoView {
+fn Nav(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoView {
     view! {
         <nav>
+            // THE GENERATE TABS ARE THIS SERVER'S AND NOT THIS BUILD'S, which
+            // is #200 on screen: one link per declared workload, labelled with
+            // the operator's own name for it. A server with one entry shows
+            // one, and there is no `kind` dropdown for it to disagree with --
+            // the page cannot offer what the server did not publish.
+            //
+            // READ INSIDE THE CLOSURE AND KEYED BY NOTHING, which is the rule
+            // four keyed-`<For>` defects on this page were paid for: the
+            // config arrives after the first render, so a nav built once would
+            // be an empty nav for ever, and a key over an id would freeze a
+            // row whose label changed. A plain map over a reactive read
+            // rebuilds the handful of links, which costs nothing.
+            {move || config.get().workloads.into_iter().map(|w| {
+                let label = w.label().to_string();
+                view! {
+                    <Link to=Route::Generate(w.id.clone()) route=route>{label}</Link>
+                }
+            }).collect::<Vec<_>>()}
             {Route::nav().into_iter().map(|(to, label)| view! {
                 <Link to=to route=route>{label}</Link>
             }).collect::<Vec<_>>()}
         </nav>
+    }
+}
+
+/// Waiting is the moment before `/api/config` has answered.
+///
+/// A SENTENCE AND NOT AN EMPTY `<main>`, for `NoPage`'s reason: a blank panel
+/// reads as a page that failed to load, which is the one thing this must not
+/// look like. It is reached for a fraction of a second on a healthy server and
+/// indefinitely on one that cannot answer -- where the header's own fatal line
+/// says why, which is why this one does not guess.
+///
+/// WHY THE FORM IS NOT DRAWN FIRST AND FILLED IN, which is what this page used
+/// to do. The controls a workload shows are the workload's, and until the
+/// server has said which workloads it has there is no honest form to draw --
+/// drawing one would be the page offering what the server may not serve, which
+/// is the whole of what #200 is about.
+#[component]
+fn Waiting() -> impl IntoView {
+    view! {
+        <section class="panel">
+            <h2>"waiting for ember"</h2>
+            <p class="hint">
+                "ember serve has not yet said which workloads it can run. The form for one
+                 appears as soon as it does."
+            </p>
+        </section>
+    }
+}
+
+/// NoWorkload is an address naming a workload this server does not declare.
+///
+/// IT NAMES THE ID AND LISTS WHAT IS THERE, because the address was typed,
+/// pasted or bookmarked from another server: a workload id is the operator's
+/// own, so the same link is a valid page on one `ember serve` and nothing on
+/// the next. A blank panel would read as a page that failed to load, and the
+/// list is what turns the refusal into something to click.
+#[component]
+fn NoWorkload(id: String, config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoView {
+    view! {
+        <section class="panel">
+            <h2>"no such workload"</h2>
+            <p class="hint">
+                "this ember serve does not declare a workload called " <code>{id}</code>
+                ". A workload id comes from the operator's own ember.yaml, so an address
+                 that worked against another server does not have to work here."
+            </p>
+            <p>
+                {move || config.get().workloads.into_iter().map(|w| {
+                    let label = w.label().to_string();
+                    view! {
+                        <Link to=Route::Generate(w.id.clone()) route=route>{label}</Link>
+                    }
+                }).collect::<Vec<_>>()}
+            </p>
+        </section>
     }
 }
 
@@ -149,7 +264,7 @@ fn NoPage(path: String, route: RwSignal<Route>) -> impl IntoView {
                 ". It answers this app on any address without a dot in it, so a
                  mistyped one arrives here rather than at a 404."
             </p>
-            <p><Link to=Route::Compose route=route>"start again"</Link></p>
+            <p><Link to=Route::Home route=route>"start again"</Link></p>
         </section>
     }
 }

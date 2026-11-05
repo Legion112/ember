@@ -420,6 +420,39 @@ func Narrow(cfg config.Config, r genstore.Request) (config.Config, provision.Bud
 				r.MaxHourly, r.MaxRun)
 	}
 
+	// THE WORKLOAD, WHICH IS A SELECTION AND NOT A NARROWING. A request names
+	// a declared entry's id and the server resolves it against the operator's
+	// own file, which is what `internal/tts` already does for a voice id -- so
+	// what comes back is the configuration for that one workload: the entry's
+	// `image:`, `images:`, `sd:` and `tts:` in place of the top-level ones.
+	// The request has named no image, no argv and no path, and every seal in
+	// `node`, `exposure` and `loopback` stays upstream of it.
+	//
+	// EMPTY IS THE IMPLICIT ENTRY, through WorkloadOf: a row written before
+	// the column, and every row against a file that declares no `workloads:`,
+	// resolves to the entry named after its own driver.
+	id := genstore.WorkloadOf(r.Workload, r.Kind)
+	cfg, w, err := cfg.Select(id)
+	if err != nil {
+		return config.Config{}, provision.Budget{}, err
+	}
+
+	// AND THE DRIVER THE STORE RECORDED HAS TO STILL BE THE ENTRY'S. The row
+	// was written when the request was queued and the file can have been
+	// edited since; a `driver:` changed from `sd` to `tts` under an id that
+	// kept its name would hand a stored batch of image jobs to piper, after a
+	// card had been paid for. The store's own `kind` is what the jobs' shape
+	// was validated against -- see genstore.Request.validate -- so the two
+	// have to agree before anything is rented, and the operator's file wins
+	// by being the thing that is refused rather than the thing that is
+	// believed.
+	if genstore.KindOf(r.Kind) != w.Driver {
+		return config.Config{}, provision.Budget{}, fmt.Errorf(
+			"this request was queued as a %s generation and the workload %q now has driver %q; "+
+				"its jobs were validated against the first, so nothing will be rented. Queue it "+
+				"again, or put the driver back", genstore.KindOf(r.Kind), w.ID, w.Driver)
+	}
+
 	// The selection. These are not ceilings -- there is nothing to compare
 	// them against -- so a request simply chooses, and the provider either
 	// has the card or reports no capacity.

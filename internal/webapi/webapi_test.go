@@ -144,6 +144,18 @@ func newHarness(t *testing.T, mut ...func(*Options)) *harness {
 	for _, m := range mut {
 		m(&o)
 	}
+	// DERIVED FROM THE CONFIG THE MUTATORS LEFT, which is what cmd_serve
+	// does: one reading of the file, handed to the server and to the queue.
+	// After the mutators so that a mutator which edits the config -- adding a
+	// tts.voices list, say -- changes what this server declares, rather than
+	// a test having to set two fields that could disagree.
+	if o.Workloads == nil {
+		ws, werr := o.Config.WorkloadCatalogue()
+		if werr != nil {
+			t.Fatal(werr)
+		}
+		o.Workloads = ws
+	}
 	s, err := New(o)
 	if err != nil {
 		t.Fatal(err)
@@ -338,11 +350,19 @@ func TestConfig_SaysWhatAUICanOffer(t *testing.T) {
 	if got.AllowPaid {
 		t.Error("allow_paid is true without the flag")
 	}
-	if !got.Servable {
-		t.Error("servable is false for a config with an sd.serve block")
+	// ONE SERVABLE WORKLOAD, FROM THIS CONFIG AND NOT FROM genstore.Kinds().
+	// The harness declares no `workloads:`, so the entry is the implicit one
+	// derived from `image:` and `sd:` -- named after its own driver, which is
+	// what makes a row written before the column resolve to it.
+	if len(got.Workloads) != 1 {
+		t.Fatalf("workloads = %+v, want the one this config describes", got.Workloads)
 	}
-	if got.Preview != "proj" || got.PreviewInterval != 5 {
-		t.Errorf("preview defaults = %q every %d, want the config's", got.Preview, got.PreviewInterval)
+	wl := got.Workloads[0]
+	if wl.ID != config.DriverSD || wl.Driver != config.DriverSD {
+		t.Errorf("workload = %+v, want the implicit sd entry", wl)
+	}
+	if wl.Preview != "proj" || wl.PreviewInterval != 5 {
+		t.Errorf("preview defaults = %q every %d, want the config's", wl.Preview, wl.PreviewInterval)
 	}
 	// Absent before this process's first rental, which is a pointer because
 	// "nothing has asked yet" and "the server has no samplers" are different
@@ -562,8 +582,13 @@ func TestPostRequest_RefusesWhenThereIsNoServerToRunOn(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
 	}
-	if got := decode[configView](t, h.do(t, "GET", "/api/config", "")); got.Servable {
-		t.Error("the config reports itself servable with no sd.serve block")
+	// AND THE PAGE IS NEVER OFFERED IT, which is the half that replaced a
+	// `servable` flag: an entry that cannot be served is left out of what
+	// `/api/config` publishes, so there is no tab for a workload whose next
+	// click would be this 409. One method answers both -- see
+	// config.Workload.Unservable.
+	if got := decode[configView](t, h.do(t, "GET", "/api/config", "")); len(got.Workloads) != 0 {
+		t.Errorf("workloads = %+v, want none offered with no sd.serve block", got.Workloads)
 	}
 }
 

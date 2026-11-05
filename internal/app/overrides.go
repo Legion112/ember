@@ -45,6 +45,23 @@ type Overrides struct {
 	// is guess.
 	TTL time.Duration
 
+	// Workload is which declared workload this run is for, and it is a
+	// SELECTION rather than a replacement -- the one field on this type that
+	// is not "a flag beats the file".
+	//
+	// It names an entry in the file's own `workloads:` list, and Apply hands
+	// it to config.Select, which answers the configuration for that one
+	// workload: the entry's `image:`, `images:`, `sd:` and `tts:` in place of
+	// the top-level ones. So nothing here reaches past the operator's file --
+	// a value that names no declared entry is refused rather than becoming an
+	// image, which is why Apply can fail at all.
+	//
+	// EMPTY IS THE ONE WORKLOAD A FILE DESCRIBES, which is every file that
+	// declares none. A file declaring more than one refuses an empty value,
+	// because one run is one image and picking silently would mean watching
+	// the wrong binary start.
+	Workload string
+
 	// Ports and Cmd replace the whole list when non-empty, never append.
 	// Appending would mean a `--port` on the command line could not override
 	// a configured one, only add to it, so the forward an operator was trying
@@ -61,7 +78,26 @@ type Overrides struct {
 // place would mean -image silently did nothing on every config that has one.
 // One field holds the answer, so there is no "which wins" rule at the
 // decision site.
-func (o Overrides) Apply(cfg *config.Config) {
+//
+// IT CAN FAIL NOW, AND ONLY FOR THE SELECTION. `Workload` names an entry in
+// the operator's own file and a name that is not there cannot be honoured, so
+// this returns an error rather than silently leaving the top-level keys in
+// place -- which would rent the wrong image. Every other field here replaces a
+// scalar and cannot fail.
+//
+// THE SELECTION HAPPENS FIRST AND THE FLAGS BEAT IT, which is one order
+// rather than two: Select reads the `workloads:` list, which no override
+// touches, and then `-image` replaces whatever the entry named for the same
+// reason it replaces whatever the file named. Doing it the other way round
+// would mean the entry's image silently overwrote the flag, which is the
+// defect `images:` already records for the map.
+func (o Overrides) Apply(cfg *config.Config) error {
+	selected, _, err := cfg.Select(o.Workload)
+	if err != nil {
+		return err
+	}
+	*cfg = selected
+
 	if o.Provider != "" {
 		cfg.Provider = o.Provider
 	}
@@ -84,6 +120,7 @@ func (o Overrides) Apply(cfg *config.Config) {
 	if len(o.Cmd) > 0 {
 		cfg.Cmd = o.Cmd
 	}
+	return nil
 }
 
 // RunAsk is one `ember up` command line as a value: the config file to read

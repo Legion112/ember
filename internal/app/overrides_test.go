@@ -27,14 +27,16 @@ func TestOverrides_ReplaceRatherThanNarrow(t *testing.T) {
 		Ports:        []string{"ui:8188"},
 		Cmd:          []string{"echo", "configured"},
 	}
-	Overrides{
+	if err := (Overrides{
 		Provider:     "runpod",
 		GPU:          "h100-80g",
 		MaxHourlyUSD: "999",
 		TTL:          2 * time.Hour,
 		Ports:        []string{"api:9000"},
 		Cmd:          []string{"echo", "typed"},
-	}.Apply(&cfg)
+	}).Apply(&cfg); err != nil {
+		t.Fatal(err)
+	}
 
 	if cfg.MaxHourlyUSD != "999" {
 		t.Errorf("max_hourly_usd = %q, want the flag's 999: narrowing it here would make the "+
@@ -68,7 +70,9 @@ func TestOverrides_AnEmptyValueLeavesTheFileAlone(t *testing.T) {
 		TTL: time.Hour, Ports: []string{"ui:8188"}, Cmd: []string{"echo"},
 	}
 	before := cfg
-	Overrides{}.Apply(&cfg)
+	if err := (Overrides{}).Apply(&cfg); err != nil {
+		t.Fatal(err)
+	}
 
 	if cfg.Provider != before.Provider || cfg.Image != before.Image || cfg.GPU != before.GPU ||
 		cfg.MaxHourlyUSD != before.MaxHourlyUSD || cfg.TTL != before.TTL ||
@@ -88,7 +92,9 @@ func TestOverrides_AnEmptyValueLeavesTheFileAlone(t *testing.T) {
 // fetched, all billed.
 func TestOverrides_AnImageTakesTheImagesMapWithIt(t *testing.T) {
 	cfg := config.Config{Image: "a:v1", Images: map[string]string{"sm_89": "b:v1"}}
-	Overrides{Image: "c:v1"}.Apply(&cfg)
+	if err := (Overrides{Image: "c:v1"}).Apply(&cfg); err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Image != "c:v1" {
 		t.Errorf("image = %q", cfg.Image)
 	}
@@ -135,5 +141,61 @@ func TestRunAsk_RefusesWhatOnlyAMistakeCouldMean(t *testing.T) {
 		Overrides: Overrides{TTL: time.Hour}}
 	if err := ok.Validate(); err != nil {
 		t.Errorf("a well-formed ask was refused: %v", err)
+	}
+}
+
+// TestApply_SelectsTheNamedWorkloadAndTheFlagStillBeatsItsImage.
+//
+// THE SELECTION AND THE REPLACEMENT IN ONE ORDER, which is what Apply's
+// comment claims and what a reader would reasonably want checked: `Select`
+// reads the `workloads:` list, which no override touches, and then `-image`
+// replaces whatever the entry named for the same reason it replaces whatever
+// the file named. Doing it the other way round would mean the entry's image
+// silently overwrote the flag, which is the defect `images:` already records
+// for the map.
+func TestApply_SelectsTheNamedWorkloadAndTheFlagStillBeatsItsImage(t *testing.T) {
+	base := func() config.Config {
+		return config.Config{
+			Provider: "local",
+			Workloads: []config.Workload{
+				{ID: "image", Driver: config.DriverSD, Image: "ghcr.io/x/sd:v1",
+					SD: config.SDConfig{Serve: []string{"sd-server"}}},
+				{ID: "speech", Driver: config.DriverTTS, Image: "ghcr.io/x/tts:v1",
+					TTS: config.TTSConfig{Voices: []config.TTSVoice{{ID: "a", Voice: "/v.onnx"}}}},
+			},
+		}
+	}
+
+	cfg := base()
+	if err := (Overrides{Workload: "speech"}).Apply(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Image != "ghcr.io/x/tts:v1" || len(cfg.SD.Serve) != 0 {
+		t.Errorf("the speech entry resolved to image %q with serve %v", cfg.Image, cfg.SD.Serve)
+	}
+
+	// AND THE FLAG WINS, which is the half with an ordering behind it.
+	cfg = base()
+	if err := (Overrides{Workload: "speech", Image: "ghcr.io/x/other:v2"}).Apply(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Image != "ghcr.io/x/other:v2" {
+		t.Errorf("image = %q; -image lost to the entry's own, which is the defect images: "+
+			"already records", cfg.Image)
+	}
+
+	// AND AN UNDECLARED NAME IS REFUSED RATHER THAN LEAVING THE TOP-LEVEL KEYS
+	// IN PLACE, which is the one thing Apply can fail for: honouring it would
+	// rent whatever `image:` happened to say.
+	cfg = base()
+	if err := (Overrides{Workload: "video"}).Apply(&cfg); err == nil {
+		t.Error("a workload nobody declared was accepted")
+	}
+
+	// AND AN EMPTY NAME AGAINST TWO DECLARED IS REFUSED, because one run is
+	// one image.
+	cfg = base()
+	if err := (Overrides{}).Apply(&cfg); err == nil {
+		t.Error("a file declaring two workloads picked one for an empty --workload")
 	}
 }

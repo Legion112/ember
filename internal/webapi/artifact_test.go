@@ -160,22 +160,29 @@ func TestArtifact_AnUntypedOneIsNamedAndNotRenderedAsAnImage(t *testing.T) {
 	}
 }
 
-// TestConfig_PublishesAtLeastOneKind is the invariant the PAGE's "has the
-// config answered yet" discriminator rests on.
+// TestConfig_AlwaysPublishesAProviderIsThePagesAnsweredDiscriminator is the
+// invariant the PAGE's "has /api/config answered yet" test rests on.
 //
-// `model::Config::composing` reads an empty `kinds` as "ember has not said
-// yet" and NOT as "this process runs nothing" -- the `caps` distinction one
-// field over, where "nothing has asked a server" and "the server reported no
-// samplers" are different answers. That reading is only sound while no real
-// response can carry an empty list, which `genstore.Kinds()` guarantees by
-// construction and nothing asserted. A projection that one day filtered the
-// kinds by what this config can run -- a plausible change, and the page has no
-// way to see it coming -- would make a configuration with no `sd:` and no
-// `tts:` publish `[]`, and the page would sit saying it was still waiting.
-func TestConfig_PublishesAtLeastOneKind(t *testing.T) {
-	// The bare harness: no voices, which is the configuration most likely to
-	// tempt somebody into filtering this list.
-	h := newHarness(t)
+// IT USED TO BE `kinds` AND THAT IS THE WHOLE POINT OF THIS TEST CHANGING.
+// `model::Config` read an empty kind list as "ember has not said yet" and NOT
+// as "this process runs nothing", which was only sound while no real response
+// could carry an empty list -- `genstore.Kinds()` guaranteed that by being a
+// literal in ember's source. The previous version of this test said in its own
+// comment that a projection which filtered the kinds by what the config can
+// run "would make a configuration with no `sd:` and no `tts:` publish `[]`,
+// and the page would sit saying it was still waiting". That projection is
+// exactly what #200 asks for and what `workloads` now is, so the
+// discriminator had to move before the list could be filtered.
+//
+// `providers` IS THE ONE FIELD NO REAL ANSWER CAN EMPTY: the registry always
+// holds the local provider, which needs no credential -- so an empty
+// `providers` means the page has not been answered and an empty `workloads`
+// means this server can be asked for nothing, which `Config::unrunnable`
+// prints. Asserted over the configuration most likely to tempt somebody into
+// filtering: the bare harness, no voices, nothing to serve once `sd.serve` is
+// gone.
+func TestConfig_AlwaysPublishesAProviderIsThePagesAnsweredDiscriminator(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.Config.SD.Serve = nil })
 	srv := live(t, h)
 
 	res := h.wire(t, srv, "GET", "/api/config", "", nil)
@@ -183,13 +190,25 @@ func TestConfig_PublishesAtLeastOneKind(t *testing.T) {
 		t.Fatalf("status = %d: %s", res.Status, res.Body)
 	}
 	var v struct {
-		Kinds []string `json:"kinds"`
+		Providers []struct {
+			Name string `json:"name"`
+		} `json:"providers"`
+		Workloads []struct {
+			ID string `json:"id"`
+		} `json:"workloads"`
 	}
 	if err := json.Unmarshal(res.Body, &v); err != nil {
 		t.Fatalf("decode: %v\n%s", err, res.Body)
 	}
-	if len(v.Kinds) == 0 {
-		t.Fatalf("kinds is empty, which the page reads as \"/api/config has not answered\" "+
+	if len(v.Providers) == 0 {
+		t.Fatalf("providers is empty, which the page reads as \"/api/config has not answered\" "+
 			"-- so it would wait for ever:\n%s", res.Body)
+	}
+	// AND THE OTHER HALF, because this test is worth nothing if the state it
+	// is about cannot be reached: a config with nothing servable publishes no
+	// workload, which is the answer the page has to be able to tell from a
+	// silence.
+	if len(v.Workloads) != 0 {
+		t.Errorf("workloads = %+v, want none for a config with nothing to serve", v.Workloads)
 	}
 }

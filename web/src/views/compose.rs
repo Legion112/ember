@@ -11,7 +11,7 @@ use leptos::task::spawn_local;
 use crate::api;
 use crate::model::{
     Answer, Composing, Config, Hires, Input, Job, Listing, NewRequest, Offers, Utterance,
-    VaeTiling, Voice,
+    VaeTiling, Voice, Workload,
 };
 use crate::route::{self, Route};
 
@@ -25,7 +25,21 @@ use crate::route::{self, Route};
 /// route match. Written down because the failure is quiet -- the form comes
 /// back empty and nothing says why.
 #[component]
-pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoView {
+pub fn Compose(
+    /// The declared workload this page is for, from `/api/config`.
+    ///
+    /// A VALUE AND NOT A SIGNAL, which is what the route split bought: there
+    /// is one page per workload and `App` creates it only once the config has
+    /// answered, so the entry cannot change under this component -- a
+    /// navigation to another workload is an unmount and a fresh mount. That is
+    /// why `composing` below can be computed once instead of being read inside
+    /// every closure, which is the rule four keyed-list defects on this page
+    /// were paid for: there is nothing reactive left for a stale read to be
+    /// stale about.
+    wl: Workload,
+    config: RwSignal<Config>,
+    route: RwSignal<Route>,
+) -> impl IntoView {
     let offers = RwSignal::new(Offers::default());
     let provider = RwSignal::new(String::new());
     let gpu = RwSignal::new(String::new());
@@ -48,11 +62,25 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
         ..Default::default()
     });
 
-    // WHICH WORKLOAD, and the empty string is an image generation -- which is
-    // what `genstore.KindOf` resolves an absent `kind` to, so the panel's
-    // opening state is the one that was here before speech existed and the
-    // body it posts is unchanged.
-    let kind = RwSignal::new(String::new());
+    // WHICH FORM THIS PAGE DRAWS, decided once from the entry the route
+    // named. There is no `kind` signal and no selector: a page per workload is
+    // #200's whole shape, and a dropdown that mutated one shared form is what
+    // it replaced -- "WHAT TO GENERATE / kind: tts" above fields that swapped
+    // out underneath it.
+    let composing = wl.composing();
+    let composing_add = composing.clone();
+    let composing_queue = composing.clone();
+    let speech_form = matches!(composing, Composing::Speech(_));
+    let workload_id = wl.id.clone();
+
+    // THIS WORKLOAD'S CONFIGURED PREVIEW DEFAULTS, which used to be the
+    // config's own two keys. They moved onto the entry because the `sd:` block
+    // did: two declared image workloads are two servers with two preview
+    // settings, and a page-wide default would start the second one's controls
+    // at the first one's value.
+    let wl_preview = wl.preview.clone();
+    let wl_preview_default = wl.preview.clone();
+    let wl_preview_every = wl.preview_interval;
 
     // The utterance being composed, which is the speech half's draft.
     //
@@ -65,19 +93,18 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
     // field on one.
     let utterance = RwSignal::new(Utterance::default());
 
-    // The voice defaults to the first one ember published, so the chooser is
-    // usable without a choice being made -- the same shape the provider
-    // selector uses, and the first of the two mechanisms that stop an empty
-    // `voice_id` reaching the server. The second is `Utterance::refusal`.
-    Effect::new(move |_| {
-        let c = config.get();
-        if utterance.get_untracked().voice_id.is_empty() {
-            if let Some(v) = c.voices.first() {
-                let id = v.id.clone();
-                utterance.update(|u| u.voice_id = id);
-            }
-        }
-    });
+    // The voice defaults to the first one THIS WORKLOAD published, so the
+    // chooser is usable without a choice being made -- the same shape the
+    // provider selector uses, and the first of the two mechanisms that stop
+    // an empty `voice_id` reaching the server. The second is
+    // `Utterance::refusal`.
+    //
+    // NOT AN EFFECT ANY MORE, because the list is no longer waited for: the
+    // entry arrived with this component, so there is nothing to react to and
+    // a one-shot write is the honest shape.
+    if let Some(v) = wl.voices.first() {
+        utterance.update(|u| u.voice_id = v.id.clone());
+    }
 
     // The provider defaults to the config's first one that can actually be
     // rented from, so the form is usable without a choice being made.
@@ -152,11 +179,6 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
         });
     };
 
-    // Whether there is a choice of kind to offer. Built outside the macro
-    // because a bare `>` inside a `view!` attribute closes the tag, and the
-    // parenthesised form is a lint `make web-test` turns into an error.
-    let choosable = move || config.get().kinds.len() > 1;
-
     let queue = move || {
         error.set(String::new());
         let mut jobs = batch.get();
@@ -166,11 +188,11 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
         // other's. A refusal here is the one `composing` already built -- the
         // sentence the panel is printing -- rather than a second wording of
         // it.
-        let speech = match config.get().composing(&kind.get()) {
+        let speech = match &composing_queue {
             Composing::Image => false,
             Composing::Speech(_) => true,
             Composing::Refused(why) => {
-                error.set(why);
+                error.set(why.clone());
                 return;
             }
         };
@@ -202,7 +224,11 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
         }
 
         let body = NewRequest {
-            kind: kind.get(),
+            // THE DECLARED ENTRY'S ID, from the route. It names something in
+            // the operator's file and nothing else: the image, the argv and
+            // the serve command are resolved server-side against that file,
+            // which is what `internal/tts` already does for a voice id.
+            workload: workload_id.clone(),
             provider: provider.get(),
             gpu: gpu.get(),
             ttl: ttl.get(),
@@ -215,7 +241,7 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
             preview: if speech {
                 String::new()
             } else if preview.get().is_empty() {
-                config.get().preview
+                wl_preview.clone()
             } else {
                 preview.get()
             },
@@ -224,7 +250,7 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
             } else if preview_every.get() > 0 {
                 preview_every.get()
             } else {
-                config.get().preview_interval
+                wl_preview_every
             },
             jobs,
             ..Default::default()
@@ -323,66 +349,28 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
 
             <h2>"what to generate"</h2>
 
-            // THE KIND, FIRST, because it decides which of the controls below
-            // it mean anything -- and an operator who has typed a prompt into
-            // a panel that was going to speak it has lost the thing they
-            // typed.
-            //
-            // BUILT FROM `config.kinds` AND NEVER SPELLED HERE, which is the
-            // same rule the voice list follows: `genstore.Kinds()` is the one
-            // list, and a copy in this crate is a place for the kind added
-            // last to be forgotten. It is also what closes the window
-            // `/api/config` leaves open -- the list is empty until the config
-            // answers, so there is no speech option to pick before ember has
-            // said whether it has a voice. `Config::composing`'s unanswered
-            // arm is the second mechanism rather than the first.
-            //
-            // ONE OPTION IS NO CHOICE, so the selector is hidden rather than
-            // shown with a single entry: a `<select>` an operator cannot
-            // change reads as a control that is broken.
-            <Show when=choosable>
-                <div class="row">
-                    <label>
-                        <Help text="kind" title="Which workload to rent for. sd generates images through a resident sd-server; tts speaks text with piper. One rental runs one of them, so changing this empties the batch."/>
-                        <select on:change=move |ev| {
-                            kind.set(event_target_value(&ev));
-                            // THE BATCH GOES WITH IT, because a batch of image
-                            // jobs posted as a speech request is a 400 naming
-                            // an index the operator cannot see, and the reverse
-                            // is a generation billed for saying nothing about
-                            // what they asked for. `kind` is on the request, so
-                            // a mixed batch is not a thing the wire can carry;
-                            // this is the page not building one.
-                            batch.set(Vec::new());
-                            error.set(String::new());
-                        }>
-                            {move || config.get().kinds.into_iter().map(|k| {
-                                let label = k.clone();
-                                view! { <option value=k>{label}</option> }
-                            }).collect::<Vec<_>>()}
-                        </select>
-                    </label>
-                </div>
-            </Show>
-
-            // WHICH CONTROLS, FROM THE METHOD AND NOT FROM A CHAIN OF `if`
-            // HERE. Read inside the closure, which is the rule four keyed-list
-            // defects on this page were paid for: a kind changed after the
-            // first render has to rebuild these, and a value read outside
-            // would leave the image controls on screen over a speech request.
-            {move || match config.get().composing(&kind.get()) {
+            // WHICH CONTROLS, FROM THE WORKLOAD'S OWN METHOD AND NOT FROM A
+            // CHAIN OF `if` HERE. Not inside a closure, which is the one place
+            // this page's keyed-list rule stops applying: the entry is a value
+            // the route handed this component, so there is no signal for a
+            // read to go stale against -- and a navigation to another workload
+            // unmounts this page rather than mutating it.
+            {match composing.clone() {
                 Composing::Image => view! {
                     <JobForm config=config draft=draft />
-                    <PreviewForm config=config preview=preview preview_every=preview_every />
+                    <PreviewForm
+                        config=config preview=preview preview_every=preview_every
+                        configured=wl_preview_default configured_every=wl_preview_every
+                    />
                 }.into_any(),
                 Composing::Speech(voices) => view! {
                     <SpeechForm voices=voices utterance=utterance />
                 }.into_any(),
                 // A SENTENCE AND NOT A BLANK PANEL. Both reasons this fires
-                // are states an operator can be in -- a config with no
-                // `tts.voices`, and a page older than the server -- and a
-                // panel that simply had nothing in it would read as a page
-                // that failed to load.
+                // are states an operator can be in -- an entry whose voices
+                // went away between the config and this render, and a page
+                // older than the server -- and a panel that simply had nothing
+                // in it would read as a page that failed to load.
                 Composing::Refused(why) => view! {
                     <p class="hint denied">{why}</p>
                 }.into_any(),
@@ -394,7 +382,7 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
                     // decision the controls came from. Each row is checked as
                     // it goes in, because `queue` only checks the draft it
                     // would push itself.
-                    match config.get().composing(&kind.get()) {
+                    match &composing_add {
                         Composing::Image => {
                             let j = draft.get();
                             if j.prompt.trim().is_empty() {
@@ -417,20 +405,16 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
                                 }
                             }
                         }
-                        Composing::Refused(why) => error.set(why),
+                        Composing::Refused(why) => error.set(why.clone()),
                     }
                 }>"add to batch"</button>
 
                 <button class="primary" on:click=move |_| queue()>
                     {move || {
-                        let speech = matches!(
-                            config.get().composing(&kind.get()),
-                            Composing::Speech(_)
-                        );
-                        // The verb is the kind's, because "generate 3 job(s)"
+                        // The verb is the driver's, because "generate 3 job(s)"
                         // over three sentences of speech is a label describing
                         // the other workload.
-                        let verb = if speech { "speak" } else { "generate" };
+                        let verb = if speech_form { "speak" } else { "generate" };
                         let n = batch.get().len();
                         if n == 0 { verb.to_string() }
                         else { format!("{verb} {n} job(s) on one rental") }
@@ -548,6 +532,11 @@ fn PreviewForm(
     config: RwSignal<Config>,
     preview: RwSignal<String>,
     preview_every: RwSignal<i32>,
+    /// What this workload's own `sd:` block configured, which is where these
+    /// two controls start. Passed in rather than read off the config: the keys
+    /// are per workload now, because the `sd:` block they live in is.
+    configured: String,
+    configured_every: i32,
 ) -> impl IntoView {
     view! {
             <div class="row">
@@ -567,7 +556,11 @@ fn PreviewForm(
                                 _ => ["none", "proj", "tae", "vae"]
                                     .iter().map(|s| s.to_string()).collect(),
                             };
-                            let now = if preview.get().is_empty() { c.preview.clone() } else { preview.get() };
+                            let now = if preview.get().is_empty() {
+                                configured.clone()
+                            } else {
+                                preview.get()
+                            };
                             modes.into_iter().map(|m: String| {
                                 let sel = m == now;
                                 let label = m.clone();
@@ -581,7 +574,7 @@ fn PreviewForm(
                     <input type="number" min="1"
                         prop:value=move || {
                             let n = preview_every.get();
-                            if n > 0 { n } else { config.get().preview_interval }
+                            if n > 0 { n } else { configured_every }
                         }
                         on:input=move |ev| preview_every.set(num(&ev)) />
                 </label>

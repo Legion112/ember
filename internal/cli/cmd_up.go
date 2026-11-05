@@ -34,6 +34,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	var (
 		providerName = fs.String("provider", "", "which provider to rent from")
 		image        = fs.String("image", "", "workload image, pinned to a tag or digest")
+		workload     = fs.String("workload", "", "which declared workload to run, by its id")
 		ttl          = fs.Duration("ttl", 0, "how long the node may live before it destroys itself")
 		gpu          = fs.String("gpu", "", "GPU model to require, for example rtx4090")
 		maxHourly    = fs.String("max-hourly-usd", "", "refuse any offer dearer than this per hour")
@@ -81,6 +82,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 		return err
 	}
 	ov := app.Overrides{
+		Workload:     *workload,
 		Provider:     *providerName,
 		Image:        *image,
 		GPU:          *gpu,
@@ -124,7 +126,12 @@ func runUp(args []string, out io.Writer, d deps) error {
 		}
 	}
 
-	ov.Apply(&cfg)
+	// It can refuse, and the one thing it refuses is a `--workload` naming no
+	// declared entry -- or an empty one against a file declaring more than
+	// one, because one run is one image.
+	if err := ov.Apply(&cfg); err != nil {
+		return usageError{err}
+	}
 
 	// Everything that can be refused for free happens in NewPlan: the store,
 	// the offer, the image for the card that offer names, the jobs, the spec.
@@ -377,8 +384,15 @@ func dryRunUp(out io.Writer, plan app.Plan) error {
 // place, so there is one implementation of each and the privileged socket
 // route CALLS this one rather than growing a second copy. See
 // app.Overrides, which has the whole argument.
-func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, ttl time.Duration, ports multiFlag) {
-	app.Overrides{
+// IT CAN FAIL AND THIS CALLER CANNOT, which is why the error is returned. The
+// one thing `Apply` refuses is the workload selection, and this helper's only
+// caller -- `ember down` -- names no workload: a file declaring one is
+// selected without being asked and a file declaring several is refused. That
+// is the honest answer rather than a dropped error, because `ember down`
+// destroys a node and reads the config for a provider and a ceiling, so a
+// configuration it cannot resolve is one it must not guess about.
+func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, ttl time.Duration, ports multiFlag) error {
+	return app.Overrides{
 		Provider:     providerName,
 		Image:        image,
 		GPU:          gpu,

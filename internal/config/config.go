@@ -30,7 +30,24 @@ type Config struct {
 	// Provider is the default provider name.
 	Provider string `yaml:"provider"`
 
+	// Workloads are the workloads this configuration declares.
+	//
+	// THE DECLARED FORM OF `image:` + `sd:`/`tts:`, and the keys below are
+	// the undeclared one. A file that lists none describes exactly one
+	// workload out of those keys, which is every configuration committed
+	// here and every `ember up` ever taken -- so nothing changes for a file
+	// that does not use this. A file that lists some may not also set them,
+	// which validateWorkloads refuses by name.
+	//
+	// WHY IT IS A LIST OF ENTRIES AND NOT A MAP KEYED BY EMBER'S KIND ENUM:
+	// see internal/config/workload.go, which is where the whole argument and
+	// the measurement behind it live.
+	Workloads []Workload `yaml:"workloads"`
+
 	// Image is the workload's OCI reference. It must be pinned.
+	//
+	// One of the keys a `workloads:` entry replaces, and reading it through
+	// Select is how every layer below this one keeps reading it.
 	Image string `yaml:"image"`
 
 	// Images maps a CUDA compute capability to the image built for it, keyed
@@ -619,7 +636,21 @@ func Load(path string) (Config, error) {
 	// ParseSD makes for refusing a mistyped sampler before a card is rented,
 	// one layer earlier because a catalogue is published rather than
 	// submitted.
+	// BEFORE THE TWO CATALOGUES, because a file that wrote both `workloads:`
+	// and a top-level `tts:` should be told it declared a workload no request
+	// can name -- which is the mistake -- rather than be handed a complaint
+	// about the block it should not have written, which is a consequence of
+	// it. The order is the cheap-and-cause-first discipline app.NewPlan keeps.
+	if err := cfg.validateWorkloads(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
 	if _, err := cfg.TTSCatalogue(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	// AT LOAD, for TTSCatalogue's reason: a duplicate id or an unpinned
+	// per-entry image is a mistake in a file the operator just edited, and
+	// its symptom at lookup time is a nav entry that cannot be used.
+	if _, err := cfg.WorkloadCatalogue(); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
@@ -977,6 +1008,16 @@ func (c Config) rejectSecrets() error {
 	}
 	for k, v := range c.Images {
 		fields["images["+k+"]"] = v
+	}
+	// AND THE PER-WORKLOAD ONES, for the reason the map above is built rather
+	// than written as a literal: a declared entry's `image:` is a free-text
+	// scalar in a committed file, and the one place that is not scanned is
+	// the one somewhere a reference gets pasted.
+	for i, w := range c.Workloads {
+		fields[fmt.Sprintf("workloads[%d].image", i)] = w.Image
+		for k, v := range w.Images {
+			fields[fmt.Sprintf("workloads[%d].images[%s]", i, k)] = v
+		}
 	}
 
 	for name, v := range fields {
