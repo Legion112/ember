@@ -881,6 +881,23 @@ func (s *SQLite) ClaimNext(ctx context.Context, runID string, c Compat) (Request
 		where = ` AND (CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ? AND gpu = ?`
 		args = append(args, KindSD, KindOf(c.Kind), c.Provider, c.GPU)
 	}
+	// AND ONE EXCLUSION PER LIVE RENTAL, which is the create side of
+	// fit-or-create and is still this one statement. See Compat.Live: the
+	// supervisor asks for the oldest queued request that none of the rentals
+	// already up can serve, so a request a busy rental could take waits for it
+	// instead of being given a card of its own.
+	//
+	// THE SAME KindOf NORMALISATION, and getting it wrong HERE is the
+	// expensive direction. On the ride side a raw `kind = ?` refuses a
+	// pre-schema-6 row to the rental serving its siblings; on the exclusion
+	// side it would fail to exclude one, so a migrated row would be treated as
+	// incompatible with the node already serving its siblings and would be
+	// given a SECOND card. Both stores spell the one rule, which is what the
+	// conformance table is for.
+	for _, l := range c.Live {
+		where += ` AND NOT ((CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ? AND gpu = ?)`
+		args = append(args, KindSD, KindOf(l.Kind), l.Provider, l.GPU)
+	}
 
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(pick, where), args...)
 	r, err := scanRequest(row)

@@ -43,10 +43,17 @@ type wsEnvelope struct {
 	Events  []report.Event `json:"events"`
 	Request *requestView   `json:"request,omitempty"`
 
-	// Running is what the queue is generating right now, which may be a
-	// different request than the one being watched -- that is how a UI shows
+	// Running is what the queue is generating right now, which may be
+	// different requests than the one being watched -- that is how a UI shows
 	// "yours is next" rather than nothing.
-	Running string `json:"running,omitempty"`
+	//
+	// A LIST SINCE max_nodes (#204), and NOT `omitempty`. Go marshals a nil
+	// slice as `null` and a client whose field is a list drops the whole
+	// envelope on a type error -- the request state with it, which is the
+	// defect the Events field above carries the same note about. `[]` is what
+	// goes out, from Server.running, for an idle queue as much as for a
+	// finished one.
+	Running []string `json:"running"`
 }
 
 // serveWS streams one request's progress.
@@ -225,9 +232,7 @@ func (s *Server) send(ctx context.Context, conn *websocket.Conn, id genstore.Req
 	if n := len(es); n > 0 {
 		env.Next = es[n-1].Seq
 	}
-	if running, ok := s.running(); ok {
-		env.Running = running
-	}
+	env.Running = s.running()
 
 	// The request travels with its events whenever either changed, so a
 	// client cannot hold a progress line for a request it still believes is

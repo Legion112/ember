@@ -227,12 +227,35 @@ func (s *RecordingStore) ClaimNext(_ context.Context, runID string, c Compat) (R
 			r.Provider != c.Provider || r.GPU != c.GPU) {
 			continue
 		}
+		// AND THE CREATE SIDE: a request some live rental can serve is not
+		// taken by a claim looking for work none of them can. Through KindOf
+		// on both sides for the reason the ride check is -- see the SQL store,
+		// where a raw comparison here hands a migrated row a second card.
+		if servedByLive(*r, c.Live) {
+			continue
+		}
 		r.Status = StatusRunning
 		r.RunID = runID
 		r.Started = s.at()
 		return clone(*r), true, nil
 	}
 	return Request{}, false, nil
+}
+
+// servedByLive reports whether any rental already up could take this request.
+//
+// A FUNCTION RATHER THAN A CONDITION INSIDE THE LOOP, so the fake's spelling of
+// the exclusion is one expression that can be read against the SQL store's one
+// `AND NOT (...)` -- two rules written in two languages is how `dataCenter`
+// against `dataCenterId` stayed invisible, and the conformance table is what
+// holds these two to each other.
+func servedByLive(r Request, live []Compat) bool {
+	for _, l := range live {
+		if KindOf(r.Kind) == KindOf(l.Kind) && r.Provider == l.Provider && r.GPU == l.GPU {
+			return true
+		}
+	}
+	return false
 }
 
 // began is the real store's first act, reproduced because its absence here is

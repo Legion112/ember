@@ -98,6 +98,40 @@ type Config struct {
 	MaxDayUSD   string `yaml:"max_day_usd"`
 	MaxMonthUSD string `yaml:"max_month_usd"`
 
+	// MaxNodes is how many rentals `ember serve` may hold at once.
+	//
+	// IT IS THE CEILING THAT REPLACED AN INVARIANT, and that is why it has a
+	// default rather than a zero meaning "no limit". Until #204 two rentals
+	// at once were *unrepresentable*: there was one drain goroutine and a
+	// rental lived inside one iteration of its loop, so a double-clicked
+	// button could not rent twice because there was nothing for the second
+	// click to start. At N>1 there is no structural version of that -- a
+	// semaphore of size N is the counter that design refused, with a larger
+	// constant -- so this number and the period ceilings are what stand in
+	// its place. See docs/threat-model/request-seal.md, which records the
+	// trade rather than being quietly falsified by it.
+	//
+	// 2 IS A BEHAVIOUR CHANGE FOR EVERY EXISTING OPERATOR. Today they have
+	// one node by construction; with this they can have two, which doubles
+	// the worst case of an unattended `ember serve`. `max_nodes: 1` is how
+	// the old guarantee is kept, and it is a real mode rather than a
+	// degenerate one: `queue.Queue` reads any value below 1 as 1, so it is
+	// the same code path as 2 with a smaller bound.
+	//
+	// WHAT IT DOES NOT BUY IS PARALLELISM FOR A HOMOGENEOUS QUEUE, which is
+	// the counter-intuitive half. The scheduler packs strictly: a request any
+	// live rental can serve is never given a new node, even if that rental is
+	// mid-batch, because a fitting rental skips the ~27s per-rental overhead
+	// and, for a resident model, a reload measured at 80-96s per image. So
+	// N>1 parallelises *incompatible* work -- a different provider, card or
+	// kind -- and two `sd` requests for one card still share one node exactly
+	// as they do today.
+	//
+	// Refused below 1 in Load: a file that writes `max_nodes: 0` decodes 0
+	// over the default and would otherwise read as "no node ceiling at all"
+	// to a reader, while meaning 1 to the code.
+	MaxNodes int `yaml:"max_nodes"`
+
 	// Dirs, resolved from the environment when empty.
 	ConfigDir string `yaml:"config_dir"`
 	StateDir  string `yaml:"state_dir"`
@@ -546,6 +580,15 @@ func Default() Config {
 	return Config{
 		Provider: "local",
 		TTL:      time.Hour,
+
+		// TWO, which is the owner's call and not a placeholder: 2 is where
+		// every property N>1 breaks actually breaks -- the one-rental
+		// invariant is gone at 2 exactly as it is at 50, shutdown has to wait
+		// for a set, and the stale-total race is reachable -- while the
+		// failure that costs real money with nobody awake, runaway
+		// scale-out, stays capped. A file that omits the key keeps this,
+		// because yaml does not touch an absent field.
+		MaxNodes: 2,
 	}
 }
 
@@ -588,6 +631,21 @@ func Load(path string) (Config, error) {
 	// submitted.
 	if _, err := cfg.TTSCatalogue(); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	// AND THE NODE CEILING, refused here beside the catalogue because this is
+	// where every other refusal of a VALUE in a file the operator just edited
+	// lives -- found when they can still see the line, rather than as a queue
+	// that mysteriously drains one request at a time.
+	//
+	// PRESENCE AND NOT EMPTINESS. `max_nodes: 0` decodes 0 over the default,
+	// and `max_nodes:` with no value decodes as a null that yaml leaves the
+	// default alone for -- so the key written with nothing after it keeps 2,
+	// which is the honest reading of "they have not decided yet" and is what
+	// KnownFields cannot distinguish either.
+	if cfg.MaxNodes < 1 {
+		return Config{}, fmt.Errorf("%s: max_nodes is %d and ember cannot hold fewer than one "+
+			"rental; write max_nodes: 1 for one rental at a time, which is the old single-rental "+
+			"behaviour, or delete the line for the default of 2", path, cfg.MaxNodes)
 	}
 	return cfg, nil
 }

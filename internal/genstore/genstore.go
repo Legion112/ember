@@ -511,9 +511,42 @@ type Compat struct {
 	Kind     string
 	Provider string
 	GPU      string
+
+	// Live is every rental that is already up, for a claim whose job is to
+	// find work that NONE of them can take.
+	//
+	// THE SELECTION EXPRESSED AS ITS COMPLEMENT, which is how fit-or-create
+	// is built without a second window. #204 describes the N>1 scheduler as
+	// `Compat` becoming "a selection -- which of these N can take it" -- and
+	// a central selection would mean ember deciding which node gets a request
+	// and then writing that decision, which reintroduces exactly the
+	// read-then-write gap ClaimNext's ONE STATEMENT argument exists to close.
+	// The rentals pull instead: each one's own drain loop claims what it can
+	// serve with the three fields above. So the only question left for the
+	// supervisor is the create side -- "the oldest queued request no live
+	// rental can serve" -- and that is this field, as one `AND NOT (...)` per
+	// entry in the same statement.
+	//
+	// IT IS WHAT MAKES PACKING STRICT. A request a busy rental could serve is
+	// excluded here, so it waits for that rental rather than getting a node of
+	// its own: ~27s of per-rental overhead and up to 80-96s per image of model
+	// reload are what that buys, and the cost is that a homogeneous queue sees
+	// no parallelism at all. See config.MaxNodes.
+	//
+	// NEVER SET WITH THE THREE FIELDS ABOVE. A ride claim does not care what
+	// other nodes are doing, and a rider claim carrying Live would exclude
+	// every request it could ride -- including itself. A nested Live on an
+	// entry here is ignored for the same reason: an entry describes one live
+	// rental and nothing about its neighbours.
+	Live []Compat
 }
 
-// IsZero reports whether no rental is up.
+// IsZero reports whether no rental is up to ride.
+//
+// IT IS ABOUT THE RIDE FIELDS AND NOT ABOUT Live, which is what lets a
+// create-side claim carry exclusions and still take the oldest queued request
+// whatever it asked for: the take-anything branch is chosen by this and the
+// exclusions are applied either way.
 func (c Compat) IsZero() bool { return c.Provider == "" }
 
 // Image is one file a request produced.
