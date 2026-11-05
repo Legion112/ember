@@ -1,7 +1,8 @@
 # What a request may name
 
 A request names a provider, a card, a kind and a batch of jobs — and nothing
-else. Two rentals at once are unrepresentable rather than refused.
+else. Two rentals at once used to be unrepresentable; since #204 they are
+bounded by `max_nodes`, and a request is not asked about that either.
 
 Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS.md)
 
@@ -63,30 +64,104 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   because it is never consulted about them. `extra` is refused structurally:
   the field does not exist on the wire type, and `genstore.Job` has none
   either, so a round trip through the store cannot invent one.
-- **Two rentals at once are unrepresentable rather than refused.** There is one
-  drain goroutine and a rental lives inside one iteration of its loop. The
-  alternative -- a handler that starts a rental per request with a counter
-  saying no to the second -- is a counter that can be wrong, and being wrong
-  costs two GPUs. A double-clicked button cannot rent twice because there is
-  nothing for the second click to start. It is also the shutdown story:
-  `queue.Run` does not return until `provision.WithNode`'s deferred destroy
-  has, so waiting for one goroutine is waiting for the node to be gone.
+- **Two rentals at once WERE unrepresentable, and at `max_nodes` > 1 they are
+  bounded instead. THIS IS A TRADE TAKEN DELIBERATELY AT #204 AND NOT A SEAL
+  THAT QUIETLY STOPPED HOLDING.** What stood here, and the argument is kept
+  because it is still correct about counters:
+
+  > There is one drain goroutine and a rental lives inside one iteration of
+  > its loop. The alternative -- a handler that starts a rental per request
+  > with a counter saying no to the second -- is a counter that can be wrong,
+  > and being wrong costs two GPUs. A double-clicked button cannot rent twice
+  > because there is nothing for the second click to start.
+
+  **THE HONEST STATEMENT OF WHAT WAS SPENT: at N > 1 there is no structural
+  version of that, only a bounded one.** A semaphore of size N *is* the
+  counter the old design refused, with a larger constant. Nothing recovers the
+  property that a double-clicked button **cannot** rent twice -- only that it
+  will not. A fleet is N rentals by definition, so this was not a feature to
+  add beside the invariant; it replaces a structural guarantee with a managed
+  one, and the owner's decision is recorded on #204 rather than inferred from
+  the code.
+
+  **WHAT IS LOAD-BEARING INSTEAD, in the order a reader should check it.**
+
+  1. **`max_nodes`, default 2, refused below 1** (`config.Config.MaxNodes`).
+     Without it the new failure mode is **runaway scale-out**: a queue of
+     fifty mutually incompatible requests is fifty `Create` calls, each
+     individually inside every money ceiling, reachable from the web UI and
+     expensive while somebody is asleep. 2 is where every property N > 1
+     breaks actually breaks and where the expensive failure is still capped.
+  2. **The claim is still on ONE goroutine**, which is what the counter
+     argument is replaced by rather than abandoned. `Queue.Run` claims, writes
+     what the new rental will serve into `live`, and only then spawns the slot
+     -- so a second compatible request cannot provoke a third node while slot
+     2 is still provisioning. That is a single-goroutine property doing the
+     work, not a count read after the fact.
+  3. **Strict packing.** The create-side claim asks for the oldest queued
+     request that **no** live rental can serve (`genstore.Compat.Live`, one
+     `AND NOT (…)` per rental in the same single statement). A fitting rental
+     always absorbs a request, even mid-batch. The consequence is
+     counter-intuitive and is stated rather than discovered: `max_nodes: 2`
+     parallelises **incompatible** work only -- a different provider, card or
+     kind -- and a homogeneous queue behaves exactly as it did at one node.
+  4. **The period ceilings stop being the backstop and become the primary
+     money guard**, which is the status #204 predicted they would need. They
+     already project against a real ledger before anything is created; what N
+     breaks is what that ledger can SEE, and `queue.Commitments` is the
+     answer -- see [the rental lifecycle](../money/rental-lifecycle.md), which
+     carries the arithmetic and the two residues.
+
+  **`max_nodes: 1` IS A REAL MODE AND NOT A DEGENERATE ONE.** It is the
+  closest thing left to the property above, it is what a cautious operator
+  sets, and it is what every lab assumes. `Queue.MaxNodes` reads anything
+  below 1 as 1, so it is the same code path as 2 with a smaller bound rather
+  than a branch only one of the two exercises -- and because a zero therefore
+  reads as one, a `cmd_serve` that forgot to wire the field would silently pin
+  an operator to a single rental. That is the #105 class, and
+  `TestServe_WiresTheNodeCeilingIntoTheDrainLoop` parses `internal/cli`'s
+  production files to close it.
+
+  **THE SHUTDOWN STORY IS NOW ABOUT A SET.** It was: "`queue.Run` does not
+  return until `provision.WithNode`'s deferred destroy has, so waiting for one
+  goroutine is waiting for the node to be gone." It is still one goroutine to
+  wait for -- `Run` holds a `sync.WaitGroup` over its slots and defers its
+  `Wait` as its first statement -- so the sentence becomes "waiting for this
+  goroutine is waiting for the SET of nodes to be gone". **The wait is
+  unbounded on purpose**: a bound abandons a node, and a process that exits
+  with a GPU still rented bills by the hour with nobody watching.
   `http.Server.Shutdown` drains requests, and a rental does not live in a
   request -- `ember serve` waits for both.
 
-  **There are two kinds of work on that goroutine now and still one place it
-  runs.** `ember up` submitted over the socket is not a queued request -- the
-  four reasons it cannot be one are the entry below -- so it does not arrive
-  through `ClaimNext`. It arrives through `Queue.Submit`, which is a
-  **rendezvous on an unbuffered channel only the drain loop receives from**: a
-  send succeeds exactly when the loop is between iterations, so `Submit`
-  returning means the loop owns the run, and the loop then runs it inline where
-  a claimed request's rental lives. A submission offered while a rental is in
-  flight **waits**, which is the honest third answer to "rent now" from a
-  process that is already renting -- refusing would be a message where a wait
-  is the fact, queueing it is not what `up` means, and renting is the second
-  GPU. The buffer is what would have made it a counter: "accepted, and it will
-  start some time" needs somebody to know how many are already waiting.
+  **AND A REQUEST IS NOT ASKED ABOUT THE NODE CEILING**, which is the one
+  sentence at the top of this document that is unchanged: `max_nodes` has no
+  field on any wire type, so the limit that bounds a browser is one the
+  browser cannot name. That is the same structural refusal the period ceilings
+  get, applied to a count of cards.
+
+  **There are two kinds of work and one place the decision is made.**
+  `ember up` submitted over the socket is not a queued request -- the four
+  reasons it cannot be one are the entry below -- so it does not arrive through
+  `ClaimNext`. It arrives through `Queue.Submit`, which is a **rendezvous on an
+  unbuffered channel only the supervisor receives from**: a send succeeds
+  exactly when the supervisor is between decisions **and has a slot free**, so
+  `Submit` returning still means the loop owns the run and has somewhere to run
+  it. A submission offered while every slot is busy **waits**, which is the
+  honest third answer to "rent now" from a process that is already renting as
+  much as it may -- refusing would be a message where a wait is the fact,
+  queueing it is not what `up` means, and renting is the extra GPU. The buffer
+  is what would have made it a counter: "accepted, and it will start some time"
+  needs somebody to know how many are already waiting.
+  **THE "ONE PLACE IT RUNS" CLAUSE IS NOW "ONE PLACE IT IS DECIDED", and the
+  wording matters because the old one is false.** The run executes on a slot
+  goroutine, as a claimed request's rental does; what is still single is the
+  supervisor that claims, registers and spawns. So the assertion that used to
+  look for `internal/queue.(*Queue).Run` in the submitted run's stack looks for
+  `(*Queue).slot` instead -- and the old spelling **passed** against the
+  supervisor, because the closure `Run` hands to `spawn` is declared inside
+  `Run` and is therefore named `(*Queue).Run.func1`: the substring matched a
+  closure's NAME rather than a caller's frame. Measured on the first run of the
+  change, which is why it is written here rather than left as a rename.
   **The context split is the detach story and it is structural.** `Submit`
   takes the CLIENT's context and bounds only the wait; `Direct.Run` takes the
   LOOP's and bounds the rental. So a Ctrl-C after the 202 cannot reach the
@@ -122,10 +197,12 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   answer: `Submit` does not return while a queued rental is open, and the error
   when it gives up is the caller's own DEADLINE rather than a refusal (so a 409
   implementation is red); the fake counts open rentals across both kinds and
-  the maximum is one (so a goroutine beside the loop is red); and the run's own
-  goroutine stack contains `(*Queue).Run` (so a goroutine with correct locking
-  -- a counter with better manners, which is the shape somebody would reach
-  for -- is red even though the first two would pass it).
+  the maximum is one -- which is still true at `max_nodes: 1`, the mode every
+  `queue.Queue{}` literal in the suite is in (so a goroutine beside the
+  supervisor is red); and the run's own goroutine stack contains
+  `(*Queue).slot` (so a goroutine with correct locking -- a counter with better
+  manners, which is the shape somebody would reach for -- is red even though
+  the first two would pass it).
   **That last clause is MEASURED against the answer it is for, which is the
   only reason the third assertion is worth having.** The obvious
   reinstatement -- a goroutine with no locking at all -- is caught by the first
@@ -134,7 +211,7 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   run on a goroutine of its own. Reinstated, `Submit` still waits with the
   caller's own deadline and the maximum number of open rentals is still one --
   **both of the first two assertions pass** -- and
-  `TestSubmit_TheRunExecutesOnTheDrainLoopsOwnGoroutine` is what goes red.
+  `TestSubmit_TheRunExecutesOnASlotsOwnGoroutine` is what goes red.
   The honest limit is
   that a stack is evidence about one goroutine: `cmd/check-coverage`'s
   `TestNothingRentsOutsideInternalApp` bounds the other half by asking which

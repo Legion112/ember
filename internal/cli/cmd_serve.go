@@ -43,7 +43,7 @@ func runServe(args []string, out io.Writer, d deps) error {
 	)
 	logs := addLogFlags(fs)
 	fs.Usage = func() {
-		outf(out, "ember serve runs the web UI and a queue that drains onto one rental.\n\n")
+		outf(out, "ember serve runs the web UI and a queue that drains onto up to max_nodes rentals.\n\n")
 		outf(out, "It listens on loopback only. Nothing ember serves is reachable from\nanother machine.\n\n")
 		outf(out, "EVERY REQUEST NEEDS A TOKEN. A loopback port is reachable by every uid on\nthis machine, and a request with no Origin -- which is what curl sends -- is\nindistinguishable from your own tooling, so the second account over could\notherwise queue a paid rental. ember serve mints a token for each run and\nprints a URL ending in ?t=<token>; open that and the browser is authorised\nfor as long as the process lives. Set serve_token in credentials.yaml, or\nEMBER_SERVE_TOKEN, for one that survives a restart. There is no --token\nflag: /proc/<pid>/cmdline is world-readable, which is the same uid the\ntoken exists to keep out.\n\n")
 		outf(out, "The token is not a substitute for --allow-paid, which stays off by default:\nauthentication answers who is asking and --allow-paid is a ceiling on what\nthe answer permits.\n\n")

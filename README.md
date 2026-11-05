@@ -113,7 +113,7 @@ Every verb `ember` dispatches, with the one-line summary it prints for itself:
 | `up` | rent a node, run the jobs the config describes, destroy it |
 | `down` | destroy a node by handle |
 | `ls` | list nodes ember created, across every configured provider |
-| `serve` | run the web UI and a queue that drains onto one rental |
+| `serve` | run the web UI and a queue that drains onto up to max_nodes rentals |
 | `reap` | destroy every node past its deadline |
 | `spend` | report what the recorded generations cost |
 | `history` | list the generations ember has run, and measure or prune what they left |
@@ -1845,7 +1845,8 @@ named twice.
 
 ## The web UI
 
-`ember serve` runs a local web UI and a queue that drains onto **one rental**.
+`ember serve` runs a local web UI and a queue that drains onto **up to
+`max_nodes` rentals**, two by default.
 It is the `sd.jobs` shape driven from a browser: pick a provider and a card
 from live offers, type a prompt and its parameters, push a batch, and watch the
 sampling steps and preview frames arrive while the images land on disk.
@@ -2166,17 +2167,33 @@ page. Without `make web`, `ember serve` says so and the JSON API under
 from `EMBER_SERVE_TOKEN` or `serve_token` in `credentials.yaml`, and otherwise
 ember mints one and prints the URL that carries it.
 
-**One rental, drained, with no idle wait.** A request is a batch of jobs; while
-a node is up the queue keeps claiming newly queued requests whose provider and
-card match, and sends their jobs to the `sd-server` that is already holding the
-weights. The moment nothing compatible is left it returns, which destroys the
-node at once. There is no idle timeout, because a node with nothing to do is a
-node billing for nothing.
+**Up to `max_nodes` rentals, drained, with no idle wait.** A request is a batch
+of jobs; while a node is up the queue keeps claiming newly queued requests
+whose provider, card and kind match, and sends their jobs to the `sd-server`
+that is already holding the weights. The moment nothing compatible is left it
+returns, which destroys the node at once. There is no idle timeout, because a
+node with nothing to do is a node billing for nothing.
 
-That is structural rather than checked: there is one drain goroutine and a
-rental lives inside one iteration of its loop, so two concurrent rentals cannot
-be expressed. A double-clicked button cannot rent twice because there is
-nothing for the second click to start.
+**`max_nodes` defaults to 2, and what it buys is not what you would guess.**
+Packing is strict: a request **any** live rental can serve is never given a
+node of its own, even while that rental is mid-batch, because a fitting rental
+skips the ~27 s of per-rental overhead and up to 80–96 s per image of model
+reload. So two images for one card still share **one** node, exactly as they
+did, and the second node is only for work the first cannot take at all — a
+different provider, a different card, or a different kind, which is `sd` beside
+`tts`. `max_nodes: 1` is the old behaviour and is a supported mode; anything
+below 1 is refused when the config loads. `ember serve` prints the number at
+startup under `--allow-paid`, beside where the money ceilings stand.
+
+**Two rentals at once used to be structural rather than checked** — one drain
+goroutine, a rental inside one iteration of its loop, so a double-clicked
+button could not rent twice because there was nothing for the second click to
+start. That property was **traded deliberately** for a fleet, and
+`max_nodes` plus the period ceilings are what stand in its place; the trade
+is written up in
+[what a request may name](docs/threat-model/request-seal.md). What is still
+structural is that one goroutine does every claim and starts every rental, and
+that a request is never asked how many nodes it may have.
 
 **It needs an `sd:` block**, because the serve argv names the weights and a
 request may not. `ember serve` refuses to start without one and says which
@@ -2397,7 +2414,58 @@ and are $54.
 ```yaml
 max_day_usd: "20.00"
 max_month_usd: "250.00"
+max_nodes: 2
 ```
+
+**`max_nodes` is the node ceiling, and it defaults to 2 — which is a behaviour
+change if you have used ember before.** Until #204 `ember serve` held **one**
+rental by construction: there was one drain goroutine and a rental lived inside
+one iteration of its loop, so two concurrent rentals could not be expressed and
+a double-clicked button could not rent twice. That property was traded
+deliberately for a fleet. Today the daemon may hold two, which doubles the
+worst case of an unattended `ember serve`, and the money ceilings above stop
+being the backstop and become the primary guard.
+
+```yaml
+max_nodes: 1     # the old guarantee: one rental at a time
+```
+
+`max_nodes: 1` is a supported mode and not a degenerate one — it is what to set
+if you want the previous behaviour back. A value below 1 is **refused when the
+config loads**, with the remedy in the message: 0 would read as "no ceiling"
+and mean one node to the queue.
+
+**What a second node does and does not buy.** The scheduler **packs
+strictly**: a queued request that any live rental can serve is never given a
+node of its own, even if that rental is mid-batch. A fitting rental skips the
+~27 s of per-rental overhead and, for a resident model, a reload measured at
+**80–96 s per image** on a node that had to re-read its weights — so *fit*
+beats *idle* by a wide margin here, because what you are spending is wall-clock
+rental and not contention.
+
+So `max_nodes: 2` parallelises **incompatible** work only:
+
+| two queued requests | nodes |
+|---|---|
+| two images, same provider and card | **1** — the second rides the first's rental |
+| an image and an utterance (`sd` beside `tts`) | **2** |
+| two images, different cards | **2** |
+| two images, different providers | **2** |
+
+A homogeneous queue therefore behaves exactly as it did at one node. If you
+queue two images for one card and expect two cards, nothing is broken —
+`ember serve` says so at startup under `--allow-paid`.
+
+**A rental in flight is worth nothing to the ledger until it is torn down**,
+because `requests.cost` is written from the deferred destroy. With two creates
+planning at once that would be an overshoot of one whole rental: a $20 day with
+$19 recorded has room for one $0.89 rental, and two concurrent creates would
+both see $19.89 and both go ahead, ending the day at $20.78. ember holds what
+it has agreed to spend in memory and checks the ceiling with that figure
+included, so the second create is refused and says why. What that does **not**
+cover is another `ember serve` process's in-flight rental, and the cheap
+machine the queue rents to fill an empty store — both written up in
+[the life of a rental](docs/money/rental-lifecycle.md).
 
 Both are UTC calendar periods, and a rental is refused when the offer's price
 over the TTL would take the period past its ceiling — the same arithmetic
@@ -2674,13 +2742,20 @@ with the deadline in it, because that is the one fact an operator needs at the
 moment they walk away. The daemon's own shutdown still destroys the rental:
 `ember serve` waits for the queue's goroutine, and that is unchanged.
 
-**One rental at a time is unchanged, and it is still structural.** A submitted
-run does not start beside the queue — it is handed to the same single goroutine
-a queued request's rental lives in, over an unbuffered channel only that
-goroutine reads from. So a run asked for while the queue is mid-rental **waits**
-for it; it is not refused, and it cannot become a second GPU, because there is
-nowhere else for a rental to start. `ember up` blocks (and says what it is
-doing) for exactly as long as the daemon is busy.
+**A submitted run takes a rental slot like any other.** It does not start
+beside the queue — it is handed to the same single goroutine that claims and
+starts every rental, over an unbuffered channel only that goroutine reads from,
+and a send succeeds exactly when that goroutine is between decisions *and* has
+a slot free. So a run asked for while every slot is busy **waits** for one; it
+is not refused, and it cannot become a rental `max_nodes` did not allow,
+because there is nowhere else for a rental to start. `ember up` blocks (and
+says what it is doing) for exactly as long as the daemon has no room.
+
+This paragraph used to read *"one rental at a time is unchanged, and it is
+still structural"*. It is not: `max_nodes` is **2** by default, so the daemon
+may be holding one rental and still take your run — see
+[what bounds a queue](#what-bounds-a-queue). What is unchanged is that nothing
+starts a rental except that one goroutine.
 
 **The config path travels, and that is a deliberate reversal.** Everywhere else
 in `ember serve` the config is read once at startup and never from a request —
@@ -2919,8 +2994,8 @@ the request is waiting for. The other case is a row left `running` by an ember
 that is gone, which nothing here holds and which a restart really does
 reconcile (`queue.Run` marks what it finds in flight as `interrupted`); that
 one keeps the restart advice. ember can tell them apart without a counter
-because there is one drain goroutine and a rental lives inside one iteration
-of its loop.
+because every claim is made on one goroutine, and a slot holds its request from
+that claim until the destroy has run.
 
 **The page says which of the three happened**, and until recently it said none
 of them: the answer was decoded into a dynamic value and the whole `Result`
