@@ -1652,8 +1652,40 @@ impl<'de> Deserialize<'de> for Rows {
 pub struct RequestList {
     #[serde(default, deserialize_with = "nullable")]
     pub requests: Rows,
-    #[serde(default)]
-    pub running: String,
+
+    /// Which requests are generating right now.
+    ///
+    /// A LIST SINCE `max_nodes` (#204), and that is the one place this change
+    /// reaches Rust. ember used to hold one rental by construction, so this
+    /// was a single id and `views/queue.rs` compared it; with several rentals
+    /// in flight several requests generate at once, and an equality would mark
+    /// one row and leave the others looking queued.
+    ///
+    /// `nullable` FOR THE REASON `requests` HAS IT, which is not about today's
+    /// server: `webapi.Server.running` answers `[]` and never nil. The rule
+    /// has to hold for the field somebody adds later, because Go marshals a
+    /// nil slice as `null` and a `null` into a `Vec` fails the WHOLE envelope
+    /// -- which is how this page once showed an empty queue over a table full
+    /// of requests.
+    #[serde(default, deserialize_with = "nullable")]
+    pub running: Vec<String>,
+}
+
+impl RequestList {
+    /// Whether this request is one of the ones generating right now.
+    ///
+    /// A METHOD AND NOT AN `iter().any()` IN THE VIEW MACRO, which is this
+    /// page's settled pattern -- `Rows::note`, `Rows::price`, `Request::reason`
+    /// and `Stream::note` are all here for the same reason. A decision written
+    /// inside a `view!` can only be checked by driving a browser, and this one
+    /// is the difference between a queue table that marks every generating
+    /// request and one that marks the first and leaves the rest looking
+    /// queued. The `.get()` that reads the signal stays in the view, inside
+    /// the closure, because that is the frozen-row defect this page has been
+    /// bitten by four times.
+    pub fn is_running(&self, id: &str) -> bool {
+        self.running.iter().any(|r| r == id)
+    }
 }
 
 /// What `POST /api/requests/{id}/cancel` answered.
@@ -1843,8 +1875,20 @@ pub struct Envelope {
     pub events: Vec<Event>,
     #[serde(default, deserialize_with = "nullable")]
     pub request: Option<Request>,
-    #[serde(default)]
-    pub running: String,
+
+    /// Which requests are generating, as the socket reports them.
+    ///
+    /// A LIST SINCE `max_nodes` (#204), AND THE TYPE IS LOAD-BEARING ALTHOUGH
+    /// NOTHING READS THE FIELD. `grep -rn '.running' web/src` finds one
+    /// reader and it is the queue table's, not this -- so this is a field with
+    /// a writer, a wire name and no reader, which is the `cancelling` shape
+    /// and is older than this change. It still has to change type: serde
+    /// decodes what it is given whether or not a view asks for it, so an array
+    /// arriving into a `String` is an error that drops the whole envelope and
+    /// takes the watched request's state with it. A field nothing reads is
+    /// cheap to leave and was NOT cheap to leave at the wrong type.
+    #[serde(default, deserialize_with = "nullable")]
+    pub running: Vec<String>,
 }
 
 /// Stream is what a watcher's progress socket is doing, and what the page
@@ -2706,6 +2750,62 @@ mod tests {
         }
     }
 
+    /// `max_nodes` means several requests generate at once, and the mark is a
+    /// MEMBERSHIP rather than an equality (#204).
+    ///
+    /// WHY THIS IS A TEST AND NOT A COMMENT. `class:running` used to compare
+    /// one id, and the shape of the defect being refused is a table that marks
+    /// the first generating request and leaves the second looking queued --
+    /// with both cards billing. Only a browser can see the class land, which
+    /// is why the DECISION is a method: `TestServe_UI` asserts the row and
+    /// this asserts what it will be told.
+    ///
+    /// THE THIRD ID IS THE HALF THAT MATTERS. An assertion that only looked
+    /// for the two generating rows being marked would pass against a
+    /// membership test that answered true for everything, which is the mark on
+    /// every row -- a highlight that says nothing. So a queued request in the
+    /// same listing must NOT be marked, and an empty list must mark nothing at
+    /// all.
+    #[test]
+    fn every_generating_request_is_marked_and_nothing_else_is() {
+        const LISTING: &str = r#"{
+            "requests": [],
+            "running": ["req-a", "req-c"]
+        }"#;
+        let list: RequestList = serde_json::from_str(LISTING).expect("the listing decodes");
+        for id in ["req-a", "req-c"] {
+            assert!(
+                list.is_running(id),
+                "{id} is generating and the table would not mark it, so an operator reading \
+                 the queue cannot see which of their cards are busy"
+            );
+        }
+        assert!(
+            !list.is_running("req-b"),
+            "a queued request was marked as generating: a mark on every row is a mark that \
+             says nothing"
+        );
+
+        let idle: RequestList = serde_json::from_str(r#"{"requests":[]}"#).expect("decodes");
+        assert!(
+            !idle.is_running("req-a"),
+            "nothing is generating and a row was still marked"
+        );
+        assert!(
+            idle.running.is_empty(),
+            "a missing `running` did not default to an empty list"
+        );
+
+        // AND A NULL DECODES, which is the rule that has to hold for the
+        // field somebody adds later rather than for this server: Go marshals a
+        // nil slice as `null`, and a `null` into a `Vec` without `nullable`
+        // fails the WHOLE envelope -- which is how this page once showed an
+        // empty queue over a table full of requests.
+        let nulled: RequestList =
+            serde_json::from_str(r#"{"requests":[],"running":null}"#).expect("a null decodes");
+        assert!(nulled.running.is_empty());
+    }
+
     /// The envelope the old row read `$0` out of, verbatim from the wire.
     ///
     /// `ws.go` sends the request alongside the events, and mid-generation
@@ -2729,7 +2829,7 @@ mod tests {
             "request": {"id":"req-1","status":"running","provider":"local",
                         "gpu":"localhost","cost":{"micro_usd":0,"display":"$0"},
                         "jobs":[],"images":[]},
-            "running": "req-1"
+            "running": ["req-1"]
         }"#;
 
         let env: Envelope = serde_json::from_str(ENVELOPE).expect("envelope decodes");

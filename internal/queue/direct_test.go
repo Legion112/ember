@@ -254,7 +254,7 @@ func TestSubmit_ARunAndAQueuedRequestCannotHoldRentalsAtOnce(t *testing.T) {
 	}
 }
 
-// TestSubmit_TheRunExecutesOnTheDrainLoopsOwnGoroutine is the assertion that
+// TestSubmit_TheRunExecutesOnASlotsOwnGoroutine is the assertion that
 // goes red for a CHECK where a structure would be green.
 //
 // The three above are satisfied by any mechanism that serialises correctly,
@@ -272,7 +272,7 @@ func TestSubmit_ARunAndAQueuedRequestCannotHoldRentalsAtOnce(t *testing.T) {
 // run executed on the loop's and not that nothing else in the program can
 // rent. cmd/check-coverage's TestNothingRentsOutsideInternalApp is the other
 // half, and the two together are what "structural" means here.
-func TestSubmit_TheRunExecutesOnTheDrainLoopsOwnGoroutine(t *testing.T) {
+func TestSubmit_TheRunExecutesOnASlotsOwnGoroutine(t *testing.T) {
 	st := genstore.NewRecordingStore()
 	q := &Queue{Store: st, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
 
@@ -305,11 +305,28 @@ func TestSubmit_TheRunExecutesOnTheDrainLoopsOwnGoroutine(t *testing.T) {
 		t.Fatal("the run never executed")
 	}
 
-	const frame = "internal/queue.(*Queue).Run"
+	// THE SUBJECT IS `slot` AND NOT `Run`, AND THE OLD SPELLING PASSED THE
+	// MOMENT IT STOPPED MEANING ANYTHING. This looked for
+	// `internal/queue.(*Queue).Run`, which was the frame while the loop ran
+	// the rental inline. Under the supervisor the rental is on a slot
+	// goroutine -- and the assertion stayed GREEN, because the closure the
+	// supervisor hands to `spawn` is declared inside `Run` and is therefore
+	// named `internal/queue.(*Queue).Run.func1`: the old substring matched a
+	// closure's NAME rather than a caller's frame. Measured, which is the only
+	// reason this comment exists -- the first run of the supervisor against
+	// the unchanged assertion passed.
+	//
+	// `(*Queue).slot` is the frame that cannot be faked that way. It is a
+	// method the supervisor calls through `spawn`, so it is in the stack of
+	// every rental this process counted and in the stack of nothing else -- a
+	// run on a goroutine somebody started beside the supervisor has no `slot`
+	// frame however correct its locking is, which is the mechanism this
+	// assertion exists to refuse.
+	const frame = "internal/queue.(*Queue).slot"
 	if !strings.Contains(stack, frame) {
-		t.Errorf("the submitted run did not execute on the drain loop's goroutine: %s is not in "+
-			"its stack, so a rental can now start somewhere other than the one place that "+
-			"serialises them.\n%s", frame, stack)
+		t.Errorf("the submitted run did not execute on a rental slot: %s is not in its stack, "+
+			"so a rental can now start somewhere other than the one place that counts "+
+			"them.\n%s", frame, stack)
 	}
 }
 

@@ -78,22 +78,39 @@ type harness struct {
 // a rental claimed and provisioning is held and not generating. A fake that
 // computed one from the other could not produce it.
 type RecordingDrain struct {
-	Calls   []string
-	running genstore.ReqID
+	Calls []string
+
+	// running is every request this fake says is generating.
+	//
+	// A SLICE SINCE max_nodes (#204), because the thing the wire now carries
+	// is a list and a fake that could only hold one id could not produce the
+	// state the change is about: two requests generating on two rentals, both
+	// of which the queue table has to mark. A fake tidier than the thing it
+	// stands in for tests a program that does not exist, and "one at a time"
+	// is exactly the tidiness that stopped being true.
+	running []genstore.ReqID
 	holding genstore.ReqID
 	reached bool
 }
 
 func (d *RecordingDrain) Kick() { d.Calls = append(d.Calls, "Kick") }
 
-func (d *RecordingDrain) Running() (genstore.ReqID, bool) {
+func (d *RecordingDrain) Running() []genstore.ReqID {
 	d.Calls = append(d.Calls, "Running")
-	return d.running, d.running != ""
+	return d.running
 }
 
 func (d *RecordingDrain) Cancel(id genstore.ReqID) bool {
 	d.Calls = append(d.Calls, "Cancel "+string(id))
-	return d.reached && id == d.running
+	if !d.reached {
+		return false
+	}
+	for _, r := range d.running {
+		if r == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *RecordingDrain) Holding(id genstore.ReqID) bool {
@@ -622,7 +639,7 @@ func TestRequests_ListAndFetch(t *testing.T) {
 
 	list := decode[struct {
 		Requests []requestView `json:"requests"`
-		Running  string        `json:"running"`
+		Running  []string      `json:"running"`
 	}](t, h.do(t, "GET", "/api/requests", ""))
 	if len(list.Requests) != 1 || list.Requests[0].ID != id {
 		t.Fatalf("listing = %+v", list.Requests)
@@ -714,7 +731,7 @@ func TestCancel_StopsARunningRequestWithoutEndingTheRental(t *testing.T) {
 	if _, ok, err := h.store.ClaimNext(t.Context(), "lease", genstore.Compat{}); err != nil || !ok {
 		t.Fatalf("setup: ok=%v err=%v", ok, err)
 	}
-	drain.running = genstore.ReqID(id)
+	drain.running = []genstore.ReqID{genstore.ReqID(id)}
 
 	w := h.do(t, "POST", "/api/requests/"+id+"/cancel", "")
 	if w.Code != http.StatusOK {

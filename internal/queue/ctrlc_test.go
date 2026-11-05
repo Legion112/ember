@@ -53,7 +53,7 @@ func TestQueue_ACtrlCdRentalRecordsWhyThroughEndIfUnfinished(t *testing.T) {
 
 	id := enqueue(t, st, "rtx2080ti", "a paper boat")
 
-	if _, err := q.once(ctx); err == nil {
+	if _, err := q.claimAndRun(ctx); err == nil {
 		t.Fatal("a rental ended by Ctrl-C was reported as success")
 	}
 
@@ -115,7 +115,7 @@ func TestQueue_ACtrlCdBatchRecordsWhyThroughFinish(t *testing.T) {
 
 	id := enqueue(t, st, "rtx2080ti", "a paper boat")
 
-	if _, err := q.once(ctx); err == nil {
+	if _, err := q.claimAndRun(ctx); err == nil {
 		t.Fatal("a batch ended by Ctrl-C was reported as success")
 	}
 
@@ -178,7 +178,7 @@ func TestQueue_ACtrlCdPlanRecordsWhyAndIsNotAFailure(t *testing.T) {
 
 	id := enqueue(t, st, "rtx2080ti", "a paper boat")
 
-	if _, err := q.once(ctx); err == nil {
+	if _, err := q.claimAndRun(ctx); err == nil {
 		t.Fatal("a plan interrupted by Ctrl-C was reported as success")
 	}
 
@@ -222,7 +222,7 @@ func TestQueue_ACtrlCdTeardownStillLeavesADoneBatchDone(t *testing.T) {
 
 	id := enqueue(t, st, "rtx2080ti", "a paper boat")
 
-	if _, err := q.once(ctx); err == nil {
+	if _, err := q.claimAndRun(ctx); err == nil {
 		t.Fatal("a teardown failure was swallowed; the operator must hear about a node that may still bill")
 	}
 

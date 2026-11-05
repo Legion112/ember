@@ -80,13 +80,13 @@ func TestCeilings_RefuseARentalThatWouldCrossTheCeiling(t *testing.T) {
 	cs := Ceilings{Month: 50_000_000} // $50 this month
 
 	// $8 more is $48, inside the ceiling.
-	if err := cs.Allow(t.Context(), s, at(17, 12), 8_000_000); err != nil {
+	if err := cs.Allow(t.Context(), s, at(17, 12), 8_000_000, 0); err != nil {
 		t.Errorf("a rental that stays inside the ceiling was refused: %v", err)
 	}
 
 	// $12 more would be $52. Nothing has been overspent yet, which is the
 	// point: the refusal happens before the money does.
-	err := cs.Allow(t.Context(), s, at(17, 12), 12_000_000)
+	err := cs.Allow(t.Context(), s, at(17, 12), 12_000_000, 0)
 	var ce *CeilingError
 	if !errors.As(err, &ce) {
 		t.Fatalf("Allow = %v, want a CeilingError", err)
@@ -111,10 +111,10 @@ func TestCeilings_AllowARentalExactlyAtTheCeiling(t *testing.T) {
 	spentOn(t, s, at(17, 9), 40_000_000)
 
 	cs := Ceilings{Month: 50_000_000}
-	if err := cs.Allow(t.Context(), s, at(17, 12), 10_000_000); err != nil {
+	if err := cs.Allow(t.Context(), s, at(17, 12), 10_000_000, 0); err != nil {
 		t.Errorf("a rental landing exactly on the ceiling was refused: %v", err)
 	}
-	if err := cs.Allow(t.Context(), s, at(17, 12), 10_000_001); err == nil {
+	if err := cs.Allow(t.Context(), s, at(17, 12), 10_000_001, 0); err == nil {
 		t.Error("one microdollar over the ceiling was allowed")
 	}
 }
@@ -128,7 +128,7 @@ func TestCeilings_CountOnlyTheirOwnPeriod(t *testing.T) {
 	cs := Ceilings{Day: 15_000_000, Month: 100_000_000}
 
 	// $6 more is $16 today: over the day ceiling, nowhere near the month's.
-	err := cs.Allow(t.Context(), s, at(17, 12), 6_000_000)
+	err := cs.Allow(t.Context(), s, at(17, 12), 6_000_000, 0)
 	var ce *CeilingError
 	if !errors.As(err, &ce) {
 		t.Fatalf("Allow = %v, want a CeilingError", err)
@@ -141,7 +141,7 @@ func TestCeilings_CountOnlyTheirOwnPeriod(t *testing.T) {
 	}
 
 	// $4 more is $14 today and $44 this month: inside both.
-	if err := cs.Allow(t.Context(), s, at(17, 12), 4_000_000); err != nil {
+	if err := cs.Allow(t.Context(), s, at(17, 12), 4_000_000, 0); err != nil {
 		t.Errorf("a rental inside both ceilings was refused: %v", err)
 	}
 }
@@ -155,17 +155,17 @@ func TestCeilings_ADayTurnsOverAtMidnightUTC(t *testing.T) {
 
 	cs := Ceilings{Day: 15_000_000}
 
-	if err := cs.Allow(t.Context(), s, at(17, 23), 2_000_000); err == nil {
+	if err := cs.Allow(t.Context(), s, at(17, 23), 2_000_000, 0); err == nil {
 		t.Error("a rental over the day's remaining allowance was allowed")
 	}
 	// Half an hour later, in the next UTC day, the allowance is fresh. This
 	// is the documented cost of matching an invoice rather than rolling.
-	if err := cs.Allow(t.Context(), s, at(18, 0), 2_000_000); err != nil {
+	if err := cs.Allow(t.Context(), s, at(18, 0), 2_000_000, 0); err != nil {
 		t.Errorf("the new day did not start with a fresh allowance: %v", err)
 	}
 	// And the month ceiling is what bounds the pair.
 	withMonth := Ceilings{Day: 15_000_000, Month: 15_000_000}
-	if err := withMonth.Allow(t.Context(), s, at(18, 0), 2_000_000); err == nil {
+	if err := withMonth.Allow(t.Context(), s, at(18, 0), 2_000_000, 0); err == nil {
 		t.Error("the month ceiling did not bound a day that turned over")
 	}
 }
@@ -177,14 +177,14 @@ func TestCeilings_NeverRefuseAFreeRental(t *testing.T) {
 	spentOn(t, s, at(17, 9), 999_000_000)
 
 	cs := Ceilings{Day: 1_000, Month: 1_000}
-	if err := cs.Allow(t.Context(), s, at(17, 12), 0); err != nil {
+	if err := cs.Allow(t.Context(), s, at(17, 12), 0, 0); err != nil {
 		t.Errorf("a free rental was refused by a money ceiling: %v", err)
 	}
 }
 
 func TestCeilings_NoCeilingReadsNothing(t *testing.T) {
 	s := genstore.NewRecordingStore()
-	if err := (Ceilings{}).Allow(t.Context(), s, at(17, 12), 50_000_000); err != nil {
+	if err := (Ceilings{}).Allow(t.Context(), s, at(17, 12), 50_000_000, 0); err != nil {
 		t.Fatal(err)
 	}
 	if len(s.Calls) != 0 {
@@ -199,7 +199,7 @@ func TestCeilings_RefuseWhenTheSpendCannotBeRead(t *testing.T) {
 	s := genstore.NewRecordingStore()
 	s.FailOn = "Spend"
 
-	err := (Ceilings{Month: 50_000_000}).Allow(t.Context(), s, at(17, 12), 1_000_000)
+	err := (Ceilings{Month: 50_000_000}).Allow(t.Context(), s, at(17, 12), 1_000_000, 0)
 	if err == nil {
 		t.Fatal("a rental was allowed although the period spend could not be read")
 	}
@@ -336,10 +336,10 @@ func TestCeilings_BindsOnlyWhenACeilingCouldRefuse(t *testing.T) {
 func TestRefuseOverPeriod_NeverRefusesAFreeRentalEvenWithNoLedgerToRead(t *testing.T) {
 	cs := Ceilings{Month: 50_000_000}
 
-	if err := RefuseOverPeriod(t.Context(), cs, nil, at(17, 12), time.Hour, 0); err != nil {
+	if err := RefuseOverPeriod(t.Context(), cs, nil, at(17, 12), time.Hour, 0, 0); err != nil {
 		t.Errorf("a free rental was refused by a ceiling with no ledger to read it against: %v", err)
 	}
-	err := RefuseOverPeriod(t.Context(), cs, nil, at(17, 12), time.Hour, node.Rate(1_790_000))
+	err := RefuseOverPeriod(t.Context(), cs, nil, at(17, 12), time.Hour, node.Rate(1_790_000), 0)
 	if err == nil {
 		t.Fatal("a paid rental was allowed by a ceiling with no ledger to read it against")
 	}
@@ -423,7 +423,7 @@ func TestOnce_RecordsACeilingRefusalOnTheRequest(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a")
 
-	worked, err := q.once(t.Context())
+	worked, err := q.claimAndRun(t.Context())
 	if err == nil {
 		t.Fatal("a rental refused by a period ceiling was reported as success")
 	}
