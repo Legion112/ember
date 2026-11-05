@@ -374,7 +374,7 @@ LAB_SELECT = sel=$$($(GO) test -tags='$(LAB_TAGS)' -list $(1) ./test/integration
 	fi; \
 	echo "selection: $$sel test(s) match $(1)"
 
-.PHONY: all build web web-check web-test test-serve-lab test test-race cover cover-check vet fmt lint docker-build test-integration reap-labs test-image-labs test-image-labs-publish test-preview-lab test-tts-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local workload-tts clean print-%
+.PHONY: all build web web-check web-test test-serve-lab test test-all test-race cover cover-check vet fmt lint docker-build test-integration reap-labs test-image-labs test-image-labs-publish test-preview-lab test-tts-lab publish-sd-cuda workload-sd workload-sd-cuda workload-sd-cuda-local workload-tts clean print-%
 
 all: fmt vet test build
 
@@ -383,6 +383,21 @@ build:
 
 test:
 	$(GO) test -race -count=1 ./...
+
+# Every test there is: the unit suite, then each lab in sequence.
+#
+# Sub-makes rather than prerequisites, because the labs take an advisory lock
+# on the Docker daemon one test binary at a time and `make -j` would run
+# prerequisites concurrently -- the second would then wait out LockWait and
+# fail for a reason that has nothing to do with the code. Needs Docker and the
+# built images; `make test` alone needs none of that.
+test-all:
+	$(MAKE) test
+	$(MAKE) test-integration
+	$(MAKE) test-preview-lab
+	$(MAKE) test-tts-lab
+	$(MAKE) test-serve-lab
+	$(MAKE) test-image-labs
 
 cover:
 	$(GO) test -race -count=1 -coverpkg=./internal/...,./cmd/... -coverprofile=$(COVERPROFILE) ./...
