@@ -387,12 +387,20 @@ func (q *Queue) nodes() int {
 // free is how many more rentals this process may open, and what the ones
 // already open can serve.
 //
-// THE TWO ANSWERS COME FROM ONE LOCK HOLD, which is not an economy: the
-// supervisor's next decision is "may I create, and if so for what work none of
-// these can take", and reading the count and the set separately would let a
-// slot exit between them -- so the claim would exclude a rental that is gone
-// and the request it was excluded for would wait for a node that no longer
-// exists.
+// THE TWO ANSWERS COME FROM ONE LOCK HOLD, so that they are consistent with
+// EACH OTHER: the supervisor's next decision is "may I create, and if so for
+// what work none of these can take", and two separate reads could pair a slot
+// count from one moment with a live set from another -- a free slot alongside
+// a rental that has since gone, or the reverse.
+//
+// WHAT ONE HOLD DOES NOT BUY, said rather than left to be assumed: a slot can
+// still exit between this read and the claim below it, so the claim may
+// exclude work for a rental that no longer exists. That costs one wasted
+// iteration and no money -- the claim finds nothing, the supervisor parks, and
+// the exiting slot's own Kick wakes it to ask again with the shorter set.
+// Holding the lock across ClaimNext would close it and would mean a SQLite
+// statement under the mutex every slot exit takes, which is the wrong trade
+// for a wasted loop.
 func (q *Queue) free() (int, []genstore.Compat) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -682,7 +690,30 @@ func (q *Queue) Run(ctx context.Context) error {
 
 		select {
 		case <-ctx.Done():
-			return nil
+			// FALLS THROUGH TO THE TOP RATHER THAN RETURNING HERE, so that
+			// `Run` has ONE return out of its loop and therefore one
+			// dropPending call site.
+			//
+			// WHAT THAT IS AND IS NOT, because the first wording of this
+			// comment claimed a defect and the claim does not survive being
+			// checked. It said a shutdown landing here with a `pending` run in
+			// hand returned silently -- the #151 defect, reintroduced. That
+			// state is UNREACHABLE: both receives of the handoff are guarded
+			// by `pending == nil && slots > 0`, and `slots` is incremented
+			// only by `spawn`, which only this goroutine calls -- so a run
+			// taken at either select is spawned in the same iteration, and
+			// there is no interleaving in which this goroutine parks holding
+			// one with no slot for it.
+			//
+			// SO THIS IS A SECOND RETURN PATH REMOVED AND NOT A SILENT DROP
+			// FIXED. It is worth removing anyway, and the reason is the rule
+			// rather than a bug: the branch is unreachable because of a guard
+			// three statements away, and a reader who widens that guard -- say
+			// to take a submission while a slot is provisioning -- makes it
+			// reachable with nothing reporting it. One return means that
+			// reader cannot reintroduce the drop by moving a condition. There
+			// is no test, because there is no state to produce: see
+			// TestDropPending_..., which is over the LINE for the same reason.
 		case d := <-offer:
 			// RECEIVED HERE AND NOT ONLY AT THE TOP, because an idle loop is
 			// parked in this select and a submission must not wait out
