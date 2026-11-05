@@ -16,6 +16,17 @@ that needs several model stacks in one file, and `SDConfig.Serve` is a single
 `[]string` — but it makes the configuration readable, and it puts the
 measurements somewhere a reader can find them without opening a YAML file.
 
+**Half of that sentence has stopped being true and is corrected here rather
+than left to be contradicted by the code.** `workloads:`
+([#200](https://github.com/Legion112/ember/issues/200)) is a list of declared
+entries, each with its own `image:`, `images:` and driver block — so two `sd`
+entries in one file ARE two model stacks, with two `sd.serve` argvs, and
+`SDConfig.Serve` being a single `[]string` is no longer the bound. What is
+still unfixed is the ephemeral half: a declared entry's `sd.jobs` and
+`tts.jobs` are the job, so one file still describes one batch per workload,
+and `cmd`/`cmds` have no entry form at all. The five files below declare no
+workloads and nothing about them changed.
+
 **The rule, so the next reader does not have to guess it.** A comment in a
 committed configuration says what a wrong value costs, in a line or two.
 Anything that argues, measures or compares belongs here.
