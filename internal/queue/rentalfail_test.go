@@ -34,7 +34,7 @@ func TestQueue_ARentalThatBreaksBeforeGeneratingEndsTheRequest(t *testing.T) {
 
 	id := enqueue(t, st, "rtx2080ti", "a paper boat")
 
-	if _, err := q.once(t.Context()); err == nil {
+	if _, err := q.claimAndRun(t.Context()); err == nil {
 		t.Fatal("a rental that never generated anything was reported as success")
 	}
 
@@ -83,7 +83,7 @@ func TestQueue_ARentalThatBreaksAfterGeneratingKeepsWhatDrainWrote(t *testing.T)
 
 	id := enqueue(t, st, "rtx2080ti", "a paper boat")
 
-	if _, err := q.once(t.Context()); err == nil {
+	if _, err := q.claimAndRun(t.Context()); err == nil {
 		t.Fatal("a teardown failure was swallowed; the operator must hear about a node that may still bill")
 	}
 
@@ -118,7 +118,7 @@ func TestQueue_ARentalEndedByCtrlCIsCancelledAndNotFailed(t *testing.T) {
 
 	id := enqueue(t, st, "rtx2080ti", "a paper boat")
 
-	if _, err := q.once(t.Context()); err == nil {
+	if _, err := q.claimAndRun(t.Context()); err == nil {
 		t.Fatal("a cancelled rental was reported as success")
 	}
 

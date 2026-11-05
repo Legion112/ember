@@ -255,7 +255,7 @@ func TestOnce_OneRentalServesEveryCompatibleRequest(t *testing.T) {
 	a := enqueue(t, st, "rtx2080ti", "first")
 	b := enqueue(t, st, "rtx2080ti", "second")
 
-	worked, err := q.once(t.Context())
+	worked, err := q.claimAndRun(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestOnce_ARequestForAnotherCardWaitsForItsOwnRental(t *testing.T) {
 	enqueue(t, st, "rtx2080ti", "this card")
 	other := enqueue(t, st, "h100-80g", "another card")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if rentals, _ := pl.counts(); rentals != 1 {
@@ -320,7 +320,7 @@ func TestOnce_ARequestForAnotherCardWaitsForItsOwnRental(t *testing.T) {
 	}
 
 	// And now it gets its own.
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if rentals, destroyed := pl.counts(); rentals != 2 || destroyed != 2 {
@@ -338,7 +338,7 @@ func TestOnce_AnEmptyQueueDestroysAtOnce(t *testing.T) {
 	enqueue(t, st, "rtx2080ti", "only one")
 
 	start := time.Now()
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if took := time.Since(start); took > time.Second {
@@ -355,7 +355,7 @@ func TestOnce_NothingToClaimRentsNothing(t *testing.T) {
 	pl := &fakePlanner{served: &fakeServed{}}
 	q, _ := newQueue(t, pl)
 
-	worked, err := q.once(t.Context())
+	worked, err := q.claimAndRun(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func TestOnce_AFailedBatchStopsTheRental(t *testing.T) {
 	bad := enqueue(t, st, "rtx2080ti", "fails")
 	good := enqueue(t, st, "rtx2080ti", "never reached on this rental")
 
-	_, err := q.once(t.Context())
+	_, err := q.claimAndRun(t.Context())
 	if err == nil {
 		t.Fatal("a failed batch was reported as success")
 	}
@@ -421,7 +421,7 @@ func TestOnce_APlanThatFailsRentsNothing(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a")
 
-	worked, err := q.once(t.Context())
+	worked, err := q.claimAndRun(t.Context())
 	if err == nil {
 		t.Fatal("a failed plan was reported as success")
 	}
@@ -456,7 +456,7 @@ func TestOnce_CancellationIsNotAFailure(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a")
 
-	if _, err := q.once(t.Context()); err == nil {
+	if _, err := q.claimAndRun(t.Context()); err == nil {
 		t.Fatal("want the cancellation reported")
 	}
 	got, err := st.Get(t.Context(), id)
@@ -483,7 +483,7 @@ func TestOnce_RecordsTheRentalAgainstTheRequestThatOpenedIt(t *testing.T) {
 	opener := enqueue(t, st, "rtx2080ti", "first")
 	rider := enqueue(t, st, "rtx2080ti", "second")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -529,7 +529,7 @@ func TestOnce_PersistsProgressSoAReconnectCanReplayIt(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -598,7 +598,7 @@ func TestOnce_JoinsTheFilesAJobWroteToTheRequest(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a cat")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -739,14 +739,13 @@ func TestRunning_NamesWhatIsGeneratingNow(t *testing.T) {
 	pl := &fakePlanner{served: served}
 	q, st := newQueue(t, pl)
 	served.progress = func(report.Sink, int) {
-		id, ok := q.Running()
-		if ok {
-			seen <- id
+		if ids := q.Running(); len(ids) == 1 {
+			seen <- ids[0]
 		}
 	}
 	id := enqueue(t, st, "rtx2080ti", "a")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -760,8 +759,8 @@ func TestRunning_NamesWhatIsGeneratingNow(t *testing.T) {
 
 	// And nothing once it is over: a UI showing a request as in progress
 	// after its node is gone is a UI nobody believes.
-	if _, ok := q.Running(); ok {
-		t.Error("Running() still names a request after the rental ended")
+	if ids := q.Running(); len(ids) != 0 {
+		t.Errorf("Running() still names %v after the rental ended", ids)
 	}
 }
 
@@ -775,7 +774,7 @@ func TestOnce_CachesTheServersCapabilities(t *testing.T) {
 	q, st := newQueue(t, pl)
 	enqueue(t, st, "rtx2080ti", "a")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	caps, ok, err := st.Caps(t.Context())
@@ -804,7 +803,7 @@ func TestOnce_SurvivesAStoreThatCannotRecordProgress(t *testing.T) {
 
 	st.(*genstore.RecordingStore).FailOn = "AppendEvents"
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Errorf("a store that could not record progress failed the generation: %v", err)
 	}
 	st.(*genstore.RecordingStore).FailOn = ""
@@ -1018,10 +1017,10 @@ func TestOnce_AStoreThatBreaksDoesNotTakeTheNodeWithIt(t *testing.T) {
 				rec.FailOn = c.failOn
 			}
 
-			_, err := q.once(t.Context())
+			_, err := q.claimAndRun(t.Context())
 			if c.failOn == "ClaimNext" {
 				rec.FailOn = "ClaimNext"
-				_, err = q.once(t.Context())
+				_, err = q.claimAndRun(t.Context())
 				if err == nil {
 					t.Fatal("a claim that failed was reported as success")
 				}
@@ -1059,7 +1058,7 @@ func TestDrain_AClaimThatFailsMidRentalStopsThatRental(t *testing.T) {
 		rec.FailOn = "ClaimNext"
 	}
 
-	_, err := q.once(t.Context())
+	_, err := q.claimAndRun(t.Context())
 	rec.FailOn = ""
 	if err == nil {
 		t.Fatal("a claim that failed mid-rental was reported as success")
@@ -1148,7 +1147,7 @@ func TestOnce_RecordsThePreviewFrameAsAPreview(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a cat")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1197,7 +1196,7 @@ func TestOnce_AProgressEventWithNoFrameRecordsNothing(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a cat")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	ims, err := st.Images(t.Context(), id)
@@ -1227,7 +1226,7 @@ func TestOnce_RecordsWhatTheNodeSaidAboutItsMemory(t *testing.T) {
 	opener := enqueue(t, st, "rtx2080ti", "first")
 	rider := enqueue(t, st, "rtx2080ti", "second")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1281,7 +1280,7 @@ func TestOnce_RecordsWhichModelServedEveryRequestOnTheRental(t *testing.T) {
 	opener := enqueue(t, st, "rtx2080ti", "first")
 	rider := enqueue(t, st, "rtx2080ti", "second")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1308,7 +1307,7 @@ func TestOnce_DoesNotInventAModelTheServerDidNotReport(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "first")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.Get(t.Context(), id)
@@ -1330,7 +1329,7 @@ func TestOnce_APlanThatFailsRecordsNoModel(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "first")
 
-	if _, err := q.once(t.Context()); err == nil {
+	if _, err := q.claimAndRun(t.Context()); err == nil {
 		t.Fatal("a plan that failed was not reported")
 	}
 	got, err := st.Get(t.Context(), id)
@@ -1384,7 +1383,7 @@ func TestCancel_StopsOneRequestAndTheRentalServesTheNext(t *testing.T) {
 		}
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatalf("a cancelled request ended the rental with an error: %v", err)
 	}
 
@@ -1451,7 +1450,7 @@ func TestCancel_ReachesOnlyTheRequestItNames(t *testing.T) {
 		return nil
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if wrong != nil {
@@ -1490,7 +1489,7 @@ func TestCancel_IsSafeToAskTwice(t *testing.T) {
 		return app.ErrCancelled
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if second {
@@ -1554,7 +1553,7 @@ func TestCancel_DoesNotReachTheNextRequestOnTheSameRental(t *testing.T) {
 		return nil
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if leaked != nil {
@@ -1609,13 +1608,13 @@ func TestHolding_IsTrueFromTheClaimAndNotOnlyWhileGenerating(t *testing.T) {
 	var heldDuringPlan, generatingDuringPlan bool
 	q.Planner = observingPlanner{fakePlanner: pl, at: func(r genstore.Request) {
 		heldDuringPlan = q.Holding(r.ID)
-		_, generatingDuringPlan = q.Running()
+		generatingDuringPlan = len(q.Running()) > 0
 	}}
 
 	if q.Holding(id) {
 		t.Error("a request nothing has claimed is held")
 	}
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !heldDuringPlan {
@@ -1666,7 +1665,7 @@ func TestHolding_FollowsTheClaimOntoARiderAndNotTheRequestThatOpenedIt(t *testin
 		return nil
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 {
@@ -1740,4 +1739,49 @@ func (s recordingSpoken) Say(_ context.Context, sink report.Sink, run tts.Run, d
 	}
 	_ = dir
 	return err
+}
+
+// claimAndRun is the supervisor's two steps in one synchronous call, for the
+// tests that drive one rental and assert on what it did.
+//
+// WHY A HELPER AT ALL. `once` used to claim and then rent, inline in Run's
+// loop, so a test could drive one whole rental with `q.once(ctx)`. At
+// max_nodes>1 the claim has to happen on the supervisor and the compat has to
+// be registered before the next decision -- otherwise two compatible requests
+// provoke two nodes while the first is still provisioning -- so the two halves
+// are `Queue.claim` and `Queue.once`, and a test that wants a rental start to
+// finish has to call them in that order. Forty call sites each spelling it out
+// is forty places for one of them to get the order wrong, which is the "one
+// name for a path, not one per call site" rule.
+//
+// WHAT IT CANNOT SEE, SAID RATHER THAN IMPLIED. It calls two production
+// functions and is therefore not a second production path -- but it is this
+// test file's own opinion about the ORDER the supervisor calls them in, and if
+// that opinion were wrong nothing here would report it: a ceiling check, a
+// terminal status or a batch count is the same whichever order produced it.
+// What covers the order is the set of tests that drive `Run` itself --
+// TestRun_PacksOntoALiveRentalRatherThanCreating,
+// TestRun_HoldsNoMoreRentalsThanMaxNodes and
+// TestRun_RegistersWhatASlotWillServeBeforeTheNextClaim -- and that last one
+// is the one this helper structurally cannot stand in for.
+//
+// IT RESERVES AND FREES A SLOT, so that a test which asserts on `Running` or
+// on `free` sees what production sees. The WaitGroup is local and waited for
+// before returning, which is what makes the call synchronous.
+func (q *Queue) claimAndRun(ctx context.Context) (bool, error) {
+	_, live := q.free()
+	lease := string(genstore.NewReqID())
+	first, ok, err := q.Store.ClaimNext(ctx, lease, genstore.Compat{Live: live})
+	if err != nil {
+		return false, fmt.Errorf("claim a request: %w", err)
+	}
+	if !ok {
+		return false, nil
+	}
+	compat := genstore.Compat{
+		Kind: genstore.KindOf(first.Kind), Provider: first.Provider, GPU: first.GPU,
+	}
+	q.reserve(first.ID, compat)
+	defer q.freeSlot(first.ID)
+	return true, q.once(ctx, lease, first, compat)
 }
