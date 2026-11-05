@@ -16,7 +16,7 @@ goes red when reinstated.
 | [host-keys.md](threat-model/host-keys.md) | minted here and injected, never trusted on first use; `hostkey.Pin` is the only `Trust` there is |
 | [serve-auth.md](threat-model/serve-auth.md) | a loopback port is reachable by every uid — the mandatory token, the cookie, the unix socket, and their stated limits |
 | [request-seal.md](threat-model/request-seal.md) | what a request may name and what it structurally cannot; two rentals at once are unrepresentable |
-| [forwards-and-reconnect.md](threat-model/forwards-and-reconnect.md) | the remote end of a forward is built, never parsed from input; the progress socket that never re-opened |
+| [forwards-and-reconnect.md](threat-model/forwards-and-reconnect.md) | the far end of a connection into a node is built, never parsed from input; the progress socket that never re-opened |
 
 ## How the seals are held
 

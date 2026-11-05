@@ -8,8 +8,7 @@ import (
 
 func validSpecOptions() SpecOptions {
 	return SpecOptions{
-		Image:   "ghcr.io/example/comfyui:v0.3.1",
-		Ports:   []PortMap{{Name: "comfyui", Remote: 8188, Local: 8188}},
+		Image:   "ghcr.io/example/sd:v0.3.1",
 		Outputs: []OutputPath{{Remote: "/workspace/output", Local: "output"}},
 		TTL:     time.Hour,
 	}
@@ -20,7 +19,7 @@ func validSpecOptions() SpecOptions {
 // ":latest" may not have run the same software, and a result nobody can
 // reproduce is not a measurement.
 func TestNewSpec_RefusesAnUnpinnedImage(t *testing.T) {
-	for _, img := range []string{"", "   ", "comfyui", "comfyui:latest", "ghcr.io/e/comfyui:latest", "comfyui:", ":v1"} {
+	for _, img := range []string{"", "   ", "sd", "sd:latest", "ghcr.io/e/sd:latest", "sd:", ":v1"} {
 		o := validSpecOptions()
 		o.Image = img
 		if _, err := NewSpec(o); err == nil {
@@ -62,23 +61,6 @@ func TestNewSpec_TTLIsMandatory(t *testing.T) {
 	}
 }
 
-func TestNewSpec_RefusesBadPorts(t *testing.T) {
-	for name, ports := range map[string][]PortMap{
-		"no remote":  {{Name: "a", Remote: 0, Local: 1}},
-		"no local":   {{Name: "a", Remote: 1, Local: 0}},
-		"no name":    {{Name: " ", Remote: 1, Local: 1}},
-		"dup remote": {{Name: "a", Remote: 1, Local: 1}, {Name: "b", Remote: 1, Local: 2}},
-		"dup local":  {{Name: "a", Remote: 1, Local: 1}, {Name: "b", Remote: 2, Local: 1}},
-		"dup name":   {{Name: "a", Remote: 1, Local: 1}, {Name: "a", Remote: 2, Local: 2}},
-	} {
-		o := validSpecOptions()
-		o.Ports = ports
-		if _, err := NewSpec(o); err == nil {
-			t.Errorf("%s: NewSpec accepted it", name)
-		}
-	}
-}
-
 func TestNewSpec_RefusesBadOutputs(t *testing.T) {
 	for name, out := range map[string]OutputPath{
 		"relative remote": {Remote: "workspace/out", Local: "o"},
@@ -113,25 +95,21 @@ func TestNewSpec_RefusesNegativeVolumeAndBadFilter(t *testing.T) {
 // let a later mutation change what a running node was asked to do.
 func TestNewSpec_CopiesItsInputs(t *testing.T) {
 	o := validSpecOptions()
-	o.Cmd = []string{"python", "main.py"}
 	o.Env = map[string]string{"A": "1"}
+	o.Outputs = []OutputPath{{Remote: "/workspace/out", Local: "out"}}
 
 	s, err := NewSpec(o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	o.Cmd[0] = "rm"
 	o.Env["A"] = "2"
-	o.Ports[0].Local = 9999
+	o.Outputs[0].Local = "elsewhere"
 
-	if s.Cmds[0][0] != "python" {
-		t.Error("Cmd aliased the caller's slice")
-	}
 	if s.Env["A"] != "1" {
 		t.Error("Env aliased the caller's map")
 	}
-	if s.Ports[0].Local != 8188 {
-		t.Error("Ports aliased the caller's slice")
+	if s.Outputs[0].Local != "out" {
+		t.Error("Outputs aliased the caller's slice")
 	}
 }
 
@@ -310,97 +288,8 @@ func TestParseCUDAVersion(t *testing.T) {
 	}
 }
 
-// TestNewSpec_CmdAndCmdsAreTheSameThing: one command is a batch of one, so
-// everything downstream reads Cmds and nothing has to ask which spelling the
-// operator used.
-func TestNewSpec_CmdAndCmdsAreTheSameThing(t *testing.T) {
-	o := validSpecOptions()
-	o.Cmd = []string{"sd-cli", "-p", "a cat"}
-	s, err := NewSpec(o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(s.Cmds) != 1 || s.Cmds[0][2] != "a cat" {
-		t.Fatalf("Cmds = %v", s.Cmds)
-	}
-
-	o2 := validSpecOptions()
-	o2.Cmd = nil
-	o2.Cmds = [][]string{{"sd-cli", "-p", "one"}, {"sd-cli", "-p", "two"}}
-	s2, err := NewSpec(o2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(s2.Cmds) != 2 || s2.Cmds[1][2] != "two" {
-		t.Fatalf("Cmds = %v", s2.Cmds)
-	}
-
-	// Copied, not aliased: a caller mutating its slice afterwards must not
-	// change what the node will be asked to run.
-	o2.Cmds[0][2] = "mutated"
-	if s2.Cmds[0][2] != "one" {
-		t.Error("the spec aliases the caller's command slices")
-	}
-}
-
-// TestNewSpec_RefusesBothSpellings. A config answering "what does this node
-// run" twice is one where an operator watches the wrong thing execute.
-func TestNewSpec_RefusesBothSpellings(t *testing.T) {
-	o := validSpecOptions()
-	o.Cmd = []string{"a"}
-	o.Cmds = [][]string{{"b"}}
-	if _, err := NewSpec(o); err == nil {
-		t.Error("a spec with both cmd and cmds was accepted")
-	}
-}
-
-func TestNewSpec_RefusesAnEmptyStep(t *testing.T) {
-	o := validSpecOptions()
-	o.Cmd = nil
-	o.Cmds = [][]string{{"sd-cli"}, {}}
-	if _, err := NewSpec(o); err == nil {
-		t.Error("a batch containing an empty command was accepted")
-	}
-}
-
-// A serve command is not a step: it is the thing the steps are sent to. A run
-// with both would hold the weights in VRAM for a resident server and then run
-// a separate sd-cli that loads them a second time -- paying for the resident
-// copy and not using it.
-func TestNewSpec_OneWorkloadSpellingNeverTwo(t *testing.T) {
-	serve := []string{"sd-server", "--diffusion-model", "/models/x.gguf"}
-	cmd := []string{"sd-cli", "-p", "a cat"}
-	cmds := [][]string{{"sd-cli", "-p", "one"}}
-
-	for _, tc := range []struct {
-		name  string
-		cmd   []string
-		cmds  [][]string
-		serve []string
-		want  string
-	}{
-		{"cmd and cmds", cmd, cmds, nil, "cmd and cmds are set"},
-		{"cmd and serve", cmd, nil, serve, "cmd and sd.serve are set"},
-		{"cmds and serve", nil, cmds, serve, "cmds and sd.serve are set"},
-		{"all three", cmd, cmds, serve, "cmd, cmds and sd.serve are set"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			o := validSpecOptions()
-			o.Cmd, o.Cmds, o.Serve = tc.cmd, tc.cmds, tc.serve
-			_, err := NewSpec(o)
-			if err == nil {
-				t.Fatal("want a refusal")
-			}
-			if got := err.Error(); !strings.Contains(got, tc.want) {
-				t.Errorf("err = %q, want it to contain %q", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestNewSpec_ServeAloneIsCarriedThrough(t *testing.T) {
 	o := validSpecOptions()
-	o.Cmd = nil
 	o.Serve = []string{"sd-server", "--diffusion-model", "/models/x.gguf"}
 	o.ServeTimeout = 11 * time.Minute
 
@@ -414,12 +303,6 @@ func TestNewSpec_ServeAloneIsCarriedThrough(t *testing.T) {
 	if s.ServeTimeout != 11*time.Minute {
 		t.Errorf("ServeTimeout = %v", s.ServeTimeout)
 	}
-	// No Cmds: the jobs do not reach the node as argv, so there is nothing
-	// for a step loop to find and run.
-	if len(s.Cmds) != 0 {
-		t.Errorf("Cmds = %v, want none for a served run", s.Cmds)
-	}
-
 	// Copied, not aliased, for the reason the command slices are.
 	o.Serve[2] = "mutated"
 	if s.Serve[2] != "/models/x.gguf" {
@@ -450,7 +333,6 @@ func TestNewSpec_RefusesAnEmptyServeArgument(t *testing.T) {
 		{""},
 	} {
 		o := validSpecOptions()
-		o.Cmd = nil
 		o.Serve = argv
 		if _, err := NewSpec(o); err == nil {
 			t.Errorf("NewSpec accepted serve %q", argv)
@@ -463,7 +345,6 @@ func TestNewSpec_RefusesAnEmptyServeArgument(t *testing.T) {
 // the machine was rented.
 func TestNewSpec_RefusesAServerOnACPUOnlyRun(t *testing.T) {
 	o := validSpecOptions()
-	o.Cmd = nil
 	o.GPUProbe = nil
 	o.Serve = []string{"sd-server"}
 	o.Filter = Filter{CPUOnly: true}
@@ -474,21 +355,5 @@ func TestNewSpec_RefusesAServerOnACPUOnlyRun(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no GPU") {
 		t.Errorf("err = %v, want it to name the contradiction", err)
-	}
-}
-
-func TestHumanList(t *testing.T) {
-	for _, tc := range []struct {
-		in   []string
-		want string
-	}{
-		{nil, ""},
-		{[]string{"a"}, "a"},
-		{[]string{"a", "b"}, "a and b"},
-		{[]string{"a", "b", "c"}, "a, b and c"},
-	} {
-		if got := humanList(tc.in); got != tc.want {
-			t.Errorf("humanList(%v) = %q, want %q", tc.in, got, tc.want)
-		}
 	}
 }

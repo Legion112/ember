@@ -103,8 +103,8 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   -- but it never gets to the write. `sdserver.WaitModel` retries `empty` and
   ends as a `NotReadyError`, so a server with no weights fails the rental
   before a claim is recorded and `s.Caps()` is only ever read from a server
-  that loaded something. What leaves the column empty is an `ember up` with
-  `cmds` and no server, or a row from before the column -- which is exactly
+  that loaded something. What leaves the column empty is an `ember up` whose
+  config describes no jobs, or a row from before the column -- which is exactly
   what `groupExpr` and `keyOr` already act on, so the comment contradicted
   both of its readers. This is "'it has no figures' is the fact; 'it ran
   before ember recorded them' was a guess at the cause" one column over, and
@@ -118,7 +118,7 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   never instead of it" while the code did the opposite. **There is no test to
   prove this one, and that is stated rather than papered over**: a comment has
   no exit code, and inventing an assertion that the column is empty for a
-  `cmds` run would test a behaviour that was never wrong.
+  jobless run would test a behaviour that was never wrong.
 - **What the server reports is the diffusion model, and that bounds what the
   grouping can distinguish.** `resolve_display_model_path` in sd-server's
   `routes_sdcpp.cpp` answers the basename of `--model`, else of
@@ -236,17 +236,12 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   drops exactly those two runs. `requests.run_id` therefore stays empty for an
   `up` row and the node's own handle, written through from `node_ready`, is the
   join to `ember ls`; neither reader prints the run id.
-- **A `cmds` step is not a job row, and a plain `ember up` has no jobs at
-  all.** Both record the request row and the full event stream and no `jobs`
-  rows: a step's own cost and span are on its `unit_cost` event, and the
-  figures the jobs table exists for -- images, passes, steps per second -- are
-  not things an `ffmpeg` invocation has. A `steps` table was the alternative
-  and is a new table, a migration, a `Store` method, a fake method and
-  conformance rows for a shape nothing aggregates; argv on `genstore.Job` was
-  the other, and that is the wire type a browser posts, which is what `Extra`
-  is kept off it for. The honest consequence is printed rather than hidden:
-  `ember history` shows such a run with no jobs, a dash for images and card
-  time, and a footnote saying which runs those are.
+- **An `ember up` whose config describes no jobs still has a row.** It
+  records the request row and the full event stream and no `jobs` rows,
+  because the figures the jobs table exists for -- images, passes, steps per
+  second -- are not things that run produced. The honest consequence is
+  printed rather than hidden: `ember history` shows such a run with no jobs, a
+  dash for images and card time, and a footnote saying which runs those are.
 - **`unrecorded` required a job, and that condition could not fire.**
   `Validate` refuses a queued request with no jobs, so `jobs > 0` was true of
   every row any reachable state could produce -- the dead half of a seal, which

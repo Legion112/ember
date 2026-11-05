@@ -422,29 +422,18 @@ func TestMapOffers_AMissingMaxCountStillYieldsOneGPU(t *testing.T) {
 // TestMapPorts_PublishesOnly22TCP is the second lock on the door that
 // exposure.PortRequest already bolts shut, placed at the exact point where a
 // wrong value becomes an unauthenticated public URL.
+//
+// IT GOES THROUGH exposure.Requests AND NOT A LITERAL, because the property is
+// about what ember asks a provider for rather than about what this function
+// does with a list somebody handed it: a set that grew a member would be
+// declared to RunPod, and RunPod publishes what is listed.
 func TestMapPorts_PublishesOnly22TCP(t *testing.T) {
-	reqs, err := exposure.Requests([]node.PortMap{
-		{Name: "comfyui", Remote: 8188, Local: 8188},
-		{Name: "metrics", Remote: 9090, Local: 19090},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ports, err := mapPorts(reqs)
+	ports, err := mapPorts(exposure.Requests())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ports) != 1 || ports[0] != "22/tcp" {
 		t.Fatalf("got %v, want exactly [22/tcp]", ports)
-	}
-	// The workload ports are not declared at all. RunPod publishes only what
-	// is listed, so saying nothing is how they stay private; they are reached
-	// by forwarding over the SSH connection.
-	for _, p := range ports {
-		if strings.Contains(p, "8188") || strings.Contains(p, "9090") {
-			t.Errorf("a workload port was declared to RunPod: %q", p)
-		}
 	}
 }
 

@@ -140,7 +140,7 @@ func runOffers(args []string, out io.Writer, d deps) error {
 	if err != nil {
 		return err
 	}
-	applyFlags(&cfg, *providerName, "", *gpu, *maxHourly, 0, nil)
+	applyFlags(&cfg, *providerName, "", *gpu, *maxHourly, 0)
 
 	filter, err := cfg.Filter()
 	if err != nil {

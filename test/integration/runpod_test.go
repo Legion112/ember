@@ -65,12 +65,11 @@ func runpodLab(t *testing.T, opts runpodfake.Options) (*runpod.Provider, *runpod
 	return p, f, l
 }
 
-func runpodSpec(t *testing.T, port int) node.Spec {
+func runpodSpec(t *testing.T) node.Spec {
 	t.Helper()
 	s, err := node.NewSpec(node.SpecOptions{
 		Image:   harness.LabImage,
 		TTL:     10 * time.Minute,
-		Ports:   []node.PortMap{{Name: "sshd", Remote: 22, Local: uint16(port)}},
 		Outputs: []node.OutputPath{{Remote: "/etc/hostname", Local: "host"}},
 	})
 	if err != nil {
@@ -89,7 +88,6 @@ func runpodSpec(t *testing.T, port int) node.Spec {
 // ssh.direct appears, and the web terminal port RunPod publishes unbidden --
 // so none of them can come back silently.
 func TestRunPod_FullLifecycleAgainstTheFake(t *testing.T) {
-	port := harness.FreePort(t)
 	p, f, l := runpodLab(t, runpodfake.Options{
 		ReadyAfter: 2 * time.Second,
 		SSHAfter:   2 * time.Second,
@@ -98,13 +96,13 @@ func TestRunPod_FullLifecycleAgainstTheFake(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "outputs")
 	var fetched transfer.Result
 
-	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t), labOptions(t, l),
 		func(ctx context.Context, s provision.Session) error {
 			client := dialSession(t, l, s)
 			defer func() { _ = client.Close() }()
 
 			res, ferr := transfer.Fetch(ctx, sshexec.New(client.SSH()),
-				[]node.OutputPath{{Remote: "/etc/hostname", Local: "host"}}, outDir, "")
+				[]node.OutputPath{{Remote: "/etc/hostname", Local: "host"}}, outDir)
 			fetched = res
 			return ferr
 		})
@@ -129,14 +127,15 @@ func TestRunPod_FullLifecycleAgainstTheFake(t *testing.T) {
 // TestRunPod_DeclaresOnly22TCPToTheAPI. The single most dangerous field in
 // RunPod's API: a port declared /http is served at
 // {id}-{port}.proxy.runpod.net with no authentication of any kind.
+//
+// THERE IS NOTHING A SPEC CAN DO TO THIS, which is what the assertion is
+// against: the create body's port list comes from exposure.Requests, whose
+// only member is sshd and which takes no argument, so the figure below is a
+// property of the program rather than of this spec.
 func TestRunPod_DeclaresOnly22TCPToTheAPI(t *testing.T) {
-	port := harness.FreePort(t)
 	p, f, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 
-	spec := runpodSpec(t, port)
-	spec.Ports = append(spec.Ports, node.PortMap{Name: "comfyui", Remote: 8188, Local: uint16(harness.FreePort(t))})
-
-	err := withNode(t.Context(), p, spec, labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t), labOptions(t, l),
 		func(context.Context, provision.Session) error { return nil })
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -161,10 +160,9 @@ func TestRunPod_DeclaresOnly22TCPToTheAPI(t *testing.T) {
 // /proc/<pid>/cmdline is world-readable, and on rented hardware the other
 // tenants of that host are strangers.
 func TestRunPod_KeyMaterialReachesTheNodeThroughTheAPIBody(t *testing.T) {
-	port := harness.FreePort(t)
 	p, f, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 
-	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t), labOptions(t, l),
 		func(context.Context, provision.Session) error { return nil })
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -204,14 +202,13 @@ func TestRunPod_KeyMaterialReachesTheNodeThroughTheAPIBody(t *testing.T) {
 // node is destroyed rather than warned about -- it is already wrong, and
 // leaving it up while complaining is the worst of both outcomes.
 func TestRunPod_RefusesAndDestroysANodeExposedBeyondThePlatformPort(t *testing.T) {
-	port := harness.FreePort(t)
 	p, f, l := runpodLab(t, runpodfake.Options{
 		ReadyAfter:      time.Second,
 		SSHAfter:        time.Second,
 		ExtraPublicPort: 8188,
 	})
 
-	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t), labOptions(t, l),
 		func(context.Context, provision.Session) error {
 			t.Error("the workload ran on a publicly exposed node")
 			return nil
@@ -236,11 +233,10 @@ func TestRunPod_RefusesAndDestroysANodeExposedBeyondThePlatformPort(t *testing.T
 // mapping RunPod forces on every pod, the provision goes through. Without
 // this the lab above would pass for a provider ember simply cannot use.
 func TestRunPod_ToleratesThePlatformPortAlone(t *testing.T) {
-	port := harness.FreePort(t)
 	p, _, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 
 	ran := false
-	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t), labOptions(t, l),
 		func(context.Context, provision.Session) error {
 			ran = true
 			return nil
@@ -279,10 +275,9 @@ func TestRunPod_ToleratesThePlatformPortAlone(t *testing.T) {
 // trust that refuses everything, which is what a zero hostkey.Pin is, and
 // without the refusal the dial is consistent with both mechanisms.
 func TestRunPod_PinsTheMintedKeyRatherThanTrustingOnFirstUse(t *testing.T) {
-	port := harness.FreePort(t)
 	p, _, l := runpodLab(t, runpodfake.Options{ReadyAfter: time.Second, SSHAfter: time.Second})
 
-	err := withNode(t.Context(), p, runpodSpec(t, port), labOptions(t, l),
+	err := withNode(t.Context(), p, runpodSpec(t), labOptions(t, l),
 		func(ctx context.Context, s provision.Session) error {
 			// Offered first, while the trust has seen nothing. Under TOFU
 			// this is accepted *and pinned*, so the dial below then fails

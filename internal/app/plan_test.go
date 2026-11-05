@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -113,41 +112,6 @@ func TestNewPlan_ARequestsBudgetWins(t *testing.T) {
 	}
 	if plan.Options.Budget != want {
 		t.Errorf("budget = %+v, want the request's %+v", plan.Options.Budget, want)
-	}
-}
-
-// TestNewPlan_SaysSoWhenAWorkloadAsksToListenOffLoopback.
-//
-// A warning and not a refusal, and the run still gets a plan: `cmd` is opaque
-// argv on purpose, so refusing would be ember claiming to know what `--host`
-// means to a program it has never heard of. What it is for is the operator's
-// belief -- nothing is published for a workload port, and somebody writing
-// 0.0.0.0 thinks otherwise. See workload.NonLoopbackBinds.
-//
-// It is asserted on the stream the operator reads rather than on the function
-// that found it, because the logger is built from that stream and a finding
-// nothing prints is a finding that does not exist.
-func TestNewPlan_SaysSoWhenAWorkloadAsksToListenOffLoopback(t *testing.T) {
-	cfg := config.Config{
-		Provider: "local",
-		Image:    "ghcr.io/example/llm@sha256:" + strings.Repeat("a", 64),
-		TTL:      time.Hour,
-		Ports:    []string{"llm:8080"},
-		Cmds: [][]string{
-			{"llama-server", "--host", "127.0.0.1", "--port", "8080"},
-			{"llama-server", "--host", "0.0.0.0", "--port", "8080"},
-		},
-	}
-	var out bytes.Buffer
-	if _, err := NewPlan(t.Context(), Request{Config: cfg, Deps: planDeps(t)}, &out); err != nil {
-		t.Fatal(err)
-	}
-	got := out.String()
-	if n := strings.Count(got, "other than the node's own loopback"); n != 1 {
-		t.Fatalf("warned %d time(s), want once -- only the second step binds off loopback:\n%s", n, got)
-	}
-	if !strings.Contains(got, "address=0.0.0.0") {
-		t.Errorf("the warning does not name the address an operator has to find:\n%s", got)
 	}
 }
 

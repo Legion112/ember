@@ -47,7 +47,7 @@ func pipered(t *testing.T, run tts.Run, names []string) *sshx.RecordingRunner {
 			"[2026-11-04 19:32:46.413] [piper] [info] Loaded voice in 0.191540585 second(s)\n" +
 				"[2026-11-04 19:32:46.483] [piper] [info] Real-time factor: 0.052 (infer=0.062 sec, audio=1.184 sec)\n")
 
-		cmd, err := transfer.TarCommand(remote, "")
+		cmd, err := transfer.TarCommand(remote)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -307,7 +307,7 @@ func TestBatchOf_ChoosesOneKindAndNothingForTheShapesThatAreNotOne(t *testing.T)
 		want string
 	}{
 		{"nothing", Plan{}, ""},
-		{"a cmds run", Plan{Spec: node.Spec{Cmds: [][]string{{"true"}}}}, ""},
+		{"a run with no batch at all", Plan{}, ""},
 		{
 			"an sd batch",
 			Plan{Spec: node.Spec{Serve: []string{"sd-server"}}, Jobs: sdserver.Run{Jobs: []sdserver.Job{{Prompt: "a cat"}}}},

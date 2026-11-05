@@ -62,10 +62,7 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   `Writer` blocks the next `Write` exactly as a filled socket buffer does.
   Narrowing `send`'s `*websocket.Conn` to an interface so a fake could block
   would be a production type shaped by a test's convenience, which is the line
-  `sshx.Runner` is not widened across either. `tunnel.Forwarder`'s `closeAll`
-  is the third of the family and is left as it is, for the reason already
-  recorded above: on the cancellation path the leak is unrepresentable, and
-  what it guards is the shape.
+  `sshx.Runner` is not widened across either.
 - **A server that died has to be noticed at once, not at `ready_timeout`.**
   Handed `--diffusion-model` for a monolithic checkpoint, sd-server printed
   `get sd version from file failed`, exited after about a second, and ember
@@ -111,11 +108,10 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   `--listen-ip 127.0.0.1` and refuses a serve command that names either listen
   flag. A config passing `0.0.0.0` would publish an unauthenticated image
   generator, with arbitrary file paths in its request body, on a rented
-  machine's public interface -- the ComfyUI exposure this threat model is
-  written against. Same rule and same reason as `tunnel.RemoteLoopback`, and
-  nothing binds locally either: ember dials the node's own loopback through
-  `direct-tcpip`, so there is no `ports:` entry and no listener outside
-  `internal/loopback`.
+  machine's public interface -- the exposure this threat model is written
+  against. Same rule and same reason as `tunnel.RemoteLoopback`, and nothing
+  binds locally either: ember dials the node's own loopback through
+  `direct-tcpip`, so there is no listener outside `internal/loopback`.
 - **A job submission is never retried.** A transport failure on
   `POST /img_gen` is ambiguous: the job may exist with an id ember never
   learned. Retrying generates and bills a second image, and the second one is

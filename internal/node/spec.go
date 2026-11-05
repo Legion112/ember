@@ -16,16 +16,6 @@ import (
 // later.
 const MaxTTL = 24 * time.Hour
 
-// PortMap is one workload port forwarded home.
-//
-// Remote is always reached on the node's loopback; see tunnel.RemoteLoopback
-// for why the remote host is never configurable.
-type PortMap struct {
-	Name   string // "comfyui" — appears in logs and in the ready line
-	Remote uint16
-	Local  uint16
-}
-
 // OutputPath is a file or directory to retrieve from the node before it dies.
 type OutputPath struct {
 	Remote string // absolute path on the node
@@ -40,20 +30,7 @@ type OutputPath struct {
 type Spec struct {
 	Image string
 
-	// Cmds are the workloads, run in sequence on one node.
-	//
-	// A list rather than one command because every per-rental cost -- waiting
-	// for the machine, pulling the image, reading and verifying the weights,
-	// loading them -- is paid once per `ember up` and not once per result.
-	// Measured on a rented A100 that overhead is about three minutes against
-	// roughly 100 seconds of actual generation, so ten images rented ten
-	// times spend more than half the bill re-doing setup.
-	//
-	// Empty holds the node open with its ports forwarded, which is the
-	// interactive shape.
-	Cmds    [][]string
 	Env     map[string]string
-	Ports   []PortMap
 	Outputs []OutputPath
 	Filter  Filter
 	TTL     time.Duration
@@ -71,7 +48,7 @@ type Spec struct {
 	Store StoreHandle
 	Mount Mount
 
-	// Assets must be on the store, verified, before Cmd runs.
+	// Assets must be on the store, verified, before the workload runs.
 	Assets []Asset
 
 	// Verify is the policy for an asset already present. Empty is the strict
@@ -92,24 +69,23 @@ type Spec struct {
 	GPUProbe        []string
 	GPUProbeTimeout time.Duration
 
-	// Serve is a long-running process started on the node before the jobs
-	// are, and ServeTimeout is how long it has to become usable.
+	// Serve is the generation server started on the node before the jobs are,
+	// and ServeTimeout is how long it has to become usable.
 	//
-	// The resident-server shape, and the reason it exists is the one cost
-	// Cmds cannot remove. Each entry in Cmds is a fresh process that reads
-	// the weights into VRAM again; a server started once holds them. On a
-	// rented RTX PRO 6000 running FLUX.2 at 2048x2048 that is 4.5s per image
-	// on a node that caches the weights and 86s on one that re-reads them.
+	// ONE SERVER FOR THE WHOLE BATCH, because the weights are the cost. A
+	// process per image reads them into VRAM again every time; a server
+	// started once holds them. On a rented RTX PRO 6000 running FLUX.2 at
+	// 2048x2048 that is 4.5s per image on a node that caches the weights and
+	// 86s on one that re-reads them.
 	//
-	// Still argv, because starting a process is the part ember has always
-	// done this way -- what is new is that ember then speaks the protocol
-	// rather than handing the next command to a shell. The jobs themselves
-	// are not here: they never reach the node as argv, and this package
-	// imports nothing else from the module, so the type that describes them
-	// cannot live here either. They travel beside the Spec.
+	// It is argv because starting a process takes one, and ember builds it:
+	// sdserver.ServeCommand owns the listen address and refuses a command
+	// that names it. The jobs themselves are not here -- they never reach the
+	// node as argv, and this package imports nothing else from the module, so
+	// the type that describes them cannot live here either. They travel
+	// beside the Spec.
 	//
-	// Empty means no server, which is what every config written before this
-	// existed asks for.
+	// Empty means no server, which is what a speech run asks for.
 	Serve        []string
 	ServeTimeout time.Duration
 }
@@ -117,10 +93,7 @@ type Spec struct {
 // SpecOptions is the input to NewSpec.
 type SpecOptions struct {
 	Image   string
-	Cmd     []string
-	Cmds    [][]string
 	Env     map[string]string
-	Ports   []PortMap
 	Outputs []OutputPath
 	Filter  Filter
 	TTL     time.Duration
@@ -182,28 +155,6 @@ func NewSpec(o SpecOptions) (Spec, error) {
 			return Spec{}, fmt.Errorf("serve[%d] is empty", i)
 		}
 	}
-	// One spelling, never two. A config carrying any two of `cmd`, `cmds` and
-	// `sd.serve` has two answers to "what does this node run", and picking
-	// one silently is how an operator watches the wrong thing execute.
-	//
-	// `serve` joins the other two rather than being allowed beside them
-	// because it is not a step: it is the thing the steps are sent to, and a
-	// run that had both would start a server, hold the weights in VRAM, and
-	// then execute a separate sd-cli that loads them a second time -- paying
-	// for the resident copy and not using it.
-	if named := namedWorkloads(o); len(named) > 1 {
-		return Spec{}, fmt.Errorf("%s are set; use one", humanList(named))
-	}
-	cmds := make([][]string, 0, len(o.Cmds)+1)
-	if len(o.Cmd) > 0 {
-		cmds = append(cmds, append([]string(nil), o.Cmd...))
-	}
-	for i, c := range o.Cmds {
-		if len(c) == 0 {
-			return Spec{}, fmt.Errorf("cmds[%d] is empty", i)
-		}
-		cmds = append(cmds, append([]string(nil), c...))
-	}
 	// A CPU-only run has no card, so a probe against one could only ever
 	// fail -- and it would fail after the machine was rented, which is the
 	// shape of mistake this whole package exists to catch early.
@@ -213,17 +164,12 @@ func NewSpec(o SpecOptions) (Spec, error) {
 	if err := o.Filter.Validate(); err != nil {
 		return Spec{}, err
 	}
-	if err := validatePorts(o.Ports); err != nil {
-		return Spec{}, err
-	}
 	if err := validateOutputs(o.Outputs); err != nil {
 		return Spec{}, err
 	}
 	return Spec{
 		Image:   o.Image,
-		Cmds:    cmds,
 		Env:     cloneEnv(o.Env),
-		Ports:   append([]PortMap(nil), o.Ports...),
 		Outputs: append([]OutputPath(nil), o.Outputs...),
 		Filter:  o.Filter,
 		TTL:     o.TTL,
@@ -273,34 +219,6 @@ func validateImage(s string) error {
 	}
 	if tag == "latest" {
 		return fmt.Errorf("image %q is pinned to :latest, which is not a pin", s)
-	}
-	return nil
-}
-
-func validatePorts(ps []PortMap) error {
-	seenRemote := map[uint16]bool{}
-	seenLocal := map[uint16]bool{}
-	seenName := map[string]bool{}
-	for _, p := range ps {
-		if p.Remote == 0 {
-			return fmt.Errorf("port %q has no remote port", p.Name)
-		}
-		if p.Local == 0 {
-			return fmt.Errorf("port %q has no local port: 0 means \"any\" to a listener and \"refused\" to a browser", p.Name)
-		}
-		if strings.TrimSpace(p.Name) == "" {
-			return fmt.Errorf("port %d has no name", p.Remote)
-		}
-		if seenRemote[p.Remote] {
-			return fmt.Errorf("remote port %d mapped twice", p.Remote)
-		}
-		if seenLocal[p.Local] {
-			return fmt.Errorf("local port %d mapped twice", p.Local)
-		}
-		if seenName[p.Name] {
-			return fmt.Errorf("port name %q used twice", p.Name)
-		}
-		seenRemote[p.Remote], seenLocal[p.Local], seenName[p.Name] = true, true, true
 	}
 	return nil
 }
@@ -376,60 +294,20 @@ func ParseCUDAVersion(s string) (major, minor int, err error) {
 	return major, minor, nil
 }
 
-// humanList renders a list the way the refusal reads it out: "cmd and cmds",
-// or "cmd, cmds and sd.serve". Not strings.Join, because "cmd and cmds and
-// sd.serve" is the kind of message that reads as a bug in the message.
-func humanList(xs []string) string {
-	switch len(xs) {
-	case 0:
-		return ""
-	case 1:
-		return xs[0]
-	}
-	return strings.Join(xs[:len(xs)-1], ", ") + " and " + xs[len(xs)-1]
-}
-
-// namedWorkloads lists which of the mutually exclusive workload keys a config
-// set, so the refusal can name them rather than saying "two of these".
-func namedWorkloads(o SpecOptions) []string {
-	var out []string
-	if len(o.Cmd) > 0 {
-		out = append(out, "cmd")
-	}
-	if len(o.Cmds) > 0 {
-		out = append(out, "cmds")
-	}
-	if len(o.Serve) > 0 {
-		out = append(out, "sd.serve")
-	}
-	return out
-}
-
 // Workload names the workload key this spec was built from, or "" when it
 // carries none.
 //
 // IT EXISTS FOR A REFUSAL ONE LAYER UP AND READS THE SPEC RATHER THAN THE
-// OPTIONS. namedWorkloads above answers the same question about a
-// SpecOptions, which is what NewSpec has; a caller holding a finished Spec --
-// which is what app.NewPlan has when it finds out a second workload kind was
-// also configured -- cannot reach it, and rebuilding the options to ask would
-// be a second copy of the question.
-//
-// Two spellings collapse to one here on purpose: NewSpec folds `cmd` into
-// `Cmds` as its first entry, so a Spec cannot tell them apart and this says
-// `cmd or cmds`. Naming the wrong one of the two would be worse than naming
-// both, because an operator looking for a key that is not in their file
-// concludes the message is about somebody else's.
+// CONFIG. app.NewPlan finds out that a second workload kind was also
+// configured only once it holds a finished Spec, and asking the config again
+// there would be a second copy of the question.
 //
 // There is no arm for a speech batch, and that is the seal rather than an
 // omission: Spec has no speech field, so a request can never be consulted
 // about one. See the refusal in app.NewPlan.
 func (s Spec) Workload() string {
-	switch {
-	case len(s.Serve) > 0:
+	if len(s.Serve) > 0 {
 		return "sd.serve"
-	case len(s.Cmds) > 0:
-		return "cmd or cmds"
 	}
 	return ""
 }

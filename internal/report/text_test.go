@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -251,32 +250,6 @@ func kindByName(t *testing.T, name string) Kind {
 	return k
 }
 
-// TestText_StepsReadExactlyAsTheyDidBeforeTheyWereEvents pins the other
-// spelling of the two lines UnitStep shares with UnitJob.
-//
-// `step 1/3 took $... of card time` and `job 1/2 took $... of card time` were
-// two format strings in two functions -- one sentence maintained twice. They
-// are one now, and this is the half that outputs_test.go matches with a
-// regexp.
-func TestText_StepsReadExactlyAsTheyDidBeforeTheyWereEvents(t *testing.T) {
-	var buf bytes.Buffer
-	s := Text(&buf)
-	s.Emit(Event{Kind: KindUnitStarted, Unit: UnitStep, Index: 1, Total: 3, Desc: "sd-cli --prompt a"})
-	s.Emit(Event{Kind: KindUnitCost, Unit: UnitStep, Index: 1, Total: 3, Cost: 30000, Spent: 30000})
-
-	got := buf.String()
-	if want := "step 1/3: sd-cli --prompt a\n"; !strings.Contains(got, want) {
-		t.Errorf("got %q, want it to contain %q", got, want)
-	}
-
-	// The regexp outputs_test.go uses, so a rendering that stops matching it
-	// fails here rather than in a lab.
-	re := regexp.MustCompile(`step (\d+)/(\d+) took \$([0-9.e+-]+) of card time, \$([0-9.e+-]+) so far`)
-	if !re.MatchString(got) {
-		t.Errorf("got %q, want it to match %v", got, re)
-	}
-}
-
 // TestText_IgnoresAKindItHasNeverHeardOf.
 //
 // Kind is a string, so an unknown value is representable -- and it has a real
@@ -298,7 +271,7 @@ func TestLabel(t *testing.T) {
 	if got, want := Label(UnitJob, 1, 2), "job 1/2"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
-	if got, want := Label(UnitStep, 10, 10), "step 10/10"; got != want {
+	if got, want := Label(UnitJob, 10, 10), "job 10/10"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }

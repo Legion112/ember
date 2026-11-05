@@ -63,12 +63,9 @@ type batch interface {
 // batchOf is the dispatch, and it is one function rather than a chain of ifs
 // in Plan.serve.
 //
-// It returns nil for the two shapes that are not a typed batch -- a `cmds` run
-// and an interactive one -- because those are not kinds in this sense: `cmds`
-// is opaque argv by design and an interactive session has no jobs at all.
-// AGENTS.md's position that "`cmds` stays as the general mechanism" is
-// unchanged by any of this; what changed is that it stopped being the only
-// answer for anything that is not stable diffusion.
+// It returns nil for a configuration that describes no jobs, which is a
+// rental that proves the card, verifies the weights, brings `outputs:` home
+// and stops -- a provider smoke test rather than a kind.
 //
 // BOTH AT ONCE IS REFUSED AT NewPlan AND NOT HERE, so that a config naming two
 // kinds fails before a card is chosen rather than having one of them silently

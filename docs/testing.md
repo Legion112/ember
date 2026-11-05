@@ -219,7 +219,7 @@ the commands.
   sentence, so `--max-hourly-usd` -- the money ceiling, on `up` **and**
   `offers`, and the one this file leans on by name for replacing a configured
   value rather than narrowing it -- appeared nowhere in `README.md`, along with
-  `--cmd`, `--as`, `--vcpu`, `--only`, `--from` and `--archs`. The
+  `--as`, `--vcpu`, `--only`, `--from` and `--archs`. The
   `imagelabs` argument one axis over: a rule maintained in prose is the
   hand-maintained list with no list.
   `TestREADME_DocumentsEveryFlag` reads every flag out of `internal/cli` with
@@ -513,110 +513,41 @@ the commands.
   agrees with you is the hardest kind to notice**, and what found this one was
   re-running it afterwards and asking why a clean answer had been followed by
   twelve staged resolutions.
-- **The seven committed configurations were 71% comment, and the guard that
-  stopped one of them rotting was keyed on a directory (#144).** They were
-  1,158 lines of which 329 were configuration -- `ember.code-model.example.yaml`
-  was 85% prose -- so one file was doing two jobs: the project's documentation
-  of record *and* an alternate config, which is the profile/job conflation #144
-  complains about, one level up. The prose is `docs/configurations.md` now and
-  the five surviving files hold configuration plus a line or two about what a
-  wrong value costs. **Measured rather than claimed: the non-comment lines of
-  all five are byte-identical to what was committed**, so nothing an operator
-  runs changed, and the five sum to 540 lines against 1,158.
-  **The two files that moved OUT of the root are the ones that cannot be
-  run**, which is the test of "is this an alternate configuration or a worked
-  example": `video`'s asset digest is `REPLACE_WITH_THE_DIGEST_PUSH_PRINTS`
-  and `code-model`'s `image:` is a sentence, both deliberately, so both refuse
-  before anything is rented. They are ```yaml fences in that document, and
-  their settings were diffed as a sorted set against the deleted files rather
-  than eyeballed.
-  **A fenced block is loaded by nothing, so the move would have cost the
-  `KnownFields` check over 85 lines of hand-written YAML -- and the rule the
-  guard needed was never a directory.** It is "every ember configuration this
-  repository commits", which is derivable: a ```yaml fence under `docs/` is
-  one. That is the `LAB_TAGS` rule rather than a second hand-maintained list,
-  and it costs the converse -- a yaml fence under `docs/` that is NOT an ember
-  config fails `TestExampleConfigs_LoadAndParse`, which is the signal to retag
-  it. `docs/long-video-is-a-pipeline.md`'s `cmds` chain is why that is a
-  feature: it is a real, small, loadable config and it is now checked for
-  free.
-  **BOTH FLOORS ARE OVER THE ANSWER AND NOT OVER AN INTERMEDIATE, and the
-  first shape of the helper had that wrong.** `Load` answers `Default()` and a
+- **The committed configurations were 71% comment, and the guard that stopped
+  one of them rotting was keyed on a directory (#144).** They were 1,158 lines
+  of which 329 were configuration -- one was 85% prose -- so a file was doing
+  two jobs: the project's documentation of record *and* an alternate config,
+  which is the profile/job conflation #144 complains about, one level up. The
+  prose is `docs/configurations.md` now and the surviving files hold
+  configuration plus a line or two about what a wrong value costs. **Measured
+  rather than claimed: the non-comment lines of each are byte-identical to
+  what was committed**, so nothing an operator runs changed.
+  **THE FLOOR IS OVER THE ANSWER AND NOT OVER AN INTERMEDIATE, and the first
+  shape of the helper had that wrong.** `Load` answers `Default()` and a
   **nil** error for a file that is not there, so a source contributing nothing
   passes every assertion -- and a floor on a local slice that is then not
-  returned is the same hole one line further down: it counted `fenced` and
-  could have returned `paths` alone, green. `committedConfigs` counts over the
-  list it hands back, telling the two apart by whether the path is one of the
-  temp files the extractor wrote, so dropping **either** source is red.
-  **AND A GLOB IS A PATTERN, SO A GLOB NARROWS: the first floor could be
-  satisfied with the 85 lines it exists for UNREAD.** It asked for one fenced
-  configuration, which `docs/long-video-is-a-pipeline.md` answers on its own,
-  and `filepath.Glob(dir, "*.md")` is not recursive -- so **measured**, moving
-  `docs/configurations.md` to `docs/reference/configurations.md` left the test
-  at **exit 0** with 6 of 8 configurations loaded and both demoted blocks
-  unread, and narrowing the same pattern to `l*.md` does it too. A file move
-  silently undoing the one property the guard was built for. The `*.mdx`
-  reinstatement could not see it, and that is the lesson rather than the
-  defect: it **zeroed** the count, and a floor no single source can fail to
-  satisfy is blind to a NARROWING while catching a BREAKING -- which is the
-  `AssertNoStray`-could-not-fail shape reached through a floor instead of a
-  cleanup order. It is `filepath.WalkDir` now, which closes the
-  sub-directory hole and the pattern together because there is no pattern left
-  but the `.md` suffix, and the floor is **at least two DOCUMENTS** rather than
-  a census of blocks -- "no one document carries it", read off the answer,
-  since the extractor names each file `<document>-line<N>.yaml`. Reinstated
-  three ways, each red: the suffix test broken (nothing found), the walk
-  narrowed to one document (the document floor), and the document floor
-  relaxed back to one with the walk still narrowed (the two-configuration
-  floor). And the sub-directory move is now **green**, which is the half that
-  says the walk is doing the work.
-  **AND THAT FLOOR COUNTS DOCUMENTS AND CAN NEVER NAME THE ONE THAT MATTERS,
-  which is stated because "no one document carries it" reads as closed and is
-  not.** Found by review attacking it rather than by the pass that built it,
-  and measured both ways: on the tree as it stands an extractor skipping
-  `configurations.md` by name is red -- but at the **two-configuration** floor
-  rather than at this one, and only while `long-video-is-a-pipeline.md` is the
-  sole other page with a fence. Plant a second `docs/` page carrying one and
-  skip `configurations.md`: **exit 0, seven configurations loaded, zero of
-  them from `configurations.md`**, both demoted blocks unread with every floor
-  satisfied. Latent rather than present, and latent only by an accident of how
-  many pages under `docs/` happen to hold YAML. **Not closed, and the trade is
-  the reason**: the only fix is naming `configurations`, one hand-maintained
-  filename, which is what the floor above refuses and what the `LAB_TAGS`
-  argument calls worse than the gap -- and with `Glob` gone there is no
-  pattern left to narrow by accident, so reaching it needs a deliberate skip
-  of that one name rather than a plausible edit. So it is the
-  `TestConformance_CannotCatchARederivedRunID` arrangement: the suite states
-  what it cannot see, and whoever adds the second fenced page reads the
-  comment and decides again.
+  returned is the same hole one line further down. `committedConfigs` counts
+  over the list it hands back.
   **THE RULE AS STATED IS WIDER THAN THE RULE AS IMPLEMENTED, and the
-  difference is `README.md`.** "Every ember configuration this repository
-  commits" is the sentence; "every ```yaml fence under `docs/`" is the code,
-  and `README.md` holds **14** fences of its own, **12** of which would pass
-  unchanged -- including the starter `# ember.yaml` block that is the first
+  difference is a configuration written inside a document.** "Every ember
+  configuration this repository commits" is the sentence; "every `ember*.yaml`
+  at the repository root" is the code, and `README.md` holds yaml fences of
+  its own -- including the starter `# ember.yaml` block that is the first
   thing anybody copies. Written down beside the rule rather than left to be
   found, because an undocumented narrowing is the `imagelabs` shape this
-  guard's own comment invokes against itself. Not widened with #144 for a
-  stated reason: README's fences are partial by design, a two-line
-  `cmd:`/`ports:` illustration is not a configuration, and deciding which of
-  the 14 are would be the hand-maintained list this guard exists not to be.
-  **`TestExampleConfigs_CanSyncTheirOwnStore` was NOT widened to the two
-  blocks, and that narrowing loses nothing measurable**: `ember store sync` on
-  the video one fails at `ParseAssets` over the placeholder digest and on the
-  code-model one at `ValidateImage` over an untagged sentence, so the
-  assertion was already resolving an image for a sync that could never happen.
-  Its comment says so rather than keeping a subject it no longer has.
-  **Nine reinstatements, each red, two negative controls green, controls at
-  both ends, and every case ended in a diff against one backup taken once per
-  path**: a typo in each demoted block, the walk's suffix test broken, the
-  walk narrowed to one document, the document floor relaxed with the walk
-  narrowed, the fenced source dropped from the return, the root source dropped
-  from the return, a foreign `kind: Deployment` fence, and an unclosed fence.
-  The negative control's first anchor missed and the harness reported
-  ANCHOR-MISS rather than a verdict, which is that trap working. And -- because
-  belt and braces reads exactly like a dead gate -- the guard was reverted to
-  its root-only shape with a typo still in a demoted block: `go test ./...` is
-  **exit 0**, so nothing else in the tree reports it.
+  guard's own comment invokes against itself. Not widened, for a stated
+  reason: README's fences are partial by design, a two-line illustration is
+  not a configuration, and deciding which of them are would be the
+  hand-maintained list this guard exists not to be.
+  **The extractor that read a ```yaml fence under `docs/` is gone with its
+  subject.** #144 demoted two configurations into prose and the guard grew a
+  walk to keep loading them; both have since left the document, so an
+  extractor over `docs/` now finds nothing -- and a floor asserting it found
+  two could not be satisfied, while one asserting nothing is the dead gate
+  this file refuses. It is the `exposure.Probe` disposal: the join is not
+  available, so the code goes rather than being kept against a subject that
+  might come back. Whoever demotes a configuration into prose again restores
+  it with the configuration, and a floor it can satisfy.
   **One thing has no exit code and is named rather than papered over: nothing
   checks that a relative link in `README.md` or `docs/` resolves.** The sweep
   found `ember up --config ember.local.yaml` in `README.md` -- a file name that

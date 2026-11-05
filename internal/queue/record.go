@@ -217,9 +217,9 @@ func (r *Recorder) Emit(e report.Event) {
 	// interrupted: the images are recorded as they are produced, because they
 	// were paid for, and the steps behind them are recorded with them.
 	//
-	// A `cmds` STEP REACHES NONE OF THESE, and that is decided rather than
-	// missed: its events carry Unit == report.UnitStep, so every case below
-	// skips it. See the package comment on why a step is not a job row.
+	// AN EVENT WITH NO UNIT REACHES NONE OF THESE, and that is decided rather
+	// than missed: the cases below ask for report.UnitJob, so a rental-level
+	// event cannot write into a job row.
 	switch {
 	case e.Kind == report.KindUnitStarted && e.Unit == report.UnitJob:
 		r.recordJob(e.Index, func(j *genstore.JobRun) { j.Started = e.At })

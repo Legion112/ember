@@ -191,11 +191,14 @@ func (p Plan) WithServed(ctx context.Context, out io.Writer, sink report.Sink,
 			// No output directory decided here: fn is a drain loop serving
 			// several requests on this one rental, and each of them writes
 			// into its own, which is also its key in the blob store.
-			client, so, err := p.prepare(ctx, out, sink, s)
+			client, so, err := dialNode(ctx, s, p.Options)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = client.Close() }()
+			if err := p.ready(ctx, out, sink, client, so); err != nil {
+				return err
+			}
 			return withServer(ctx, out, sink, client, sshexec.New(client.SSH()),
 				p.Spec, so, p.Offer.Price, len(p.Jobs.Jobs), p.InputsDir, fn)
 		})
@@ -308,13 +311,14 @@ func withServer(
 	}
 
 	// The figure this whole shape exists to stop paying repeatedly, said out
-	// loud: with cmds it would be spent again for every job after the first.
+	// loud: a process per image would spend it again for every job after the
+	// first.
 	//
 	// Measured by ember rather than read from the server's own
 	// load_elapsed_seconds, because that field is not this number. The first
 	// FLUX.2 run reported 551ms for a model whose weights are 56 GiB, so
 	// ember printed "551ms of loading is paid once rather than 8 times"
-	// while the cmds arm of the same measurement spent 80-96s per image
+	// while the other arm of the same measurement spent 80-96s per image
 	// re-reading those weights off the store -- understating the saving by
 	// two orders of magnitude, in the one line an operator would size a
 	// batch from. sd-server does not open its port until the load has

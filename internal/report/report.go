@@ -178,15 +178,12 @@ func Kinds() []Kind {
 	}
 }
 
-// Units are the two things a rental does one of at a time.
+// UnitJob is what a rental does one of at a time.
 //
-// One sentence covers both: "job 1/2 took $0.03 of card time" and "step 1/2
-// took $0.03 of card time" were two format strings in two functions, which is
-// one sentence maintained twice.
-const (
-	UnitJob  = "job"
-	UnitStep = "step"
-)
+// A named constant and not a literal, because `Label` renders it into the one
+// sentence every unit line shares -- "job 1/2 took $0.03 of card time" -- and
+// a second spelling of that is one sentence maintained twice.
+const UnitJob = "job"
 
 // Event is one thing that happened during a run.
 //
@@ -210,8 +207,8 @@ type Event struct {
 	// Cmd is a command as it will be sent, quoting included.
 	Cmd string `json:"cmd,omitempty"`
 
-	// Unit is UnitJob or UnitStep; Index is 1-based and Total is how many
-	// there are.
+	// Unit is UnitJob when a unit is in flight; Index is 1-based and Total is
+	// how many there are.
 	Unit  string `json:"unit,omitempty"`
 	Index int    `json:"index,omitempty"`
 	Total int    `json:"total,omitempty"`

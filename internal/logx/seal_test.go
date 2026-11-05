@@ -121,7 +121,7 @@ var setProviders = map[string]bool{
 // exporter is the only thing in this tree that would originate a connection
 // carrying operator content: a span of a generation naturally holds the
 // prompt, the seed and the output path, and the rule for operator content is
-// an allow-list -- rejectSecrets deliberately not scanning `cmd`/`cmds`
+// an allow-list -- rejectSecrets deliberately not scanning a prompt
 // because "a token of affection" is a legitimate prompt is the precedent for
 // why a deny-list is the wrong tool. So the terms of a future yes are in
 // AGENTS.md and this test is what makes somebody read them.
@@ -262,7 +262,7 @@ var logMethods = map[string]bool{
 // check that holds whatever the spelling.
 //
 // It is NOT a substring filter over message text. That is the tool AGENTS.md
-// rejects for rejectSecrets, which deliberately does not scan `cmd` or `cmds`
+// rejects for rejectSecrets, which deliberately does not scan a prompt
 // because a prompt is arbitrary English: "a token of affection" is a
 // legitimate prompt. This matches on the shape of the expression instead.
 func TestNoKeyMaterialInALogCall(t *testing.T) {

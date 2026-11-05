@@ -4,7 +4,6 @@ package integration
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -29,12 +28,8 @@ import (
 // measurement in README was taken with this command.
 func TestRecord_UpIsInTheHistoryItRanFrom(t *testing.T) {
 	l := harness.New(t)
-	port := harness.FreePort(t)
 
-	res := l.Run(t.Context(), "up",
-		"--hold", "2s",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	res := l.Run(t.Context(), "up")
 	if res.ExitCode != 0 {
 		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
 	}

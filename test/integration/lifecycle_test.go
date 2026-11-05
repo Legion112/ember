@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,51 +13,34 @@ import (
 	"github.com/Legion112/ember/test/integration/harness"
 )
 
-// TestLifecycle_ForwardsRealBytesAndDestroys is the whole product in one test.
+// TestLifecycle_RunsOverRealSSHAndDestroysOnCtrlC is the whole product in one
+// test.
 //
 // ember rents a container, authenticates against a host key it minted and
-// injected itself, forwards a port to loopback, and destroys the node. Every
-// layer runs its production code: the real Docker client in dockerclient,
-// which the coverage gate excludes as a branchless adapter and which therefore
-// runs nowhere else; a real sshd; a real SSH handshake against a pinned host
-// key; a real direct-tcpip forward.
+// injected itself, runs a command on it over that connection, and destroys the
+// node when the operator interrupts. Every layer runs its production code: the
+// real Docker client in dockerclient, which the coverage gate excludes as a
+// branchless adapter and which therefore runs nowhere else; a real sshd; a
+// real SSH handshake against a pinned host key; a real remote exec.
 //
-// The forward is pointed at the node's own sshd so the lab can read a banner
-// back. That is bytes which provably crossed the tunnel from inside the
-// container -- a successful accept on the local listener would not show that,
-// and a tunnel which completes a connect and then drops payload passes the
-// weaker test and fails in production.
-func TestLifecycle_ForwardsRealBytesAndDestroys(t *testing.T) {
+// THE GPU PROBE IS WHAT HOLDS THE WINDOW OPEN, and it is not a test hook:
+// `gpu_probe` is the config key an operator writes for a card that needs time
+// to come up, doing exactly what it says, on a node that has no card. One that
+// always exits non-zero is retried until `gpu_probe_timeout`, so the run stays
+// alive with its connection established for as long as the lab needs -- and
+// the debug line gpucheck writes per attempt is the proof a command ran on the
+// node and came back with a status, which an accept on a socket would not show.
+func TestLifecycle_RunsOverRealSSHAndDestroysOnCtrlC(t *testing.T) {
 	l := harness.New(t)
-	port := harness.FreePort(t)
+	l.AppendConfig("gpu_probe: [sh, -c, \"exit 1\"]\ngpu_probe_timeout: 5m\n")
 
-	cmd, wait := l.Start(t.Context(), "up",
-		"--hold", "3m",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	cmd, wait := l.Start(t.Context(), "up", "--log-level", "debug")
 
 	l.WaitNode(t.Context(), 90*time.Second)
-
-	// The forward is opened after the node is ready, so the banner read is
-	// retried rather than attempted once against a listener that may not be
-	// bound yet.
-	var banner string
-	deadline := time.Now().Add(90 * time.Second)
-	for {
-		b, err := l.ReadBanner(port, 5*time.Second)
-		if err == nil && b != "" {
-			banner = b
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("nothing came back through the forward within 90s: %v\n%s", err, wait())
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	if !strings.Contains(banner, "SSH-2.0") {
-		t.Errorf("the bytes through the tunnel are not an sshd banner: %q", banner)
-	}
+	// A command that ran INSIDE the container and reported its status back:
+	// gpucheck logs this per attempt, after the handshake against the pinned
+	// key. A node that was merely created would never reach it.
+	probed := l.WaitForLine(t.Context(), "gpu probe failed")
 
 	if err := cmd.Process.Signal(interrupt()); err != nil {
 		t.Fatalf("signal ember: %v", err)
@@ -75,6 +57,10 @@ func TestLifecycle_ForwardsRealBytesAndDestroys(t *testing.T) {
 	if !strings.Contains(out, "node ready") {
 		t.Errorf("ember never reported a ready node:\n%s", out)
 	}
+	if !strings.Contains(probed, "exit=1") {
+		t.Errorf("the probe line does not carry the remote exit status, so nothing says a "+
+			"command ran on the node: %q", probed)
+	}
 }
 
 // TestLifecycle_CleanRunLeavesAnEmptyJournal. A record that outlives its node
@@ -83,12 +69,8 @@ func TestLifecycle_ForwardsRealBytesAndDestroys(t *testing.T) {
 // real one.
 func TestLifecycle_CleanRunLeavesAnEmptyJournal(t *testing.T) {
 	l := harness.New(t)
-	port := harness.FreePort(t)
 
-	res := l.Run(t.Context(), "up",
-		"--hold", "2s",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	res := l.Run(t.Context(), "up")
 	if res.ExitCode != 0 {
 		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
 	}
@@ -121,12 +103,8 @@ func TestLifecycle_CleanRunLeavesAnEmptyJournal(t *testing.T) {
 func TestLifecycle_UpFetchesOutputsBeforeDestroyingTheNode(t *testing.T) {
 	l := harness.New(t)
 	l.WriteConfig(map[string]string{"outputs": "[/etc/hostname:host]"})
-	port := harness.FreePort(t)
 
-	res := l.Run(t.Context(), "up",
-		"--hold", "2s",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	res := l.Run(t.Context(), "up")
 	if res.ExitCode != 0 {
 		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
 	}
@@ -204,27 +182,23 @@ func TestLifecycle_UpFetchesOutputsBeforeDestroyingTheNode(t *testing.T) {
 func TestLifecycle_TheNodesOwnLogSurvivesAnInterruptedRun(t *testing.T) {
 	l := harness.New(t)
 	l.WriteConfig(nil)
-	port := harness.FreePort(t)
+	l.AppendConfig("gpu_probe: [sh, -c, \"exit 1\"]\ngpu_probe_timeout: 5m\n")
 
 	// --log-level debug through the real binary, because this is the only
 	// place the flag, the handler and a line that was previously undisplayable
 	// meet. Asserted below.
-	cmd, wait := l.Start(t.Context(), "up",
-		"--log-level", "debug",
-		"--hold", "10m",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	cmd, wait := l.Start(t.Context(), "up", "--log-level", "debug")
 
-	// WAIT FOR THE TUNNEL AND NOT FOR THE CONTAINER. The first version of
+	// WAIT FOR THE CONNECTION AND NOT FOR THE CONTAINER. The first version of
 	// this lab waited for the node to exist and for its record to be
 	// written, and then interrupted -- which landed inside session.Dial's
 	// retry loop, before ember had a connection at all. The log could not
 	// come home because there was nothing to fetch it over, and the lab was
 	// asserting about a window this mechanism does not cover: an interrupt
 	// before the handshake is the SIGKILL case with a different signal.
-	// "Ctrl-C to stop" is printed once the forwards are up, which is the
-	// first moment a fetch is possible.
-	l.WaitForLine(t.Context(), "Ctrl-C to stop")
+	// gpucheck's per-attempt debug line is written after the handshake, which
+	// is the first moment a fetch is possible.
+	l.WaitForLine(t.Context(), "gpu probe failed")
 
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("interrupt ember: %v", err)
@@ -305,12 +279,8 @@ func readFetched(t *testing.T, l *harness.Lab, rel string) string {
 func TestLifecycle_AFailedOutputFetchStillDestroysTheNode(t *testing.T) {
 	l := harness.New(t)
 	l.WriteConfig(map[string]string{"outputs": "[/workspace/never-written:renders]"})
-	port := harness.FreePort(t)
 
-	res := l.Run(t.Context(), "up",
-		"--hold", "2s",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	res := l.Run(t.Context(), "up")
 	if res.ExitCode == 0 {
 		t.Errorf("a missing output path was reported as a clean run\n%s", res.Combined())
 	}
@@ -327,14 +297,10 @@ func TestLifecycle_AFailedOutputFetchStillDestroysTheNode(t *testing.T) {
 // was written on, after a day of runs.
 func TestLifecycle_UpLeavesNoNetworkBehind(t *testing.T) {
 	l := harness.New(t)
-	port := harness.FreePort(t)
 
 	before := len(l.Networks(t.Context()))
 
-	res := l.Run(t.Context(), "up",
-		"--hold", "2s",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	res := l.Run(t.Context(), "up")
 	if res.ExitCode != 0 {
 		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
 	}
@@ -363,12 +329,8 @@ func TestLifecycle_UpLeavesNoNetworkBehind(t *testing.T) {
 // runs them somewhere other than in a fake.
 func TestLifecycle_UpReportsBothViewsOfTheNodesMemory(t *testing.T) {
 	l := harness.New(t)
-	port := harness.FreePort(t)
 
-	res := l.Run(t.Context(), "up",
-		"--hold", "2s",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	res := l.Run(t.Context(), "up")
 	if res.ExitCode != 0 {
 		t.Fatalf("ember up exited %d\n%s", res.ExitCode, res.Combined())
 	}

@@ -76,9 +76,9 @@ func TestAdopt_IsNotClaimable(t *testing.T) {
 
 // TestAdopt_TakesARunWithNoJobs, which Enqueue refuses.
 //
-// Two of `ember up`'s three shapes have none: a forwarded session has ports,
-// and a `cmds` run has argv ember does not read. Refusing to record them would
-// refuse the cheapest thing ember does and the easiest to leak.
+// A configuration that describes no jobs has none, and that rental is the
+// cheapest thing ember does and the easiest to leak. Refusing to record it
+// would refuse exactly the row worth having.
 func TestAdopt_TakesARunWithNoJobs(t *testing.T) {
 	each(t, func(t *testing.T, s Store) {
 		jobless := req()

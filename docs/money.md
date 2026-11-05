@@ -14,7 +14,7 @@ measurement and the refused alternative behind each of them.
 | [ceilings.md](money/ceilings.md) | `max_hourly_usd`, `max_run_usd`, `max_day_usd`, `max_month_usd`, and the sweep that found three of five renting paths ungated |
 | [cards-and-images.md](money/cards-and-images.md) | image pinning, the wrong-architecture abort, offer filtering and reclaim, why `min_cuda` could never be enforced |
 | [stores-and-assets.md](money/stores-and-assets.md) | a store outlives every node that mounts it: mount refusals, digest verification, the S3 client, orphaned uploads, the pre-flight |
-| [batching.md](money/batching.md) | overhead is per rental rather than per result, what `cmds` can and cannot do, what a resident model is worth |
+| [batching.md](money/batching.md) | overhead is per rental rather than per result, and what a resident model is worth |
 | [sd-server.md](money/sd-server.md) | wire types captured from responses rather than guessed, previews, progress, cancelling a job without destroying the rental |
 | [speech-and-kinds.md](money/speech-and-kinds.md) | piper, the one-method seam a second kind needed, the artifact type, the voice catalogue that keeps the request seal intact |
 | [ledger.md](money/ledger.md) | what every run records, what `ember history` and `ember spend` read, the nodes route, measurements that live nowhere else |
