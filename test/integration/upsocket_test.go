@@ -64,16 +64,21 @@ gpu_probe_timeout: 2m
 // point.
 //
 // TWO CONFIGS, AND THE SECOND IS THE REVERSAL BEING EXERCISED. `ember serve`
-// needs an sd: block or it refuses to start, and node.NewSpec refuses a spec
-// that has both `cmd` and `sd.serve` -- so a submitted `cmd` run cannot use
-// the daemon's own file. It uses this one, which is exactly what app.RunAsk
-// documents: the config path travels, the daemon reads the file the operator
-// named, and the ceilings in it are the ones that bound the run. On the
-// loopback port there is no field for it and never will be.
+// needs an sd: block or it refuses to start, and a configuration names one
+// kind of job -- so this run uses its own file, which is exactly what
+// app.RunAsk documents: the config path travels, the daemon reads the file the
+// operator named, and the ceilings in it are the ones that bound the run. On
+// the loopback port there is no field for it and never will be.
+//
+// IT MOUNTS A STORE WITH AN ASSET ON IT, and that is not scenery: the
+// assertion at the end of the lab is that bytes which came out of the
+// container reached the event stream, and `embernode fetch` over SSH is what
+// produces them on a run with no jobs. Its stdout is copied to the `out`
+// writer `Plan.Do` takes, which on this path is report.Writer.
 //
 // The directories are the lab's own, so the socket this client looks for is
 // the socket the daemon bound and the history both write is one file.
-func upConfigFile(t *testing.T, l *harness.Lab) string {
+func upConfigFile(t *testing.T, l *harness.Lab, assets string) string {
 	t.Helper()
 	p := filepath.Join(l.Dir, "up.yaml")
 	body := strings.Join([]string{
@@ -83,6 +88,8 @@ func upConfigFile(t *testing.T, l *harness.Lab) string {
 		"config_dir: " + filepath.Join(l.Dir, "config"),
 		"state_dir: " + l.StateDir(),
 		"output_dir: " + l.OutputDir(),
+		"store: " + upStoreYAML,
+		"assets: " + assets,
 		slowProbe,
 	}, "\n")
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
@@ -90,6 +97,8 @@ func upConfigFile(t *testing.T, l *harness.Lab) string {
 	}
 	return p
 }
+
+const upStoreYAML = "\n  name: upmodels\n  size_gib: 40\n  region: EU-RO-1"
 
 // submittedID reads the request id out of the client's own first line.
 //
@@ -141,6 +150,13 @@ func socketEvents(t *testing.T, path string, id genstore.ReqID) []report.Event {
 func TestServe_UpOverTheSocket(t *testing.T) {
 	l := harness.New(t)
 	l.AppendConfig(upRunConfig)
+
+	// Seeded out-of-band so the configured URL is never reached: what is
+	// under test here is the carrier, not the download.
+	l.CreateVolume(t.Context(), "ember-store-upmodels")
+	sum := l.SeedVolume(t.Context(), "ember-store-upmodels", "sd15.gguf", "these are the weights")
+	cfgPath := upConfigFile(t, l, assetYAML(sum))
+
 	_, srv, _ := startServe(t, l)
 	sockPath := serveSocketPath(t, l)
 
@@ -148,8 +164,7 @@ func TestServe_UpOverTheSocket(t *testing.T) {
 	// the file the operator pointed at rather than the one it was started
 	// with. runRaw because Lab.Start inserts the lab's own --config, and the
 	// whole point here is a different one.
-	client, clientOut := l.StartRaw(t.Context(), "up",
-		"--config", upConfigFile(t, l))
+	client, clientOut := l.StartRaw(t.Context(), "up", "--config", cfgPath)
 	id := submittedID(t, l)
 
 	// INTERRUPTED WHILE THE RUN IS STILL GOING, which is the property. The
@@ -217,15 +232,21 @@ func TestServe_UpOverTheSocket(t *testing.T) {
 	// detached operator has left. On the direct path they go to the terminal
 	// the client owns; here that terminal is gone by now, so report.Writer is
 	// what puts them somewhere durable.
+	//
+	// `embernode fetch` IS WHAT PRODUCES THEM, and the line is its own: it
+	// runs inside the container, over the SSH connection, and its stdout is
+	// copied to the writer Plan.Do was handed. A line ember composed about
+	// the node would not show this -- what has to be true is that a stream
+	// coming OUT of the container lands in the event table.
 	var logged string
 	for _, e := range socketEvents(t, sockPath, id) {
 		if e.Kind == report.KindLog {
 			logged += e.Text
 		}
 	}
-	if !strings.Contains(logged, "the-run-finished") {
-		t.Errorf("the workload's own output is in no event, so a detached run's log is lost:\n%q",
-			logged)
+	if !strings.Contains(logged, "present and verified") {
+		t.Errorf("no bytes from inside the container are in any event, so a detached run's "+
+			"log is lost:\n%q", logged)
 	}
 
 	// THE PRIVILEGED ROUTE IS NOT ON THE PORT, asked with this process's own
@@ -233,7 +254,7 @@ func TestServe_UpOverTheSocket(t *testing.T) {
 	// guard.go and auth.go, and what stops it is that no handler is
 	// registered. A page, a forwarded `ssh -L` and a second account holding
 	// the token all reach the same place.
-	body := fmt.Sprintf(`{"config":%q,"cmd":["echo","nope"]}`, l.ConfigPath)
+	body := fmt.Sprintf(`{"config":%q,"gpu":"nope"}`, l.ConfigPath)
 	onPort := ask(t, http.MethodPost, srv, webapi.RunPath, body)
 	if onPort.Status == http.StatusAccepted {
 		t.Errorf("the loopback port accepted a run: %d %s", onPort.Status, onPort.Body)

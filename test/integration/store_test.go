@@ -68,7 +68,11 @@ func TestStore_ANodeLeavesTheStoreBehindWhenItIsDestroyed(t *testing.T) {
 
 	l.CreateVolume(ctx, "ember-store-models")
 
-	l.WriteConfig(map[string]string{"cmd": "[/bin/true]"})
+	// NO JOBS, which is the whole of what this lab needs from the run: a
+	// configuration naming none rents, proves the card, brings `outputs:`
+	// home and destroys the node. The store is not mounted here on purpose --
+	// what is under test is that a run does not take a store with it.
+	l.WriteConfig(nil)
 	out := l.Run(ctx, "up")
 	if out.ExitCode != 0 {
 		t.Fatalf("up exited %d: %s", out.ExitCode, out.Combined())
@@ -104,26 +108,42 @@ func names(vs []*volume.Volume) []string {
 // binary, with nothing seeded out-of-band.
 //
 // The property at the centre is the one that makes a store worth the risk it
-// carries: the workload writes to the mount, the node is destroyed, and what
-// it wrote is still there for the next run.
+// carries: something writes to the mount, the node is destroyed, and what it
+// wrote is still there for the next run.
+//
+// EMBER IS WHAT WRITES IT, and that is the only shape there is. The writer is
+// `embernode fetch` on the first node, downloading the configured asset onto
+// the mount; the second run is a different node and finds it already there.
+// `assetServer.hits()` is what tells the two apart -- one fetch for two runs
+// is the file surviving the machine, and two would mean the second node found
+// an empty mount and quietly re-downloaded, which is the defect this lab is
+// against and the one a `present and verified` line alone cannot see.
 func TestStore_CreateMountRunDestroyRemove(t *testing.T) {
 	l := harness.New(t)
 	ctx := t.Context()
 
-	l.WriteConfig(map[string]string{
-		"store": "\n  name: models\n  size_gib: 40\n  region: EU-RO-1",
-		"cmd":   `[/bin/sh, -c, "echo weights > /models/model.bin; cat /models/model.bin"]`,
-	})
+	// Reachable from inside a node container, which loopback is not: the
+	// address is the Docker bridge's own gateway, read from the daemon.
+	assets := newAssetServer(t, l.BridgeGateway(ctx), storeAsset)
 
+	// `verify` is left at its default of `always`, so the second run re-reads
+	// and re-hashes what the first one put there. That is the stronger check
+	// of the two: `present` would answer from the file's existence alone, and
+	// what this lab is about is the BYTES surviving the machine.
+	cfg := map[string]string{
+		"store":  storeYAML,
+		"assets": servedAssetYAML(assets.URL, harness.DigestOf(storeAsset)),
+	}
+	l.WriteConfig(cfg)
 	l.CreateStore(ctx, "models")
 
-	// First run writes to the store.
+	// First run: the mount is empty, so embernode fetches onto it.
 	first := l.Run(ctx, "up")
 	if first.ExitCode != 0 {
 		t.Fatalf("first up exited %d: %s", first.ExitCode, first.Combined())
 	}
-	if !strings.Contains(first.Stdout, "weights") {
-		t.Errorf("the workload did not read back what it wrote:\n%s", first.Combined())
+	if assets.hits() != 1 {
+		t.Fatalf("the first run made %d request(s) for the asset, want exactly 1", assets.hits())
 	}
 
 	// The node is gone. The store is not.
@@ -133,16 +153,17 @@ func TestStore_CreateMountRunDestroyRemove(t *testing.T) {
 
 	// Second run, a different node, finds the first one's file already
 	// there. This is the whole point: weights survive the machine.
-	l.WriteConfig(map[string]string{
-		"store": "\n  name: models\n  size_gib: 40\n  region: EU-RO-1",
-		"cmd":   `[/bin/sh, -c, "cat /models/model.bin"]`,
-	})
+	l.WriteConfig(cfg)
 	second := l.Run(ctx, "up")
 	if second.ExitCode != 0 {
 		t.Fatalf("second up exited %d: %s", second.ExitCode, second.Combined())
 	}
-	if !strings.Contains(second.Stdout, "weights") {
-		t.Errorf("a second node did not see what the first wrote:\n%s", second.Combined())
+	if !strings.Contains(second.Stdout, "present and verified") {
+		t.Errorf("the second node did not find the first one's file:\n%s", second.Combined())
+	}
+	if assets.hits() != 1 {
+		t.Errorf("the second run fetched the asset again (%d request(s) in total), so the "+
+			"mount did not carry it across the two nodes", assets.hits())
 	}
 
 	// And ember removes it when told to, which is the only thing that ever
@@ -167,7 +188,6 @@ func TestStore_UpRefusesAStoreThatDoesNotExist(t *testing.T) {
 
 	l.WriteConfig(map[string]string{
 		"store": "\n  name: absent\n  size_gib: 40\n  region: EU-RO-1",
-		"cmd":   "[/bin/true]",
 	})
 
 	out := l.Run(ctx, "up")
@@ -204,7 +224,6 @@ func TestAssets_VerifiedInPlaceWithoutTouchingTheNetwork(t *testing.T) {
 	l.WriteConfig(map[string]string{
 		"store":  storeYAML,
 		"assets": assetYAML(sum),
-		"cmd":    `[/bin/sh, -c, "cat /models/sd15.gguf"]`,
 	})
 
 	out := l.Run(ctx, "up")
@@ -214,8 +233,14 @@ func TestAssets_VerifiedInPlaceWithoutTouchingTheNetwork(t *testing.T) {
 	if !strings.Contains(out.Stdout, "present and verified") {
 		t.Errorf("the asset was not verified in place:\n%s", out.Combined())
 	}
-	if !strings.Contains(out.Stdout, "these are the weights") {
-		t.Errorf("the workload did not read the asset:\n%s", out.Combined())
+	// AND THE RUN GOT PAST IT, which is the half the sentence above cannot
+	// give: `reportMemory` is the step immediately after EnsureAssets, so its
+	// line is the first thing a run prints once the weights are accepted.
+	// Without it, "present and verified" would also be what a run that
+	// verified and then died printed -- and the tampered lab below asserts
+	// this line's ABSENCE for exactly that reason.
+	if !strings.Contains(out.Stdout, "node memory:") {
+		t.Errorf("the run did not get past the asset verify:\n%s", out.Combined())
 	}
 	// The URL points nowhere. Reaching it would have failed the run, so a
 	// clean exit is the proof that nothing was downloaded.
@@ -224,13 +249,13 @@ func TestAssets_VerifiedInPlaceWithoutTouchingTheNetwork(t *testing.T) {
 	}
 }
 
-// TestAssets_TamperedWeightsRefuseBeforeTheWorkloadRuns.
+// TestAssets_TamperedWeightsRefuseBeforeAnythingElseRuns.
 //
 // The control that stands in for a read-only mount. A store is writable by
 // every node that mounts it, so one run can leave something behind that the
 // next would load as its model; RunPod offers no way to prevent the write, so
 // it is detected -- and detected before any GPU time is spent on it.
-func TestAssets_TamperedWeightsRefuseBeforeTheWorkloadRuns(t *testing.T) {
+func TestAssets_TamperedWeightsRefuseBeforeAnythingElseRuns(t *testing.T) {
 	l := harness.New(t)
 	ctx := t.Context()
 
@@ -243,7 +268,6 @@ func TestAssets_TamperedWeightsRefuseBeforeTheWorkloadRuns(t *testing.T) {
 	l.WriteConfig(map[string]string{
 		"store":  storeYAML,
 		"assets": assetYAML(harness.DigestOf("these are the weights")),
-		"cmd":    `[/bin/sh, -c, "echo THE WORKLOAD RAN"]`,
 	})
 
 	out := l.Run(ctx, "up")
@@ -253,9 +277,13 @@ func TestAssets_TamperedWeightsRefuseBeforeTheWorkloadRuns(t *testing.T) {
 	if !strings.Contains(out.Combined(), "does not match its digest") {
 		t.Errorf("the refusal does not say why:\n%s", out.Combined())
 	}
-	// The whole point of checking first.
-	if strings.Contains(out.Combined(), "THE WORKLOAD RAN") {
-		t.Errorf("the workload ran against weights that failed verification:\n%s", out.Combined())
+	// THE WHOLE POINT OF CHECKING FIRST, and `node memory:` is the marker
+	// because it is the step immediately after EnsureAssets in `Plan.ready`:
+	// a run that reached it is a run that accepted the weights. The lab above
+	// asserts the same line's PRESENCE over a verify that passed, so the two
+	// discriminate rather than both resting on an exit code.
+	if strings.Contains(out.Combined(), "node memory:") {
+		t.Errorf("the run carried on past weights that failed verification:\n%s", out.Combined())
 	}
 	// And the node still went away.
 	if n := len(l.Nodes(ctx)); n != 0 {
@@ -264,6 +292,12 @@ func TestAssets_TamperedWeightsRefuseBeforeTheWorkloadRuns(t *testing.T) {
 }
 
 const storeYAML = "\n  name: models\n  size_gib: 40\n  region: EU-RO-1"
+
+// servedAssetYAML points at a URL something does answer, for the one lab that
+// needs ember to be the thing that writes to the mount.
+func servedAssetYAML(url, sum string) string {
+	return "\n  - url: " + url + "\n    sha256: " + sum + "\n    as: " + storeAssetName
+}
 
 // assetYAML points at a URL nothing answers. Every asset lab here has the
 // file on the store already, so a fetch would be a bug -- and one that shows
