@@ -10,6 +10,12 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   the provider's metadata service; a free-form remote host makes every ember
   node an open relay billed to the operator. It takes a port and not an
   address, so there is nothing for a config or a request to name.
+  **And there is now one port rather than two**: the forward to sd-server's
+  own HTTP API is gone, because the worker reaches that server on the node's
+  loopback where the call is a syscall instead of a round trip to the
+  operator's machine. Every connection ember opens into a node goes to
+  `control.Port` — see
+  [control-channel.md](control-channel.md).
 - **The progress socket noticed its own close, wrote a signal nothing read,
   and never re-opened -- and the parameter that would have made a reconnect
   lossless had one caller passing the literal `0`.** `connected` was an

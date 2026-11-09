@@ -34,6 +34,18 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   host-key attack. `/workspace` is RunPod's default mount path *and* where
   ember writes outputs, so a store there bills for every render for as long as
   the store exists — and the operator finds out on the invoice a month later.
+- **A worker writes what it generated to the node's own disk and never to the
+  store, and the plan that introduced it said the store.** That is this entry
+  one layer out: nothing in ember deletes a file off a store, so results there
+  would bill by the gigabyte-month for ever, created by the mechanism meant to
+  make a rental tidier rather than by a mount an operator chose. Everything the
+  plan wanted from a store write survives the correction, because none of it
+  was about the store: the write is a plain filesystem write, so the node needs
+  no S3 key and no API key; an event names what landed, so ember fetches
+  exactly those paths; and the bytes die with the pod, which costs nothing. The
+  path is a constant both ends know, under `/tmp`, for `logx.NodeLogPath`'s
+  reason — see
+  [the control channel](../threat-model/control-channel.md).
 - **Every asset is verified by digest before any GPU time is spent on it.**
   A store is writable by every node that mounts it, which makes it a channel
   between runs that are otherwise isolated: one workload can leave something

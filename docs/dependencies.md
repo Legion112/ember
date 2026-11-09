@@ -57,6 +57,17 @@ OpenTelemetry has its own page: [opentelemetry.md](opentelemetry.md).
   plan; a socket is one connection per watched request instead of four
   requests a second, and the latency floor stops being a poll interval.
 
+  It is also **the control channel to the worker on a rented node**, which is
+  its second consumer and the reason it is in `cmd/embernode`'s dependency
+  graph as well as `ember`'s. The alternative there was protobuf over Connect
+  (#192), and the written reason against it is in
+  [the control channel](threat-model/control-channel.md): Connect's
+  bidirectional streaming needs HTTP/2, so over HTTP/1.1 -- the property #192
+  recommends it for -- one full-duplex channel would be two calls; and the
+  module that would pay is the node binary, which cannot be redeployed to a
+  pod that is already running. Nothing here has measured Connect + protobuf,
+  which #192 says itself, and measuring it means adding the dependency.
+
   It is the **pure-Go** driver and not `mattn/go-sqlite3`, because cgo would
   mean `CGO_ENABLED=0` no longer builds ember and `go test ./...` would need a
   C toolchain, which is the kind of requirement that turns "it just works on a

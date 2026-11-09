@@ -827,6 +827,50 @@ say that job two is fourteen steps into its first pass — and a `curl` in a
 config file is not an integration, it is the same knowledge maintained by
 hand.
 
+### The worker on the node, and the one channel
+
+**ember used to drive a node through three mechanisms** — `ssh exec` for a
+workload, an SSH port-forward to the generation server's HTTP API, and `tar`
+for results. Three channels fail three ways, and a generation that went wrong
+had to be reconstructed by correlating an exec, a forward and a tar.
+
+The node image now runs a **worker** beside sshd: a second supervised child of
+`embernode`, started at boot, listening on the node's own loopback and
+reachable only through the SSH connection ember already holds. There is
+nothing to configure — no flag, no config key, no port — and nothing is
+published: `exposure.SSHPort()` is still the only thing in the program that
+can mint a public port, and 22/tcp is still the only port a node publishes.
+
+What changed in practice:
+
+- **ember pushes a whole batch and stops driving it.** The jobs sit in the
+  worker's in-memory queue and it submits them to the generation server one at
+  a time, which is what keeps a finished image out of that server's own
+  ten-minute purge window.
+- **Previews travel on the channel**, which is what they were always for: the
+  frame arrives while the card is still sampling, and ember writes it into the
+  run directory under the name the progress event carries, exactly as before.
+- **Finished images are written on the node and an event names them**, and
+  ember fetches those exact paths. They land on the node's own disk, under
+  `/tmp/ember-results`, and die with the pod — **not on a store**, which bills
+  by the gigabyte-month and which nothing in ember deletes a file from.
+- **The worker exits when its queue is empty and ember has said there is no
+  more work.** Both halves are needed: an empty queue between two requests of
+  one drain loop is not the end of a rental, and exiting there would throw
+  away the resident weights the whole arrangement exists to pay for once.
+- **The node's deadline now stops the worker too.** It used to SIGTERM sshd
+  alone, which with a second child would have stopped the process ember uses
+  to *reach* the node while the one *spending* the card carried on.
+
+**A node image older than the ember driving it is refused by name.** The
+worker states a protocol version in the first frame it sends, and a mismatch
+says to rebuild and republish the image — before any work has been pushed,
+which is the only moment that refusal is cheap. If you see it, rebuild with
+`make docker-build` for a lab or `make publish-sd-cuda` for a rented pod.
+
+An operator's `ssh` into a node is unchanged and is still there for looking
+around.
+
 ### What a job can be told
 
 The eleven fields above are what every job has. These are the rest of what a
@@ -2076,8 +2120,11 @@ producing.
                                    │ ssh, host key pinned to the minted one
                                    ▼
    rented node ─────────────────────────────────────────────────────────────
-   sshd ─► sd-server --listen-ip 127.0.0.1, reached by direct-tcpip only
-           weights resident: loaded once for the whole batch
+   embernode (PID 1) ─► sshd                  the operator's way in
+                     └► worker  127.0.0.1:7311, reached by direct-tcpip only
+                          │ jobs down · events and previews up
+                          └► sd-server --listen-ip 127.0.0.1
+                             weights resident: loaded once for the whole batch
 ```
 
 Progress travels one way and is stored once. Every emitter writes a

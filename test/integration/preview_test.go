@@ -119,7 +119,7 @@ func TestPreview_AServerStreamsFramesEmberCanDecode(t *testing.T) {
 	// expensive one on a billed card -- which is exactly why ember's default
 	// is 5 and why this lab does not inherit ember's default either. The lab
 	// wants the most frames it can get in the fewest steps.
-	id, err := srv.client.Submit(t.Context(), job, "proj", 1)
+	id, err := srv.client.Submit(t.Context(), labBody(t, job, "proj", 1))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestPreview_TheSameFrameComesBackBetweenIntervals(t *testing.T) {
 		Seed:    1234,
 		Output:  "boat",
 	}
-	id, err := srv.client.Submit(t.Context(), job, "proj", 1)
+	id, err := srv.client.Submit(t.Context(), labBody(t, job, "proj", 1))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestPreview_ARealServerStopsAGenerationWhenAsked(t *testing.T) {
 	// interval 1 so the step count moves on every step: the cancel is aimed
 	// at a step in the middle, and a sparse preview would mean aiming at a
 	// number ember had not been told yet.
-	id, err := srv.client.Submit(t.Context(), job, "proj", 1)
+	id, err := srv.client.Submit(t.Context(), labBody(t, job, "proj", 1))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -565,11 +565,11 @@ func TestPreview_AModelThatCannotLoadIsAnErrorStateAndNotASilence(t *testing.T) 
 	//    body, so the reason arrived as JSON inside a sentence about a status
 	//    code. sdserver.refusal is what reads it, and this is the assertion
 	//    that the shape it reads is the shape a server sends.
-	_, serr := srv.client.Submit(t.Context(), sdserver.Job{
+	_, serr := srv.client.Submit(t.Context(), labBody(t, sdserver.Job{
 		Prompt: "a paper boat",
 		Width:  labWidth, Height: labHeight,
 		Steps: labSteps,
-	}, sdserver.PreviewNone, 0)
+	}, sdserver.PreviewNone, 0))
 	if serr == nil {
 		t.Fatal("a server with no weights accepted a generation")
 	}
@@ -830,7 +830,7 @@ func TestPreview_AFailedJobCarriesTheObjectFormOfError(t *testing.T) {
 			"a server-side failure: %v", err)
 	}
 
-	id, err := srv.client.Submit(t.Context(), job, sdserver.PreviewProj, 1)
+	id, err := srv.client.Submit(t.Context(), labBody(t, job, sdserver.PreviewProj, 1))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -1882,4 +1882,26 @@ func (w *testWriter) Write(p []byte) (int, error) {
 		w.t.Logf("%s: %s", w.prefix, strings.TrimRight(string(w.buf[:i]), "\r"))
 		w.buf = w.buf[i+1:]
 	}
+}
+
+// labBody is Job.Body, which is the step ember takes before pushing a job to a
+// worker.
+//
+// sdserver.Client.Submit takes the request body rather than a Job because
+// that body crosses the control channel between ember and a rented node as
+// bytes nobody parses -- a body decoded into map[string]any comes back with
+// every number as a float64, and a seed is an int64. So the lab builds it the
+// way ember does, which is also what keeps this lab a test of the SERVER's
+// answers rather than of ember's job mapping: Body has its own unit tests.
+func labBody(t *testing.T, j sdserver.Job, preview string, interval int) json.RawMessage {
+	t.Helper()
+	body, err := j.Body(preview, interval)
+	if err != nil {
+		t.Fatalf("build the job body: %v", err)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encode the job body: %v", err)
+	}
+	return raw
 }

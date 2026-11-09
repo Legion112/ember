@@ -2,56 +2,43 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/sshx/sshexec"
 
 	"github.com/Legion112/ember/internal/blob"
+	"github.com/Legion112/ember/internal/control"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/internal/session"
 	"github.com/Legion112/ember/internal/sshx"
+	"github.com/Legion112/ember/internal/transfer"
 	"github.com/Legion112/ember/internal/tunnel"
 	"github.com/Legion112/ember/internal/workload"
 )
 
-// The poll cadence, which starts fast and backs off.
+// THE POLL CADENCE MOVED TO internal/worker, WITH ITS MEASUREMENT.
 //
-// A FLAT TWO SECONDS WAS WRONG, AND MEASURED SO. Three sd15 images at
-// 256x256 and four steps take about 0.3s each to sample, and a flat 2s poll
-// noticed each one up to two seconds late: the marginal cost per job came to
-// 2.08s served against 1.81s for a fresh sd-cli per image. The resident model
-// saved about 0.8s of tensor loading per job and ember's own poll interval
-// then spent more than that waiting, so the served path measured *slower* at
-// every batch size tried -- 1, 3 and 8 jobs -- and the gap widened. The whole
-// point of the feature, hidden by its own client.
+// It used to be here, because ember held the poll loop: it dialled the node's
+// loopback over SSH and asked sd-server about each job itself. The loop is now
+// on the node, which is the whole of this change -- so jobPollMin, jobPollMax
+// and nextPoll live beside the code that uses them, and the figure that set
+// them (a flat two seconds measured the served path *slower* than a fresh
+// sd-cli per image, at every batch size tried) travelled with them rather
+// than being left behind as a comment about a loop that is no longer here.
 //
-// Starting at jobPollMin and doubling to jobPollMax fits both ends: a short
-// job is noticed almost at once, and a long one settles to a cadence that
-// does not pull a preview frame every tenth of a second. The poll is a
-// loopback HTTP call over an SSH channel that is already open, and with
-// previews off it carries nothing, so the fast end is nearly free.
-var (
-	jobPollMin = 50 * time.Millisecond
-	jobPollMax = 2 * time.Second
-)
-
-// nextPoll is the backoff: double, capped.
-func nextPoll(d time.Duration) time.Duration {
-	if d <= 0 {
-		return jobPollMin
-	}
-	if d *= 2; d > jobPollMax {
-		return jobPollMax
-	}
-	return d
-}
+// What ember does instead is read frames. There is no interval on this side at
+// all: a preview arrives when the node has one.
 
 // Served is a rental whose generation server is up and whose weights are
 // resident in VRAM.
@@ -84,11 +71,27 @@ type Served interface {
 	Caps() sdserver.Capabilities
 }
 
-// served is the real Served: a client pointed at the node's own loopback.
+// served is the real Served: the control channel to this rental's worker.
+//
+// IT USED TO BE AN sdserver.Client, and that is the change. ember held a
+// client pointed at the node's loopback through an SSH port-forward and ran
+// the submit-poll-collect loop itself. Now it pushes typed jobs down one
+// channel and reads what the node reports back, which is what collapses three
+// mechanisms -- exec, forward, tar -- into a channel plus a fetch of files an
+// event named.
 type served struct {
-	client sdserver.Client
-	caps   sdserver.Capabilities
-	rate   node.Rate
+	ch   *control.Conn
+	caps sdserver.Capabilities
+	rate node.Rate
+
+	// runner is how the files a worker names are brought home.
+	//
+	// A rental's images land on the node's own disk and an event names them,
+	// so ember fetches exactly those paths rather than globbing an `outputs:`
+	// tree. It is the sshx.Runner seam and not the SSH client for the reason
+	// every other fetch here takes one: the reporting and the error handling
+	// are then testable against a recording runner instead of needing a node.
+	runner sshx.Runner
 
 	// inputs is where a job's image inputs are staged, empty when this
 	// rental's jobs cannot name one. See resolveInputs.
@@ -117,12 +120,7 @@ func (s served) Generate(ctx context.Context, sink report.Sink, jobs sdserver.Ru
 			return Usage(fmt.Errorf("sd.jobs[%d]: %w", i, err))
 		}
 	}
-	// The capability is joined to the signal HERE and not by the caller: a
-	// drain loop knows which request the operator stopped and has no business
-	// knowing what the server build can do, and this is the one place that
-	// holds both.
-	return runJobs(ctx, sink, s.client, jobs, dir, s.rate,
-		cancelSignal{on: stop, server: s.caps.CancelGenerating})
+	return pushBatch(ctx, sink, s, jobs, dir, stop)
 }
 
 // resolveInputs loads the bytes every job's image reference names.
@@ -288,26 +286,54 @@ func withServer(
 		}
 	}()
 
-	remote := tunnel.RemoteLoopback(sdserver.Port)
-	if err := orExited(ctx, proc, "it accepted a connection", func() error {
-		return tunnel.WaitReady(ctx, client, remote, time.Second)
-	}); err != nil {
-		return fmt.Errorf("sd-server is not listening on %v: %w", remote, err)
+	// THE WORKER AND NOT sd-server IS WHAT EMBER DIALS NOW, and nothing is
+	// dialled twice: the forward to sdserver.Port is gone, and the only
+	// connection ember opens into the node is the control channel. The worker
+	// reaches the generation server on its own loopback, where that call is a
+	// syscall rather than a round trip to the operator's machine.
+	//
+	// WAIT FIRST AND OPEN SECOND, because the worker is started by embernode
+	// at boot and ember's first dial can land in the window before it has
+	// bound its port. A refused dial there would be reported as a node with no
+	// worker, which is the one failure that actually needs a rebuilt image --
+	// so the two are told apart by waiting, bounded, and then by asking.
+	wctx, stopWait := context.WithTimeout(ctx, control.HandshakeTimeout)
+	defer stopWait()
+	remote := tunnel.RemoteLoopback(control.Port)
+	if err := tunnel.WaitReady(wctx, client, remote, time.Second); err != nil {
+		return fmt.Errorf("this node's worker is not listening on %v: %w; the node's own log says why", remote, err)
 	}
-
-	c := sdserver.New(client.DialContext)
-	var load time.Duration
-	if err := orExited(ctx, proc, "the weights finished loading", func() error {
-		var werr error
-		load, werr = sdserver.WaitModel(ctx, c, spec.ServeTimeout, out, so.Log)
-		return werr
-	}); err != nil {
-		return err
-	}
-
-	caps, err := c.Capabilities(ctx)
+	ch, err := control.Open(ctx, client.DialContext)
 	if err != nil {
 		return err
+	}
+	defer ch.Abort()
+
+	// PREPARE IS RACED AGAINST THE SERVER'S OWN EXIT, which is the half of
+	// orExited that matters most and the reason it is still here after the
+	// poll loop left. The worker waits for sd-server's port and then for its
+	// weights, and it cannot see that the process died -- that process is
+	// ember's child over `ssh exec`. Without this race, a server that exited
+	// one second in would be waited out for the whole ready_timeout: ten
+	// minutes by default, which on an A100 at $1.79/hour is thirty cents of
+	// billing for a program that was already gone.
+	var load time.Duration
+	var rawCaps json.RawMessage
+	if err := orExited(ctx, proc, "the weights finished loading", func() error {
+		var perr error
+		load, rawCaps, perr = prepareWorker(ctx, out, ch, spec.ServeTimeout)
+		return perr
+	}); err != nil {
+		return err
+	}
+
+	// The value the worker decoded, not the server's own document: the
+	// generation server is on the node's loopback, so the one place that can
+	// read its answer is the node. See sdserver.Capabilities on why that
+	// mapper runs once rather than at both ends.
+	var caps sdserver.Capabilities
+	if err := json.Unmarshal(rawCaps, &caps); err != nil {
+		return fmt.Errorf("read what the worker says the generation server can do: %w", err)
 	}
 
 	// The figure this whole shape exists to stop paying repeatedly, said out
@@ -347,7 +373,115 @@ func withServer(
 		Model: caps.Model,
 	})
 
-	return fn(ctx, served{client: c, caps: caps, rate: rate, inputs: inputsDir})
+	err = fn(ctx, served{ch: ch, caps: caps, rate: rate, runner: r, inputs: inputsDir})
+
+	// THE WORKER IS TOLD THERE IS NO MORE WORK, which is the frame that lets
+	// it exit rather than being cut off.
+	//
+	// "The worker exits when its queue empties" needs both halves and only
+	// ember holds the second: an empty queue between two requests of one
+	// drain loop is not the end of a rental, and a worker that exited there
+	// would throw away the resident weights the whole shape exists to pay for
+	// once. Sent even when fn failed, because a failed request ends this
+	// rental too.
+	//
+	// Best effort, and bounded. A channel that has already gone is the case
+	// this is for -- the worker exits on its own when ember disappears -- so
+	// a failure here is logged and nothing more: the node is about to be
+	// destroyed either way, and holding up a destroy is holding up the end of
+	// a bill.
+	drainWorker(ctx, ch, so.Log)
+	return err
+}
+
+// drainWorker tells the worker no more jobs are coming and waits briefly for
+// it to say it is going.
+//
+// WHY WAIT AT ALL, given that the destroy is what ends the bill. The node's
+// own log is fetched after this, and "the queue is empty and ember says there
+// is no more work" is the line that distinguishes a worker that finished from
+// one that was cut off mid-batch -- which is the difference between a tidy
+// rental and a bug, read afterwards on a machine that no longer exists.
+func drainWorker(ctx context.Context, ch *control.Conn, log *slog.Logger) {
+	// On a context that survives the operator's Ctrl-C, for the reason every
+	// other end-of-rental step here is: Ctrl-C is the most likely way to get
+	// here, and the worker is the thing still holding a card.
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workerDrainTimeout)
+	defer cancel()
+
+	if err := ch.Send(dctx, control.Frame{Kind: control.KindDrained}); err != nil {
+		log.Debug("could not tell the worker the queue is drained", "err", err)
+		return
+	}
+	for {
+		f, err := ch.Recv(dctx)
+		if err != nil {
+			if !errors.Is(err, control.ErrClosed) {
+				log.Debug("the worker did not say goodbye", "err", err)
+			}
+			return
+		}
+		if f.Kind == control.KindDone {
+			log.Debug("the worker reported its queue empty and is exiting")
+			return
+		}
+		// Anything else is a frame from a batch that has already ended -- a
+		// preview in flight when fn returned. Dropped rather than reported:
+		// the request it belongs to is closed, and a late event written to a
+		// finished row is a row that changes after it ended.
+		log.Debug("dropped a late frame from the worker", "kind", f.Kind)
+	}
+}
+
+// workerDrainTimeout bounds the goodbye.
+//
+// THREE SECONDS, AND IT IS A TEARDOWN FIGURE RATHER THAN A PROTOCOL ONE. What
+// is being waited for is one frame over a connection that is already open,
+// from a worker that is idle by construction -- every batch has ended before
+// this is called. The case that takes longer is the one where ember gave up on
+// a batch the worker is still finishing, and there the right answer is to stop
+// waiting: the node is being destroyed either way, a destroy that is held up
+// is a bill that keeps running, and this runs on a context that survives
+// Ctrl-C precisely so it cannot be skipped. Ten seconds would be ten seconds
+// of billing bought for a log line.
+const workerDrainTimeout = 3 * time.Second
+
+// prepareWorker asks the worker to wait for the generation server and report
+// what it can do.
+//
+// The log frames are written to out as they arrive, which is what keeps a
+// four-minute model load visible. That line used to be printed by ember's own
+// poll loop, on the operator's machine; the loop is on the node now, so the
+// line travels back or an operator watches nothing happen.
+func prepareWorker(ctx context.Context, out io.Writer, ch *control.Conn, timeout time.Duration) (time.Duration, json.RawMessage, error) {
+	if err := ch.Send(ctx, control.Frame{Kind: control.KindPrepare, Timeout: timeout}); err != nil {
+		return 0, nil, err
+	}
+	for {
+		f, err := ch.Recv(ctx)
+		if err != nil {
+			return 0, nil, err
+		}
+		switch f.Kind {
+		case control.KindLog:
+			outf(out, "%s", f.Text)
+		case control.KindPrepared:
+			if len(f.Caps) == 0 {
+				// A prepared frame with no capabilities document is a worker
+				// that read the server and found nothing, and ember's whole
+				// job refusal rests on that document: an empty one would make
+				// Validate wave every job through, which is the "an empty
+				// list from the server is not a licence to accept anything"
+				// rule reached one layer out.
+				return 0, nil, errors.New("the worker reported the generation server ready without its capabilities, so no job could be checked before being paid for")
+			}
+			return f.Elapsed, f.Caps, nil
+		case control.KindFailed:
+			return 0, nil, errors.New(f.Err)
+		default:
+			return 0, nil, fmt.Errorf("the worker answered a prepare with a %q frame", f.Kind)
+		}
+	}
 }
 
 // startServer starts a long-running process on the node and returns the
@@ -445,20 +579,6 @@ func orExited(ctx context.Context, p *serverProc, what string, fn func() error) 
 	}
 }
 
-// runJobs submits one job at a time and collects its images before the next.
-//
-// ONE JOB IN FLIGHT, and the reason is in sd-server's own source rather than
-// its documentation. async_jobs.h sets completed_ttl_seconds = 600 and
-// async_jobs.cpp measures that from completed_at and purges from the worker --
-// when it wakes before popping the next job, and after each job finishes. So a
-// finished result is erased ten minutes after it completed, and api.md lists
-// 410 Gone for a job without ever saying why.
-//
-// Queueing ten jobs up front would therefore leave eight finished images, each
-// already paid for, one dropped connection away from being deleted. Submitting
-// one at a time costs nothing in throughput -- the generation context lock
-// serializes work on the device anyway -- and makes the TTL unreachable, the
-// 64-job pending cap irrelevant and queue_position moot.
 // ErrCancelled is a batch the operator stopped, as opposed to one that failed.
 //
 // A SENTINEL BECAUSE THE DIFFERENCE DECIDES WHETHER A RENTAL DIES. A failed
@@ -472,39 +592,37 @@ func orExited(ctx context.Context, p *serverProc, what string, fn func() error) 
 // end the rental.
 var ErrCancelled = errors.New("cancelled while it was generating")
 
-// cancelSignal is the operator's stop, plus what the server will do about it.
+// pushBatch sends one request's jobs to the worker and turns what comes back
+// into this request's events.
 //
-// One value rather than two parameters so a caller cannot pass a channel and
-// forget the capability, which would silently mean "never ask the server" --
-// the quietest possible way for this whole path to do nothing. The zero value
-// is "no cancel is possible", which is what every caller that has nothing to
-// cancel gets by writing cancelSignal{}.
-type cancelSignal struct {
-	// on is closed when the operator asked for this batch to stop. nil is
-	// never closed, and a receive on a nil channel blocks forever, so a
-	// zero value needs no branch anywhere below.
-	on <-chan struct{}
-
-	// server is sdserver.Capabilities.CancelGenerating. See that field for
-	// why false does not refuse the cancel.
-	server bool
-}
-
-// asked reports whether the operator has asked, without blocking.
-func (s cancelSignal) asked() bool {
-	select {
-	case <-s.on:
-		return true
-	default:
-		return false
-	}
-}
-
-func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdserver.Run, runDir string, rate node.Rate, stop cancelSignal) error {
+// THE WHOLE BATCH GOES AT ONCE AND THE WORKER HOLDS IT, which is the opposite
+// of what this function used to do and does not contradict the reason it used
+// to do it. sd-server's own async_jobs.cpp purges a finished result ten
+// minutes after it completed, so queueing ten jobs *there* would leave eight
+// finished images -- each already paid for -- one lapse away from being
+// deleted. That argument is about the generation server's queue. The worker
+// holds the batch in memory and submits to that server one job at a time, so
+// the TTL stays unreachable, the 64-job pending cap stays irrelevant, and
+// ember stops having to be present for each submission.
+//
+// WHAT EMBER STILL DECIDES, and the list is deliberate: which jobs exist and
+// whether they are allowed (Validate, against the server's own capabilities,
+// before anything is pushed); what a job is called in the history; what each
+// one cost, from ember's own clock and ember's own rate, because money is
+// ember's and `int64` microdollars never cross a wire as anything else; and
+// which events a request's row records. The node reports what happened and
+// never what it was worth.
+//
+// A NODE IS UNTRUSTED INPUT -- the rule internal/transfer enforces twice over
+// a tar stream -- so every index that arrives is checked against the batch
+// ember pushed. The alternative is `jobs.Jobs[f.Index-1]` on a number a rented
+// machine chose, which is a panic in the process holding the operator's
+// credentials.
+func pushBatch(ctx context.Context, sink report.Sink, s served, run sdserver.Run, runDir string, stop <-chan struct{}) error {
 	// Created here, because nothing else on this path does. The fetching
-	// paths get it from transfer.Fetch's own MkdirAll; a served run never
-	// calls Fetch, since the images arrive in the HTTP response rather than
-	// as a tar. Without this, every served run failed at the first image with
+	// paths get it from transfer.Fetch's own MkdirAll; a preview frame never
+	// calls Fetch, since it arrives on the channel rather than as a tar.
+	// Without this, every served run failed at the first preview with
 	// "no such file or directory" after the generation had been paid for.
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return fmt.Errorf("create the run's output directory: %w", err)
@@ -515,257 +633,340 @@ func runJobs(ctx context.Context, sink report.Sink, c sdserver.Client, run sdser
 	}
 	defer func() { _ = root.Close() }()
 
-	var spent node.MicroUSD
+	total := len(run.Jobs)
+	stems := make([]string, total)
 	for i, j := range run.Jobs {
-		label := report.Label(report.UnitJob, i+1, len(run.Jobs))
-
-		// CHECKED BEFORE THE SUBMIT, which is where the money in a batch
-		// actually is. Stopping only the job in flight would leave the next
-		// one starting a second later on the same card -- the button would
-		// appear to work and the bill would not change, which is the "reads
-		// as working" defect this repository keeps finding. A cancelled
-		// request means every job of it that has not started, never starts.
-		if stop.asked() {
-			// No Unit, because no job is in flight to name: the cancel landed
-			// in the gap between one job finishing and the next starting.
-			// Index is how many finished, so Total-Index is what was dropped
-			// -- the same arithmetic as the in-flight event below, which is
-			// why there is one kind and not two.
-			sink.Emit(report.Event{
-				Kind: report.KindJobCancelled, Index: i, Total: len(run.Jobs),
-			})
-			return ErrCancelled
-		}
-		stem := j.Output
-		if stem == "" {
+		stems[i] = j.Output
+		if stems[i] == "" {
 			// Numbered from the position in the list, so a config that names
 			// nothing still produces files an operator can tell apart.
-			stem = fmt.Sprintf("%03d", i+1)
+			stems[i] = fmt.Sprintf("%03d", i+1)
 		}
+	}
 
-		start := time.Now()
-		sink.Emit(report.Event{
-			Kind: report.KindUnitStarted, Unit: report.UnitJob,
-			Index: i + 1, Total: len(run.Jobs), Desc: j.Describe(),
-		})
-
-		id, err := c.Submit(ctx, j, run.Preview, run.PreviewInterval)
+	for i, j := range run.Jobs {
+		body, err := j.Body(run.Preview, run.PreviewInterval)
 		if err != nil {
-			return fmt.Errorf("%s: %w", label, err)
+			return fmt.Errorf("%s: %w", report.Label(report.UnitJob, i+1, total), err)
 		}
-
-		st, asked, err := awaitJob(ctx, sink, c, id, i+1, len(run.Jobs), stem, root, stop)
+		raw, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("%s: %w", label, err)
+			return fmt.Errorf("%s: encode the job: %w", report.Label(report.UnitJob, i+1, total), err)
 		}
-		switch {
-		case asked && st.Status == sdserver.StatusCancelled:
-			// The expected end of a job ember asked to stop, AND IT HAS TO
-			// BE TESTED BEFORE st.Err, which the lab found and no fake had.
-			//
-			// A real cancelled job carries the server's own explanation in
-			// `error`: {"code":"cancelled","message":"job cancelled by
-			// client"}. With the refusal check first, every live cancel came
-			// back as `sd-server refused it: cancelled: job cancelled by
-			// client` -- a plain failure, not ErrCancelled -- so the queue
-			// would have read the operator's own cancel as a failed batch
-			// and DESTROYED THE RENTAL, taking every other request on it.
-			// The exact outcome the whole feature exists to avoid, reached
-			// by pressing the button it added. The fake answered a cancelled
-			// status with no error object, so the unit tests agreed with
-			// themselves; see testdata/job_cancelled.json.
-			//
-			// `asked` keeps the other meaning available: a server that
-			// cancelled a job nobody asked about has done something ember
-			// cannot account for, and filing that under "the operator
-			// pressed cancel" would record a request nobody stopped as
-			// cancelled.
-		case st.Err != nil:
-			return fmt.Errorf("%s: sd-server refused it: %w", label, st.Err)
-		case st.Status != sdserver.StatusCompleted:
-			return fmt.Errorf("%s: ended as %s", label, st.Status)
+		// Index is one-based on the wire; see control.Frame on why a zero
+		// index and an absent one would otherwise be the same bytes.
+		if err := s.ch.Send(ctx, control.Frame{
+			Kind: control.KindJob, Index: i + 1, Total: total,
+			Stem: stems[i], Job: raw,
+		}); err != nil {
+			return fmt.Errorf("push %s to the worker: %w", report.Label(report.UnitJob, i+1, total), err)
 		}
+	}
 
-		w, err := sdserver.WriteImages(root, stem, st.Images)
-		if err != nil {
-			return fmt.Errorf("%s: %w", label, err)
-		}
-		// WRITTEN AND REPORTED EVEN WHEN THE CANCEL LANDED, because a card
-		// that produced an image was paid for it whatever happened next. A
-		// job the server stopped mid-pass carries none, which is why the
-		// event is guarded on there being files rather than emitted flat:
-		// "0 file(s), 0 B" against a cancelled job reads as a job that
-		// finished and produced nothing. The job's step tally still reaches
-		// its row through the cost event below, which is unconditional.
-		if w.Files > 0 {
-			wrote := make([]report.File, 0, len(w.Each))
-			for _, f := range w.Each {
-				wrote = append(wrote, report.File{Name: f.Name, Bytes: f.Bytes})
+	// THE CANCEL TRAVELS DOWN THE CHANNEL FROM A SECOND GOROUTINE, which is
+	// the one place in this program where two goroutines write to a control
+	// channel -- and the reason control.Conn serialises its sends. The
+	// operator presses the button while a card is sampling, so the loop below
+	// is blocked in a read and cannot be the thing that sends.
+	//
+	// A nil stop channel is never closed and a receive on one blocks forever,
+	// so a caller with nothing to cancel needs no branch here.
+	cancelCtx, stopCancel := context.WithCancel(ctx)
+	defer stopCancel()
+	go func() {
+		select {
+		case <-stop:
+			if err := s.ch.Send(cancelCtx, control.Frame{Kind: control.KindCancel}); err != nil {
+				// Not returned anywhere, because there is nowhere to return
+				// it to: the batch is still running and the loop below
+				// reports what actually happens to it. A cancel that could
+				// not be sent shows up as a batch that completes, which is
+				// the honest outcome.
+				sink.Emit(report.Event{
+					Kind: report.KindJobCancelled, Err: err.Error(),
+				})
 			}
-			sink.Emit(report.Event{
-				Kind: report.KindJobImages, Unit: report.UnitJob,
-				Index: i + 1, Total: len(run.Jobs),
-				Files: w.Files, Bytes: w.Bytes, Wrote: wrote,
-			})
+		case <-cancelCtx.Done():
 		}
+	}()
 
-		// The accumulating price, the same reporting runSteps does and for the
-		// same reason: an operator watching a ten-job batch can stop paying
-		// for the rest. Card time, which is why it is timed across the
-		// collection and not only the sampling.
-		step := rate.Cost(time.Since(start))
-		spent += step
-		sink.Emit(report.Event{
-			Kind: report.KindUnitCost, Unit: report.UnitJob,
-			Index: i + 1, Total: len(run.Jobs), Cost: step, Spent: spent,
-		})
+	var (
+		spent   node.MicroUSD
+		started = make(map[int]time.Time, total)
+		ended   int
+		asked   bool
+	)
 
-		// AFTER the cost, not before: the card time this job spent is money
-		// the operator is billed for whether or not they stopped it, and a
-		// return that skipped it would make a cancelled batch look cheaper
-		// than it was -- the one direction a money figure must never be
-		// wrong in.
-		if asked {
-			return ErrCancelled
+	for ended < total {
+		f, err := s.ch.Recv(ctx)
+		if err != nil {
+			return fmt.Errorf("read the worker's events: %w", err)
+		}
+		switch f.Kind {
+		case control.KindStarted:
+			i, err := jobIndex(f, total)
+			if err != nil {
+				return err
+			}
+			// Timed from when the NODE submitted it rather than from when
+			// ember pushed it: what this figure is for is card time, and the
+			// time a job spent queued in the worker is time the card spent on
+			// the job before it.
+			started[i] = time.Now()
+			sink.Emit(report.Event{
+				Kind: report.KindUnitStarted, Unit: report.UnitJob,
+				Index: i, Total: total, Desc: run.Jobs[i-1].Describe(),
+			})
+
+		case control.KindProgress:
+			i, err := jobIndex(f, total)
+			if err != nil {
+				return err
+			}
+			preview(sink, root, stems[i-1], i, total, f)
+
+		case control.KindLanded:
+			i, err := jobIndex(f, total)
+			if err != nil {
+				return err
+			}
+			if err := s.collect(ctx, sink, runDir, i, total, f); err != nil {
+				return fmt.Errorf("%s: %w", report.Label(report.UnitJob, i, total), err)
+			}
+
+		case control.KindCancelled:
+			// The operator's stop, reported once by the worker. Index and
+			// Total are stamped HERE and not taken from the frame, because
+			// which numbers they are differs: with a job in flight they name
+			// that job, and in the gap between two jobs the index is how many
+			// finished -- which is a fact about ember's own bookkeeping.
+			asked = true
+			e := report.Event{
+				Kind:  report.KindJobCancelled,
+				Index: ended, Total: total, Err: f.Err,
+			}
+			if f.InFlight {
+				// No Unit when none was in flight: the cancel landed in the
+				// gap between one job finishing and the next starting, and
+				// Total-Index is then what was dropped.
+				e.Unit, e.Index = report.UnitJob, ended+1
+			}
+			sink.Emit(e)
+			if !f.InFlight {
+				// The worker has dropped the rest of the batch, so no frame
+				// about any of them is coming. Returning here is what stops
+				// ember waiting for events that will never arrive -- and a
+				// cancelled request means every job of it that has not
+				// started, never starts.
+				return ErrCancelled
+			}
+
+		case control.KindEnded:
+			i, err := jobIndex(f, total)
+			if err != nil {
+				return err
+			}
+			ended++
+			label := report.Label(report.UnitJob, i, total)
+			switch {
+			case f.Cancelled && f.Status == sdserver.StatusCancelled.String():
+				// The expected end of a job ember asked to stop, AND IT HAS
+				// TO BE TESTED BEFORE f.Err, which the lab found and no fake
+				// had.
+				//
+				// A real cancelled job carries the server's own explanation
+				// in `error`: {"code":"cancelled","message":"job cancelled by
+				// client"}. With the refusal check first, every live cancel
+				// came back as `sd-server refused it: cancelled: job
+				// cancelled by client` -- a plain failure, not ErrCancelled
+				// -- so the queue would have read the operator's own cancel
+				// as a failed batch and DESTROYED THE RENTAL, taking every
+				// other request on it. The exact outcome the whole feature
+				// exists to avoid, reached by pressing the button it added.
+				//
+				// f.Cancelled keeps the other meaning available: a server
+				// that cancelled a job nobody asked about has done something
+				// ember cannot account for, and filing that under "the
+				// operator pressed cancel" would record a request nobody
+				// stopped as cancelled.
+			case f.Err != "":
+				return fmt.Errorf("%s: sd-server refused it: %s", label, f.Err)
+			case f.Status != sdserver.StatusCompleted.String():
+				return fmt.Errorf("%s: ended as %s", label, f.Status)
+			}
+
+			// The accumulating price, from ember's clock and ember's rate.
+			// Card time, which is why it is measured across the collection
+			// and not only the sampling -- and why a job whose started frame
+			// never arrived is priced from this moment rather than from zero,
+			// which would bill the rental's whole history to one job.
+			step := s.rate.Cost(time.Since(startedAt(started, i)))
+			spent += step
+			sink.Emit(report.Event{
+				Kind: report.KindUnitCost, Unit: report.UnitJob,
+				Index: i, Total: total, Cost: step, Spent: spent,
+			})
+
+			// AFTER the cost, not before: the card time this job spent is
+			// money the operator is billed for whether or not they stopped
+			// it, and a return that skipped it would make a cancelled batch
+			// look cheaper than it was -- the one direction a money figure
+			// must never be wrong in.
+			if f.Cancelled || asked {
+				return ErrCancelled
+			}
+
+		case control.KindFailed:
+			// Labelled when the worker said which job it was about, because
+			// that is the sentence an operator reads off a batch of eight.
+			// The label is ember's prose and the numbers are the worker's,
+			// which is why the frame carries the second and not the first.
+			if f.Index >= 1 && f.Index <= total {
+				return fmt.Errorf("%s: %s", report.Label(report.UnitJob, f.Index, total), f.Err)
+			}
+			return fmt.Errorf("the worker stopped: %s", f.Err)
+
+		case control.KindLog:
+			sink.Emit(report.Event{Kind: report.KindLog, Text: f.Text})
+
+		default:
+			// Named rather than ignored. A frame nobody handles is a job
+			// ember would wait for forever, and the version handshake is what
+			// should have made this unreachable -- so arriving here means the
+			// two ends disagree about what a version means.
+			return fmt.Errorf("the worker sent a %q frame in the middle of a batch", f.Kind)
 		}
 	}
 	return nil
 }
 
-// awaitJob polls one job to a conclusion, reporting progress as it goes.
+// jobIndex is the untrusted-input check on every frame that names a job.
 //
-// Progress is reported as pass, step and total, never as a single percentage:
-// sd-server's step and total_steps describe the current sampling pass and not
-// the whole job, and passes restart for each batch item, each high- and
-// low-noise stage and each highres pass. A bar built from them runs to the end
-// and then starts again, which reads as a hang.
+// A rented machine chooses this number, and `run.Jobs[f.Index-1]` on a number
+// it chose is an out-of-range panic in the process that holds the operator's
+// provider credentials. Checked once, here, so no call site can forget it.
+func jobIndex(f control.Frame, total int) (int, error) {
+	if f.Index < 1 || f.Index > total {
+		return 0, fmt.Errorf("the worker sent a %s frame for job %d of a batch of %d: this node is reporting work ember never pushed",
+			f.Kind, f.Index, total)
+	}
+	return f.Index, nil
+}
+
+// startedAt is when job i began, falling back to now.
+//
+// THE FALLBACK IS NOT COSMETIC. A zero time.Time is the year 1, and
+// time.Since of it is two thousand years -- which Rate.Cost would turn into a
+// price larger than every ceiling in the program, on a request's own row,
+// because a started frame went missing. A job whose start ember never saw is
+// priced at nothing instead, which is wrong in the direction that cannot
+// trigger a false refusal and is visible beside the rental's own run_cost.
+func startedAt(started map[int]time.Time, i int) time.Time {
+	if t, ok := started[i]; ok {
+		return t
+	}
+	return time.Now()
+}
+
+// preview writes one frame and reports where it went.
+//
+// The frame is written BEFORE the event that reports its step, and travels ON
+// that event rather than on one of its own. A reader recording where the bytes
+// went needs the step and the filename in the same value: with the name on a
+// second event, a UI learns there is a step 4 before it learns there is a
+// frame for it, and shows step 4 beside step 3's picture. The name is not
+// re-derived either -- safeStem decides what a file is called, and a second
+// spelling of that rule is a gallery pointing at names that are not on disk.
 //
 // Each distinct frame is written over the last one rather than accumulating,
 // because the useful thing is a file an operator can leave open in a viewer
-// and not three hundred PNGs of a half-finished cat.
-// It reports whether ember asked for this job to stop, which is the one fact
-// its caller cannot work out for itself: the signal can be closed between two
-// polls, and a job that came back `cancelled` because ember asked is a
-// different outcome from one that came back `cancelled` on its own.
-func awaitJob(ctx context.Context, sink report.Sink, c sdserver.Client, id string, index, total int, stem string, root *os.Root, stop cancelSignal) (sdserver.State, bool, error) {
-	lastStep := -1
-	wait := jobPollMin
-	asked := false
-
-	// Set to nil once the ask has been made, so the select below stops waking
-	// on a channel that is closed and stays closed. A closed channel is
-	// permanently ready, so leaving it in would turn the poll loop into a
-	// spin at the exact moment ember is waiting for a card to finish -- and a
-	// nil channel is the standard way to say "never again" without a second
-	// flag that could disagree with the first.
-	pending := stop.on
-
-	for {
-		st, err := c.Poll(ctx, id)
-		if err != nil {
-			return sdserver.State{}, asked, err
+// and not three hundred PNGs of a half-finished cat. The worker is what drops
+// a repeated step, which is also where dropping it saves the bytes.
+func preview(sink report.Sink, root *os.Root, stem string, index, total int, f control.Frame) {
+	var wrote []report.File
+	var werr error
+	if len(f.PNG) > 0 {
+		var w sdserver.Written
+		w, werr = sdserver.WriteImages(root, stem+"-preview", []sdserver.Image{{Data: f.PNG}})
+		for _, each := range w.Each {
+			wrote = append(wrote, report.File{Name: each.Name, Bytes: each.Bytes})
 		}
-		if p := st.Preview; p != nil && p.Step != lastStep {
-			lastStep = p.Step
-
-			// The frame is written BEFORE the event that reports its step,
-			// and travels ON that event rather than on one of its own.
-			//
-			// A reader recording where the bytes went needs the step and the
-			// filename in the same value: with the name on a second event, a
-			// UI learns there is a step 4 before it learns there is a frame
-			// for it, and shows step 4 beside step 3's picture. The name is
-			// not re-derived here either, for the reason Wrote exists --
-			// safeStem decides what a file is called, and a second spelling
-			// of that rule is a gallery pointing at names that are not on
-			// disk.
-			var wrote []report.File
-			var werr error
-			if len(p.PNG) > 0 {
-				var w sdserver.Written
-				w, werr = sdserver.WriteImages(root, stem+"-preview", []sdserver.Image{{Data: p.PNG}})
-				for _, f := range w.Each {
-					wrote = append(wrote, report.File{Name: f.Name, Bytes: f.Bytes})
-				}
-			}
-			sink.Emit(report.Event{
-				Kind: report.KindJobProgress, Unit: report.UnitJob,
-				Index: index, Total: total,
-				Pass: p.Pass, Step: p.Step, TotalSteps: p.TotalSteps,
-				Wrote: wrote,
-			})
-			if werr != nil {
-				// Best effort: a preview that cannot be written is not a
-				// reason to abandon a generation that is already paid for.
-				sink.Emit(report.Event{
-					Kind: report.KindPreviewFailed, Unit: report.UnitJob,
-					Index: index, Total: total, Err: werr.Error(),
-				})
-			}
-		}
-		if st.Status.Done() {
-			return st, asked, nil
-		}
-
-		// THE ONE CALL THIS WHOLE PATH EXISTS FOR, made once per job and not
-		// once per poll: POST /jobs/{id}/cancel is idempotent as far as
-		// anyone knows, but asking repeatedly while the server works through
-		// a 141-second FLUX.2 step would be a request a second against the
-		// program ember is waiting for.
-		//
-		// Polling CONTINUES after the ask. The server's own answer is what
-		// decides the outcome -- it may come back `cancelled` with nothing,
-		// or `completed` because the last step finished while the request was
-		// in flight -- and ember records whichever happened rather than
-		// assuming. Status.Done() already treats cancelled as terminal,
-		// which is the half of this feature that was finished first.
-		if pending != nil && stop.asked() {
-			asked, pending = true, nil
-			switch {
-			case !stop.server:
-				// NOT A REFUSAL, and the reasoning is on
-				// Capabilities.CancelGenerating. ember does not ask a server
-				// that says it cannot, because the 404 or 400 that came back
-				// would be reported as a transport problem rather than as
-				// the capability it is -- but the jobs after this one are
-				// ember's to drop, and in a batch they are most of the bill.
-				// What is left is to be explicit about the part that keeps
-				// billing.
-				sink.Emit(report.Event{
-					Kind: report.KindJobCancelled, Unit: report.UnitJob,
-					Index: index, Total: total,
-					Err: "this sd-server build does not report features.cancel_generating",
-				})
-			default:
-				cerr := c.Cancel(ctx, id)
-				e := report.Event{
-					Kind: report.KindJobCancelled, Unit: report.UnitJob,
-					Index: index, Total: total,
-				}
-				if cerr != nil {
-					// Reported and not returned. The generation is still
-					// running on a card that is still billing, so abandoning
-					// the poll here would lose the image it is about to
-					// produce AND the record of what it cost -- turning a
-					// failed cancel into a worse outcome than no cancel at
-					// all.
-					e.Err = cerr.Error()
-				}
-				sink.Emit(e)
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return sdserver.State{}, asked, ctx.Err()
-		case <-pending:
-			// Woken to ask at once rather than at the next poll. The backoff
-			// settles at two seconds, and a cancel that takes effect two
-			// seconds late is a cancel the operator presses again -- which
-			// is how a button that works comes to look like one that does
-			// not.
-		case <-time.After(wait):
-		}
-		wait = nextPoll(wait)
 	}
+	sink.Emit(report.Event{
+		Kind: report.KindJobProgress, Unit: report.UnitJob,
+		Index: index, Total: total,
+		Pass: f.Pass, Step: f.Step, TotalSteps: f.TotalSteps,
+		Wrote: wrote,
+	})
+	if werr != nil {
+		// Best effort: a preview that cannot be written is not a reason to
+		// abandon a generation that is already paid for.
+		sink.Emit(report.Event{
+			Kind: report.KindPreviewFailed, Unit: report.UnitJob,
+			Index: index, Total: total, Err: werr.Error(),
+		})
+	}
+}
+
+// collect brings home the files a worker named.
+//
+// THIS IS WHAT "an event names what landed" IS FOR. The images are on the
+// node's own disk -- not on the store, which bills by the gigabyte-month and
+// which nothing in ember deletes a file from -- and this fetch asks for
+// exactly the paths the worker wrote rather than tarring a tree and hoping.
+//
+// ON A CONTEXT THAT SURVIVES Ctrl-C, for the reason every other fetch here is:
+// the node is about to be destroyed either way, and these bytes have already
+// been paid for. An operator pressing Ctrl-C is the most likely way to reach
+// this function with images on a machine that is about to stop existing.
+//
+// WHAT IT COSTS, SAID PLAINLY: one `tar` over SSH per file, where the images
+// used to arrive inside the poll response ember was already reading. For a
+// 512-square image that is a few milliseconds of SSH session against the
+// 80-96 s the card spent producing it, and it buys a node that writes its
+// results down before anything fetches them -- so a dropped connection loses
+// the fetch rather than the picture.
+func (s served) collect(ctx context.Context, sink report.Sink, runDir string, index, total int, f control.Frame) error {
+	if len(f.Files) == 0 {
+		// The worker guards against this, and it is checked anyway because
+		// what it would produce is a "0 file(s), 0 B" event that reads as a
+		// job which finished and produced nothing.
+		return errors.New("the worker named no files in a landed frame")
+	}
+	if f.Dir == "" {
+		return errors.New("the worker named files without naming the directory they are in")
+	}
+
+	outs := make([]node.OutputPath, 0, len(f.Files))
+	wrote := make([]report.File, 0, len(f.Files))
+	for _, each := range f.Files {
+		if each.Name == "" || strings.ContainsRune(each.Name, '/') {
+			// A node is untrusted input. transfer.Extract's own containment
+			// would hold -- every write goes through an os.Root -- and the
+			// refusal is here as well because what this builds is a REMOTE
+			// path for a tar command, where a name with a slash in it means
+			// a directory nobody asked for rather than the file ember is
+			// about to report by that name.
+			return fmt.Errorf("the worker named a file as %q, which is not a single filename", each.Name)
+		}
+		outs = append(outs, node.OutputPath{Remote: path.Join(f.Dir, each.Name)})
+		wrote = append(wrote, report.File{Name: each.Name, Bytes: each.Bytes})
+	}
+
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputTimeout)
+	defer cancel()
+
+	res, err := transfer.Fetch(fetchCtx, s.runner, outs, runDir)
+	if err != nil {
+		return err
+	}
+	sink.Emit(report.Event{
+		Kind: report.KindJobImages, Unit: report.UnitJob,
+		Index: index, Total: total,
+		// What ARRIVED, from the fetch's own count, and the names from the
+		// frame. The two are the same files; the counts are the ones ember can
+		// stand behind, because they are of bytes that are on this disk.
+		Files: res.Files, Bytes: res.Bytes, Wrote: wrote,
+	})
+	return nil
 }

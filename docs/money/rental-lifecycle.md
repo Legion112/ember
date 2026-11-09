@@ -10,6 +10,24 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   own self-destruct timer; three copies computed at three call sites are three
   copies that can disagree, and the one that disagrees is the one that does not
   stop the bill.
+- **The node's own timer stops every child and not just sshd, which is what a
+  second supervised process cost.** `armDeadline` took sshd's `*exec.Cmd`, and
+  on a node that also runs a worker that would have stopped the one process
+  ember uses to *reach* the machine while the one *spending* the card carried
+  on: the connection goes, the generation continues, and nothing is watching.
+  A deadline that stops half a node is advisory, and the half it leaves
+  running is the expensive half. Measured as an exit code --
+  `TestArmDeadline_StopsEveryChildAndNotJustSshd` -- rather than inferred from
+  the shape of the change, because the old spelling is still the one that
+  compiles.
+- **The worker's own exit is a signal and not what ends the bill**, and the
+  plan that added it said otherwise: "a pod whose container exits stops
+  billing" is true of a container whose only process exits, and `embernode` is
+  PID 1 and stays. So what stops the bill is unchanged -- ember's destroy, or
+  this timer when ember is gone -- and the worker exiting is how ember learns
+  there is nothing left to pay for. See
+  [the control channel](../threat-model/control-channel.md) on why sshd
+  outlives the worker rather than the other way round.
 - **The deadline is not re-armable, and that is one invariant rather than a
   missing flag.** `cmd/embernode`'s `armDeadline` reads `EMBER_TTL_SECONDS`
   **once**, at container start, and nothing on the node listens for a change

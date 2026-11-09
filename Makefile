@@ -182,7 +182,31 @@ GO_LDFLAGS := -X github.com/Legion112/ember/internal/cli.Version=$(VERSION)
 # both the answer and its negation decide whether a seal reads the right
 # source. A floor below 100 on four lines would mean one of those four was
 # never run.
-COVER_PKGS := internal/repotree=100,internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=100,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=93,internal/statestore=88,internal/tunnel=100,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99,internal/tts=100,internal/logx=100
+COVER_PKGS := internal/repotree=100,internal/catalogue=96,internal/assets=91,internal/blob=97,internal/genstore=93,internal/queue=94,internal/webapi=92,internal/awssig=100,internal/s3=97,internal/workload=100,internal/transfer=95,internal/sshx=100,internal/provider/runpod=98,internal/httpx=98,internal/exposure=100,internal/reconcile=96,internal/node=100,internal/report=100,internal/loopback=100,internal/app=81,internal/cli=88,internal/provider=100,internal/keys=85,internal/hostkey=93,internal/statestore=88,internal/tunnel=100,internal/tunnel/sshdial=97,internal/provider/local=98,internal/dockerengine=100,internal/provision=92,internal/config=100,internal/session=96,internal/provider/providertest=98,internal/gpucheck=100,internal/nodemem=100,internal/sdserver=99,internal/tts=100,internal/logx=100,internal/control=92,internal/control/controltest=95,internal/worker=91
+# internal/control is at 92 against a measured 93.4, internal/worker at 91
+# against 91.3 and internal/control/controltest at 95 against 96.3 -- the
+# control channel between ember and the worker on a rented node.
+#
+# What internal/control cannot reach is the half of a websocket failure that
+# needs the library to fail: a write whose context expires mid-frame and a
+# marshal of a Frame whose json.RawMessage is not JSON. Every refusal it
+# exists for IS covered, through a rig that plays a node this build did not
+# produce -- a version from another tree, a binary message, bytes that are not
+# JSON, a second channel into one node.
+#
+# internal/worker is the lowest of the three and the gap is one shape: the
+# sends that fail because the channel has gone while a job is in flight. The
+# frames are written from the goroutine running the job, so provoking each one
+# means dropping a net.Pipe at a named instant between two polls, which is a
+# test about scheduling rather than about the worker. Everything that DECIDES
+# anything is covered against a real sd-server fake: what a cancel drops, when
+# the queue ends the work, which directory a job writes into, and what a frame
+# the two ends disagree about does.
+#
+# controltest is gated for internal/provider/providertest's reason: it is
+# production code by location and test support by purpose, so the floor is
+# what keeps the rig itself exercised rather than merely compiled. Its gap is
+# the dial that loses a race with a closed listener.
 # cmd/reap-labs joins the other cmd mains here for their reason and one of its
 # own: every statement in it is a Docker call or a line of output, the decisions
 # it could get wrong live in test/integration/harness/labdaemon, and a unit test

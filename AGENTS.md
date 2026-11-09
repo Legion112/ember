@@ -85,6 +85,13 @@ tested:
   else** — no image, no store, no mount, no argv, no assets. Nothing an
   operator writes in a config reaches a node as a command either: every argv
   ember sends over SSH is one ember built.
+- **ember and the worker on a rented node speak one channel, ember dials it,
+  and sshd's authentication is the channel's.** It answers on the node's own
+  loopback through `loopback.Listen`, so a non-loopback worker port is
+  unrepresentable rather than merely checked; a node image older than the
+  ember driving it is refused by version before any work is pushed; and a
+  node's reply is bounded, indexed against the batch ember pushed, and carries
+  no opinion about money.
 - A tar stream from a rented machine is untrusted input; containment is
   enforced twice, by two different mechanisms.
 
@@ -113,6 +120,16 @@ is using:
   bounded now, which is a trade taken at #204 rather than a seal that stopped
   holding. Packing is strict, so N>1 parallelises only work no live rental can
   serve.
+- **A node's deadline stops every child and not just sshd**, because the one
+  that spends the card is not the one ember reaches the node through.
+- **A worker writes its results to the node's own disk and never to a store.**
+  A store bills by the gigabyte-month and nothing in ember deletes a file off
+  one, so results there would leak exactly the way `/workspace` is a refused
+  mount point to prevent.
+- **The worker exits when its queue is empty *and* ember has said there is no
+  more work.** An empty queue between two requests of one drain loop is not
+  the end of a rental, and exiting there would throw away the resident weights
+  — 80-96 s per image to put back.
 
 The measurements behind each of those, the crossover points that decide a
 design, and the options that were refused — [docs/money.md](docs/money.md).
