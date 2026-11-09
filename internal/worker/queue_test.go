@@ -20,6 +20,37 @@ func job(i, total int) control.Frame {
 	return control.Frame{Kind: control.KindJob, Index: i, Total: total}
 }
 
+// nextWithin is queue.next with a deadline of its own.
+//
+// A WEDGE PRINTS NO `--- FAIL`, and this file's own reinstatement pass is what
+// said so: with the hang-up's `drained` taken out, the test below blocked for
+// the full four-minute package timeout and printed a goroutine dump instead of
+// a failure naming anything. Every assertion here that expects next to say
+// "there will be no more work" is an assertion about a call that BLOCKS when
+// it is wrong, so each one carries its own bound -- which is the rule the
+// browser labs already follow: race the thing you are waiting for against the
+// thing that means it will never happen.
+func nextWithin(t *testing.T, q *queue) (control.Frame, bool) {
+	t.Helper()
+	type answer struct {
+		f  control.Frame
+		ok bool
+	}
+	done := make(chan answer, 1)
+	go func() {
+		f, ok := q.next()
+		done <- answer{f, ok}
+	}()
+	select {
+	case a := <-done:
+		return a.f, a.ok
+	case <-afterLong():
+		t.Fatal("WEDGED: next blocked instead of saying there would be no more work, " +
+			"which is a hang rather than a failure and is why this carries its own deadline")
+		return control.Frame{}, false
+	}
+}
+
 // TestNextPoll_StartsFastAndCapsOut.
 //
 // The backoff exists because a flat two seconds measured SLOWER than no
@@ -75,7 +106,7 @@ func TestQueue_HandsBackWhatWasPushedInOrder(t *testing.T) {
 	q.push(control.Frame{Kind: control.KindDrained}, quiet())
 
 	for i := 1; i <= 3; i++ {
-		f, ok := q.next()
+		f, ok := nextWithin(t, q)
 		if !ok {
 			t.Fatalf("the queue ran dry at job %d", i)
 		}
@@ -83,7 +114,7 @@ func TestQueue_HandsBackWhatWasPushedInOrder(t *testing.T) {
 			t.Fatalf("got job %d, want %d", f.Index, i)
 		}
 	}
-	if _, ok := q.next(); ok {
+	if _, ok := nextWithin(t, q); ok {
 		t.Error("the queue produced a fourth item from three jobs")
 	}
 }
@@ -147,14 +178,14 @@ func TestQueue_ACancelDropsEveryQueuedJobAtOnce(t *testing.T) {
 
 	// What comes back is the cancellation to report and nothing else: the five
 	// jobs are gone.
-	f, ok := q.next()
+	f, ok := nextWithin(t, q)
 	if !ok {
 		t.Fatal("a cancel nobody has reported is work, and the queue said there was none")
 	}
 	if f.Kind != control.KindCancelled || f.InFlight {
 		t.Fatalf("got %+v, want a cancelled frame with no job in flight", f)
 	}
-	if next, ok := q.next(); ok {
+	if next, ok := nextWithin(t, q); ok {
 		t.Errorf("a job survived the cancel: %+v", next)
 	}
 }
@@ -177,7 +208,7 @@ func TestQueue_ACancelIsConsumedExactlyOnce(t *testing.T) {
 			t.Error("the cancel was taken twice")
 		}
 		q.push(control.Frame{Kind: control.KindDrained}, quiet())
-		if f, ok := q.next(); ok {
+		if f, ok := nextWithin(t, q); ok {
 			t.Errorf("next also reported the cancel the job in flight already handled: %+v", f)
 		}
 	})
@@ -185,7 +216,7 @@ func TestQueue_ACancelIsConsumedExactlyOnce(t *testing.T) {
 	t.Run("by next, in the gap between jobs", func(t *testing.T) {
 		q := newQueue()
 		q.push(control.Frame{Kind: control.KindCancel}, quiet())
-		f, ok := q.next()
+		f, ok := nextWithin(t, q)
 		if !ok || f.Kind != control.KindCancelled {
 			t.Fatalf("next = %+v, %v", f, ok)
 		}
@@ -204,7 +235,7 @@ func TestQueue_ACancelIsConsumedExactlyOnce(t *testing.T) {
 func TestQueue_ACancelAppliesToTheBatchItArrivedDuringAndNotTheNextOne(t *testing.T) {
 	q := newQueue()
 	q.push(control.Frame{Kind: control.KindCancel}, quiet())
-	if f, ok := q.next(); !ok || f.Kind != control.KindCancelled {
+	if f, ok := nextWithin(t, q); !ok || f.Kind != control.KindCancelled {
 		t.Fatalf("next = %+v, %v", f, ok)
 	}
 
@@ -213,7 +244,7 @@ func TestQueue_ACancelAppliesToTheBatchItArrivedDuringAndNotTheNextOne(t *testin
 	q.push(job(2, 2), quiet())
 	q.push(control.Frame{Kind: control.KindDrained}, quiet())
 	for i := 1; i <= 2; i++ {
-		f, ok := q.next()
+		f, ok := nextWithin(t, q)
 		if !ok || f.Kind != control.KindJob || f.Index != i {
 			t.Fatalf("the request after a cancelled one lost job %d: %+v, %v", i, f, ok)
 		}
@@ -232,7 +263,7 @@ func TestQueue_AHangUpEndsTheWorkAndCarriesItsReason(t *testing.T) {
 		q := newQueue()
 		q.push(job(1, 1), quiet())
 		q.hangUp(control.ErrClosed)
-		if _, ok := q.next(); ok {
+		if _, ok := nextWithin(t, q); ok {
 			t.Error("work survived the channel closing")
 		}
 		hungUp, err := q.endedBy()
@@ -257,7 +288,7 @@ func TestQueue_AHangUpEndsTheWorkAndCarriesItsReason(t *testing.T) {
 		q := newQueue()
 		q.push(control.Frame{Kind: control.KindCancel}, quiet())
 		q.hangUp(control.ErrClosed)
-		if f, ok := q.next(); ok {
+		if f, ok := nextWithin(t, q); ok {
 			// Reporting it would be a send on a channel that is already gone,
 			// which turns the ordinary end of a rental into a failure with a
 			// transport error in it.
