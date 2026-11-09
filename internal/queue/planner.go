@@ -98,6 +98,14 @@ type AppPlanner struct {
 	// reaches this -- it guards the shape.
 	Runs RunStore
 
+	// Fills serialises the store fills this process starts, one store at a
+	// time, so two slots cannot both rent a machine to fetch the same
+	// weights.
+	//
+	// Nil serialises nothing, which is what max_nodes: 1 needs: the plans are
+	// serial there and the second one finds the store full. See storefill.go.
+	Fills *StoreFills
+
 	// Commit is what this process has agreed to spend and not yet recorded,
 	// shared with the drain loop and with DirectRunner.
 	//
@@ -189,20 +197,18 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 		// operator did not ask for. A queue drains unattended, which is the
 		// case this is worth money in and the case nobody is watching to
 		// type the command.
-		if err := p.fillStore(ctx, cfg, missing); err != nil {
-			return nil, err
-		}
-		// Asked again rather than assumed. The sync verified every digest on
-		// the node, so this is not in doubt about the bytes -- what it
-		// confirms is that the store's own endpoint now lists them, which is
-		// the thing this planner acted on and the only claim it has made. A
-		// second miss is reported as what it is rather than fallen through,
-		// because falling through is the rental this exists to prevent.
-		plan, err = app.NewPlan(ctx, req, p.out())
-		if second, ok := app.IsAssetsMissing(err); ok {
-			return nil, fmt.Errorf("filled the store and %d asset(s) are still not listed on it (%w). "+
-				"The node verified their digests, so the bytes are there and the store's endpoint does not show them yet; "+
-				"nothing has been rented", len(second.Missing), err)
+		//
+		// AND ONE STORE IS FILLED BY ONE SLOT AT A TIME (#204). At
+		// max_nodes>1 two plans run at once, so both can be told the weights
+		// are missing and both can go and fetch the same fifty-six
+		// gigabytes -- a thing the one-rental loop made unrepresentable
+		// because the two plans were serial. See storefill.go for what the
+		// duplicate costs and why the lock is context-aware rather than a
+		// mutex.
+		if ferr := p.Fills.Fill(ctx, missing.Store, func() error {
+			return p.fillLocked(ctx, cfg, req, missing, &plan, &err)
+		}); ferr != nil {
+			return nil, ferr
 		}
 	}
 	if err != nil {
@@ -234,6 +240,75 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 	}
 
 	return appRental{plan: plan, out: p.out()}, nil
+}
+
+// fillLocked asks again, fills if it still has to, and asks once more.
+//
+// THE FIRST RE-ASK IS WHAT max_nodes ADDED, and it is the whole point of
+// holding the store's fill while this runs: another slot may have been
+// fetching these exact weights while this one waited, so the first thing to do
+// with the lock is ask the store's own endpoint rather than act on an answer
+// that is now minutes old. That is "Asked again rather than assumed" moved one
+// step earlier -- and it is why nothing here records what this process has
+// filled: the store is the authority, a flag would be a second one, and a
+// second one would be wrong the first time two requests on one store wanted
+// different assets.
+//
+// IT COSTS ONE CATALOGUE READ AND A HEAD PER ASSET ON A PATH THAT IS ABOUT TO
+// RENT FOR MINUTES, which is why the re-ask is unconditional rather than
+// guarded on whether anybody waited: a condition on "did I block" is a
+// condition somebody has to keep true, and the saving it buys is one HTTP
+// round trip in the case where a store is empty, which happens once per store.
+//
+// `plan` and `err` ARE WRITTEN THROUGH POINTERS because this runs inside a
+// closure that Fill calls, and what the caller needs back is the plan the
+// second ask produced. A return value would have meant Fill knowing what a
+// plan is.
+func (p AppPlanner) fillLocked(
+	ctx context.Context,
+	cfg config.Config,
+	req app.Request,
+	missing *app.AssetsMissingError,
+	plan *app.Plan,
+	err *error,
+) error {
+	if _, ok := app.IsAssetsMissing(*err); !ok {
+		// Cannot happen -- the caller only enters here with a missing-assets
+		// error -- and is answered rather than asserted, because the
+		// alternative is a nil dereference inside a closure on a path that
+		// rents.
+		return nil
+	}
+	*plan, *err = app.NewPlan(ctx, req, p.out())
+	if second, ok := app.IsAssetsMissing(*err); ok {
+		// Still missing with the fill held, so this slot is the one that
+		// fills it -- and it fills what the RE-ASK found rather than what the
+		// caller's own plan did, which is the point of asking again: another
+		// slot may have put some of these assets there while this one waited.
+		if ferr := p.fillStore(ctx, cfg, second); ferr != nil {
+			return ferr
+		}
+		// Asked again rather than assumed. The sync verified every digest on
+		// the node, so this is not in doubt about the bytes -- what it
+		// confirms is that the store's own endpoint now lists them, which is
+		// the thing this planner acted on and the only claim it has made. A
+		// second miss is reported as what it is rather than fallen through,
+		// because falling through is the rental this exists to prevent.
+		*plan, *err = app.NewPlan(ctx, req, p.out())
+		if third, ok := app.IsAssetsMissing(*err); ok {
+			return fmt.Errorf("filled the store and %d asset(s) are still not listed on it (%w). "+
+				"The node verified their digests, so the bytes are there and the store's endpoint does not show them yet; "+
+				"nothing has been rented", len(third.Missing), *err)
+		}
+		return nil
+	}
+	// ANOTHER SLOT FILLED IT WHILE THIS ONE WAITED, which is the saving: no
+	// second machine, no second fetch of the same weights, and `missing` is
+	// named in the line so an operator reading two requests on one store can
+	// see why only one of them rented a downloader.
+	_, _ = fmt.Fprintf(p.out(), "the store %q was filled by another rental while this request "+
+		"waited; nothing more to fetch\n", missing.Store)
+	return nil
 }
 
 // fillStore rents a machine with no card and has it fetch this run's weights.

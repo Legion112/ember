@@ -231,6 +231,13 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// which has the measurement and the two residues.
 	commit := &queue.Commitments{}
 
+	// AND ONE STORE IS FILLED BY ONE SLOT AT A TIME. At max_nodes>1 two plans
+	// run at once, so two slots can both be told a store is missing its
+	// weights and both go and rent a machine to fetch the same fifty-six
+	// gigabytes -- which the one-rental loop made unrepresentable by being
+	// serial. See queue/storefill.go.
+	fills := &queue.StoreFills{}
+
 	q := &queue.Queue{
 		Store: store,
 		// THE NODE CEILING, from the operator's own file. Any value below 1
@@ -255,7 +262,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		// one store on purpose -- see queue.RunStore.
 		Planner: queue.AppPlanner{
 			Config: cfg, Deps: d, AllowPaid: o.AllowPaid, Out: out,
-			Ledger: store, Runs: store, Commit: commit,
+			Ledger: store, Runs: store, Commit: commit, Fills: fills,
 			Log: o.Log,
 		},
 		Outputs: ps.Outputs,

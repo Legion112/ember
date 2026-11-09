@@ -53,6 +53,27 @@ import (
 //
 // AND THERE IS A FLOOR. A load that resolved nothing, or a `queue.Queue` that
 // moved file, would otherwise leave this asserting about no literals at all.
+//
+// IT COVERS THREE FIELDS AND NOT ONE, because max_nodes introduced three
+// whose nil or zero is TODAY'S BEHAVIOUR and whose absence is therefore
+// silent:
+//
+//   - `Queue.MaxNodes`, where a zero is one node;
+//   - `Queue.Commit` and `AppPlanner.Commit`, where a nil runs every ceiling
+//     check against a committed total of zero -- which is correct at one
+//     rental and is the ledger race at two;
+//   - `AppPlanner.Fills`, where a nil serialises nothing -- correct at one
+//     rental, and two machines fetching one store's weights at two.
+//
+// Every one of them had to default to the old behaviour, because every literal
+// in the suite predates the field; so for every one of them the production
+// wiring is the only thing that turns the mechanism on, and nothing but this
+// reports its absence. That is the #105 class three times over rather than
+// once. The two literals are checked for presence AND for the value being a
+// config this function bound where the value is a config read -- `Commit` and
+// `Fills` are process-wide values rather than config reads, so for those the
+// assertion is that the field is named at all, and that is said here rather
+// than implied by the code.
 func TestServe_WiresTheNodeCeilingIntoTheDrainLoop(t *testing.T) {
 	pkgs, err := packages.Load(&packages.Config{
 		// Production files only. The subject is what `ember serve` wires, and
@@ -78,36 +99,89 @@ func TestServe_WiresTheNodeCeilingIntoTheDrainLoop(t *testing.T) {
 				c := configObjects(pkg.TypesInfo, fn)
 				ast.Inspect(fn.Body, func(n ast.Node) bool {
 					lit, ok := n.(*ast.CompositeLit)
-					if !ok || !isQueueQueue(lit) {
+					if !ok {
 						return true
 					}
-					found++
-					checkQueueMaxNodes(t, pkg.Fset, pkg.TypesInfo, lit, c)
+					switch {
+					case isQueueType(lit, "Queue"):
+						found++
+						checkQueueMaxNodes(t, pkg.Fset, pkg.TypesInfo, lit, c)
+						requireNamed(t, pkg.Fset, lit, "Queue", "Commit",
+							"a nil Commitments runs every period-ceiling check against a "+
+								"committed total of zero, so two slots planning at once both "+
+								"see a half-spent day and the overshoot is bounded by "+
+								"max_nodes rather than by one rental (#204)")
+					case isQueueType(lit, "AppPlanner"):
+						found++
+						requireNamed(t, pkg.Fset, lit, "AppPlanner", "Commit",
+							"the planner is where the projection is known, so a nil here is "+
+								"the ledger race with nothing recording what this rental will "+
+								"cost (#204)")
+						requireNamed(t, pkg.Fset, lit, "AppPlanner", "Fills",
+							"a nil StoreFills serialises nothing, so two slots can both be "+
+								"told a store is missing its weights and both rent a machine "+
+								"to fetch the same fifty-six gigabytes (#204)")
+					}
 					return true
 				})
 			}
 		}
 	}
-	if found == 0 {
-		t.Fatal("found no production queue.Queue to check, so this guard asserted nothing: " +
-			"a zero MaxNodes reads as one node, so a literal that stopped naming it would " +
-			"pin an operator who wrote max_nodes: 2 to a single rental in silence")
+	// THE FLOOR IS TWO, because there are two literals to find and a walk that
+	// saw one of them would silently stop checking the other's fields. A
+	// higher floor would be a census of literals rather than a floor, which is
+	// the shape AGENTS.md records going wrong when the count is the assertion.
+	if found < 2 {
+		t.Fatalf("found %d production literal(s) to check and wanted at least 2 (a queue.Queue "+
+			"and a queue.AppPlanner), so this guard asserted nothing about one of them: every "+
+			"field it checks defaults to the old single-rental behaviour, so a literal that "+
+			"stopped naming one would be silent", found)
 	}
 }
 
-// isQueueQueue reports whether a literal builds a queue.Queue.
+// isQueueType reports whether a literal builds queue.<name>.
 //
 // ON THE SPELLING, for isDirectRunner's reason: this decides which literals to
-// LOOK AT, so a miss lands on the `found == 0` floor and fails, where
-// isConfigConfig decides what to ACCEPT and a miss there would pass. An import
-// alias is therefore a red at the floor and not a hole.
-func isQueueQueue(lit *ast.CompositeLit) bool {
+// LOOK AT, so a miss lands on the floor above and fails, where isConfigConfig
+// decides what to ACCEPT and a miss there would pass. An import alias is
+// therefore a red at the floor and not a hole.
+func isQueueType(lit *ast.CompositeLit, name string) bool {
 	sel, ok := lit.Type.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "Queue" {
+	if !ok || sel.Sel.Name != name {
 		return false
 	}
 	pkg, ok := sel.X.(*ast.Ident)
 	return ok && pkg.Name == "queue"
+}
+
+// requireNamed fails when a literal does not name a field, with the reason
+// that field's absence is silent.
+//
+// PRESENCE AND NOT A VALUE, which is weaker than the MaxNodes check beside it
+// and is said rather than left to be assumed: `Commit` and `Fills` are
+// process-wide values built in this function, not config reads, so there is no
+// bound object to compare an identity against. What that gives up is a literal
+// naming the field and handing it a fresh `&queue.Commitments{}` of its own --
+// which would serialise and account for nothing, because the whole point is
+// that every path shares ONE. Closing it would mean tracking which variable
+// each literal was handed and that the two literals were handed the SAME one,
+// which is the dataflow the #165 guard refuses to do; the two fields are three
+// lines apart in one function instead, where a reader can see it.
+func requireNamed(t *testing.T, fset *token.FileSet, lit *ast.CompositeLit, what, field, why string) {
+	t.Helper()
+	for _, el := range lit.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			t.Fatalf("%s: a queue.%s is built with a positional field this guard cannot read, "+
+				"so it cannot say whether %s is wired: name the fields",
+				fset.Position(el.Pos()), what, field)
+		}
+		if key, ok := kv.Key.(*ast.Ident); ok && key.Name == field {
+			return
+		}
+	}
+	t.Errorf("%s: this queue.%s does not set %s, and the default is the old single-rental "+
+		"behaviour: %s", fset.Position(lit.Pos()), what, field, why)
 }
 
 // checkQueueMaxNodes is the per-literal half.

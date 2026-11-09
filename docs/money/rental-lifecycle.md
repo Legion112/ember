@@ -125,6 +125,53 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
     of this process's whose rentals could be in flight — so they pass a
     committed total of zero, honestly, and a daemon's rental in flight reaches
     them exactly as it did before.
+- **ONE STORE IS FILLED BY ONE SLOT AT A TIME, AND AT ONE RENTAL THAT WAS
+  UNREPRESENTABLE.** `AppPlanner.Plan` rents a machine with no card when the
+  store a run needs is missing its weights — the measurement behind it is
+  **$0.61 of a $0.63 rental** spent downloading at a card's rate, 14m47s of an
+  RTX PRO 6000 at $2.49/hr with the GPU at 0% throughout. At one rental the two
+  plans were **serial**, so by the time the second ran the store was full and a
+  duplicate fill could not be expressed. With `max_nodes` > 1 two plans run at
+  once: both ask the store's endpoint, both are told the weights are missing,
+  and both rent a CPU machine to fetch the same fifty-six gigabytes.
+
+  **What the duplicate costs, so the fix is in proportion.** One extra
+  **$0.06/hour** machine for as long as the fetch takes — measured at
+  **eighty-one minutes for 56 GiB** over a home link, so about eight cents —
+  plus two writers into one mount. The writers are the half worth checking and
+  they are already safe: `embernode fetch` downloads under a temporary name and
+  renames into place only once the digest matches, so two fetches of one asset
+  race on an atomic rename and whichever lands is the right bytes. So this is
+  money and a pointless rental rather than corruption.
+
+  **It is the defect `TestStore_CreateMountRunDestroyRemove` is written
+  against, one layer up.** That lab's discriminator is **one** asset fetch
+  across two runs, and what it refuses is a second node re-downloading what the
+  first already placed. A duplicate fill is that, with the two nodes
+  concurrent instead of consecutive.
+
+  **The mechanism is a lock per store and a re-ask under it**, not a record of
+  what this process has filled. `Plan` already re-asks the store's own endpoint
+  after a fill — *"Asked again rather than assumed"* — and that is the
+  authority here too: the second slot waits, then asks, and finds the weights
+  the first one put there. A "filled in this process" flag would be a second,
+  invented source of truth for a question the store answers, and it would be
+  wrong the first time two requests on one store wanted different assets. The
+  cost is one catalogue read and a HEAD per asset on a path that is about to
+  rent for minutes, which happens once per empty store.
+
+  **The wait is context-aware and that is not a detail.** A `sync.Mutex` cannot
+  be abandoned, so a slot waiting on another slot's fetch would hold up
+  `queue.Run`'s shutdown for the length of it — up to those eighty-one
+  minutes, on a process whose whole shutdown story is that it waits for every
+  slot. So it is a `select` on the caller's own context, and a cancelled one
+  ends that request while the fill that is running carries on and its own slot
+  destroys its node.
+
+  **And the residue is `Commitments`', unchanged:** another ember process
+  filling the same store is invisible to this one. Two `ember serve`s over one
+  store would both fetch, exactly as they do today, and the only thing that
+  would close it is a lock on the store itself.
 - **A refusal names the committed figure only when there is one.** An operator
   reading a refusal over a half-spent day has to be able to reconcile it with
   what `ember spend` says, and the only thing that explains the gap is a rental

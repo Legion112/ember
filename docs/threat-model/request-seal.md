@@ -105,7 +105,13 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
      counter-intuitive and is stated rather than discovered: `max_nodes: 2`
      parallelises **incompatible** work only -- a different provider, card or
      kind -- and a homogeneous queue behaves exactly as it did at one node.
-  4. **The period ceilings stop being the backstop and become the primary
+  4. **One store is filled by one slot at a time.** The planner rents a
+     machine with no card when a store is missing its weights, and at one
+     rental the two plans were serial so a duplicate could not be expressed.
+     At N it can: `queue.StoreFills` serialises per store and the second slot
+     re-asks the store's own endpoint under the lock rather than acting on an
+     answer minutes old. See [the rental lifecycle](../money/rental-lifecycle.md).
+  5. **The period ceilings stop being the backstop and become the primary
      money guard**, which is the status #204 predicted they would need. They
      already project against a real ledger before anything is created; what N
      breaks is what that ledger can SEE, and `queue.Commitments` is the
@@ -206,6 +212,50 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   dropped so a null fails the whole envelope.
 
   Green: a reworded comment.
+
+  **AND A THIRD PASS FOR THE STORE FILL, THE WIDENED WIRING GUARD AND THE SINK
+  ROUTING -- in which TWO OF MY OWN TESTS WERE GREEN AGAINST THE DEFECT THEY
+  WERE WRITTEN FOR, both of them the expected-value trap and both found by
+  asking why a case went the way it did rather than by review.**
+
+  `TestFill_TwoStoresDoNotWaitForEachOther` is the assertion that stops the
+  per-store lock being satisfied by one global lock, and it **passed against a
+  global lock**: it waited twenty seconds for the second fill to start and the
+  held fill gave up after ten, so a global lock delivered the second at t=10s,
+  inside the deadline. The two bounds are an order of magnitude apart the other
+  way now -- the fill is held for a minute and the second has three seconds --
+  and the case is red at exactly that assertion.
+
+  `TestAppPlanner_TwoSlotsDoNotBothRentAMachineToFillOneStore` asserted the
+  peak number of fills in flight, which the LOCK makes one -- and a planner
+  that serialised and then filled anyway keeps that peak at one while fetching
+  fifty-six gigabytes twice, serially. So the peak assertion was green against
+  a deleted re-ask. The fake's store now answers for the asset from the moment
+  a fill starts, which is what another slot's `embernode fetch` looks like from
+  the store's own endpoint, and the discriminator is the TOTAL number of fills:
+  one with the re-ask, two without. The two assertions are independent, and the
+  fake's fill FAILS throughout -- which is the design rather than a
+  convenience: what the waiter asks is the store and not the other slot, so a
+  "this process filled it" flag would have been wrong here, where the fill
+  failed and the weights arrived anyway.
+
+  **One case reported BUILD-ERROR rather than a verdict, and the reason is a
+  stronger guard than the test.** Deleting `Fills: fills` from `cmd_serve`
+  alone leaves `fills` declared and not used, so the tree does not compile --
+  the harness refusing to read a non-compiling tree as a failing suite. Run as
+  the deletion somebody would actually make, field and value together, it is
+  red at the wiring guard. Worth recording because it means forgetting that one
+  field is caught by the COMPILER, which `Commit` is not: that value has two
+  readers, so dropping one of them compiles, and the guard is the only thing
+  that reports it.
+
+  Red where expected across that pass: the fill not serialised at all; one
+  global lock; a mutex in place of the abandonable wait; the re-ask deleted;
+  the planner's `Fills` and `Commit` and the queue's `Commit` each dropped from
+  the wiring; the guard narrowed to one literal kind, which is its floor; and
+  one event stream for the whole process, which is red at
+  `TestRun_EachSlotsEventsLandOnItsOwnRequest` at BOTH halves -- one request
+  empty and the other carrying its neighbour's node output.
 
   **AND THE BELT-AND-BRACES MEASUREMENT, because belt and braces reads exactly
   like a dead gate.** With each new guard DELETED and its defect still in
