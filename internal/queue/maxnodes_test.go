@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -675,4 +676,99 @@ func TestHolding_ASlotHandsTheEntryOverRatherThanAccumulating(t *testing.T) {
 		t.Error("a request was still held after the rental ended, which makes the restart " +
 			"advice unreachable for the state it IS true of")
 	}
+}
+
+// TestRun_EachSlotsEventsLandOnItsOwnRequest, which `queue.sinks` makes true
+// by construction and which nothing asserted.
+//
+// WHY IT NEEDED A TEST AT ALL. `sinks` is a map keyed by request id, so two
+// slots emitting at once get two streams and the property holds without
+// anybody arranging it -- which is exactly the kind of "holds by construction"
+// this repository has been wrong about before. What makes it worth an exit
+// code is what depends on it: `TestServe_UpOverTheSocket` asserts that a
+// DETACHED operator's only carrier -- the node's own bytes, through
+// `report.Writer` onto their request's event stream -- reaches them. At one
+// rental there was one stream in flight and no way to cross them; at N there
+// are N, and the failure would be an operator reading somebody else's node's
+// output as their own, with their own missing.
+//
+// THE SEQUENCE NUMBERS ARE THE OTHER HALF. Two numberings for one request is
+// what `sinks` is memoised against -- `genstore`'s INSERT OR REPLACE on
+// `(request, seq)` makes each event overwrite the last, which once left a
+// whole generation as one row -- so the assertion is that each stream is
+// numbered from 1 with no gaps and no repeats, which a shared counter across
+// two slots would break.
+func TestRun_EachSlotsEventsLandOnItsOwnRequest(t *testing.T) {
+	p := newFleetPlanner()
+	q, st := fleet(t, p, 2)
+	image := enqueueKind(t, st, genstore.KindSD, "rtx2080ti", "an image")
+	speech := enqueueKind(t, st, genstore.KindTTS, "rtx2080ti")
+
+	// Each rental emits a line naming the request it is for, which is what
+	// `embernode fetch`'s stdout is on the real path: bytes out of the
+	// container, onto this request's stream and no other.
+	q.Planner = loggingPlanner{p: p}
+
+	stop := runLoop(t, q, p)
+	waitFor(t, 20*time.Second, "both rentals to be open",
+		func() bool { return p.gate.now() == 2 })
+	stop()
+
+	for _, c := range []struct{ id, want, other genstore.ReqID }{
+		{image, image, speech},
+		{speech, speech, image},
+	} {
+		es, err := st.Events(t.Context(), c.id, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var text string
+		for _, e := range es {
+			if e.Kind == report.KindLog {
+				text += e.Text
+			}
+		}
+		if !strings.Contains(text, "for "+string(c.want)) {
+			t.Errorf("request %s has none of its own node's output, so a detached operator's "+
+				"only carrier is empty: %q", c.id, text)
+		}
+		if strings.Contains(text, "for "+string(c.other)) {
+			t.Errorf("request %s carries the OTHER rental's node output, so an operator reads "+
+				"somebody else's machine as their own: %q", c.id, text)
+		}
+		// Numbered from one, with no gaps and no repeats: a counter shared
+		// across two slots would make each event overwrite the last.
+		for i, e := range es {
+			if e.Seq != int64(i+1) {
+				t.Errorf("request %s event %d has seq %d, so the two slots are not numbering "+
+					"their streams independently", c.id, i, e.Seq)
+				break
+			}
+		}
+	}
+}
+
+// loggingPlanner is the fleet planner with each rental emitting a line that
+// names the request it is serving.
+type loggingPlanner struct{ p *fleetPlanner }
+
+func (l loggingPlanner) Plan(_ context.Context, r genstore.Request) (Rental, error) {
+	return loggingRental{p: l.p, gpu: r.GPU, req: r.ID, hold: l.p.hold(r.GPU)}, nil
+}
+
+type loggingRental struct {
+	p    *fleetPlanner
+	gpu  string
+	req  genstore.ReqID
+	hold chan struct{}
+}
+
+func (r loggingRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
+	sink.Emit(report.Event{Kind: report.KindLog, Text: "bytes for " + string(r.req) + "\n"})
+	return fleetRental{p: r.p, gpu: r.gpu, hold: r.hold}.WithServed(ctx, sink, fn)
+}
+
+func (r loggingRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error {
+	sink.Emit(report.Event{Kind: report.KindLog, Text: "bytes for " + string(r.req) + "\n"})
+	return fleetRental{p: r.p, gpu: r.gpu, hold: r.hold}.WithSpoken(ctx, sink, fn)
 }
