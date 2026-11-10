@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 
 	"github.com/coder/websocket"
@@ -86,7 +87,7 @@ func TestRawNode_CanSaySomethingControlServeNeverWould(t *testing.T) {
 // test carries its own deadline, and a rig is the one place a hang is easiest
 // to introduce.
 func TestDial_AfterTheListenerIsClosedIsRefusedRatherThanBlocking(t *testing.T) {
-	l := &pipeListener{conns: make(chan net.Conn), closed: make(chan struct{})}
+	l := NewPipe()
 	_ = l.Close()
 
 	if _, err := l.DialContext(t.Context(), "tcp", "x"); !errors.Is(err, net.ErrClosed) {
@@ -107,6 +108,40 @@ func TestDial_AfterTheListenerIsClosedIsRefusedRatherThanBlocking(t *testing.T) 
 	}
 	if got := l.Addr().Network(); got != "pipe" {
 		t.Errorf("Network = %q", got)
+	}
+}
+
+// TestClose_IsIdempotentUnderTwoClosersAtOnce, which the sequential version
+// above is not a test of.
+//
+// THE DIFFERENCE IS THE WHOLE DEFECT. Close was a select on the channel with a
+// `default` that closed it -- check-then-act, which two closes in a row cannot
+// break and two at the same time can: both reach the default arm and the
+// second panics with "close of closed channel". Both closes happen in
+// practice, because control.Serve closes the server (which closes its
+// listener) while the test's own cleanup closes it too.
+//
+// It went red on CI inside TestJobLimit_IsInForceAtTheWorkersEnd, which makes
+// no claim about any of this and was simply the longest-lived user of the rig
+// -- so the panic took down a test that had nothing to do with it, which is
+// the worst shape a rig failure can have. Reproduced in 5 of 16 stressed
+// instances before the fix, and this is the version that does not need a
+// stress to say so.
+func TestClose_IsIdempotentUnderTwoClosersAtOnce(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		l := NewPipe()
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for c := 0; c < 4; c++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_ = l.Close()
+			}()
+		}
+		close(start)
+		wg.Wait()
 	}
 }
 

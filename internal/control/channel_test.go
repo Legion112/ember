@@ -187,6 +187,76 @@ func TestRecv_RefusesAFrameItDidNotExpect(t *testing.T) {
 	}
 }
 
+// TestServe_WaitsForTheSessionWhenTheNodeIsStopped.
+//
+// A WEBSOCKET HANDLER HAS HIJACKED ITS CONNECTION, and `net/http` neither
+// cancels a hijacked request's context nor closes the connection on
+// `Server.Close` -- its own documentation says Close "does not attempt to
+// close (and does not even know about) any hijacked connections". So a
+// session given `r.Context()` was a session nothing could interrupt: Serve
+// returned on a SIGTERM while the worker carried on polling a card, and what
+// ended it was the process exiting underneath it.
+//
+// That is the wrong mechanism for the thing that stops the bill when an
+// operator's laptop dies. Both halves are asserted here: the session's context
+// is cancelled, and Serve does not return until the session has.
+//
+// FOUND AS A TEST'S OWN TempDir BEING REMOVED while a worker was still
+// creating a directory inside it -- 1 of 24 stressed instances -- which is
+// this rig's cleanup claiming to wait for the session and waiting for Serve
+// instead.
+func TestServe_WaitsForTheSessionWhenTheNodeIsStopped(t *testing.T) {
+	ctx, stopNode := context.WithCancel(context.Background())
+
+	ln := controltest.NewPipe()
+	noticed := make(chan error, 1)
+	left := make(chan struct{})
+	served := make(chan error, 1)
+	go func() {
+		served <- control.Serve(ctx, ln, controltest.Log(t), func(sctx context.Context, c *control.Conn) error {
+			// What a worker does: block on a read until something ends it.
+			_, err := c.Recv(sctx)
+			noticed <- err
+			// Long enough that a Serve which did not wait would certainly
+			// have returned first.
+			time.Sleep(300 * time.Millisecond)
+			close(left)
+			return err
+		})
+	}()
+
+	c, err := control.Open(t.Context(), ln.DialContext)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer c.Abort()
+
+	stopNode()
+
+	select {
+	case err := <-noticed:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the session's read ended with %v, want context.Canceled: a session that "+
+				"cannot be interrupted is a card nothing releases", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("WEDGED: the session never noticed the node being stopped, so a deadline would " +
+			"stop sshd and leave a generation running")
+	}
+
+	select {
+	case <-served:
+		select {
+		case <-left:
+		default:
+			t.Error("Serve returned while the session was still running, so a worker goroutine " +
+				"outlives the thing that started it")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("WEDGED: Serve did not return after the session did")
+	}
+}
+
 // TestRecv_ATidyCloseIsErrClosed, over the real socket.
 //
 // ember's event loop and the worker's reader both act on this, and they act

@@ -349,6 +349,38 @@ func runOne(ctx context.Context, c *control.Conn, q *queue, f control.Frame, cap
 		// label lives.
 		apiErr = st.Err.Error()
 	}
+
+	// A JOB THAT DID NOT COMPLETE ENDS THE BATCH, AND THE WORKER IS WHAT HAS
+	// TO SAY SO NOW THAT IT HOLDS THE QUEUE.
+	//
+	// This was a money defect and CI found it before a card did. ember used to
+	// hold the batch and returned on the first job the server refused, so job
+	// two was never submitted: "a batch whose first job the server refused is
+	// not a batch to keep paying for". With the queue on the node, ember
+	// returning an error stops EMBER -- and the worker, one frame later, took
+	// the next job off its own queue and put it on the card. Nothing in the
+	// rental's accounting would have shown it: the request's row ends at the
+	// failure, and the image job two produced is written to a directory the
+	// fetch for that request never looks at. A card paid for work whose
+	// premise an operator is at that moment re-examining.
+	//
+	// REPRODUCED RATHER THAN ARGUED, twice over and both under contention: on
+	// CI as "submitted 2 job(s) after a failure, want 1", and locally in 1 of
+	// 24 stressed instances as a results directory being created while the
+	// test's own cleanup was removing it -- the worker starting job two,
+	// caught by the filesystem instead of by the counter.
+	//
+	// Cancelled is dropped here as well as by the cancel path, and the two do
+	// not overlap: that path drops the queue when the ASK arrives, and this
+	// one covers a job the server cancelled with nobody asking -- which ember
+	// reads as a plain failure, so the batch is over for the same reason.
+	if st.Status != sdserver.StatusCompleted || apiErr != "" {
+		if dropped := q.dropBatch(); dropped > 0 {
+			o.Log.Warn("a job did not complete, so the rest of this batch will not be started",
+				"index", f.Index, "status", st.Status.String(), "dropped", dropped, "err", apiErr)
+		}
+	}
+
 	return c.Send(ctx, control.Frame{
 		Kind: control.KindEnded, Index: f.Index, Total: f.Total,
 		Status: st.Status.String(), Cancelled: asked, Err: apiErr,
@@ -589,6 +621,24 @@ func (q *queue) next() (control.Frame, bool) {
 	f := q.items[0]
 	q.items = q.items[1:]
 	return f, true
+}
+
+// dropBatch forgets the jobs ember pushed and is no longer waiting for, and
+// reports how many there were.
+//
+// SEPARATE FROM THE CANCEL PATH ALTHOUGH IT DOES THE SAME THING TO THE SLICE,
+// because the two are different facts and only one of them is reported up the
+// channel: a cancel is the operator asking and carries an event, and this is
+// the batch being over because a job of it failed, which ember learns from the
+// `ended` frame it is already reading. Sharing one method would have made the
+// cancel's `pending` flag part of this, and a failure would then have been
+// reported as a cancellation -- a request nobody stopped recorded as stopped.
+func (q *queue) dropBatch() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	n := len(q.items)
+	q.items = nil
+	return n
 }
 
 // takeCancel reports whether ember has asked for the job in flight to stop,

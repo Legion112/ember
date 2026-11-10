@@ -443,6 +443,149 @@ func TestSession_NumbersAJobThatNamesNothing(t *testing.T) {
 	}
 }
 
+// TestSession_AJobThatDidNotCompleteStopsTheBatch.
+//
+// THIS IS A MONEY DEFECT CI FOUND BEFORE A CARD DID, and the test is written
+// where the fact lives rather than where the symptom appeared. ember used to
+// hold the batch and returned on the first job the server refused, so job two
+// was never submitted: "a batch whose first job the server refused is not a
+// batch to keep paying for". With the queue on the node, ember returning an
+// error stops EMBER -- and the worker, one frame later, took the next job off
+// its own queue and put it on the card.
+//
+// Nothing in the accounting would have shown it. The request's row ends at the
+// failure, and whatever job two produced lands in a directory the fetch for
+// that request never looks at: a card paid for work whose premise an operator
+// is at that moment re-examining.
+//
+// IT IS DETERMINISTIC AND THE TWO THAT CAUGHT IT WERE NOT. CI saw "submitted 2
+// job(s) after a failure, want 1" once; a local stress of 24 instances saw it
+// once, as a results directory being created while the test's own cleanup was
+// removing it. Both are ember's view of the worker, which is a race by
+// construction -- ember is returning while the worker is still running. This
+// one asks the worker, after it has gone: by the time `done` arrives the
+// worker has made every submission it is ever going to make.
+func TestSession_AJobThatDidNotCompleteStopsTheBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, body string
+	}{
+		{
+			"the server refused it", "failed",
+			`{"id":"j1","status":"failed","error":{"code":"invalid_request","message":"width must be a multiple of 16"}}`,
+		},
+		{
+			// A job the server cancelled with nobody asking, which ember
+			// reads as a plain failure -- so the batch is over for the same
+			// reason, and it reaches this through a different branch from the
+			// cancel path's.
+			"the server cancelled it with nobody asking", "cancelled",
+			`{"id":"j1","status":"cancelled"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu        sync.Mutex
+				submitted int
+			)
+			gen := fakeGen(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/sdcpp/v1/img_gen":
+					mu.Lock()
+					submitted++
+					mu.Unlock()
+					_, _ = fmt.Fprint(w, `{"id":"j1","status":"queued"}`)
+				default:
+					_, _ = fmt.Fprint(w, tc.body)
+				}
+			})
+
+			ember, done := started(t, Options{Gen: gen})
+			for i := 1; i <= 3; i++ {
+				push(t, ember, i, 3, fmt.Sprintf("j%d", i))
+			}
+			// Drained straight after, which is what ember does when a request
+			// fails: the rental ends. The worker therefore has both facts and
+			// nothing to wait for.
+			if err := ember.Send(t.Context(), control.Frame{Kind: control.KindDrained}); err != nil {
+				t.Fatal(err)
+			}
+
+			var ended int
+			for {
+				f, err := ember.Recv(t.Context())
+				if err != nil {
+					t.Fatalf("recv: %v", err)
+				}
+				if f.Kind == control.KindEnded {
+					ended++
+					if f.Status != tc.status {
+						t.Errorf("job %d ended as %q, want %q", f.Index, f.Status, tc.status)
+					}
+				}
+				if f.Kind == control.KindDone {
+					break
+				}
+			}
+
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("the worker exited with %v", err)
+				}
+			case <-afterLong():
+				t.Fatal("the worker did not exit")
+			}
+
+			// The whole claim, asked of the generation server rather than of
+			// ember: exactly one job reached the card.
+			mu.Lock()
+			defer mu.Unlock()
+			if submitted != 1 {
+				t.Errorf("%d job(s) reached the generation server, want 1: the two behind a job "+
+					"that did not complete are the money, and ember has already stopped reading", submitted)
+			}
+			if ended != 1 {
+				t.Errorf("%d job(s) ended, want 1", ended)
+			}
+		})
+	}
+}
+
+// TestSession_ACompletedJobDoesNotStopTheBatch is the negative half, without
+// which "stop the batch" is satisfied by a worker that stops after every job.
+func TestSession_ACompletedJobDoesNotStopTheBatch(t *testing.T) {
+	gen := fakeGen(t, genScript(t))
+	ember, done := started(t, Options{Gen: gen})
+	for i := 1; i <= 3; i++ {
+		push(t, ember, i, 3, fmt.Sprintf("j%d", i))
+	}
+	if err := ember.Send(t.Context(), control.Frame{Kind: control.KindDrained}); err != nil {
+		t.Fatal(err)
+	}
+
+	var ended int
+	for {
+		f, err := ember.Recv(t.Context())
+		if err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+		if f.Kind == control.KindEnded {
+			ended++
+		}
+		if f.Kind == control.KindDone {
+			break
+		}
+	}
+	if ended != 3 {
+		t.Errorf("%d job(s) of 3 ended, want all of them: a batch nothing went wrong in runs to the end", ended)
+	}
+	select {
+	case <-done:
+	case <-afterLong():
+		t.Fatal("the worker did not exit")
+	}
+}
+
 // TestSession_AFailedSubmissionStopsTheWorker.
 //
 // NOT RETRIED, anywhere: a transport failure on a submission is ambiguous --

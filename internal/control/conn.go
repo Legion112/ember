@@ -208,6 +208,36 @@ func Serve(ctx context.Context, ln net.Listener, log *slog.Logger, fn func(conte
 	var taken atomic.Bool
 	done := make(chan error, 1)
 
+	// THE SESSION'S CONTEXT IS THIS ONE AND NOT THE REQUEST'S, which is a
+	// correction rather than a preference. A websocket handler has hijacked
+	// its connection, and `net/http` neither cancels a hijacked request's
+	// context nor closes the connection on `Server.Close` -- it says so: Close
+	// "does not attempt to close (and does not even know about) any hijacked
+	// connections". So a session given `r.Context()` is a session nothing can
+	// interrupt: on SIGTERM this function returned while the worker carried on
+	// polling a card, and what ended it was the process exiting underneath it.
+	//
+	// The deadline is the thing that stops the bill when the operator's laptop
+	// dies, so "the card is released when the process happens to exit" is the
+	// wrong mechanism to leave it resting on. Derived from ctx, the session's
+	// own reads and writes fail with context.Canceled and the worker logs that
+	// it was stopped mid-job.
+	//
+	// A dropped connection still ends it, from the other direction: the
+	// websocket read returns an error at once, which is the case ErrClosed is
+	// for.
+	sessionCtx, endSession := context.WithCancel(ctx)
+	defer endSession()
+	// Closed when the session has actually returned. The cleanup in
+	// controltest claimed to wait for this and was waiting for Serve instead,
+	// which let a worker goroutine outlive the test that started it -- caught
+	// as a test's own TempDir being removed while the worker was creating a
+	// directory inside it.
+	finished := make(chan struct{})
+	var once sync.Once
+	sessionOver := func() { once.Do(func() { close(finished) }) }
+	defer sessionOver()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
 		if !taken.CompareAndSwap(false, true) {
@@ -233,15 +263,16 @@ func Serve(ctx context.Context, ln net.Listener, log *slog.Logger, fn func(conte
 		// because a job can carry an init image; see JobLimit.
 		c.ws.SetReadLimit(JobLimit)
 		defer c.Abort()
+		defer sessionOver()
 
 		// The version goes first and before anything is read, so ember can
 		// refuse an image that predates it without having pushed any work.
-		if err := c.Send(r.Context(), Frame{Kind: KindHello, Version: Version}); err != nil {
+		if err := c.Send(sessionCtx, Frame{Kind: KindHello, Version: Version}); err != nil {
 			done <- err
 			return
 		}
 		log.Info("control channel open", "remote", r.RemoteAddr, "version", Version)
-		done <- fn(r.Context(), c)
+		done <- fn(sessionCtx, c)
 	})
 
 	srv := &http.Server{
@@ -265,6 +296,35 @@ func Serve(ctx context.Context, ln net.Listener, log *slog.Logger, fn func(conte
 		return fmt.Errorf("the worker's control listener stopped: %w", err)
 	case <-ctx.Done():
 		_ = srv.Close()
+		// AND THE SESSION IS WAITED FOR, bounded, which is the half that was
+		// missing. srv.Close does not touch a hijacked connection, so without
+		// this the worker goroutine outlives the function that started it --
+		// on a node that is only a window before the process exits, and in a
+		// test it is a goroutine still writing files after the test has
+		// finished. endSession is what unblocks it; this is what proves it
+		// went.
+		//
+		// Bounded because the alternative is a node that cannot be stopped:
+		// this path is a deadline or a `docker stop`, and a session that will
+		// not return must not be able to hold either. Reported rather than
+		// waited out for ever -- the node's log is the only record of a worker
+		// that had to be abandoned.
+		endSession()
+		select {
+		case <-finished:
+		case <-time.After(sessionStopTimeout):
+			log.Error("the session did not stop when the node was told to; abandoning it",
+				"after", sessionStopTimeout)
+		}
 		return ctx.Err()
 	}
 }
+
+// sessionStopTimeout bounds how long a stopped node waits for its session.
+//
+// Short: what it is waiting for is a poll loop noticing a cancelled context
+// between two polls, and the poll cadence caps at two seconds. Anything longer
+// than a few of those is a session that is not going to notice, and holding a
+// container's shutdown on it would turn a deadline into a ten-second grace
+// period and then a kill.
+const sessionStopTimeout = 10 * time.Second

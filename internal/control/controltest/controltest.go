@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,7 +45,7 @@ import (
 func Node(t *testing.T, fn func(context.Context, *control.Conn) error) control.DialFunc {
 	t.Helper()
 
-	ln := &pipeListener{conns: make(chan net.Conn), closed: make(chan struct{})}
+	ln := NewPipe()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	served := make(chan error, 1)
@@ -79,7 +80,7 @@ func Node(t *testing.T, fn func(context.Context, *control.Conn) error) control.D
 func RawNode(t *testing.T, fn func(context.Context, *websocket.Conn) error) control.DialFunc {
 	t.Helper()
 
-	ln := &pipeListener{conns: make(chan net.Conn), closed: make(chan struct{})}
+	ln := NewPipe()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	mux := http.NewServeMux()
@@ -141,19 +142,31 @@ func Log(t *testing.T) *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// pipeListener is a net.Listener over net.Pipe, plus the dialler that feeds
+// NewPipe is a listener and the dialler that feeds it.
+//
+// Exported for the one test that has to call control.Serve itself, with a
+// context of its own, because what it is about is what Serve does when the
+// node is stopped -- which the rig above cannot show, since the rig is the
+// thing doing the stopping.
+func NewPipe() *Pipe {
+	return &Pipe{conns: make(chan net.Conn), closed: make(chan struct{})}
+}
+
+// Pipe is a net.Listener over net.Pipe, plus the dialler that feeds
 // it.
 //
 // Each dial makes a fresh pipe and hands one end over. That is what lets
 // tunnel.WaitReady's dial-and-close land on this listener the way it lands on
 // a node -- the connection is accepted, carries no HTTP request, and goes away
 // -- and the channel ember actually uses be the next one.
-type pipeListener struct {
+type Pipe struct {
 	conns  chan net.Conn
 	closed chan struct{}
+
+	closeOnce sync.Once
 }
 
-func (l *pipeListener) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+func (l *Pipe) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
 	ours, theirs := net.Pipe()
 	select {
 	case l.conns <- ours:
@@ -165,7 +178,7 @@ func (l *pipeListener) DialContext(ctx context.Context, _, _ string) (net.Conn, 
 	}
 }
 
-func (l *pipeListener) Accept() (net.Conn, error) {
+func (l *Pipe) Accept() (net.Conn, error) {
 	select {
 	case c := <-l.conns:
 		return c, nil
@@ -177,16 +190,26 @@ func (l *pipeListener) Accept() (net.Conn, error) {
 	}
 }
 
-func (l *pipeListener) Close() error {
-	select {
-	case <-l.closed:
-	default:
-		close(l.closed)
-	}
+// Close is idempotent, and it takes a sync.Once to be so.
+//
+// IT WAS A SELECT ON THE CHANNEL WITH A `default` THAT CLOSED IT, which is
+// check-then-act and not idempotent at all: two concurrent closes both reach
+// the default arm and the second panics with "close of closed channel". Both
+// closes happen in practice -- control.Serve closes the server, which closes
+// its listener, while the test's own cleanup closes it too -- and the panic
+// takes down whichever test is running rather than the one that caused it.
+//
+// It went red on CI inside TestJobLimit_IsInForceAtTheWorkersEnd, which makes
+// no claim about any of this and was simply the longest-lived user of the rig.
+// Reproduced locally in 5 of 16 stressed instances before this line changed;
+// the test this package already had closed twice SEQUENTIALLY, which is the
+// arrangement that cannot fail.
+func (l *Pipe) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
 	return nil
 }
 
-func (l *pipeListener) Addr() net.Addr { return pipeAddr{} }
+func (l *Pipe) Addr() net.Addr { return pipeAddr{} }
 
 type pipeAddr struct{}
 
