@@ -1292,6 +1292,81 @@ func TestGenerate_TellsTheWorkerToDropABatchItGaveUpOn(t *testing.T) {
 	}
 }
 
+// TestGenerate_DropsWhatItAlreadyPushedWhenALaterJobIsRefused.
+//
+// THE PUSH LOOP HAD TO BE INSIDE THE ABANDON DEFER'S REACH, which is the one
+// ordering in that function that was wrong. `Job.Body` refuses an `extra:` key
+// the body owns -- operator input, and refused per job -- so job three of a
+// batch can be refused after jobs one and two are already on the worker's
+// queue, on a channel that is perfectly healthy. Returning from the middle of
+// the loop left a card working through those two for a request that had ended.
+//
+// WHAT IS NOT TESTED HERE, AND IT IS A FINDING RATHER THAN A GAP: the other
+// way a push can fail is the send itself timing out, and ember cannot tell the
+// worker anything afterwards. A write that expires mid-frame leaves the
+// websocket unusable -- measured, by writing this test that way first and
+// watching the abandon frame never arrive even after the far end resumed
+// reading -- so every later send fails at once. It needs no closing either:
+// a dead channel is a dead channel at both ends, and the worker's own reads
+// fail, which is what ends it. See
+// docs/threat-model/control-channel.md.
+func TestGenerate_DropsWhatItAlreadyPushedWhenALaterJobIsRefused(t *testing.T) {
+	told := make(chan control.Kind, 4)
+	pushed := make(chan int, 8)
+	ch := controltest.Pair(t, func(ctx context.Context, c *control.Conn) error {
+		jobs := 0
+		for {
+			f, err := c.Recv(ctx)
+			if err != nil {
+				return nil
+			}
+			switch f.Kind {
+			case control.KindJob:
+				jobs++
+				pushed <- jobs
+			default:
+				told <- f.Kind
+			}
+		}
+	})
+	s := served{ch: ch, runner: &nodeShell{t: t}}
+
+	err := s.Generate(t.Context(), report.Discard, testRun(
+		sdserver.Job{Prompt: "a", Output: "a"},
+		sdserver.Job{Prompt: "b", Output: "b"},
+		// `preview` is a key the body owns, so mergeExtra refuses it -- and
+		// Validate does not look at `extra`, so this reaches the push loop.
+		sdserver.Job{Prompt: "c", Output: "c", Extra: map[string]any{"preview": "vae"}},
+	), filepath.Join(t.TempDir(), "r"), nil)
+	if err == nil {
+		t.Fatal("a job whose body cannot be built was pushed")
+	}
+	if !strings.Contains(err.Error(), "job 3/3") {
+		t.Errorf("err = %v, want the refused job named", err)
+	}
+
+	// Two arrived before the refusal, and they are the ones that would
+	// otherwise run.
+	deadline := time.Now().Add(10 * time.Second)
+	for n := 0; n < 2; {
+		select {
+		case n = <-pushed:
+		case <-time.After(time.Until(deadline)):
+			t.Fatalf("only %d job(s) reached the worker before the refusal", n)
+		}
+	}
+
+	select {
+	case k := <-told:
+		if k != control.KindCancel {
+			t.Errorf("the worker was sent %q, want %q", k, control.KindCancel)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("ember refused job three and never told the worker to drop jobs one and two, " +
+			"so they run on a card for a request that has already ended")
+	}
+}
+
 // TestGenerate_ReportsAWorkerThatStopped.
 //
 // The worker's own failure reaches ember as a frame rather than as a closed
