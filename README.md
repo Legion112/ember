@@ -1623,10 +1623,20 @@ store:
   mount: /models        # default; /workspace and /root are refused
 ```
 
-Naming a store here does **not** create it — `ember store create` does, and
-nothing that rents a node will bring one into existence as a side effect. A
-store is a standing monthly charge with no deadline, no reaper and no Ctrl-C
-that ends it, so it takes a command somebody typed.
+**Naming a store that bills does not create it** — `ember store create` does,
+and nothing that rents a node will bring one into existence as a side effect. At
+a paid provider a store is a standing monthly charge with no deadline, no reaper
+and no Ctrl-C that ends it, so it takes a command somebody typed.
+
+**Where nothing bills for one, ember makes it.** On the local provider a store
+is a Docker named volume: it costs nothing, and `ember store rm` removes it. The
+refusal's own sentence was *"a store bills by the month and nothing destroys it
+on a deadline"* — true of a network volume and false of the thing it was being
+said about, so what remained was friction protecting an operator from a charge
+that does not exist. `Caps.StoresFree` is the gate, and it is a claim about
+storage rather than about renting, because a provider could charge for one and
+not the other. The name, the size and the region still come from your file:
+ember makes the store the configuration described, not one it guessed at.
 
 `ember ls` prints every store ember owns and what it costs per month, on every
 run, including the run where there are no nodes at all — the clean-bill-of-

@@ -130,7 +130,10 @@ func runUp(args []string, out io.Writer, d deps) error {
 	// the offer, the image for the card that offer names, the jobs, the spec.
 	// Nothing is rented until Do.
 	plan, err := app.NewPlan(context.Background(), app.Request{
-		Config: cfg, Deps: d, Log: logOpts,
+		// `--dry-run` says what would be rented and creates nothing, which
+		// its own flag help promises -- so it may not make a store either,
+		// free or otherwise.
+		Config: cfg, Deps: d, Log: logOpts, MayCreateStore: !*dryRun,
 	}, out)
 	if err != nil {
 		return err

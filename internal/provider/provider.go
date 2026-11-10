@@ -106,6 +106,25 @@ type Caps struct {
 	// its label into whatever free-text field exists, usually the name.
 	Tags bool
 
+	// StoresFree means a store at this provider carries no standing charge.
+	//
+	// SEPARATE FROM Free, WHICH IS ABOUT RENTING, and the separation is the
+	// point rather than pedantry: the two happen to agree for both providers
+	// that exist today and they are different claims, so reading one as the
+	// other would be the wrong kind of wrong -- the distinction Accrued and
+	// Monthly are kept apart for, one layer down. A provider could rent for
+	// nothing and bill for storage, or the reverse.
+	//
+	// WHAT IT LICENSES is AttachStore creating a missing store instead of
+	// refusing. The refusal exists because a store bills by the month and
+	// nothing destroys it on a deadline, so ember bringing one into existence
+	// because a config mentioned a name is the leak `ember store create`
+	// exists to prevent. Where there is no charge there is no leak, and the
+	// refusal is pure friction: a Docker named volume costs nothing, and an
+	// operator reading "create it yourself" about one is being asked to
+	// protect themselves from nothing.
+	StoresFree bool
+
 	// Free means renting costs nothing, which is true only of the local
 	// provider and lets the budget check be skipped honestly rather than by
 	// comparing against zero.

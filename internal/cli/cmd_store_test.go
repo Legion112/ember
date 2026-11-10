@@ -182,26 +182,42 @@ func TestStore_RefusesAProviderWithoutStorage(t *testing.T) {
 	}
 }
 
-func TestUp_RefusesWhenTheNamedStoreDoesNotExist(t *testing.T) {
-	// The refusal that keeps `ember up` from bringing a monthly charge into
-	// existence because a config mentioned a name. It must also happen
-	// before anything is rented: a run that discovers this after creating a
-	// node has already started paying.
+// TestUp_ADryRunMakesNoStore.
+//
+// `--dry-run`'s own flag help is "say what would be rented and create
+// nothing", and `Plan`'s doc comment is the same promise one layer down: it is
+// the half where "no node exists, nothing is billing". A `docker volume
+// create` on that path is a side effect in a command that promised none, even
+// though a Docker volume is free -- and the same path answers a web request
+// asking what a run would cost.
+//
+// THIS TEST USED TO ASSERT THE REFUSAL ITSELF, before a missing store at a
+// provider that charges nothing was made rather than refused. The refusal it
+// asserted now belongs to a provider that BILLS, which is
+// TestAttachStore_StillRefusesAStoreThatBills, and to a plan that may not
+// create, which is TestAttachStore_ADryRunMakesNothing. What it keeps is the
+// command-level half: that `ember up --dry-run` is such a plan.
+//
+// IT IS ALSO WHY THIS TEST IS FAST AGAIN. Without `--dry-run` the run now
+// creates the store and proceeds into a full fake rental, waiting out a
+// readiness timeout for ninety seconds -- which is how the contract break
+// announced itself in the first place.
+func TestUp_ADryRunMakesNoStore(t *testing.T) {
 	d := labDeps(t)
 	cfg := storeConfig(t, d, storeBlock)
 
 	var out bytes.Buffer
-	err := runUp([]string{"-config", cfg}, &out, d)
+	err := runUp([]string{"-config", cfg, "--dry-run"}, &out, d)
 	if err == nil {
-		t.Fatal("up ran with a store that does not exist")
+		t.Fatal("a dry run planned a store it was not allowed to create")
 	}
 	if !strings.Contains(err.Error(), "ember store create") {
 		t.Errorf("err = %q, want it to name the command that makes one", err)
 	}
 	e := d.Engine.(*dockerengine.RecordingEngine)
 	for _, c := range e.Calls {
-		if strings.HasPrefix(c, "ContainerCreate") {
-			t.Errorf("a node was created before the store was resolved: %v", e.Calls)
+		if strings.HasPrefix(c, "VolumeCreate") || strings.HasPrefix(c, "ContainerCreate") {
+			t.Errorf("a dry run changed something: %v", e.Calls)
 			break
 		}
 	}
@@ -702,25 +718,35 @@ func TestStoreSync_RefusesAnUnreadableConfig(t *testing.T) {
 	t.Error("sync ran against a config that does not exist")
 }
 
-func TestStoreSync_RefusesAStoreThatDoesNotExist(t *testing.T) {
-	// Same refusal `up` gives, and for the same reason: naming a store does
-	// not create one, and a command that rents a machine before finding that
-	// out has already started paying.
+// TestStoreSync_ResolvesTheStoreBeforeRentingAnything is `up`'s ordering rule
+// for the command whose whole job is the store.
+//
+// Same move as TestUp_ResolvesTheStoreBeforeRentingAnything: the refusal is
+// about a store that bills and these deps are the local provider, where one
+// costs nothing. What is left is the order, which is the part that was never
+// about money -- renting a CPU box and only then discovering a store problem
+// has already started paying, whichever way that problem is answered.
+func TestStoreSync_ResolvesTheStoreBeforeRentingAnything(t *testing.T) {
 	d := labDeps(t)
 	cfg := storeConfig(t, d, storeBlock+"\n"+assetBlock)
 	var out bytes.Buffer
-	err := runStore([]string{"sync", "-config", cfg}, &out, d)
-	if err == nil {
-		t.Fatal("sync ran against a store that does not exist")
-	}
-	if !strings.Contains(err.Error(), "ember store create") {
-		t.Errorf("err = %q, want it to name the command that makes one", err)
-	}
+	_ = runStore([]string{"sync", "-config", cfg}, &out, d)
+
 	e := d.Engine.(*dockerengine.RecordingEngine)
-	for _, c := range e.Calls {
-		if strings.HasPrefix(c, "ContainerCreate") {
-			t.Errorf("a machine was rented before the store was resolved: %v", e.Calls)
+	created, mounted := -1, -1
+	for i, c := range e.Calls {
+		if strings.HasPrefix(c, "VolumeCreate") && mounted < 0 {
+			mounted = i
 		}
+		if strings.HasPrefix(c, "ContainerCreate") && created < 0 {
+			created = i
+		}
+	}
+	if mounted < 0 {
+		t.Fatalf("no store was created for a config that names one: %v", e.Calls)
+	}
+	if created >= 0 && created < mounted {
+		t.Errorf("a machine was rented before the store was resolved: %v", e.Calls)
 	}
 }
 

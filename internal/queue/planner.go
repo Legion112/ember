@@ -173,6 +173,9 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 	}
 
 	req := app.Request{
+		// The drain loop is about to rent, so it may make a store nothing
+		// bills for rather than failing a queued request over one.
+		MayCreateStore:  true,
 		Config:          cfg,
 		Deps:            p.Deps,
 		Jobs:            jobs,
@@ -357,10 +360,11 @@ func (p AppPlanner) fillStore(ctx context.Context, cfg config.Config, missing *a
 	// No Budget override. The request's narrowed ceiling bounds the request's
 	// own rental; this one is the config's, which is the operator's.
 	sync, err := app.NewPlan(ctx, app.Request{
-		Config:  cfg,
-		Deps:    p.Deps,
-		CPUOnly: true,
-		Log:     p.Log,
+		MayCreateStore: true,
+		Config:         cfg,
+		Deps:           p.Deps,
+		CPUOnly:        true,
+		Log:            p.Log,
 	}, p.out())
 	if err != nil {
 		return fmt.Errorf("plan a machine to fill the store: %w", err)

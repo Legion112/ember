@@ -385,7 +385,8 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 	}
 
 	plan, err := app.NewPlan(ctx, app.Request{
-		Config: cfg, Deps: r.Deps, Log: r.Log,
+		// A direct run rents, so it may make a store nothing bills for.
+		Config: cfg, Deps: r.Deps, Log: r.Log, MayCreateStore: true,
 	}, r.out())
 	if err != nil {
 		return "", err

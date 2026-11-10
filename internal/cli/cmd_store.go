@@ -412,7 +412,9 @@ func runStoreSync(args []string, out io.Writer, d deps) error {
 	// spec -- and two copies of an ordering whose whole purpose is that every
 	// refusal happens before the create call is one copy too many.
 	plan, err := app.NewPlan(context.Background(), app.Request{
-		Config: cfg, Deps: d, CPUOnly: true, VCPU: *vcpu,
+		// `store sync` rents a CPU box to fill the store, so it is a caller
+		// that is about to spend and may make a free one.
+		Config: cfg, Deps: d, CPUOnly: true, VCPU: *vcpu, MayCreateStore: true,
 	}, out)
 	if err != nil {
 		return err
