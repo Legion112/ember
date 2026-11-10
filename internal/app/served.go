@@ -695,7 +695,46 @@ func pushBatch(ctx context.Context, sink report.Sink, s served, run sdserver.Run
 		started = make(map[int]time.Time, total)
 		ended   int
 		asked   bool
+		done    bool
 	)
+
+	// EMBER GIVING UP ON A BATCH HAS TO REACH THE WORKER, because the worker
+	// is holding the rest of it.
+	//
+	// This is the CI failure's rule applied to the cases the worker cannot
+	// notice for itself. A job that failed, it polled: it drops the rest of
+	// the batch on its own. But ember also abandons a batch for reasons only
+	// ember can see -- a landed file whose fetch failed, a frame it refuses as
+	// untrusted, a worker that sent something in the middle of a batch that
+	// does not belong there -- and in every one of those the worker is still
+	// working through a queue nobody is reading any more. A card paid for
+	// pictures the request that asked for them has already ended.
+	//
+	// The frame is `cancel` and not a new kind, because "stop the batch" is
+	// exactly what it means: the operator's button is one caller of that and
+	// ember giving up is another, and both want the same thing done to the
+	// same queue. Not sent when the operator already asked -- that cancel is
+	// in flight or landed -- and not sent when the batch finished, which is
+	// what `done` distinguishes. Best effort and bounded: a send that fails
+	// here means the channel has gone, which ends the worker anyway.
+	defer func() {
+		if done || asked {
+			return
+		}
+		// On a context that survives Ctrl-C, for the reason the fetch and the
+		// goodbye are: Ctrl-C is a likely way to reach this, and what is on
+		// the other side is a card.
+		//
+		// The error is dropped rather than logged, and there is nowhere
+		// honest to put it: this function reports through a sink that writes
+		// a request's history, and a line there about a frame ember sent
+		// while giving up on that request is noise in the one place an
+		// operator reads to find out what happened. A send that fails means
+		// the channel has gone, which ends the worker by itself.
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workerDrainTimeout)
+		defer cancel()
+		_ = s.ch.Send(sctx, control.Frame{Kind: control.KindCancel})
+	}()
 
 	for ended < total {
 		f, err := s.ch.Recv(ctx)
@@ -837,6 +876,9 @@ func pushBatch(ctx context.Context, sink report.Sink, s served, run sdserver.Run
 			return fmt.Errorf("the worker sent a %q frame in the middle of a batch", f.Kind)
 		}
 	}
+	// Every job ended, so there is nothing left for the worker to drop. The
+	// deferred cancel above reads this.
+	done = true
 	return nil
 }
 

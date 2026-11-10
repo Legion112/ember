@@ -431,6 +431,26 @@ func testRun(jobs ...sdserver.Job) sdserver.Run {
 	return sdserver.Run{Preview: sdserver.PreviewProj, PreviewInterval: 5, Jobs: jobs}
 }
 
+// idleLikeAWorker is how a frame script ends: still reading.
+//
+// IT WAS `<-ctx.Done()`, AND THAT MADE THE FAKE LESS CAPABLE THAN THE THING IT
+// STANDS IN FOR -- which this repository has paid for six times in the other
+// direction and once, here, in this one. A real worker always has a reader
+// goroutine on the channel; a script that stopped reading after its last frame
+// meant every send ember makes afterwards waited out its own bound, and the
+// package's suite went from 17 to 44 seconds the moment ember learned to tell
+// a worker it had given up on a batch.
+//
+// So the fakes read to the end, like a worker, and the seconds were a fake's
+// behaviour rather than a timeout that needed shortening.
+func idleLikeAWorker(ctx context.Context, c *control.Conn) error {
+	for {
+		if _, err := c.Recv(ctx); err != nil {
+			return nil
+		}
+	}
+}
+
 // --- what ember does with a batch ---
 
 func TestGenerate_CollectsEveryImageAndPricesEachJob(t *testing.T) {
@@ -916,8 +936,7 @@ func TestGenerate_ACancelThatLandedBetweenTwoJobsNamesNoJobAndEndsTheBatch(t *te
 				return err
 			}
 		}
-		<-ctx.Done()
-		return nil
+		return idleLikeAWorker(ctx, c)
 	})
 	s := served{ch: ch, rate: node.Rate(2_000_000), runner: &nodeShell{t: t}}
 
@@ -1086,8 +1105,7 @@ func TestGenerate_RefusesAFrameForAJobItNeverPushed(t *testing.T) {
 				}); err != nil {
 					return err
 				}
-				<-ctx.Done()
-				return nil
+				return idleLikeAWorker(ctx, c)
 			})
 			s := served{ch: ch, runner: &nodeShell{t: t}}
 			err := s.Generate(t.Context(), report.Discard, testRun(sdserver.Job{Prompt: "a"}),
@@ -1122,8 +1140,7 @@ func TestGenerate_RefusesALandedFrameThatNamesAPathRatherThanAFile(t *testing.T)
 				}); err != nil {
 					return err
 				}
-				<-ctx.Done()
-				return nil
+				return idleLikeAWorker(ctx, c)
 			})
 			s := served{ch: ch, runner: &nodeShell{t: t}}
 			err := s.Generate(t.Context(), report.Discard, testRun(sdserver.Job{Prompt: "a"}),
@@ -1156,13 +1173,120 @@ func TestGenerate_RefusesALandedFrameWithNothingInIt(t *testing.T) {
 				if err := c.Send(ctx, frame); err != nil {
 					return err
 				}
-				<-ctx.Done()
-				return nil
+				return idleLikeAWorker(ctx, c)
 			})
 			s := served{ch: ch, runner: &nodeShell{t: t}}
 			if err := s.Generate(t.Context(), report.Discard, testRun(sdserver.Job{Prompt: "a"}),
 				filepath.Join(t.TempDir(), "r"), nil); err == nil {
 				t.Fatalf("%+v was accepted", frame)
+			}
+		})
+	}
+}
+
+// TestGenerate_TellsTheWorkerToDropABatchItGaveUpOn.
+//
+// THE CI FAILURE'S RULE APPLIED TO THE CASES THE WORKER CANNOT SEE. A job that
+// failed, it polled -- so it drops the rest of the batch itself. But ember also
+// abandons a batch for reasons only ember has: a landed file whose fetch
+// failed, a frame it refuses as untrusted, a worker that said something in the
+// middle of a batch that does not belong there. In every one of those the
+// worker is still working through a queue nobody is reading, on a card that is
+// still billing, for a request that has already ended.
+//
+// The three rows are the three shapes, and the fourth is the control: a batch
+// that FINISHED must not be told to drop anything, or every successful request
+// would end with ember cancelling a worker that had nothing left to cancel.
+func TestGenerate_TellsTheWorkerToDropABatchItGaveUpOn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// script is what the worker sends after it has taken the one job.
+		script []control.Frame
+		want   bool
+	}{
+		{
+			"a landed file ember refuses",
+			[]control.Frame{{
+				Kind: control.KindLanded, Index: 1, Total: 1,
+				Dir: "/tmp/ember-results/1", Files: []control.File{{Name: "../escape.png", Bytes: 1}},
+			}},
+			true,
+		},
+		{
+			"a frame for a job ember never pushed",
+			[]control.Frame{{Kind: control.KindStarted, Index: 9, Total: 1}},
+			true,
+		},
+		{
+			"a frame that does not belong in a batch",
+			[]control.Frame{{Kind: control.KindPrepared, Index: 1, Total: 1}},
+			true,
+		},
+		{
+			"a batch that finished",
+			[]control.Frame{
+				{Kind: control.KindStarted, Index: 1, Total: 1},
+				{Kind: control.KindEnded, Index: 1, Total: 1, Status: sdserver.StatusCompleted.String()},
+			},
+			false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			told := make(chan control.Kind, 4)
+			ch := controltest.Pair(t, func(ctx context.Context, c *control.Conn) error {
+				if _, err := c.Recv(ctx); err != nil {
+					return err
+				}
+				for _, f := range tc.script {
+					if err := c.Send(ctx, f); err != nil {
+						return err
+					}
+				}
+				// Reading like a worker, which is what makes this assertion
+				// possible at all: a script that stopped reading would make
+				// ember's send time out rather than arrive.
+				for {
+					f, err := c.Recv(ctx)
+					if err != nil {
+						return nil
+					}
+					told <- f.Kind
+				}
+			})
+			s := served{ch: ch, runner: &nodeShell{t: t}}
+
+			err := s.Generate(t.Context(), report.Discard, testRun(sdserver.Job{Prompt: "a"}),
+				filepath.Join(t.TempDir(), "r"), nil)
+			if tc.want && err == nil {
+				t.Fatal("ember accepted a batch it should have given up on")
+			}
+			if !tc.want && err != nil {
+				t.Fatalf("a batch that finished returned %v", err)
+			}
+
+			// The two waits differ because the two claims do. A frame that
+			// must arrive gets a bound generous enough not to flake; a frame
+			// that must NOT arrive only needs long enough that it would have.
+			// ember's send happens in a defer inside pushBatch, so by the
+			// time Generate has returned it has either gone or never will --
+			// all that is left is the trip down a net.Pipe to a reader that
+			// is already waiting.
+			settle := 10 * time.Second
+			if !tc.want {
+				settle = 2 * time.Second
+			}
+			select {
+			case k := <-told:
+				if !tc.want {
+					t.Errorf("ember sent %q after a batch that finished; there was nothing left to drop", k)
+				} else if k != control.KindCancel {
+					t.Errorf("ember sent %q, want %q", k, control.KindCancel)
+				}
+			case <-time.After(settle):
+				if tc.want {
+					t.Error("ember gave up on the batch and never told the worker, so the jobs " +
+						"behind it stay on a card nobody is reading the results of")
+				}
 			}
 		})
 	}
@@ -1605,8 +1729,7 @@ func TestDrainWorker_IsBoundedAgainstAWorkerThatSaysNothing(t *testing.T) {
 			workerDrainTimeout)
 	}
 	ch := controltest.Pair(t, func(ctx context.Context, c *control.Conn) error {
-		<-ctx.Done()
-		return nil
+		return idleLikeAWorker(ctx, c)
 	})
 
 	done := make(chan struct{})
