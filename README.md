@@ -847,6 +847,12 @@ What changed in practice:
   worker's in-memory queue and it submits them to the generation server one at
   a time, which is what keeps a finished image out of that server's own
   ten-minute purge window.
+- **A job that does not complete ends the batch, and the worker is what stops
+  it.** A batch whose first job the server refused is not a batch to keep
+  paying for, and now that the queue is on the node the worker is the thing
+  that saw the refusal — it drops the rest itself. Where ember is the one that
+  gives up, on something only ember can see, it tells the worker to drop what
+  it is still holding.
 - **Previews travel on the channel**, which is what they were always for: the
   frame arrives while the card is still sampling, and ember writes it into the
   run directory under the name the progress event carries, exactly as before.
