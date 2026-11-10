@@ -3288,12 +3288,26 @@ const billingProbe = `(function () {
 		var e = panel.querySelector(sel);
 		return e ? e.textContent.replace(/\s+/g, " ").trim() : "";
 	}
-	var rows = Array.from(panel.querySelectorAll("table.ledger tr"))
+	// NOT .fleet, WHICH IS THE OTHER TABLE IN THIS PANEL. The sweep's three
+	// tables are what exists at the providers; the fleet is what this process
+	// is renting, and it has a probe of its own in fleetui_test.go. One
+	// selector matching both would make every assertion here about "rows"
+	// pass or fail on whether an ember serve happened to be renting.
+	var rows = Array.from(panel.querySelectorAll("table.ledger:not(.fleet) tr"))
 		.map(function (r) { return r.innerText.replace(/\s+/g, " ").trim(); })
 		.join(" // ");
 	return [
 		"panel|present",
-		"verdict|" + text("p.verdict"),
+		// EVERY VERDICT AND NOT THE FIRST, because there are two now and
+		// they answer different questions: reconcile's count of what
+		// ember ls exits 2 for, and the rentals THIS process is holding
+		// that have stopped answering. The old text(p.verdict) took whichever
+		// came first in the DOM, so an assertion about the second one was
+		// silently an assertion about the first -- which is how the fleet
+		// lab's wedged-verdict check read "nothing needs attention".
+		"verdict|" + Array.from(panel.querySelectorAll("p.verdict"))
+			.map(function (e) { return e.textContent.replace(/\s+/g, " ").trim(); })
+			.join(" // "),
 		"rows|" + rows,
 		"storage|" + Array.from(panel.querySelectorAll("p.hint"))
 			.map(function (e) { return e.textContent.replace(/\s+/g, " ").trim(); })

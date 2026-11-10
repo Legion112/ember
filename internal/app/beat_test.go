@@ -149,3 +149,44 @@ func TestServed_BeatIsZeroUntilAWorkerHasSaidSomething(t *testing.T) {
 		t.Errorf("a channel nobody has spoken on reports a beat of %v, want the zero time", b)
 	}
 }
+
+// TestDialWorker_TheHandshakeIsTheFirstBeat.
+//
+// THE DEFECT THE BROWSER FOUND, stated where `go test` can hold it. Without
+// the seed, a rental read as NOT ANSWERING for the first five seconds of its
+// channel -- the gap before the worker's first tick -- and the fleet lab
+// caught a row saying "not answering, and still billing" about a node that was
+// eight seconds old with its weights still loading. Every unit test around it
+// was green, because every one of them was about a beat that had already
+// arrived.
+//
+// IT IS SOUND BECAUSE control.Open READS BEFORE IT RETURNS. The handshake is
+// the worker's hello frame and its version, so holding a *Conn at all means
+// the worker spoke -- which makes "ember has never heard this worker" a state
+// an open channel cannot be in, rather than one classified conservatively.
+func TestDialWorker_TheHandshakeIsTheFirstBeat(t *testing.T) {
+	dial := controltest.Node(t, func(ctx context.Context, c *control.Conn) error {
+		// A worker that says hello -- which control.Serve does -- and then
+		// nothing at all. That is the first five seconds of every rental,
+		// and it must not read as a worker that has stopped answering.
+		<-ctx.Done()
+		return nil
+	})
+
+	before := time.Now()
+	ch, beat, err := dialWorker(t.Context(), dial)
+	if err != nil {
+		t.Fatalf("dialling the worker: %v", err)
+	}
+	t.Cleanup(ch.Abort)
+
+	got := beat.last()
+	if got.IsZero() {
+		t.Fatalf("a channel whose handshake has just completed reports no beat at all, so a " +
+			"fleet view would paint every new rental as not answering for the first " +
+			"HeartbeatEvery of its life")
+	}
+	if got.Before(before) {
+		t.Errorf("the first beat reads %v and the dial started at %v", got, before)
+	}
+}

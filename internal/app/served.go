@@ -234,6 +234,41 @@ func (s served) resolveInputs(jobs []sdserver.Job) ([]sdserver.Job, error) {
 	return out, nil
 }
 
+// dialWorker opens the control channel and starts this rental's pulse.
+//
+// THE HANDSHAKE IS THE FIRST BEAT, and this function exists so that it cannot
+// be forgotten. control.Open returns only after it has READ the worker's hello
+// and checked its version, so the instant a caller holds a *Conn is an instant
+// at which the worker spoke -- and seeding the pulse with it is what makes
+// "ember has never heard this worker" unrepresentable on a channel that is
+// open.
+//
+// FOUND BY THE BROWSER LAB AND BY NOTHING ELSE, which is the whole argument
+// for that lab. Without the seed, every rental read as NOT ANSWERING for the
+// first five seconds of its channel -- the gap before the worker's first tick
+// -- and `TestServe_UIShowsAWorkerOnTheJobAndThenOneThatStopsAnswering`
+// caught a row that said "not answering, and still billing" about a node that
+// was eight seconds old with its weights loading. Every unit test around it
+// was green, because each of them was about a beat that had already arrived.
+// The comment that let it through claimed "a worker that is going to beat has
+// had the chance by then"; it has not, and the first thing a reader of a fleet
+// view would have learned is that the red word means nothing.
+//
+// A PULSE ALLOCATED HERE AND NOT BESIDE THE `served` BELOW for a second
+// reason: the model load is the longest window in a rental -- 80-96 s for an
+// ordinary image, four minutes for FLUX.2 -- and it is the window an operator
+// is most likely to be looking at the fleet view during. A pulse that started
+// at the first batch would be blind for the whole of it.
+func dialWorker(ctx context.Context, dial control.DialFunc) (*control.Conn, *pulse, error) {
+	ch, err := control.Open(ctx, dial)
+	if err != nil {
+		return nil, nil, err
+	}
+	beat := &pulse{}
+	beat.felt(time.Now())
+	return ch, beat, nil
+}
+
 // WithServed rents this plan's node, makes the weights resident, and calls fn.
 //
 // THE NODE IS DESTROYED WHEN fn RETURNS, whatever it returns. That is what
@@ -370,19 +405,11 @@ func withServer(
 	if err := tunnel.WaitReady(wctx, client, remote, time.Second); err != nil {
 		return fmt.Errorf("this node's worker is not listening on %v: %w; the node's own log says why", remote, err)
 	}
-	ch, err := control.Open(ctx, client.DialContext)
+	ch, beat, err := dialWorker(ctx, client.DialContext)
 	if err != nil {
 		return err
 	}
 	defer ch.Abort()
-
-	// ALLOCATED BEFORE THE PREPARE AND NOT BESIDE THE `served` BELOW, because
-	// the model load is the longest window in a rental -- 80-96 s for a large
-	// image, four minutes for FLUX.2 -- and it is the window an operator is
-	// most likely to be looking at the fleet view during. A pulse that only
-	// started at the first batch would show every rental as not answering for
-	// the whole of it.
-	beat := &pulse{}
 
 	// PREPARE IS RACED AGAINST THE SERVER'S OWN EXIT, which is the half of
 	// orExited that matters most and the reason it is still here after the
