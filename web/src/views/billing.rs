@@ -99,11 +99,33 @@ pub fn Billing() -> impl IntoView {
                 Some(n) => {
                     let verdict = n.verdict();
                     let needs = n.attention > 0 || !n.unreachable().is_empty();
+                    // A SECOND SENTENCE AND NOT A SECOND TERM IN THE FIRST.
+                    // `verdict` counts what `ember ls` exits 2 for, which is
+                    // reconcile's answer about what exists at the providers; a
+                    // worker that has stopped answering is THIS process's own
+                    // observation and no `ember ls` has ever seen one. Folding
+                    // it in would make a number mean something different
+                    // depending on whether an `ember serve` happened to be
+                    // running when it was taken.
+                    let wedged = n.wedged();
                     let storage = n.monthly_storage.clone();
                     let charged = !storage.is_free();
                     let total = storage.text().to_string();
                     view! {
                         <p class="verdict" class:bad=move || needs>{verdict}</p>
+                        // THE FLEET FIRST, because it is what THIS process is
+                        // doing and the three tables below are what exists at
+                        // the providers. An operator who pressed this button
+                        // while `ember serve` is renting is asking about their
+                        // own rentals; the sweep is how they find out about
+                        // everything else.
+                        <Show when=move || wedged != 0>
+                            <p class="verdict bad">
+                                {move || format!(
+                                    "{wedged} rental(s) are not answering and are still billing")}
+                            </p>
+                        </Show>
+                        {fleet_table(n.workers.clone())}
                         {findings_table(n.findings.clone())}
                         {findings_table(n.leftovers.clone())}
                         {findings_table(n.stores.clone())}
@@ -156,6 +178,90 @@ fn findings_table(fs: Vec<crate::model::Finding>) -> AnyView {
                             <td><code>{f.names()}</code></td>
                             <td>{f.reason.clone()}</td>
                             <td class="price">{spent.or(monthly).unwrap_or_default()}</td>
+                        </tr>
+                    }
+                }).collect::<Vec<_>>()}
+            </tbody>
+        </table>
+    }
+    .into_any()
+}
+
+/// fleet_table lays out the rentals this process is holding.
+///
+/// NO KEY AND NO `<For>`, WHICH IS THE RULE THIS PAGE WAS REPAIRED TO FOUR
+/// TIMES AND IS LOAD-BEARING HERE FOR THE FIRST TIME. A key is stable
+/// identity, and it is right only when a row OUTLIVES the data under it. This
+/// panel replaces its whole answer on every press -- `sweep.set(Some(n))` --
+/// so there is nothing to preserve across two of them, and the key an author
+/// reaches for is the node id: a value that is stable precisely while the
+/// things worth reading beside it (the beat, the state, the cost, the request
+/// on the card) are the ones that change. A worker row keyed on its node, with
+/// its heartbeat read where the key is read, is the frozen progress row again
+/// -- the fifth time, in the one table whose entire purpose is a value that
+/// moves. There is no `<For>` here, so it cannot be written.
+///
+/// THE STATE IS A WORD FROM THE SERVER AND THE COLOUR IS THE PAGE'S. Which
+/// states exist and where the staleness threshold is are `queue.WorkerState`
+/// and `control.HeartbeatStale`; what a page decides is which row is painted
+/// as wrong, and that is `Worker::needs_attention` -- `stale` only. A red
+/// `starting` would be red on every rental for its first minute, and a red
+/// `quiet` would be red on every speech rental for ever.
+fn fleet_table(ws: Vec<crate::model::Worker>) -> AnyView {
+    if ws.is_empty() {
+        return ().into_any();
+    }
+    view! {
+        <p class="hint">
+            "what this " <code>"ember serve"</code> " is renting. A rental whose create call has
+             not returned is here with no node, because the money is committed from the plan."
+        </p>
+        <table class="ledger fleet">
+            <tbody>
+                {ws.into_iter().map(|w| {
+                    // READ HERE, INSIDE THE CLOSURE THAT BUILDS THIS ROW, and
+                    // every one of them from THIS `w`. The defect this page
+                    // keeps finding is a value read once outside the thing
+                    // that re-renders; the shape that prevents it is a row
+                    // built entirely from its own item.
+                    let bad = w.needs_attention();
+                    let note = w.note();
+                    let name = w.names();
+                    // "nothing generating" rather than an empty cell: a blank
+                    // there reads as a column that failed to load, and this is
+                    // the row an operator most needs to see -- a node that is
+                    // up, billing, and has nothing on it.
+                    let on = if w.request.is_empty() {
+                        "nothing generating".to_string()
+                    } else {
+                        w.request.clone()
+                    };
+                    // The card and the image together: "which of these is the
+                    // FLUX node" is the question, and the image is what
+                    // answers it.
+                    let what = [w.card.clone(), w.image.clone()]
+                        .into_iter().filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>().join(" \u{b7} ");
+                    // The beat where there has been one. Empty is left empty
+                    // rather than printed as "0s", because "nothing has
+                    // arrived yet" and "a moment ago" are different answers
+                    // and the second is the reassuring one.
+                    let beat = if w.beat.is_empty() {
+                        String::new()
+                    } else {
+                        format!("beat {} ago", w.beat)
+                    };
+                    let left = w.remaining.clone().map(|r| format!("{r} left")).unwrap_or_default();
+                    let spent = w.accrued.as_ref().map(|m| m.text().to_string()).unwrap_or_default();
+                    view! {
+                        <tr class:bad=bad>
+                            <td class="status">{w.state.clone()}</td>
+                            <td><code>{name}</code></td>
+                            <td>{what}</td>
+                            <td><code>{on}</code></td>
+                            <td class="status">{if note.is_empty() { beat } else { note }}</td>
+                            <td class="status">{left}</td>
+                            <td class="price">{spent}</td>
                         </tr>
                     }
                 }).collect::<Vec<_>>()}

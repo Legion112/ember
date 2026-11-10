@@ -92,6 +92,10 @@ tested:
   ember driving it is refused by version before any work is pushed; and a
   node's reply is bounded, indexed against the batch ember pushed, and carries
   no opinion about money.
+- **A worker's liveness is a heartbeat on that channel and never a health-check
+  port on the node**, because a port means a second public-port minter beside
+  `exposure.SSHPort()` — and a beat tells a wedged rental from a working one,
+  which a reachability probe cannot.
 - A tar stream from a rented machine is untrusted input; containment is
   enforced twice, by two different mechanisms.
 
@@ -126,6 +130,9 @@ is using:
   A store bills by the gigabyte-month and nothing in ember deletes a file off
   one, so results there would leak exactly the way `/workspace` is a refused
   mount point to prevent.
+- **A rider gets its rental's node and never its rental's cost.** The node is a
+  label and the cost is a quantity: one says a true thing N times, the other
+  says one bill N times.
 - **The worker exits when its queue is empty *and* ember has said there is no
   more work.** An empty queue between two requests of one drain loop is not
   the end of a rental, and exiting there would throw away the resident weights

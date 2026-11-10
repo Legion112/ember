@@ -17,7 +17,7 @@ goes red when reinstated.
 | [serve-auth.md](threat-model/serve-auth.md) | a loopback port is reachable by every uid — the mandatory token, the cookie, the unix socket, and their stated limits |
 | [request-seal.md](threat-model/request-seal.md) | what a request may name and what it structurally cannot; two rentals at once are unrepresentable |
 | [forwards-and-reconnect.md](threat-model/forwards-and-reconnect.md) | the far end of a connection into a node is built, never parsed from input; the progress socket that never re-opened |
-| [control-channel.md](threat-model/control-channel.md) | the one channel to the worker on a rented node: ember dials and the node answers, sshd's authentication is the channel's, the protocol decision against protobuf+Connect, and what the deadline stops now there are two children |
+| [control-channel.md](threat-model/control-channel.md) | the one channel to the worker on a rented node: ember dials and the node answers, sshd's authentication is the channel's, the protocol decision against protobuf+Connect, what the deadline stops now there are two children, and the heartbeat that is there instead of a health-check port |
 
 ## How the seals are held
 

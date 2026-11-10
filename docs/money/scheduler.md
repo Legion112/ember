@@ -281,3 +281,92 @@ Four reasons, in the order that decides it:
 - **Submitted runs (`ember up` over the socket) still never populate the caps
   cache**, so an operator who only uses `up` gets no enqueue-time validation.
   Pre-existing and unchanged.
+
+## The fleet on screen
+
+**At one rental the queue table answered every question an operator had.** The
+request that said `running` was *the* request, on *the* node, and `ember ls`
+named the machine it was on. At N rentals the same table says several things
+are running and nothing says which machine each is on, what that machine is, or
+whether it is still answering. Three facts went missing at once.
+
+**`GET /api/nodes` gains a list and not a route.** It already projects
+`reconcile.Scan`; the fleet is a second list in the same response, joined to
+the first by the node's handle. Two scanners is two answers to "what am I
+paying for", and the one that disagrees is the one that misses a node — so what
+a rental *is* comes from the queue that planned it, and what it *costs* comes
+from reconcile, which is the one authority on money here. Pricing a rental from
+its own rate and a start time would be a second answer; and it would be the
+wrong one, because reconcile is what knows about a node a provider has already
+stopped billing for.
+
+**The join is over `Scan`'s node findings alone.** A finding's id is built from
+four different objects and three of them spell themselves `provider/name` — a
+store handle, a leftover, a record's run id. A join over every finding would let
+a Docker volume named after a run attach its **monthly** charge to a live
+rental's row, and an operator reads a figure on that row as what the node has
+cost so far. Guarded by
+`TestNodes_DoesNotPriceARentalFromAStoreThatSharesItsName`.
+
+**A rental being created is already a row.** The commitment is taken before the
+create call, which on RunPod is seconds to minutes; a table that only listed
+rentals whose node had come up would be silent for exactly the window an
+operator who pressed the button is asking about. So the entry is made one
+statement after the plan, beside the card advertisement and for its reason —
+that is the earliest moment the card is known — and the row carries the card
+and image with no node, which is what `starting` means.
+
+**And it is still a press and never a poll.** The route makes three provider
+sweeps on the request's own context. A fleet view refreshing every two seconds
+would be three sweeps every two seconds per open tab, and `local.DetectGPU`'s
+entry records why the answer is not to cache: a cached failed probe is how a
+card vanishes from a listing.
+
+## A rider gets the node and not the cost
+
+**`requests.node` was empty for every rider, which is a hole exactly where a
+fleet view looks.** It is written through from the `node_ready` event, and
+`Queue.lifecycle` routes that event to the request that **opened** the rental
+and to no other. That routing is correct and is not what changed: `run_cost`
+travels the same road, and *"summing the per-request figures and calling it the
+bill would understate it; attributing the whole rental to every request would
+multiply it."*
+
+**So the node is written off the event path and the event path is untouched.**
+The drain loop writes it to each request beside the model it already writes,
+and the argument is the one that write already makes: a node is a **label** —
+every request this rental served ran on that machine, so writing it N times
+says one true thing N times — where a cost is a **quantity**. Routing
+`node_ready` to riders instead would have made the column correct and put one
+rental's bill one field away from N rows.
+
+**The value is the one the event carried**, tapped once as it passes the
+opener's sink. Not rebuilt here from the offer or the record: two spellings of
+one node id is a fleet view and a queue table naming one machine two ways,
+which is the defect `viewFinding` already records in the other direction.
+
+`TestFleet_ARiderGetsTheNodeAndNotTheCost` asserts both halves, because either
+alone is satisfied by the wrong fix.
+
+## Measured and not fixed
+
+- **A submitted `ember up` has no worker row.** It takes a rental slot and
+  rents inside `Direct.Run`, an opaque closure — by design, because
+  `internal/webapi` must never be able to reach a plan — so the queue knows a
+  slot is taken and nothing else about it. Its node is still a finding in the
+  same response, with its cost and its deadline; what is missing is the worker.
+  Closing it means either a second lifecycle route into the fleet or widening
+  the `Direct` seam, and the second is the one that costs a seal.
+- **A beat does not prove the generation server is alive.** The beat ticks on
+  its own goroutine, so a worker whose sd-server has stopped answering polls
+  keeps beating. Making it prove that would mean a beat whose freshness depends
+  on a poll of a program the worker is *waiting for*, which converts a slow
+  model load into a false "wedged" — the direction this must not be wrong in.
+  What the symptom actually looks like is a request whose job never ends, and
+  that is the request's own row.
+- **Staleness is measured against the moment ember OBSERVED a beat**, not the
+  moment the node sent one. A rented machine's clock is untrusted input, and
+  one that is an hour fast would report every beat as fresh for an hour after
+  they stopped. The cost is that a beat sitting in a socket buffer while ember
+  is between frame loops is not counted until ember reads it — a window bounded
+  by a SQLite claim, which is orders below the threshold.
