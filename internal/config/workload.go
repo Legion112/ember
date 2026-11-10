@@ -397,7 +397,7 @@ func (c Config) validateWorkloads() error {
 	return fmt.Errorf("workloads: is set and so is top-level %s; the top-level keys are the "+
 		"one unnamed workload a file without workloads: describes, so a file with both declares "+
 		"a workload no request can name beside ones it can.\n"+
-		"Move each of those keys into the workloads: entry it belongs to.",
+		"Move each of those keys into the workloads: entry it belongs to",
 		strings.Join(also, ", "))
 }
 
