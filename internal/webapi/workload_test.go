@@ -3,8 +3,10 @@ package webapi
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
@@ -156,4 +158,90 @@ func TestPostRequest_RefusesAnIdThisServerDoesNotDeclare(t *testing.T) {
 	if n, _ := h.store.List(t.Context(), genstore.Filter{}); len(n) != 0 {
 		t.Errorf("%d row(s) were stored over a refused request", len(n))
 	}
+}
+
+// TestPostRequest_TakesTheEntrysOwnTTLWhenTheBodySentNone.
+//
+// THE DEFECT THIS WAS WRITTEN AGAINST COST A REAL RUN. `toRequest` took the
+// entry for everything except its deadline, so a body with no `ttl` fell
+// through to the file's `ttl:` -- and `flux2-local` declares `ttl: 4h`
+// precisely because its weights are a 59 GB fetch that takes about two hours.
+// A browser sending no ttl got the file's 30m, `Narrow` correctly took the
+// smaller of the two, and the node self-destructed 13.3 GB into the download:
+// half an hour of a card paid for, nothing generated, and nothing resumable
+// left behind.
+//
+// BOTH ARMS, because the fallback is a chain and either link can rot. An entry
+// that declares a ttl decides it; an entry that declares none inherits the
+// file's, which is the one value `config.Load` has always refused to leave
+// unset -- so the request is never stored with no deadline whichever arm ran.
+func TestPostRequest_TakesTheEntrysOwnTTLWhenTheBodySentNone(t *testing.T) {
+	const long = 4 * time.Hour
+
+	h := newHarness(t, func(o *Options) {
+		declaring(o)
+		// The entry's own, longer than the file's hour, the way a workload
+		// whose weights take longer to fetch than to use has to be.
+		o.Config.Workloads[0].TTL = long
+	})
+
+	w := h.do(t, "POST", "/api/requests",
+		`{"workload":"image","provider":"local","jobs":[{"prompt":"a cat"}]}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	req := stored(t, h, w)
+	if req.TTL != long {
+		t.Errorf("ttl = %v, want the entry's %v: a deadline the file chose and the entry did not",
+			req.TTL, long)
+	}
+
+	// AND THE BODY STILL WINS, because the entry is a default and not a
+	// substitution -- an operator shortening one run must still be able to.
+	w = h.do(t, "POST", "/api/requests",
+		`{"workload":"image","provider":"local","ttl":"10m","jobs":[{"prompt":"a cat"}]}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if req := stored(t, h, w); req.TTL != 10*time.Minute {
+		t.Errorf("ttl = %v, want the body's 10m", req.TTL)
+	}
+}
+
+// TestPostRequest_FallsBackToTheFilesTTLWhenTheEntryDeclaresNone is the other
+// arm: `declaring` sets no ttl on either entry, so the harness's hour is what
+// a request has to be stored with. Without this the change above could have
+// stored a zero -- which `genstore` refuses, but only after a row has been
+// built, and the message an operator would get names the request rather than
+// the file.
+func TestPostRequest_FallsBackToTheFilesTTLWhenTheEntryDeclaresNone(t *testing.T) {
+	h := newHarness(t, declaring)
+
+	w := h.do(t, "POST", "/api/requests",
+		`{"workload":"image","provider":"local","jobs":[{"prompt":"a cat"}]}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if req := stored(t, h, w); req.TTL != time.Hour {
+		t.Errorf("ttl = %v, want the file's 1h", req.TTL)
+	}
+}
+
+// stored returns the row THIS response's id names, and fails loudly on an
+// absent one.
+//
+// BY ID AND NOT "THE ONE QUEUED ROW", because a test that posts twice to show
+// a precedence has two, and reading the first would have asserted the default
+// twice while reporting that the override worked.
+func stored(t *testing.T, h *harness, w *httptest.ResponseRecorder) genstore.Request {
+	t.Helper()
+	id := decode[map[string]string](t, w)["id"]
+	if id == "" {
+		t.Fatal("no id came back, so there is no row to read the deadline off")
+	}
+	r, err := h.store.Get(t.Context(), genstore.ReqID(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }

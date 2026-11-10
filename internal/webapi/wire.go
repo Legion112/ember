@@ -779,6 +779,33 @@ func (n newRequest) toRequest(wl config.Workload) (genstore.Request, error) {
 			return genstore.Request{}, fmt.Errorf("ttl %q is not positive; a node nothing destroys on a deadline is a node that bills until somebody notices", n.TTL)
 		}
 		r.TTL = d
+	} else if wl.TTL > 0 {
+		// THE ENTRY'S OWN DEADLINE, AND NOT THE FILE'S DEFAULT. This used to
+		// fall straight through to `postRequest`'s `s.opts.Config.TTL`, so an
+		// entry that declares a longer ttl -- and declares it because it
+		// needs one -- silently got the file's.
+		//
+		// MEASURED, on the entry that motivated this: `flux2-local` sets
+		// `ttl: 4h` because its weights are a 59 GB fetch that runs at
+		// 8.5 MB/s, which is 1.9 hours. A browser sending no ttl got the
+		// file's `30m`; `Narrow` then correctly took the smaller of the two,
+		// and the node self-destructed 13.3 GB in. Thirty minutes of a card
+		// paid for, nothing generated, and the partial thrown away, because
+		// assets.Fetch writes to a fresh `.partial-*` per attempt and resumes
+		// nothing -- so a retry does not get further, it starts again.
+		//
+		// A CEILING AND NOT AN OVERRIDE. `Narrow` still takes the smaller of
+		// this and the request's, so a body asking for longer than the entry
+		// allows is still capped, and lowering an entry's ttl still lowers
+		// every request against it.
+		//
+		// GUARDED ON POSITIVE, because an entry's `ttl:` is the one key of the
+		// six that `Workload.validate` had nothing to say about: a negative
+		// one would reach `genstore`'s `r.TTL <= 0` as a stored row rather
+		// than as a refusal. It is refused there now, and this guard is the
+		// second mechanism -- zero still means absent, which is what sends it
+		// on to the file's checked default.
+		r.TTL = wl.TTL
 	}
 	if n.MaxHourlyUSD != "" {
 		v, err := node.ParseUSD(n.MaxHourlyUSD)

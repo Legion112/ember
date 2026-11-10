@@ -2531,7 +2531,7 @@ least. Every field in the form explains itself on hover.
 | a request may narrow | only `ember.yaml` decides |
 |---|---|
 | provider, card, region | `image:` and the `images:` map |
-| `ttl`, up to the config's | `store:` and its mount |
+| `ttl`, up to the entry's | `store:` and its mount |
 | `max_hourly_usd` and `max_run_usd`, up to the config's | `max_day_usd` and `max_month_usd` |
 | prompt, size, steps, batch count, seed, sampler, scheduler, cfg, guidance, output name | `sd.serve`, `gpu_probe`, `assets:`, `verify:` |
 | clip skip, eta, flow shift, shifted timestep, output format and compression | `extra` |
@@ -2539,6 +2539,13 @@ least. Every field in the form explains itself on hover.
 | an image it has already uploaded, by digest, and its `strength` | the voice **file** and espeak's data directory |
 | preview mode and interval | piper's `speaker`, `length_scale`, `noise_scale`, `noise_w` and `sentence_silence` |
 | the declared `workload`'s id, and for speech the text and a **voice id** from that entry's `tts.voices` | the entry's `image:`, `driver:` and driver block |
+
+**A request that names no `ttl` gets the workload entry's, not the file's.**
+An entry sets `ttl:` when its own work needs longer than the file's default --
+weights that take two hours to fetch are the case this exists for -- and a form
+that sent no deadline meant that entry's, which is why the file's `ttl:` is
+reached only for an entry declaring none. A `ttl` a request *does* send still
+has to be smaller: the entry is the ceiling, the request narrows it.
 
 **A bad sampler is refused before a card is rented, per card.** ember caches
 what each generation server reported it can do and checks a queued batch

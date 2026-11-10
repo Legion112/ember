@@ -321,6 +321,19 @@ func TestWorkloads_RefusedForAMistakeInTheEntryItself(t *testing.T) {
 				strings.Repeat("a", 64) + "\"}}\n",
 			"sm_89",
 		},
+		{
+			// A DEADLINE IN THE PAST, which used to survive the file. Zero is
+			// absent and inherits the file's checked value -- the contract
+			// `Workload.TTL` documents -- but a negative one is neither: it
+			// reached `Narrow`, where `cfg.TTL <= 0` reads as "no ceiling"
+			// and the deadline becomes whatever the request asked for. The
+			// top-level `ttl:` has always been refused; an entry's decides a
+			// node's self-destruct timer now, so it is checked by the same
+			// rule and in the same place.
+			"a negative per-entry ttl",
+			"workloads:\n  - {id: w, driver: sd, image: " + ref + ", ttl: -1h}\n",
+			"deadline in the past",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

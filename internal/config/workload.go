@@ -258,6 +258,18 @@ func (w Workload) validate() error {
 	if _, err := (Config{Images: w.Images}).ParseImages(); err != nil {
 		return err
 	}
+
+	// A DEADLINE IN THE PAST IS REFUSED HERE RATHER THAN NARROWED LATER. Zero
+	// is absent and inherits the file's checked value, which is the contract
+	// the field documents; a negative one is neither, and it used to survive
+	// `Select` into `Narrow`, where `cfg.TTL <= 0` reads it as "no ceiling"
+	// and hands the deadline to whatever the request asked for. The top-level
+	// `ttl:` has always been refused; an entry's decides a node's
+	// self-destruct timer now, so it is checked by the same rule.
+	if w.TTL < 0 {
+		return fmt.Errorf("ttl is %v, and a node cannot be given a deadline in the past; "+
+			"leave it out to inherit the file's", w.TTL)
+	}
 	return nil
 }
 
