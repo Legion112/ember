@@ -282,10 +282,12 @@ func TestFleet_IsEmptyOnceEveryRentalHasGone(t *testing.T) {
 // one that matters most, a worker that stops beating while its card bills, has
 // no cheap end-to-end shape at all.
 //
-// THE ZERO-BEAT CASE IS THE DELIBERATE ONE. A channel that completed its
-// handshake and has produced nothing is counted STALE rather than starting: a
-// worker that is going to beat has had the chance by then, and reporting it as
-// healthy would be this listing's one reassuring lie.
+// THE ZERO-BEAT CASE IS ASSERTED ON ITS OUTCOME AND NOT ON ITS MECHANISM, and
+// a reinstatement is why. `State` used to carry an arm of its own for it;
+// disabling that arm was GREEN, because `now` minus the zero time is seventy
+// years and the threshold comparison already answers stale. The arm was
+// deleted and this row stayed: what has to hold is that a channel which has
+// produced nothing does not read as healthy, however that is arrived at.
 //
 // AND `quiet` IS NOT `stale`. A speech rental runs piper over `ssh exec` and
 // opens no control channel, so there is nobody to answer -- a different fact

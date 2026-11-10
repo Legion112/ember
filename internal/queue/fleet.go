@@ -128,14 +128,22 @@ func (w Worker) State(now time.Time) WorkerState {
 		return WorkerStarting
 	case !w.Channel:
 		return WorkerQuiet
-	case w.Beat.IsZero():
-		// A channel that is open and has produced nothing. Counted as stale
-		// rather than as starting, which is the conservative direction: the
-		// handshake completed, so a worker that is going to beat has had the
-		// chance, and reporting it as healthy would be this list's one
-		// reassuring lie.
-		return WorkerStale
 	case now.Sub(w.Beat) > control.HeartbeatStale:
+		// A ZERO BEAT FALLS THROUGH HERE AND THERE IS NO ARM FOR IT, which is
+		// a correction made by a reinstatement rather than a choice. There was
+		// a `case w.Beat.IsZero(): return WorkerStale` above this line,
+		// arguing that an open channel which has produced nothing is reported
+		// conservatively -- and disabling it was GREEN, because `now` minus
+		// the zero time is seventy years and this comparison already answers
+		// stale. A second mechanism saying the same thing is a line that
+		// cannot fail, which is the shape this repository keeps finding; the
+		// argument survives here and the dead arm does not.
+		//
+		// What makes a zero beat unreachable on a live channel in the first
+		// place is app.dialWorker: control.Open has READ the worker's hello
+		// before it returns, so the handshake is the first beat. The
+		// conservative answer is what is left for a `served` that somehow has
+		// no pulse at all.
 		return WorkerStale
 	default:
 		return WorkerLive

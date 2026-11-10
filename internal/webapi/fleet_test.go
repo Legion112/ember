@@ -90,43 +90,59 @@ func TestNodes_JoinsTheFleetToWhatTheSweepFound(t *testing.T) {
 	}
 }
 
-// TestNodes_DoesNotPriceARentalFromAStoreThatSharesItsName.
+// TestNodes_PricesEachRentalFromItsOwnNode.
 //
-// THE JOIN IS OVER sc.Nodes ALONE, and this is why. findingView.ID is built
-// from four different objects and three of them spell themselves
-// `provider/name`: a store handle, a leftover, and a record's run id. A join
-// over every finding would therefore let a Docker volume called after a run
-// attach its MONTHLY charge to a live rental's row -- a figure an operator
-// would read as what the node has cost so far, which is the exact confusion
-// findingView keeps Accrued and Monthly apart for.
+// THE JOIN IS THE ASSERTION AND NOT THE PAIR OF VALUES. Two rentals, two node
+// findings, two different costs: a join that ignored its key, took the first
+// finding, or keyed on the wrong field gives both rows one figure, and a test
+// with one rental could not see any of those.
 //
-// The sweep below has a store whose handle collides with the live rental's
-// node, which is a collision a careless operator can really produce: store
-// names are theirs to choose.
-func TestNodes_DoesNotPriceARentalFromAStoreThatSharesItsName(t *testing.T) {
+// AND THE REINSTATEMENT THAT WAS NOT A FINDING IS RECORDED IN viewNodes, not
+// here. The join is written over `sc.Nodes` because a store handle, a leftover
+// and a record's run id all spell themselves `provider/name` -- and widening
+// it to every finding came back GREEN, measured: no store or leftover finding
+// carries `Accrued` or a `Node`, so there is nothing for this projection to
+// read off one. The narrow join stays because that is the only reason it is
+// harmless; a test asserting otherwise would have been a guard that cannot
+// fail.
+func TestNodes_PricesEachRentalFromItsOwnNode(t *testing.T) {
 	now := time.Now()
-	drain := &RecordingDrain{fleet: aFleet(now)[:1]}
+	drain := &RecordingDrain{fleet: []queue.Worker{
+		{Node: "local/n1", Provider: "local", Opener: "req-a", Since: now, Beat: now, Channel: true},
+		{Node: "local/n2", Provider: "local", Opener: "req-b", Since: now, Beat: now, Channel: true},
+	}}
 	h := newHarness(t, func(o *Options) { o.Queue = drain })
 	h.scan = func(context.Context) (app.Scanned, error) {
-		return app.Scanned{
-			Stores: []reconcile.Finding{{
-				Kind:     reconcile.KindStore,
-				Provider: "local",
-				Store:    &node.Store{Handle: node.StoreHandle{Provider: "local", ID: "n1"}, Name: "n1"},
-				Reason:   "a store, billing by the month",
-				Monthly:  node.MicroUSD(7_000_000),
-			}},
-		}, nil
+		return app.Scanned{Nodes: []reconcile.Finding{
+			{
+				Kind: reconcile.KindOK, Provider: "local",
+				Node:    node.Node{Handle: node.Handle{Provider: "local", ID: "n1"}},
+				Reason:  "running",
+				Accrued: &node.Billing{Cost: node.MicroUSD(11333)},
+			},
+			{
+				Kind: reconcile.KindOK, Provider: "local",
+				Node:    node.Node{Handle: node.Handle{Provider: "local", ID: "n2"}},
+				Reason:  "running",
+				Accrued: &node.Billing{Cost: node.MicroUSD(777000)},
+			},
+		}}, nil
 	}
 
 	got := decode[nodesView](t, h.do(t, "GET", "/api/nodes", ""))
-	if len(got.Workers) != 1 {
-		t.Fatalf("got %d worker(s), want 1", len(got.Workers))
+	if len(got.Workers) != 2 {
+		t.Fatalf("got %d worker(s), want 2", len(got.Workers))
 	}
-	if got.Workers[0].Accrued != nil {
-		t.Errorf("a rental was priced at %+v from a STORE whose handle spells the same string "+
-			"as its node. A store's charge is per month and a node's is what it has cost so "+
-			"far; reading one as the other is the wrong kind of wrong.", got.Workers[0].Accrued)
+	want := map[string]int64{"local/n1": 11333, "local/n2": 777000}
+	for _, w := range got.Workers {
+		if w.Accrued == nil {
+			t.Errorf("%s was priced at nothing", w.Node)
+			continue
+		}
+		if w.Accrued.Micro != want[w.Node] {
+			t.Errorf("%s is priced at %d, want %d -- the join took another node's finding",
+				w.Node, w.Accrued.Micro, want[w.Node])
+		}
 	}
 }
 

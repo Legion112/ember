@@ -1083,11 +1083,24 @@ func viewNodes(sc app.Scanned, fleet []queue.Worker, now time.Time) nodesView {
 	all := append(append(append([]reconcile.Finding(nil), sc.Nodes...), sc.Stores...), sc.Leftovers...)
 	v.Attention = reconcile.Attention(all)
 
-	// THE JOIN IS OVER sc.Nodes ALONE and not over `all`. A store and a
-	// leftover have ids in the same shape -- `provider/name` -- and a Docker
-	// volume called after a run would otherwise price a live rental at a
-	// store's monthly charge. Nodes is the only slice whose ids are node
-	// handles, which is the same field queue.Worker.Node is read from.
+	// THE JOIN IS OVER sc.Nodes ALONE and not over `all`, and the reason is
+	// written down because a reinstatement refused to make it a test.
+	//
+	// A store handle, a leftover and a record's run id all spell themselves
+	// `provider/name`, so a Docker volume named after a run collides with a
+	// live rental's handle exactly -- a collision an operator can produce,
+	// because store names are theirs to choose. Widening the join to every
+	// finding was reinstated and came back GREEN: viewWorker reads `Accrued`
+	// and `Node.Deadline`, and reconcile sets neither on a store or a
+	// leftover, so there is currently nothing for the wrong join to pick up.
+	//
+	// It stays narrow because THAT is the only reason it is harmless. The ids
+	// collide by construction, and the day any of those kinds gains a cost
+	// figure, a join over all of them would attach a per-MONTH charge to a row
+	// whose every other figure is a total already spent -- the wrong kind of
+	// wrong, which is what findingView keeps Accrued and Monthly apart for.
+	// What IS guarded is that each rental is priced from its own node:
+	// TestNodes_PricesEachRentalFromItsOwnNode.
 	billed := map[string]reconcile.Finding{}
 	for _, f := range sc.Nodes {
 		if !f.Node.Handle.IsZero() {
