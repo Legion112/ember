@@ -436,6 +436,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/requests", s.guarded(s.listRequests))
 	s.mux.HandleFunc("GET /api/requests/{id}", s.guarded(s.getRequest))
 	s.mux.HandleFunc("POST /api/requests/{id}/cancel", s.guarded(s.cancelRequest))
+	s.mux.HandleFunc("POST /api/requests/{id}/retry", s.guarded(s.retryRequest))
 	s.mux.HandleFunc("GET /api/requests/{id}/events", s.guarded(s.getEvents))
 	s.mux.HandleFunc("GET /api/requests/{id}/images/{job}/{index}", s.guarded(s.getImage))
 
@@ -931,6 +932,96 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {
 // stopped -- is the queue's to record when the batch returns. Writing
 // "cancelled" here as well would be a second writer for one row, racing the
 // one that actually knows, and the loser would overwrite the truth.
+// retryRequest puts a terminal request back on the queue.
+//
+// THE ROW IS REUSED AND NOT COPIED, which is the operator's own choice and the
+// reason the event below is not optional. A new request would have left the
+// failure in the ledger untouched and needed no event at all; one row keeps
+// the queue from filling with retries of the same work, and makes the row's
+// status, error and node a thing this overwrites. The event stream only
+// appends and is the truth about what happened -- without the KindRequeued a
+// request that failed, was retried and then succeeded would read as one that
+// simply succeeded.
+//
+// THE STORE DECIDES, NOT THIS HANDLER. `Retry` is one statement whose WHERE
+// carries the status condition, so two operators pressing the button on one
+// row, or a retry racing the drain loop's own claim, cannot both win. A
+// handler that read the status and then wrote would be exactly the window
+// ClaimNext is one statement to avoid -- so the 409 below is built from
+// Retry's answer rather than from a status this handler looked up first.
+//
+// NOTHING IS RE-VALIDATED AND NOTHING NEEDS TO BE. The jobs, the ceilings and
+// the card are the row's own, written when it was first accepted and checked
+// then; a retry asks for the same work on the same terms. The budget is
+// projected again by the drain loop before anything is rented, which is where
+// it is projected for every other queued request.
+func (s *Server) retryRequest(w http.ResponseWriter, r *http.Request) {
+	id := genstore.ReqID(r.PathValue("id"))
+
+	// Read first only for the status the EVENT records, which is a different
+	// thing from deciding whether the retry may happen: that is Retry's own
+	// condition. A row that changed between this read and the statement
+	// simply does not retry, and the text of an event nobody writes does not
+	// matter.
+	before, err := s.opts.Store.Get(r.Context(), id)
+	if err != nil {
+		s.failStore(w, err)
+		return
+	}
+
+	ok, err := s.opts.Store.Retry(r.Context(), id)
+	if err != nil {
+		s.failStore(w, err)
+		return
+	}
+	if !ok {
+		s.fail(w, http.StatusConflict, fmt.Errorf(
+			"request %s is %s and only a failed, cancelled or interrupted request can be "+
+				"retried", id, before.Status))
+		return
+	}
+
+	// APPENDED AFTER THE STATEMENT WON, so an event never describes a retry
+	// that did not happen. The reverse order would write history for a row
+	// another operator had already taken.
+	//
+	// STAMPED PAST THE REQUEST'S LAST SEQUENCE, because this is the one place
+	// in ember that appends an event without a report.Stream to number it.
+	// Seq is "stamped by Stream, not by the emitter" and numbers start at 1,
+	// so a zero both reads as "never went through a Stream" and collides:
+	// AppendEvents replaces on seq, so a second Seq-0 event would overwrite
+	// the first rather than following it. A retry is the only event an
+	// operator causes from outside a run, which is why no existing path had
+	// to solve this.
+	seq := int64(0)
+	if evs, eerr := s.opts.Store.Events(r.Context(), id, 0); eerr == nil {
+		for _, e := range evs {
+			if e.Seq > seq {
+				seq = e.Seq
+			}
+		}
+	}
+	if err := s.opts.Store.AppendEvents(r.Context(), id, []report.Event{{
+		Seq: seq + 1, At: time.Now().UTC(),
+		Kind: report.KindRequeued, Text: string(before.Status),
+	}}); err != nil {
+		// REPORTED AND NOT FATAL. The row is queued: the work will run, and
+		// answering 500 here would tell an operator the retry failed when it
+		// is already on the queue -- which is the one wrong answer, because
+		// they would press again.
+		s.opts.Log.Warn("retried a request but could not record the event, so its history "+
+			"will not show the retry", "request", id, "err", err)
+	}
+
+	// THE QUEUE IS KICKED, for the reason Cancel does it: the supervisor polls
+	// every fifteen seconds and a retry an operator is watching should not
+	// wait out a poll to start.
+	if s.opts.Queue != nil {
+		s.opts.Queue.Kick()
+	}
+	s.ok(w, map[string]string{"id": string(id), "status": string(genstore.StatusQueued)})
+}
+
 func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 	id := genstore.ReqID(r.PathValue("id"))
 

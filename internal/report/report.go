@@ -126,6 +126,24 @@ const (
 	// is destroyed.
 	KindRunCost Kind = "run_cost"
 
+	// KindRequeued is a terminal request put back on the queue by an
+	// operator.
+	//
+	// IT EXISTS BECAUSE THE ROW IS REUSED. A retry could have been a new
+	// request, which would have left the failure in the ledger untouched and
+	// needed no event at all -- the operator chose one row instead, so the
+	// queue does not fill with retries of the same work. That makes this
+	// event the thing that keeps the history: the row's status, error and
+	// node are a derived index and the retry overwrites them, where the event
+	// stream is the truth about what happened and only ever appends. Without
+	// this, a request that failed, was retried and then succeeded would read
+	// as one that simply succeeded.
+	//
+	// Text carries the status it is replacing, because "requeued" alone does
+	// not say what was there -- a failure, a cancellation and an interruption
+	// are three different reasons to be looking at this line.
+	KindRequeued Kind = "requeued"
+
 	// KindDestroyFailed is the one event an operator must not miss: the node
 	// may still be running, and running means billing.
 	KindDestroyFailed Kind = "destroy_failed"
@@ -175,6 +193,7 @@ func Kinds() []Kind {
 		KindUnitStarted, KindJobProgress, KindJobImages, KindUnitCost,
 		KindJobCancelled, KindPreviewFailed,
 		KindNodeReady, KindNodeMemory, KindRunCost, KindDestroyFailed,
+		KindRequeued,
 	}
 }
 

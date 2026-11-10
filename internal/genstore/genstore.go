@@ -1348,6 +1348,27 @@ type Store interface {
 	// default, a row nothing will ever reclaim, is unrepresentable.
 	Reclaim(ctx context.Context) (int, error)
 
+	// Retry puts a terminal request back on the queue, answering whether it
+	// did. False means the row was not there or was not terminal.
+	//
+	// ONE STATEMENT, which is ClaimNext's discipline in the other direction:
+	// two operators pressing retry on one row, or a retry racing the drain
+	// loop, must not both succeed, and the status condition is what decides.
+	//
+	// ONLY failed, cancelled AND interrupted. A `done` request has nothing to
+	// retry and a queued or running one is already live -- and `done` is the
+	// reason this is three names rather than "not queued or running", because
+	// the two readings differ on exactly the row an operator is most likely to
+	// press by accident.
+	//
+	// THE CALLER APPENDS A KindRequeued EVENT. The row is reused rather than
+	// replaced by a new request, so its status, error and node are overwritten
+	// -- and the event stream, which only appends, is what keeps a request
+	// that failed and was then retried from reading as one that simply
+	// succeeded. The cost on the row survives, because it is the total this
+	// request has spent across every attempt.
+	Retry(ctx context.Context, id ReqID) (bool, error)
+
 	// PruneEvents drops the events of finished requests that ended before the
 	// horizon, keeping the request, its jobs, its costs and its images.
 	// dryRun counts them and removes nothing.

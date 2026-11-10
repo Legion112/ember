@@ -555,6 +555,41 @@ func (s *RecordingStore) Renew(_ context.Context, ids []ReqID) (int, error) {
 }
 
 // Reclaim marks interrupted every running request whose lease has expired.
+// Retry is the fake's half of the one-statement rule, spelled as the same
+// condition the SQL store's WHERE is.
+//
+// THE THREE TERMINAL STATUSES AND NOT "NOT QUEUED OR RUNNING", because the
+// two readings differ on `done`: a finished request has nothing to retry, and
+// a fake that let one through would disagree with the SQL store on the row an
+// operator is most likely to press by accident. The conformance table is what
+// holds the two to each other.
+func (s *RecordingStore) Retry(_ context.Context, id ReqID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("Retry", string(id)); err != nil {
+		return false, err
+	}
+	r, ok := s.reqs[id]
+	if !ok {
+		return false, nil
+	}
+	switch r.Status {
+	case StatusFailed, StatusCancelled, StatusInterrupted:
+	default:
+		return false, nil
+	}
+	r.Status = StatusQueued
+	r.Err = ""
+	r.Node = ""
+	r.Offer = ""
+	r.Started = time.Time{}
+	r.Ended = time.Time{}
+	// THE COST SURVIVES. A request that failed after renting has already spent
+	// money, and the row is the total across every attempt.
+	delete(s.leases, id)
+	return true, nil
+}
+
 func (s *RecordingStore) Reclaim(_ context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

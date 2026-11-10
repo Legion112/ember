@@ -3334,6 +3334,27 @@ live in a request, so draining connections would say nothing about a node.
 Cancelling a request is a button whether it is **queued** or **generating**.
 `POST /api/requests/{id}/cancel` takes both.
 
+**Retrying one is a button beside its reason**, where a reason is the sentence
+explaining why it needs retrying. `POST /api/requests/{id}/retry` takes a
+**failed**, **cancelled** or **interrupted** request and puts it back on the
+queue — not a finished one, which has nothing to retry and is the row easiest
+to press by accident.
+
+It **reuses the row** rather than queueing a copy, so the queue does not fill
+with retries of the same work. That makes two things deliberate. The **cost
+survives**: a request that failed after renting has already spent money, and
+the row is the total across every attempt rather than the last one. And a
+`requeued` event is appended, because the status, error and node on the row are
+a derived index that a retry overwrites, where the event stream only appends —
+without it, a request that failed, was retried and then succeeded would read as
+one that simply succeeded. `ember history` prints it as `requeued from failed`.
+
+The statement is **one `UPDATE` whose `WHERE` carries the status condition**, so
+two operators pressing the button on one row, or a retry racing the drain
+loop's own claim, cannot both win. It also clears the lease: a queued row
+holding a live one is skipped by the claim and ignored by the reaper, so the
+retry would look like it worked and the request would sit there.
+
 **It does not take a run submitted by `ember up`.** Such a row is `running`
 from the moment it is adopted and never becomes *generating* — there is no
 sd-server job to stop, because the only way to end an `ember up` is to destroy

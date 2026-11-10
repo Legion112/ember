@@ -1795,6 +1795,18 @@ impl Request {
         !self.is_terminal()
     }
 
+    /// Whether this row can be put back on the queue.
+    ///
+    /// NOT `is_terminal`, AND THE DIFFERENCE IS `done`. A finished request has
+    /// nothing to retry, and it is the row an operator is most likely to press
+    /// by accident -- so the three names are written out rather than derived
+    /// by negating something. The server's `Retry` spells the same three in
+    /// its WHERE, and a page offering a button the next click refuses is the
+    /// defect the workload selector was just repaired for.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self.status.as_str(), "failed" | "cancelled" | "interrupted")
+    }
+
     /// The results, without the progress frames.
     ///
     /// A `proj` preview of a 64x64 generation is an 8x8 PNG of about 250

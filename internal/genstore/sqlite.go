@@ -1425,6 +1425,52 @@ func (s *SQLite) Renew(ctx context.Context, ids []ReqID) (int, error) {
 //
 // See Store.Reclaim for why this is keyed on the lease rather than sweeping
 // every running row, and why a reclaimed request is not re-queued.
+// Retry puts a terminal request back on the queue.
+//
+// ONE STATEMENT AND NOT A READ THEN A WRITE, which is ClaimNext's discipline
+// applied to the other direction. Two operators pressing retry on one row, or
+// a retry racing the drain loop's own claim, must not both succeed -- the
+// `WHERE status IN (...)` is what decides, and `RowsAffected` is the answer.
+// A read-then-write would leave exactly the window that made ClaimNext one
+// statement.
+//
+// THE ROW IS REUSED, WHICH IS WHAT THE EVENT IS FOR. The alternative was a new
+// request, leaving the failure in the ledger untouched; one row was chosen so
+// the queue does not fill with retries of the same work. So the caller appends
+// a KindRequeued event: the status, error and node here are a derived index
+// and this overwrites them, where the event stream only appends and is the
+// truth about what happened.
+//
+// THE COST IS KEPT. A request that failed after renting has already spent
+// money, and a retry adds to it rather than starting from nothing -- the row
+// is the total this request has cost across every attempt, which is the only
+// reading that does not lose money somebody paid. `started_unix` and
+// `ended_unix` are cleared because they describe an attempt rather than the
+// request, and the event stream has both.
+//
+// THE LEASE IS CLEARED, and that is not tidiness. A row left queued with a
+// live lease is one ClaimNext's `NOT (...)` arm skips and Reclaim will not
+// take either, because Reclaim only looks at running rows -- so the retry
+// would appear to work and the request would sit there until the lease aged
+// out.
+func (s *SQLite) Retry(ctx context.Context, id ReqID) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE requests
+			SET status = ?, run_id = '', lease_until_unix = 0, err = '',
+			    node = '', offer = '', started_unix = 0, ended_unix = 0
+			WHERE id = ? AND status IN (?,?,?)`,
+		string(StatusQueued), string(id),
+		string(StatusFailed), string(StatusCancelled), string(StatusInterrupted))
+	if err != nil {
+		return false, fmt.Errorf("retry request %s in %s: %w", id, s.path, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count the retried request: %w", err)
+	}
+	return n == 1, nil
+}
+
 func (s *SQLite) Reclaim(ctx context.Context) (int, error) {
 	now := s.at().UnixMilli()
 	res, err := s.db.ExecContext(ctx,
