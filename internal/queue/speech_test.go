@@ -65,7 +65,7 @@ func TestDrain_ASpeechRequestReachesTheSpeechRentalAndResolvesItsVoice(t *testin
 	q, _ := newQueueOver(t, st, pl)
 	q.Workloads = speechWorkloads(t)
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatalf("once: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestDrain_ASpeechRequestWhoseVoiceVanishedFailsAndSaysSo(t *testing.T) {
 	// The rental is opened and then fails, which is the honest shape: the
 	// catalogue is this process's and the id was stored earlier, so nothing
 	// before the claim can know the two disagree.
-	if _, err := q.once(t.Context()); err == nil {
+	if _, err := q.claimAndRun(t.Context()); err == nil {
 		t.Fatal("an unresolvable voice id did not fail the request")
 	}
 
@@ -220,7 +220,7 @@ func TestDrain_ASpeechRequestRecordsItsArtifacts(t *testing.T) {
 	q, _ := newQueueOver(t, st, pl)
 	q.Workloads = speechWorkloads(t)
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatalf("once: %v", err)
 	}
 

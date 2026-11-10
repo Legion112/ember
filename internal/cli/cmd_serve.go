@@ -43,7 +43,7 @@ func runServe(args []string, out io.Writer, d deps) error {
 	)
 	logs := addLogFlags(fs)
 	fs.Usage = func() {
-		outf(out, "ember serve runs the web UI and a queue that drains onto one rental.\n\n")
+		outf(out, "ember serve runs the web UI and a queue that drains onto up to max_nodes rentals.\n\n")
 		outf(out, "It listens on loopback only. Nothing ember serves is reachable from\nanother machine.\n\n")
 		outf(out, "EVERY REQUEST NEEDS A TOKEN. A loopback port is reachable by every uid on\nthis machine, and a request with no Origin -- which is what curl sends -- is\nindistinguishable from your own tooling, so the second account over could\notherwise queue a paid rental. ember serve mints a token for each run and\nprints a URL ending in ?t=<token>; open that and the browser is authorised\nfor as long as the process lives. Set serve_token in credentials.yaml, or\nEMBER_SERVE_TOKEN, for one that survives a restart. There is no --token\nflag: /proc/<pid>/cmdline is world-readable, which is the same uid the\ntoken exists to keep out.\n\n")
 		outf(out, "The token is not a substitute for --allow-paid, which stays off by default:\nauthentication answers who is asking and --allow-paid is a ceiling on what\nthe answer permits.\n\n")
@@ -231,6 +231,21 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		}
 	}
 
+	// WHAT THIS PROCESS HAS AGREED TO SPEND, built here because it is shared:
+	// the drain loop's slots and a run submitted over the socket have to see
+	// each other's commitments or the ceilings are checked against a ledger
+	// in which a rental in flight is worth nothing. One value, handed to the
+	// queue and read back from it by DirectRunner -- see queue/commit.go,
+	// which has the measurement and the two residues.
+	commit := &queue.Commitments{}
+
+	// AND ONE STORE IS FILLED BY ONE SLOT AT A TIME. At max_nodes>1 two plans
+	// run at once, so two slots can both be told a store is missing its
+	// weights and both go and rent a machine to fetch the same fifty-six
+	// gigabytes -- which the one-rental loop made unrepresentable by being
+	// serial. See queue/storefill.go.
+	fills := &queue.StoreFills{}
+
 	q := &queue.Queue{
 		Store: store,
 		// The declared workloads a stored entry id is resolved against. This
@@ -238,6 +253,13 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		// voice path, and it comes from the config this process was started
 		// with.
 		Workloads: workloads,
+		// THE NODE CEILING, from the operator's own file. Any value below 1
+		// reads as 1 inside the queue, so a zero here would silently pin an
+		// operator who wrote `max_nodes: 2` to one node with nothing
+		// reporting it -- the #105 class, which is why
+		// TestServe_WiresTheNodeCeilingIntoTheDrainLoop parses this file.
+		MaxNodes: cfg.MaxNodes,
+		Commit:   commit,
 		// Ledger is the same store, as a reader: the period ceilings are
 		// checked against what the generation history says was spent, which
 		// is the one number that is already recorded, numbered and durable.
@@ -249,7 +271,7 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		// one store on purpose -- see queue.RunStore.
 		Planner: queue.AppPlanner{
 			Config: cfg, Deps: d, AllowPaid: o.AllowPaid, Out: out,
-			Ledger: store, Runs: store,
+			Ledger: store, Runs: store, Commit: commit, Fills: fills,
 			Log: o.Log,
 		},
 		Outputs: ps.Outputs,
@@ -389,12 +411,17 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// SHUTDOWN ORDER IS THE WHOLE POINT OF WHAT FOLLOWS.
 	//
 	// Both halves are started and BOTH are waited for. http.Server.Shutdown
-	// drains requests, and a rental does not live in a request -- it lives in
-	// the queue's goroutine, so waiting only for the server would exit while
-	// a node is alive. provision.WithNode's deferred destroy runs on a
-	// context that survives the cancellation, and queue.Run does not return
-	// until it has, so waiting for queue.Run is waiting for the node to be
-	// gone.
+	// drains requests, and a rental does not live in a request -- it lives on
+	// one of the queue's slot goroutines, so waiting only for the server would
+	// exit while a node is alive. provision.WithNode's deferred destroy runs
+	// on a context that survives the cancellation, and queue.Run does not
+	// return until EVERY slot's has, so waiting for queue.Run is waiting for
+	// every node to be gone.
+	//
+	// THAT SENTENCE USED TO BE ABOUT ONE NODE and is amended rather than left
+	// to be falsified: at max_nodes>1 there are up to that many, queue.Run
+	// holds a WaitGroup over them and the wait is deliberately unbounded,
+	// because a bound here abandons a GPU. See internal/queue's package doc.
 	//
 	// That is the single most expensive thing to get wrong here: a process
 	// that exits with a GPU still rented bills by the hour with nobody
@@ -529,6 +556,11 @@ func announce(out io.Writer, srv *webapi.Server, cfg config.Config, allowPaid bo
 			outf(out, ", %v per run", run)
 		}
 		outf(out, ".\n  A request may narrow those and never widen them.\n")
+		// THE NODE CEILING BESIDE THE MONEY ONE, because an operator deciding
+		// whether to walk away needs both: this is the number that says how
+		// many cards an unattended queue may be holding at once, and it is 2
+		// by default rather than the 1 that used to be structural.
+		announceNodes(out, cfg.MaxNodes)
 		announcePeriods(out, st)
 	} else {
 		outf(out, "  Paid providers are refused. Start with --allow-paid to let the UI spend money.\n")
@@ -573,6 +605,30 @@ func announceSocket(out io.Writer, srv *webapi.Server) {
 		"  token: connect(2) needs write permission on it, so the operating system\n"+
 		"  refuses every account but yours before ember sees the request. A browser\n"+
 		"  cannot reach it; the port above is what a browser uses.\n", srv.SocketPath())
+}
+
+// announceNodes says how many rentals this process may hold at once.
+//
+// ONLY UNDER --allow-paid, with announcePeriods and for its reason: a free
+// provider's rentals cost nothing, so how many of them there may be is not a
+// number an operator has to weigh before walking away.
+//
+// IT SAYS WHAT max_nodes > 1 DOES AND DOES NOT BUY, because the honest answer
+// is counter-intuitive and an operator who expects two cards for two images
+// will conclude ember is broken. Packing is strict: a request a live rental
+// can serve never gets a node of its own, so the second node is for work the
+// first one cannot take at all.
+func announceNodes(out io.Writer, maxNodes int) {
+	if maxNodes < 1 {
+		maxNodes = 1
+	}
+	if maxNodes == 1 {
+		outf(out, "  At most one rental at a time (max_nodes: 1).\n")
+		return
+	}
+	outf(out, "  At most %d rentals at a time (max_nodes). A queued request that a rental\n"+
+		"  already up can serve joins it rather than starting another, so a second node is\n"+
+		"  only for work the first cannot take -- a different provider, card or kind.\n", maxNodes)
 }
 
 // announcePeriods says where the period ceilings stand.

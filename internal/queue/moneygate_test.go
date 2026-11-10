@@ -279,7 +279,7 @@ func TestAppPlanner_ProjectsTheChosenCardsPriceAgainstThePeriodCeilings(t *testi
 // submittedRunConfig is `paidRunConfig` over a whole hour, so the projection
 // at $0.89/hr is exactly $0.89 and the figures in the assertions below are
 // readable rather than a rounded fraction of an hour.
-const submittedRunConfig = "provider: runpod\nimage: " + runImage + "\nttl: 1h\ncmd: [echo, hi]\n"
+const submittedRunConfig = "provider: runpod\nimage: " + runImage + "\nttl: 1h\n"
 
 // aLoop runs the drain goroutine for as long as the test needs one and waits
 // for its deferred destroy on the way out.
@@ -805,5 +805,103 @@ func TestCeilings_TightestNeverWidensAndTreatsZeroAsUnbounded(t *testing.T) {
 				t.Errorf("Tightest reversed = %+v, want %+v", got, c.want)
 			}
 		})
+	}
+}
+
+// TestAppPlanner_ASecondCreateSeesWhatTheFirstCommitted is the ledger race at
+// max_nodes>1, end to end through the gate that is wired in production (#204).
+//
+// The arithmetic is covered by commit_test.go. What this adds is the WIRING,
+// which is the half #105 is the cautionary tale for: `webapi.Options` had no
+// Scan field and every assignment in the tree was in a test file reaching past
+// the constructor, so GET /api/nodes answered 501 in every shipped
+// `ember serve` and the suite could not tell "the production value is missing"
+// from "this test did not set it". So this drives `AppPlanner.Plan`, which is
+// what the drain loop calls, and not `Commitments.Admit`.
+//
+// THREE NUMBERS AGAIN, chosen so only the real gate passes them: $19 spent
+// today, a $20 day ceiling, and two $0.89 rentals. Each one alone fits
+// ($19.89); the two together do not ($20.78), and nothing in the ledger says
+// so, because `requests.cost` is written from a deferred teardown and the
+// first rental has not torn down. A planner that did not commit admits both.
+//
+// AND THE FIRST ONE IS PLANNED THROUGH, which is what stops this being
+// satisfied by a gate that refuses everything: the day really does have room
+// for one.
+func TestAppPlanner_ASecondCreateSeesWhatTheFirstCommitted(t *testing.T) {
+	cfg := pricedConfig()
+	cfg.MaxDayUSD = "20"
+
+	led := genstore.NewRecordingStore()
+	spentOn(t, led, at(17, 9), 19_000_000)
+
+	commit := &Commitments{}
+	plan := func(id genstore.ReqID) error {
+		r := aPricedRequest()
+		r.ID = id
+		_, err := AppPlanner{
+			Config: cfg, Deps: pricedFakes(t), AllowPaid: true, Ledger: led, Commit: commit,
+			Now: func() time.Time { return at(17, 12) },
+		}.Plan(t.Context(), r)
+		return err
+	}
+
+	if err := plan("slot-one"); err != nil {
+		t.Fatalf("the first create was refused with the day's headroom intact: %v", err)
+	}
+
+	err := plan("slot-two")
+	if err == nil {
+		t.Fatal("a second create was admitted against a ledger in which the first rental is " +
+			"worth nothing: requests.cost is written from the deferred teardown, so at " +
+			"max_nodes>1 the overshoot is bounded by N rather than by 1")
+	}
+	// THE COMMITTED FIGURE IS NAMED, because an operator reading a refusal
+	// over a half-spent day has to be able to reconcile it with what
+	// `ember spend` says -- and the only thing that explains the gap is a
+	// rental this process is holding and has not recorded.
+	for _, want := range []string{"max_day_usd", "ceiling of $20,", "$0.89", "committed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+
+	// AND THE RELEASE GIVES IT BACK, which is the slot's own defer in
+	// production. Without it a refused period would stay refused for the life
+	// of the process, which an operator would read as a ceiling that had
+	// stopped working.
+	commit.Release("slot-one")
+	if err := plan("slot-three"); err != nil {
+		t.Errorf("a create after the first rental was recorded and released was still refused, "+
+			"so a commitment outlived its rental: %v", err)
+	}
+}
+
+// TestCeilingError_NamesACommittedFigureOnlyWhenThereIsOne.
+//
+// README.md quotes the zero-committed wording verbatim, and every shell path
+// and every `max_nodes: 1` daemon produces exactly that -- so the sentence has
+// to stay byte-for-byte what it was when nothing is committed. The clause only
+// appears when there is a figure an operator cannot otherwise reconcile.
+func TestCeilingError_NamesACommittedFigureOnlyWhenThereIsOne(t *testing.T) {
+	base := &CeilingError{
+		Period: PeriodDay, Since: at(17, 12),
+		Spent: 19_000_000, Projected: 890_000, Ceiling: 20_000_000,
+	}
+	if got := base.Error(); strings.Contains(got, "committed") {
+		t.Errorf("a refusal with nothing committed names a committed figure: %s", got)
+	}
+	if got := base.Error(); !strings.Contains(got, "take it to $19.89") {
+		t.Errorf("the total is not spent+projected with nothing committed: %s", got)
+	}
+
+	withCommit := *base
+	withCommit.Committed = 500_000
+	got := withCommit.Error()
+	for _, want := range []string{"$0.5 committed", "take it to $20.39"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the refusal does not mention %q, so an operator cannot reconcile it "+
+				"with `ember spend`: %s", want, got)
+		}
 	}
 }

@@ -63,6 +63,7 @@ import (
 	"github.com/Legion112/ember/internal/loopback"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
+	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/internal/tts"
@@ -88,8 +89,13 @@ type Drain interface {
 	// Kick says there may be work. Never blocks.
 	Kick()
 
-	// Running is which request is generating right now, if any.
-	Running() (genstore.ReqID, bool)
+	// Running is which requests are generating right now, sorted.
+	//
+	// A LIST SINCE max_nodes (#204). It was `(ReqID, bool)` while one rental
+	// was structural; with several rentals in flight several requests
+	// generate at once, and a single id would mark one row in the queue table
+	// and leave the others looking queued.
+	Running() []genstore.ReqID
 
 	// Cancel stops one request's generation and reports whether it reached
 	// it. False means that request is not the one generating, which a caller
@@ -103,6 +109,26 @@ type Drain interface {
 	// NOT A SECOND SPELLING OF Running, and the difference is a rental the
 	// operator is paying for: see cancelRequest's two 409s.
 	Holding(genstore.ReqID) bool
+
+	// Fleet is every rental this process is holding, sorted: what each one
+	// is, which request is generating on it, and when its worker last beat.
+	//
+	// A FOURTH METHOD RATHER THAN A FIELD ON Running's ANSWER, because the
+	// two lists answer different questions and have different lifetimes. A
+	// request is `running` from the claim; a rental exists from the plan and
+	// outlives every request that rode it. Folding one into the other would
+	// have made "which requests are generating" and "what am I paying for"
+	// one list, and the row that disagrees is the rental with nothing on it
+	// -- which is a node billing for nothing and the one row an operator most
+	// needs to see.
+	//
+	// IT RETURNS queue.Worker AND NOT A LOCAL TYPE, which is the one import
+	// this package takes from the loop. The alternative is a second struct
+	// with the same fields, converted in `cmd_serve`, and a second place for
+	// a field added to one and not the other -- and this package already
+	// takes genstore.ReqID from the same direction. Nothing here can reach a
+	// plan, a provider or a rental through it: Worker is data.
+	Fleet() []queue.Worker
 }
 
 // Options are what a server needs.
@@ -516,7 +542,14 @@ func serveOn(ctx context.Context, srv *http.Server, lns ...net.Listener) error {
 
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	var caps *sdserver.Capabilities
-	if c, ok, err := s.opts.Store.Caps(r.Context()); err != nil {
+	// THE CONFIG'S OWN SHAPE, because that is what this endpoint describes:
+	// the page asks "what can this server offer me" before it has chosen
+	// anything, and the answer it should be given is the one for the rental
+	// the operator's file would start. A page that then asks for a different
+	// card gets its own shape's answer from the refusal at POST time --
+	// validateJobs reads the request's shape, not this one.
+	shape := genstore.NewShape(genstore.KindSD, s.opts.Config.Provider, s.opts.Config.GPU)
+	if c, ok, err := s.opts.Store.Caps(r.Context(), shape); err != nil {
 		// Reported and not fatal: a UI without the capability list offers
 		// free-text controls instead of menus, which is worse than ideal and
 		// better than a blank page.
@@ -588,7 +621,12 @@ func (s *Server) getNodes(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadGateway, err)
 		return
 	}
-	s.ok(w, viewNodes(sc))
+	// THE FLEET IS THIS PROCESS'S OWN BOOKKEEPING AND THE SWEEP IS THE
+	// PROVIDERS', joined below by the node's handle. Read AFTER the sweep so
+	// the two are as close together as they can be: a rental that ended
+	// during those three provider calls is better left out of the fleet than
+	// listed against a finding that no longer mentions it.
+	s.ok(w, viewNodes(sc, s.fleet(), time.Now()))
 }
 
 // postRequest queues a batch.
@@ -744,7 +782,15 @@ func (s *Server) validateJobs(ctx context.Context, req genstore.Request, wl conf
 		return fmt.Errorf("preview_interval: %w", err)
 	}
 
-	caps, haveCaps, cerr := s.opts.Store.Caps(ctx)
+	// AGAINST THIS REQUEST'S OWN SHAPE AND NOT AGAINST WHATEVER CAME UP LAST.
+	// The cache used to be one row per process, so a request naming a
+	// provider and a card was checked against the capability list of
+	// whichever rental had most recently reported one -- a different card,
+	// possibly a different provider, and a sampler list that is legitimately
+	// allowed to differ between them. A miss here is the pre-rental case and
+	// is handled exactly as it always was: the static half still runs, and
+	// the capability half is caught on the node.
+	caps, haveCaps, cerr := s.opts.Store.Caps(ctx, req.Shape())
 	if cerr != nil {
 		s.log().Warn("could not read the cached capabilities; a bad sampler will be caught "+
 			"after the node is up instead of now", "err", cerr)
@@ -796,16 +842,28 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 		out = append(out, viewRequest(req, nil))
 	}
 
-	running, _ := s.running()
-	s.ok(w, map[string]any{"requests": out, "running": running})
+	s.ok(w, map[string]any{"requests": out, "running": s.running()})
 }
 
-func (s *Server) running() (string, bool) {
+// running is which requests are generating, as the wire carries them.
+//
+// NEVER NIL, which is not tidiness: Go marshals a nil slice as `null`, and a
+// client whose field is a list gets a type error that drops the WHOLE
+// envelope -- which cost this program its entire queue table once, over one
+// number the server could say and the browser could not hear. So this answers
+// `[]` for no queue and for an idle one alike, and `web/src/model.rs`
+// tolerates a null anyway, because the rule has to hold for a field somebody
+// adds later.
+func (s *Server) running() []string {
 	if s.opts.Queue == nil {
-		return "", false
+		return []string{}
 	}
-	id, ok := s.opts.Queue.Running()
-	return string(id), ok
+	ids := s.opts.Queue.Running()
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, string(id))
+	}
+	return out
 }
 
 func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {
@@ -925,6 +983,22 @@ func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 	// this is a no-op.
 	s.cancelRunning(id)
 	s.ok(w, map[string]any{"id": string(id), "status": string(genstore.StatusCancelled)})
+}
+
+// fleet is what this process is renting, tolerating no queue the way
+// cancelRunning and running() do.
+//
+// NIL IS AN EMPTY FLEET AND NOT A MISSING ONE. A server with no drain loop is
+// renting nothing, so "no rows" is the true answer rather than an absence --
+// the opposite of the `sweep` signal in the page, where "not asked" and "asked
+// and found nothing" must never render the same. The difference is that this
+// process KNOWS what it is holding, and a handler test holding nothing is
+// correct about it.
+func (s *Server) fleet() []queue.Worker {
+	if s.opts.Queue == nil {
+		return nil
+	}
+	return s.opts.Queue.Fleet()
 }
 
 // cancelRunning asks the drain loop to stop one request, tolerating no queue.

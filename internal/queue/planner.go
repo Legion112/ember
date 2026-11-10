@@ -98,6 +98,23 @@ type AppPlanner struct {
 	// reaches this -- it guards the shape.
 	Runs RunStore
 
+	// Fills serialises the store fills this process starts, one store at a
+	// time, so two slots cannot both rent a machine to fetch the same
+	// weights.
+	//
+	// Nil serialises nothing, which is what max_nodes: 1 needs: the plans are
+	// serial there and the second one finds the store full. See storefill.go.
+	Fills *StoreFills
+
+	// Commit is what this process has agreed to spend and not yet recorded,
+	// shared with the drain loop and with DirectRunner.
+	//
+	// A FIELD HERE BECAUSE THIS IS WHERE THE PROJECTION IS KNOWN: it needs the
+	// offer, and the offer is chosen in Plan. Nil is today's arithmetic -- see
+	// commit.go -- which is what keeps every existing literal in the suite
+	// measuring what production measures at max_nodes: 1.
+	Commit *Commitments
+
 	// Now is injected because a ceiling is a question about a calendar
 	// period, and a test that could not choose the day could not ask it.
 	Now func() time.Time
@@ -180,20 +197,18 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 		// operator did not ask for. A queue drains unattended, which is the
 		// case this is worth money in and the case nobody is watching to
 		// type the command.
-		if err := p.fillStore(ctx, cfg, missing); err != nil {
-			return nil, err
-		}
-		// Asked again rather than assumed. The sync verified every digest on
-		// the node, so this is not in doubt about the bytes -- what it
-		// confirms is that the store's own endpoint now lists them, which is
-		// the thing this planner acted on and the only claim it has made. A
-		// second miss is reported as what it is rather than fallen through,
-		// because falling through is the rental this exists to prevent.
-		plan, err = app.NewPlan(ctx, req, p.out())
-		if second, ok := app.IsAssetsMissing(err); ok {
-			return nil, fmt.Errorf("filled the store and %d asset(s) are still not listed on it (%w). "+
-				"The node verified their digests, so the bytes are there and the store's endpoint does not show them yet; "+
-				"nothing has been rented", len(second.Missing), err)
+		//
+		// AND ONE STORE IS FILLED BY ONE SLOT AT A TIME (#204). At
+		// max_nodes>1 two plans run at once, so both can be told the weights
+		// are missing and both can go and fetch the same fifty-six
+		// gigabytes -- a thing the one-rental loop made unrepresentable
+		// because the two plans were serial. See storefill.go for what the
+		// duplicate costs and why the lock is context-aware rather than a
+		// mutex.
+		if ferr := p.Fills.Fill(ctx, missing.Store, func() error {
+			return p.fillLocked(ctx, cfg, req, missing, &plan, &err)
+		}); ferr != nil {
+			return nil, ferr
 		}
 	}
 	if err != nil {
@@ -213,11 +228,87 @@ func (p AppPlanner) Plan(ctx context.Context, r genstore.Request) (Rental, error
 	// lookup and not a node of its own -- although a store fill above may
 	// already have rented and recorded one, which fillStore projects against
 	// these same ceilings before it does.
-	if err := p.refuseOverPeriod(ctx, cfg.TTL, plan.Offer.Price); err != nil {
+	//
+	// AND IT IS THE ADMITTING FORM, which is the last statement before this
+	// function hands back something that can rent: the check and the record
+	// happen under one lock, so a second slot planning concurrently cannot
+	// also see a half-spent day. Nothing stands between this and the return,
+	// so a commitment is never recorded for a plan that then failed; the slot
+	// that runs the rental releases it in a defer. See commit.go.
+	if err := p.admitOverPeriod(ctx, r.ID, cfg.TTL, plan.Offer.Price); err != nil {
 		return nil, err
 	}
 
 	return appRental{plan: plan, out: p.out()}, nil
+}
+
+// fillLocked asks again, fills if it still has to, and asks once more.
+//
+// THE FIRST RE-ASK IS WHAT max_nodes ADDED, and it is the whole point of
+// holding the store's fill while this runs: another slot may have been
+// fetching these exact weights while this one waited, so the first thing to do
+// with the lock is ask the store's own endpoint rather than act on an answer
+// that is now minutes old. That is "Asked again rather than assumed" moved one
+// step earlier -- and it is why nothing here records what this process has
+// filled: the store is the authority, a flag would be a second one, and a
+// second one would be wrong the first time two requests on one store wanted
+// different assets.
+//
+// IT COSTS ONE CATALOGUE READ AND A HEAD PER ASSET ON A PATH THAT IS ABOUT TO
+// RENT FOR MINUTES, which is why the re-ask is unconditional rather than
+// guarded on whether anybody waited: a condition on "did I block" is a
+// condition somebody has to keep true, and the saving it buys is one HTTP
+// round trip in the case where a store is empty, which happens once per store.
+//
+// `plan` and `err` ARE WRITTEN THROUGH POINTERS because this runs inside a
+// closure that Fill calls, and what the caller needs back is the plan the
+// second ask produced. A return value would have meant Fill knowing what a
+// plan is.
+func (p AppPlanner) fillLocked(
+	ctx context.Context,
+	cfg config.Config,
+	req app.Request,
+	missing *app.AssetsMissingError,
+	plan *app.Plan,
+	err *error,
+) error {
+	if _, ok := app.IsAssetsMissing(*err); !ok {
+		// Cannot happen -- the caller only enters here with a missing-assets
+		// error -- and is answered rather than asserted, because the
+		// alternative is a nil dereference inside a closure on a path that
+		// rents.
+		return nil
+	}
+	*plan, *err = app.NewPlan(ctx, req, p.out())
+	if second, ok := app.IsAssetsMissing(*err); ok {
+		// Still missing with the fill held, so this slot is the one that
+		// fills it -- and it fills what the RE-ASK found rather than what the
+		// caller's own plan did, which is the point of asking again: another
+		// slot may have put some of these assets there while this one waited.
+		if ferr := p.fillStore(ctx, cfg, second); ferr != nil {
+			return ferr
+		}
+		// Asked again rather than assumed. The sync verified every digest on
+		// the node, so this is not in doubt about the bytes -- what it
+		// confirms is that the store's own endpoint now lists them, which is
+		// the thing this planner acted on and the only claim it has made. A
+		// second miss is reported as what it is rather than fallen through,
+		// because falling through is the rental this exists to prevent.
+		*plan, *err = app.NewPlan(ctx, req, p.out())
+		if third, ok := app.IsAssetsMissing(*err); ok {
+			return fmt.Errorf("filled the store and %d asset(s) are still not listed on it (%w). "+
+				"The node verified their digests, so the bytes are there and the store's endpoint does not show them yet; "+
+				"nothing has been rented", len(third.Missing), *err)
+		}
+		return nil
+	}
+	// ANOTHER SLOT FILLED IT WHILE THIS ONE WAITED, which is the saving: no
+	// second machine, no second fetch of the same weights, and `missing` is
+	// named in the line so an operator reading two requests on one store can
+	// see why only one of them rented a downloader.
+	_, _ = fmt.Fprintf(p.out(), "the store %q was filled by another rental while this request "+
+		"waited; nothing more to fetch\n", missing.Store)
+	return nil
 }
 
 // fillStore rents a machine with no card and has it fetch this run's weights.
@@ -359,7 +450,8 @@ func (p AppPlanner) recordSync(ctx context.Context, sync app.Plan, store string)
 }
 
 // refuseOverPeriod is this planner's half of the max_day_usd and
-// max_month_usd gate: its config, its ledger and its clock.
+// max_month_usd gate: its config, its ledger, its clock and what this process
+// has committed.
 //
 // THE RULE ITSELF IS RefuseOverPeriod's, and it is a package function rather
 // than a method here because three other rental paths need the same one --
@@ -367,12 +459,47 @@ func (p AppPlanner) recordSync(ctx context.Context, sync app.Plan, store string)
 // This method serves two of the five: Plan's own rental, and the store fill
 // above. A copy per caller is a copy of a money rule, and the one thing this
 // repository records about those is that the copies drift.
+//
+// IT READS THE COMMITTED TOTAL AND RECORDS NOTHING, which is the store fill's
+// half of commit.go's split. See admitOverPeriod for the other.
 func (p AppPlanner) refuseOverPeriod(ctx context.Context, ttl time.Duration, price node.Rate) error {
 	cs, err := CeilingsOf(p.Config)
 	if err != nil {
 		return err
 	}
-	return RefuseOverPeriod(ctx, cs, p.Ledger, p.now(), ttl, price)
+	return RefuseOverPeriod(ctx, cs, p.Ledger, p.now(), ttl, price, p.Commit.Committed())
+}
+
+// admitOverPeriod is the same gate for the rental this plan is FOR, and it
+// records what that rental will cost before another create can read the
+// ledger.
+//
+// TWO METHODS AND NOT A FLAG, because the two callers want different things
+// from one rule and the difference is money. The rental below is the one a
+// concurrent create must be able to see, so it is admitted under this
+// request's id and released by the slot that holds it; the store fill above is
+// deliberately NOT a commitment -- it is a $0.06/hour machine inside this same
+// Plan call, and committing it would mean nesting an Admit inside an Admit or
+// holding two entries under one request id. Both of those, and what the
+// residue costs, are written at the top of commit.go.
+//
+// THE PROJECTION IS DERIVED FROM THE PRICE AND THE TTL HERE AS WELL AS INSIDE
+// `Binds`, and that is one expression repeated rather than two rules: #157
+// measured a literal zero in either half as a gate that cannot fail, so there
+// is nowhere a caller could pass the answer instead of the two facts.
+func (p AppPlanner) admitOverPeriod(
+	ctx context.Context,
+	id genstore.ReqID,
+	ttl time.Duration,
+	price node.Rate,
+) error {
+	cs, err := CeilingsOf(p.Config)
+	if err != nil {
+		return err
+	}
+	return p.Commit.Admit(id, price.Cost(ttl), func(committed node.MicroUSD) error {
+		return RefuseOverPeriod(ctx, cs, p.Ledger, p.now(), ttl, price, committed)
+	})
 }
 
 // refusePaid is the --allow-paid gate.
@@ -519,3 +646,24 @@ func (a appRental) WithServed(ctx context.Context, sink report.Sink, fn func(con
 func (a appRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error {
 	return a.plan.WithSpoken(ctx, a.out, sink, fn)
 }
+
+// Card is the card this plan's offer carries.
+//
+// THROUGH HasGPU, so a CPU-only plan answers "" rather than whatever a
+// provider happened to put in a field it does not fill. The same reading
+// RunGPU already uses for the stored column, which is what keeps the card a
+// rental advertises and the card its row records one fact.
+func (a appRental) Card() node.GPUModel {
+	if !a.plan.Offer.HasGPU() {
+		return ""
+	}
+	return a.plan.Offer.GPU
+}
+
+// Image is the workload image this plan will run, off the resolved spec.
+//
+// FROM THE SPEC AND NOT FROM THE CONFIG FILE, which is the same reading every
+// other fact about a rental uses: NewPlan has already applied whatever this
+// request's kind selects, so this is the image that will actually be pulled
+// rather than the one `images:` lists first.
+func (a appRental) Image() string { return a.plan.Spec.Image }

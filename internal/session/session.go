@@ -1,4 +1,4 @@
-// Package session connects to a ready node and holds the tunnel open.
+// Package session connects to a ready node.
 //
 // It exists as its own package because the two decisions in it — when to
 // retry a dial and when to refuse one — are the kind that need tests, and
@@ -10,26 +10,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Legion112/ember/internal/hostkey"
-	"github.com/Legion112/ember/internal/loopback"
-	"github.com/Legion112/ember/internal/node"
-	"github.com/Legion112/ember/internal/tunnel"
 	"github.com/Legion112/ember/internal/tunnel/sshdial"
 )
 
-// outf writes to the operator's stream. The error is discarded on purpose: a
-// failed write to stdout means the pipe is gone -- `ember up | head` is the
-// ordinary way that happens -- and surfacing it would end a healthy session
-// with a non-zero status.
-func outf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
-
-// Options tune the connection and the hold.
+// Options tune the connection.
 type Options struct {
 	Dialer sshdial.Dialer
 	Log    *slog.Logger
@@ -39,9 +29,6 @@ type Options struct {
 
 	// RetryEvery is the gap between dial attempts.
 	RetryEvery time.Duration
-
-	// Hold ends the session after this long. Zero waits for the context.
-	Hold time.Duration
 }
 
 const (
@@ -112,53 +99,4 @@ func Dial(ctx context.Context, target sshdial.Target, trust hostkey.Trust, signe
 		case <-time.After(o.retryEvery()):
 		}
 	}
-}
-
-// Forwards builds the forward set for a spec's ports.
-//
-// Both loopback families are bound, because a browser that resolves localhost
-// to ::1 first sees connection-refused on a working tunnel and reports it as
-// a bug in ember.
-func Forwards(ports []node.PortMap) []tunnel.Forward {
-	out := make([]tunnel.Forward, 0, len(ports))
-	for _, p := range ports {
-		out = append(out, tunnel.Forward{
-			Name:   p.Name,
-			Local:  []loopback.Bind{loopback.Port(p.Local), loopback.Port6(p.Local)},
-			Remote: tunnel.RemoteLoopback(p.Remote),
-		})
-	}
-	return out
-}
-
-// Serve holds the tunnel open until the context ends or Hold elapses.
-//
-// A context that ends is the ordinary way out — the operator pressed Ctrl-C,
-// or the node reached its deadline — so it is not an error. Returning one
-// would teach the operator to ignore ember's exit code, and the exit code is
-// how `ember ls` reports findings.
-func Serve(ctx context.Context, out io.Writer, d tunnel.Dialer, fwds []tunnel.Forward, o Options) error {
-	if o.Hold > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, o.Hold)
-		defer cancel()
-	}
-
-	if len(fwds) == 0 {
-		outf(out, "no ports to forward; holding the node until you stop it\n")
-		<-ctx.Done()
-		return nil
-	}
-
-	for _, f := range fwds {
-		outf(out, "  %-12s http://%s\n", f.Name, f.Local[0])
-	}
-	outf(out, "\nCtrl-C to stop. The node is destroyed either way.\n")
-
-	f := &tunnel.Forwarder{Dialer: d, Log: o.Log}
-	err := f.Run(ctx, fwds)
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return nil
-	}
-	return err
 }

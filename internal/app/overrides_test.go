@@ -24,16 +24,12 @@ func TestOverrides_ReplaceRatherThanNarrow(t *testing.T) {
 		GPU:          "rtx2080ti",
 		MaxHourlyUSD: "0.10",
 		TTL:          time.Hour,
-		Ports:        []string{"ui:8188"},
-		Cmd:          []string{"echo", "configured"},
 	}
 	if err := (Overrides{
 		Provider:     "runpod",
 		GPU:          "h100-80g",
 		MaxHourlyUSD: "999",
 		TTL:          2 * time.Hour,
-		Ports:        []string{"api:9000"},
-		Cmd:          []string{"echo", "typed"},
 	}).Apply(&cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -48,15 +44,6 @@ func TestOverrides_ReplaceRatherThanNarrow(t *testing.T) {
 	if cfg.Provider != "runpod" || cfg.GPU != "h100-80g" {
 		t.Errorf("selection = %s/%s", cfg.Provider, cfg.GPU)
 	}
-	// REPLACED AND NOT APPENDED. A --port that could only add to a configured
-	// one is a --port that cannot replace the forward an operator is trying to
-	// change, so the one they wanted gone is still open.
-	if len(cfg.Ports) != 1 || cfg.Ports[0] != "api:9000" {
-		t.Errorf("ports = %v, want only the flag's", cfg.Ports)
-	}
-	if len(cfg.Cmd) != 2 || cfg.Cmd[1] != "typed" {
-		t.Errorf("cmd = %v, want only the flag's", cfg.Cmd)
-	}
 }
 
 // TestOverrides_AnEmptyValueLeavesTheFileAlone.
@@ -67,7 +54,7 @@ func TestOverrides_ReplaceRatherThanNarrow(t *testing.T) {
 func TestOverrides_AnEmptyValueLeavesTheFileAlone(t *testing.T) {
 	cfg := config.Config{
 		Provider: "local", Image: "a:v1", GPU: "rtx2080ti", MaxHourlyUSD: "0.10",
-		TTL: time.Hour, Ports: []string{"ui:8188"}, Cmd: []string{"echo"},
+		TTL: time.Hour,
 	}
 	before := cfg
 	if err := (Overrides{}).Apply(&cfg); err != nil {
@@ -75,8 +62,7 @@ func TestOverrides_AnEmptyValueLeavesTheFileAlone(t *testing.T) {
 	}
 
 	if cfg.Provider != before.Provider || cfg.Image != before.Image || cfg.GPU != before.GPU ||
-		cfg.MaxHourlyUSD != before.MaxHourlyUSD || cfg.TTL != before.TTL ||
-		len(cfg.Ports) != 1 || len(cfg.Cmd) != 1 {
+		cfg.MaxHourlyUSD != before.MaxHourlyUSD || cfg.TTL != before.TTL {
 		t.Errorf("a zero Overrides changed the config: %+v -> %+v", before, cfg)
 	}
 }
@@ -120,7 +106,6 @@ func TestRunAsk_RefusesWhatOnlyAMistakeCouldMean(t *testing.T) {
 		{"no config", RunAsk{}, "config file"},
 		{"a relative path", RunAsk{Config: "ember.yaml"}, "relative"},
 		{"a relative path with a dot", RunAsk{Config: "./ember.yaml"}, "relative"},
-		{"a negative hold", RunAsk{Config: "/e.yaml", Hold: -time.Second}, "hold"},
 		{"a negative ttl", RunAsk{Config: "/e.yaml", Overrides: Overrides{TTL: -time.Hour}}, "ttl"},
 	}
 	for _, c := range cases {
@@ -137,8 +122,7 @@ func TestRunAsk_RefusesWhatOnlyAMistakeCouldMean(t *testing.T) {
 
 	// And the acceptance beside the refusals, because a Validate that refused
 	// everything would satisfy every case above -- the zero-Pin lesson.
-	ok := RunAsk{Config: "/home/op/ember.yaml", Hold: time.Minute,
-		Overrides: Overrides{TTL: time.Hour}}
+	ok := RunAsk{Config: "/home/op/ember.yaml", Overrides: Overrides{TTL: time.Hour}}
 	if err := ok.Validate(); err != nil {
 		t.Errorf("a well-formed ask was refused: %v", err)
 	}

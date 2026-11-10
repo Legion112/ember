@@ -164,11 +164,11 @@ func (s *SQLite) History(ctx context.Context, f Filter) ([]Entry, error) {
 // any reachable state could produce -- the dead half of a seal, which this
 // file already removed one of. Adopt makes it reachable, and the answer it
 // then gives is the right one: a rental that generates nothing -- an
-// `ember up` that forwarded ports or ran `cmds`, or the machine with no card
-// that fills a store -- pays for a node and reports no per-job figures at
-// all, which is precisely what this flag means. That list was the first two
-// alone while a store fill wrote no row, and it is three now; naming two of
-// three is the shape a `--all` on an `ember ls` cost this repository
+// `ember up` whose configuration describes no jobs, or the machine with no
+// card that fills a store -- pays for a node and reports no per-job figures
+// at all, which is precisely what this flag means. That list was the first
+// alone while a store fill wrote no row, and it is two now; naming one of
+// two is the shape a `--all` on an `ember ls` cost this repository
 // eighteen times, where the argument persuades and the enumeration no longer
 // holds. Both readers then print a dash rather
 // than a zero and say how many rows they had to leave out, which is the

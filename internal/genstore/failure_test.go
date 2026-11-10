@@ -53,9 +53,10 @@ func TestSQLite_EveryMethodReportsAClosedDatabase(t *testing.T) {
 		{"Events", func() error { _, err := s.Events(ctx, id, 0); return err }},
 		{"AddImage", func() error { return s.AddImage(ctx, Image{Req: id, Job: 1, Key: "a.png"}) }},
 		{"Images", func() error { _, err := s.Images(ctx, id); return err }},
-		{"PutCaps", func() error { return s.PutCaps(ctx, sdserver.Capabilities{Model: "m"}) }},
-		{"Caps", func() error { _, _, err := s.Caps(ctx); return err }},
-		{"Interrupt", func() error { _, err := s.Interrupt(ctx); return err }},
+		{"PutCaps", func() error { return s.PutCaps(ctx, Shape{Kind: KindSD}, sdserver.Capabilities{Model: "m"}) }},
+		{"Caps", func() error { _, _, err := s.Caps(ctx, Shape{Kind: KindSD}); return err }},
+		{"Renew", func() error { _, err := s.Renew(ctx, []ReqID{"req-1"}); return err }},
+		{"Reclaim", func() error { _, err := s.Reclaim(ctx); return err }},
 		{"PruneEvents", func() error { _, err := s.PruneEvents(ctx, time.Now(), false); return err }},
 		{"PruneEvents dry", func() error { _, err := s.PruneEvents(ctx, time.Now(), true); return err }},
 		{"DropImages", func() error { _, err := s.DropImages(ctx, id); return err }},
@@ -176,9 +177,10 @@ func TestRecording_FailsEveryCallItWasToldTo(t *testing.T) {
 		{"Events", func() error { _, err := s.Events(ctx, id, 0); return err }},
 		{"AddImage", func() error { return s.AddImage(ctx, Image{Req: id, Job: 1, Key: "a.png"}) }},
 		{"Images", func() error { _, err := s.Images(ctx, id); return err }},
-		{"PutCaps", func() error { return s.PutCaps(ctx, sdserver.Capabilities{}) }},
-		{"Caps", func() error { _, _, err := s.Caps(ctx); return err }},
-		{"Interrupt", func() error { _, err := s.Interrupt(ctx); return err }},
+		{"PutCaps", func() error { return s.PutCaps(ctx, Shape{Kind: KindSD}, sdserver.Capabilities{}) }},
+		{"Caps", func() error { _, _, err := s.Caps(ctx, Shape{Kind: KindSD}); return err }},
+		{"Renew", func() error { _, err := s.Renew(ctx, []ReqID{"req-1"}); return err }},
+		{"Reclaim", func() error { _, err := s.Reclaim(ctx); return err }},
 		{"PruneEvents", func() error { _, err := s.PruneEvents(ctx, time.Now(), false); return err }},
 		{"DropImages", func() error { _, err := s.DropImages(ctx, id); return err }},
 		{"Usage", func() error { _, err := s.Usage(ctx); return err }},
@@ -282,10 +284,15 @@ func TestSQLite_RefusesRowsItCannotDecode(t *testing.T) {
 		t.Error("a replay accepted a row that is not an event")
 	}
 
-	if _, err := s.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('caps','not json')`); err != nil {
+	// The cache is a table keyed by shape now, so the corrupt row has to be
+	// written under the shape the read asks for -- a row under a different
+	// key is a miss and would make this assertion pass against anything.
+	if _, err := s.db.Exec(
+		`INSERT OR REPLACE INTO caps (kind, provider, gpu, body, at_unix)
+			VALUES (?, 'local', 'rtx2080ti', 'not json', 0)`, KindSD); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Caps(t.Context()); err == nil {
+	if _, _, err := s.Caps(t.Context(), Shape{Kind: KindSD, Provider: "local", GPU: "rtx2080ti"}); err == nil {
 		t.Error("the capability cache accepted a value that is not JSON")
 	}
 }

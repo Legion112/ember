@@ -29,8 +29,11 @@ import (
 // because "something that is not ember took it away" is the entire premise.
 func TestLeftover_DestroyRemovesTheNetworkWhenSomethingElseTookTheContainer(t *testing.T) {
 	l := harness.New(t)
+	// A rental that stays up while the lab takes its container away, through
+	// the key an operator writes for a card that needs time to come up.
+	l.AppendConfig("gpu_probe: [sh, -c, \"exit 1\"]\ngpu_probe_timeout: 3m\n")
 
-	cmd, wait := l.Start(t.Context(), "up", "--hold", "3m")
+	cmd, wait := l.Start(t.Context(), "up")
 	l.WaitNode(t.Context(), 90*time.Second)
 
 	nodes := l.Nodes(t.Context())

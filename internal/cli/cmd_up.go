@@ -40,17 +40,12 @@ func runUp(args []string, out io.Writer, d deps) error {
 		maxHourly    = fs.String("max-hourly-usd", "", "refuse any offer dearer than this per hour")
 		cfgPath      = fs.String("config", config.FileName, "path to ember.yaml")
 		dryRun       = fs.Bool("dry-run", false, "say what would be rented and create nothing")
-		holdFor      = fs.Duration("hold", 0, "stop after this long instead of waiting for Ctrl-C")
 	)
 	logs := addLogFlags(fs)
-	var ports multiFlag
-	fs.Var(&ports, "port", "forward a port, as name:remote or name:remote:local (repeatable)")
-	var cmdArgs multiFlag
-	fs.Var(&cmdArgs, "cmd", "a word of the command to run on the node (repeatable, in order)")
 
 	fs.Usage = func() {
-		outf(out, "ember up rents a node, forwards its ports to loopback, and destroys it.\n\n")
-		outf(out, "Every forwarded port is bound to 127.0.0.1 and reached over SSH.\nNothing ember creates is reachable from the internet.\n\n")
+		outf(out, "ember up rents a node, runs the jobs this config describes, and destroys it.\n\n")
+		outf(out, "Nothing ember creates is reachable from the internet: the only port a node\npublishes is sshd, and ember reaches everything else over that one SSH connection.\n\n")
 		outf(out, "WITH AN ember serve RUNNING, this submits the run to it over its unix socket\nand streams the result, so the run survives this terminal -- and Ctrl-C then\nDETACHES rather than destroying, which makes the ttl the only thing that stops\nthe bill. With no ember serve, it rents here and Ctrl-C destroys the node, as\nit always has. A paid provider needs that ember serve to have been started\nwith --allow-paid; --dry-run never asks one.\n\n")
 		fs.PrintDefaults()
 	}
@@ -88,8 +83,6 @@ func runUp(args []string, out io.Writer, d deps) error {
 		GPU:          *gpu,
 		MaxHourlyUSD: *maxHourly,
 		TTL:          *ttl,
-		Ports:        ports,
-		Cmd:          cmdArgs,
 	}
 
 	// A RUNNING `ember serve` IS ASKED TO DO THIS INSTEAD, and a dry run never
@@ -121,7 +114,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 			sctx, sstop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer sstop()
 			return upOverSocket(sctx, out, sock, app.RunAsk{
-				Config: abs, Overrides: ov, Hold: *holdFor,
+				Config: abs, Overrides: ov,
 			})
 		}
 	}
@@ -137,7 +130,7 @@ func runUp(args []string, out io.Writer, d deps) error {
 	// the offer, the image for the card that offer names, the jobs, the spec.
 	// Nothing is rented until Do.
 	plan, err := app.NewPlan(context.Background(), app.Request{
-		Config: cfg, Deps: d, Hold: *holdFor, Log: logOpts,
+		Config: cfg, Deps: d, Log: logOpts,
 	}, out)
 	if err != nil {
 		return err
@@ -259,7 +252,14 @@ func boundAndRecord(
 	// that was chosen and plan.Spec.TTL is the deadline the node will get
 	// after every override has had its say -- the two halves #157 measured as
 	// gates that cannot fail when either is a literal zero.
-	if err := queue.RefuseOverPeriod(ctx, cs, store, time.Now(), plan.Spec.TTL, plan.Offer.Price); err != nil {
+	//
+	// AND A COMMITTED TOTAL OF ZERO, which is honest rather than an omission:
+	// this is a shell, so there is no loop of this process's whose rentals
+	// could be in flight and unrecorded. Another `ember serve`'s in-flight
+	// rental is invisible here, which is the residue commit.go names and is
+	// unchanged by max_nodes -- a figure in one process's memory is not
+	// something a second process can read.
+	if err := queue.RefuseOverPeriod(ctx, cs, store, time.Now(), plan.Spec.TTL, plan.Offer.Price, 0); err != nil {
 		_ = store.Close()
 		return nil, nil, err
 	}
@@ -350,15 +350,7 @@ func dryRunUp(out io.Writer, plan app.Plan) error {
 	spec, run := plan.Spec, plan.Jobs
 	outf(out, "dry-run: would rent %s from %s at %v for %v\n",
 		plan.Offer.Token, plan.Provider.Name(), plan.Offer.Price, spec.TTL)
-	outf(out, "dry-run: would run %s (%s) and forward %d port(s)\n",
-		spec.Image, plan.ImageFrom, len(spec.Ports))
-	for i, c := range spec.Cmds {
-		if len(spec.Cmds) > 1 {
-			outf(out, "dry-run: step %d/%d: %s\n", i+1, len(spec.Cmds), workload.Describe(c))
-			continue
-		}
-		outf(out, "dry-run: would execute: %s\n", workload.Describe(c))
-	}
+	outf(out, "dry-run: would run %s (%s)\n", spec.Image, plan.ImageFrom)
 	if len(spec.Serve) > 0 {
 		outf(out, "dry-run: would serve: %s\n", workload.Describe(spec.Serve))
 		// The listen address is printed because ember appended it rather than
@@ -391,14 +383,16 @@ func dryRunUp(out io.Writer, plan app.Plan) error {
 // is the honest answer rather than a dropped error, because `ember down`
 // destroys a node and reads the config for a provider and a ceiling, so a
 // configuration it cannot resolve is one it must not guess about.
-func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, ttl time.Duration, ports multiFlag) error {
+//
+// NO `ports` ANY MORE: the key is gone from the config, so the parameter that
+// carried it went with it rather than being threaded through as a nil.
+func applyFlags(cfg *config.Config, providerName, image, gpu, maxHourly string, ttl time.Duration) error {
 	return app.Overrides{
 		Provider:     providerName,
 		Image:        image,
 		GPU:          gpu,
 		MaxHourlyUSD: maxHourly,
 		TTL:          ttl,
-		Ports:        ports,
 	}.Apply(cfg)
 }
 

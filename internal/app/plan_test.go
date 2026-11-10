@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -116,41 +115,6 @@ func TestNewPlan_ARequestsBudgetWins(t *testing.T) {
 	}
 }
 
-// TestNewPlan_SaysSoWhenAWorkloadAsksToListenOffLoopback.
-//
-// A warning and not a refusal, and the run still gets a plan: `cmd` is opaque
-// argv on purpose, so refusing would be ember claiming to know what `--host`
-// means to a program it has never heard of. What it is for is the operator's
-// belief -- nothing is published for a workload port, and somebody writing
-// 0.0.0.0 thinks otherwise. See workload.NonLoopbackBinds.
-//
-// It is asserted on the stream the operator reads rather than on the function
-// that found it, because the logger is built from that stream and a finding
-// nothing prints is a finding that does not exist.
-func TestNewPlan_SaysSoWhenAWorkloadAsksToListenOffLoopback(t *testing.T) {
-	cfg := config.Config{
-		Provider: "local",
-		Image:    "ghcr.io/example/llm@sha256:" + strings.Repeat("a", 64),
-		TTL:      time.Hour,
-		Ports:    []string{"llm:8080"},
-		Cmds: [][]string{
-			{"llama-server", "--host", "127.0.0.1", "--port", "8080"},
-			{"llama-server", "--host", "0.0.0.0", "--port", "8080"},
-		},
-	}
-	var out bytes.Buffer
-	if _, err := NewPlan(t.Context(), Request{Config: cfg, Deps: planDeps(t)}, &out); err != nil {
-		t.Fatal(err)
-	}
-	got := out.String()
-	if n := strings.Count(got, "other than the node's own loopback"); n != 1 {
-		t.Fatalf("warned %d time(s), want once -- only the second step binds off loopback:\n%s", n, got)
-	}
-	if !strings.Contains(got, "address=0.0.0.0") {
-		t.Errorf("the warning does not name the address an operator has to find:\n%s", got)
-	}
-}
-
 // TestJobsFromRequest_RefusesEveryJobBeforeAnythingIsRented.
 //
 // Every refusal here is config.ParseSD's, reached through the same function,
@@ -233,8 +197,8 @@ func TestWithServed_RefusesAConfigWithNoServer(t *testing.T) {
 // dollar a mistake.
 func TestServed_GenerateRefusesEveryBadJobBeforeGeneratingAnything(t *testing.T) {
 	f := newFakeSD(t)
-	c, _ := f.start(t)
-	s := served{client: c, caps: sdserver.Capabilities{Samplers: []string{"euler"}}}
+	n := startNode(t, f)
+	s := n.served(t, 0)
 
 	err := s.Generate(t.Context(), report.Discard, testRun(
 		sdserver.Job{Prompt: "fine", Sampler: "euler"},
@@ -251,17 +215,16 @@ func TestServed_GenerateRefusesEveryBadJobBeforeGeneratingAnything(t *testing.T)
 	if !errorsIsUsage(err) {
 		t.Errorf("err = %v, want it to be an ErrUsage", err)
 	}
-	if len(f.submitted) != 0 {
-		t.Errorf("%d job(s) were generated before the refusal", len(f.submitted))
+	if f.submits() != 0 {
+		t.Errorf("%d job(s) were generated before the refusal", f.submits())
 	}
 }
 
 // TestServed_GenerateRunsTheBatchAndReportsIt.
 func TestServed_GenerateRunsTheBatchAndReportsIt(t *testing.T) {
-	shrinkPoll(t)
 	f := newFakeSD(t)
-	c, _ := f.start(t)
-	s := served{client: c, caps: sdserver.Capabilities{Samplers: []string{"euler"}}, rate: node.Rate(2_000_000)}
+	n := startNode(t, f)
+	s := n.served(t, node.Rate(2_000_000))
 
 	dir := t.TempDir()
 	events := &collect{}
@@ -272,8 +235,8 @@ func TestServed_GenerateRunsTheBatchAndReportsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(f.submitted) != 2 {
-		t.Errorf("submitted %d job(s), want 2", len(f.submitted))
+	if f.submits() != 2 {
+		t.Errorf("submitted %d job(s), want 2", f.submits())
 	}
 	// The names travel on the event, from sdserver.WriteImages, so a reader
 	// recording where the bytes went does not re-derive the naming.

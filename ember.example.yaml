@@ -37,11 +37,6 @@ max_run_usd: "0.50"
 # max_day_usd: "2.00"
 # max_month_usd: "20.00"
 
-# name:remote or name:remote:local. Every local end binds 127.0.0.1 and is
-# reached over SSH; nothing is published to the internet.
-ports:
-  - sshd:22:18022
-
 # Paths to retrieve from the node before it dies, as remote or remote:local.
 outputs:
   - /etc/hostname:host
@@ -50,6 +45,11 @@ outputs:
 # runs on a machine somebody else owns and can see.
 runpod_cloud: SECURE
 
-# No cmd, cmds or sd: block, so this holds the node open with its ports
-# forwarded -- the interactive shape. Add one of the three and ember runs it,
-# brings the outputs home and destroys the node. Never two of them.
+# No sd: or tts: block, so this file describes no jobs: `ember up` rents the
+# machine, proves the card, brings `outputs:` home and destroys it. That is a
+# provider smoke test -- credentials, image and sshd -- and it costs a minute
+# rather than the ttl, because nothing holds the node afterwards.
+#
+# Add `sd:` for image generation or `tts:` for speech, never both.
+# ember.sd-server.example.yaml is the rented shape and
+# ember.local.sd-server.example.yaml the free one.

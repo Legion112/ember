@@ -1,8 +1,10 @@
 package queue
 
 import (
+	"context"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -162,20 +164,58 @@ func TestOnce_TwoRequestsForOneDeclaredWorkloadRideOneRental(t *testing.T) {
 	// declared file with two `sd` entries holds.
 	enq("sd15", "third")
 
-	if _, err := q.once(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	// DRIVEN THROUGH `Run` AND COUNTED IN PLANS, which is this assertion
+	// rewritten for the supervisor rather than weakened. `once` is the slot
+	// goroutine's body now and takes the claim with it, so there is no
+	// single-shot entry point to call -- and `served.batches` is a flat list
+	// across every rental, so counting batches can no longer say which rental
+	// served them. A PLAN is a rental: the two requests for one declared
+	// workload must produce ONE, and `sd15` its own, so the number to assert
+	// is two. With the entry id dropped from the Compat the rider is refused
+	// and each request rents its own node, which is three.
+	q.MaxNodes = 1
+	stopLoop := runWorkloadLoop(t, q)
+	defer stopLoop()
 
-	if len(served.batches) != 2 {
-		t.Fatalf("the rental served %d batch(es), want the two requests for the same declared "+
-			"workload; a Compat that does not carry the entry id refuses its own riders and "+
-			"rents a node per request", len(served.batches))
+	waitFor(t, 30*time.Second, "all three requests to be served", func() bool {
+		served.mu.Lock()
+		defer served.mu.Unlock()
+		return len(served.batches) == 3
+	})
+
+	pl.mu.Lock()
+	plans := len(pl.planned)
+	pl.mu.Unlock()
+	if plans != 2 {
+		t.Errorf("the loop planned %d rental(s) for three requests, want 2: two requests for "+
+			"one declared workload ride one rental and `sd15` gets its own. A Compat that does "+
+			"not carry the entry id refuses its own riders and rents a node per request, which "+
+			"pays for provisioning, the image pull, the asset verify and the model load again",
+			plans)
 	}
-	prompts := []string{served.batches[0].Jobs[0].Prompt, served.batches[1].Jobs[0].Prompt}
-	for _, p := range prompts {
-		if p == "third" {
-			t.Errorf("a request for another workload rode this rental; it would reach a "+
-				"resident server holding another model (served %v)", prompts)
-		}
+}
+
+// runWorkloadLoop drives the supervisor for one of these cases and stops it.
+//
+// THE SAME SHAPE AS runLoop IN maxnodes_test, and separate only because that
+// one releases a fleetPlanner's blocked creates and these cases use the
+// ordinary fake. A loop left running past the test holds a rental nothing
+// accounts for, which is the thing its deferred stop exists for.
+func runWorkloadLoop(t *testing.T, q *Queue) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- q.Run(ctx) }()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done: //nolint:errcheck // the loop reports its own error
+			case <-time.After(30 * time.Second):
+				t.Error("the supervisor did not return after its context ended, so a rental " +
+					"it holds is unaccounted for")
+			}
+		})
 	}
 }

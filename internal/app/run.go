@@ -22,7 +22,6 @@ import (
 	"github.com/Legion112/ember/internal/sshx"
 	"github.com/Legion112/ember/internal/sshx/sshexec"
 	"github.com/Legion112/ember/internal/transfer"
-	"github.com/Legion112/ember/internal/tunnel"
 	"github.com/Legion112/ember/internal/tunnel/sshdial"
 	"github.com/Legion112/ember/internal/workload"
 )
@@ -111,7 +110,7 @@ func (p Plan) lifecycle(sink report.Sink) provision.Options {
 func (p Plan) SyncAssets(ctx context.Context, out io.Writer, sink report.Sink) error {
 	return provision.WithNode(ctx, p.Provider, p.Spec, p.Offer, p.lifecycle(sink),
 		func(ctx context.Context, s provision.Session) error {
-			client, so, err := dialNode(ctx, s, p.Options, 0)
+			client, so, err := dialNode(ctx, s, p.Options)
 			if err != nil {
 				return err
 			}
@@ -120,7 +119,8 @@ func (p Plan) SyncAssets(ctx context.Context, out io.Writer, sink report.Sink) e
 		})
 }
 
-// prepare dials the node and gets it ready to be used.
+// ready proves the card, puts the weights in place and records what the node
+// says about its memory.
 //
 // THE ORDER IS THE CHEAP-FAILURE ORDER, and it is the reason this is one
 // function rather than three lines repeated by every shape. A dead GPU costs
@@ -129,16 +129,14 @@ func (p Plan) SyncAssets(ctx context.Context, out io.Writer, sink report.Sink) e
 // model set is a minute of a card that cannot run it anyway. So: the card,
 // then the weights, then whatever the node was rented for.
 //
-// The returned client is the caller's to close.
-func (p Plan) prepare(ctx context.Context, out io.Writer, sink report.Sink, s provision.Session) (*sshdial.Client, session.Options, error) {
-	client, so, err := dialNode(ctx, s, p.Options, p.Hold)
-	if err != nil {
-		return nil, so, err
-	}
-
+// IT TAKES A CLIENT RATHER THAN DIALLING, which is what lets the caller
+// register the node-log fetch between the two. The dial and these three used
+// to be one function, so a probe that timed out returned before anything had
+// asked for embernode's log -- and an interrupted probe is precisely the case
+// that log exists for. Closing the client stays with whoever opened it.
+func (p Plan) ready(ctx context.Context, out io.Writer, sink report.Sink, client *sshdial.Client, so session.Options) error {
 	if err := gpucheck.Wait(ctx, sshexec.New(client.SSH()), p.Spec.GPUProbe, p.Spec.GPUProbeTimeout, out, so.Log); err != nil {
-		_ = client.Close()
-		return nil, so, err
+		return err
 	}
 
 	// Assets next, and a failure here means the workload never starts.
@@ -148,8 +146,7 @@ func (p Plan) prepare(ctx context.Context, out io.Writer, sink report.Sink, s pr
 	// connection the workload uses, so its output streams live and its exit
 	// status is known when it happens rather than polled for afterwards.
 	if err := EnsureAssets(ctx, out, sshexec.New(client.SSH()), p.Spec, so); err != nil {
-		_ = client.Close()
-		return nil, so, err
+		return err
 	}
 
 	// And the memory facts last, because the asset figure is a stat of the
@@ -158,7 +155,7 @@ func (p Plan) prepare(ctx context.Context, out io.Writer, sink report.Sink, s pr
 	// "can this node hold the model" asked before the card is paid to find
 	// out the hard way.
 	reportMemory(ctx, sink, sshexec.New(client.SSH()), p.Spec, so)
-	return client, so, nil
+	return nil
 }
 
 // reportMemory records what the node says about its memory, and swallows
@@ -211,7 +208,7 @@ func reportMemory(ctx context.Context, sink report.Sink, r sshx.Runner, spec nod
 // refuse one -- live in internal/session, where they can be tested against an
 // in-process SSH server instead of a rented machine.
 func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s provision.Session) error {
-	client, so, err := p.prepare(ctx, out, sink, s)
+	client, so, err := dialNode(ctx, s, p.Options)
 	if err != nil {
 		return err
 	}
@@ -223,12 +220,19 @@ func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s prov
 
 	// THE NODE'S OWN LOG, COLLECTED ONCE FOR EVERY SHAPE BELOW.
 	//
-	// A defer rather than a line in each of the three branches -- steps,
-	// served, interactive -- because three call sites for one decision are
-	// three that can disagree, and the branch that would be missed is
-	// whichever one is added next. It runs before `client.Close()` above:
-	// defers unwind last-registered-first, and that one was registered
+	// A defer rather than a line in each branch -- image generation, speech,
+	// and the shape that runs no batch at all -- because a call site per
+	// branch is a call site that can disagree, and the branch that would be
+	// missed is whichever kind is added next. It runs before `client.Close()`
+	// above: defers unwind last-registered-first, and that one was registered
 	// first.
+	//
+	// REGISTERED BEFORE `ready` AND NOT AFTER IT, which is the one ordering in
+	// this function that was wrong. The dial and the three readiness steps
+	// used to be one call, so a gpu probe that timed out -- or an interrupted
+	// one, which is the case this log exists for -- returned before anything
+	// had asked the node for it. The log is now fetched for every rental that
+	// got as far as a connection.
 	//
 	// It covers every rental that brings something home. `store sync` does
 	// not, because nothing on that path has an output directory at all --
@@ -236,47 +240,46 @@ func (p Plan) serve(ctx context.Context, out io.Writer, sink report.Sink, s prov
 	// point of it.
 	defer collectNodeLog(ctx, sshexec.New(client.SSH()), runDir, so.Log)
 
-	// A node rented to run something stops when it has run it. Holding
-	// afterwards would bill for a machine with nothing left to do, which is
-	// the whole failure mode ember exists to prevent. So this returns rather
-	// than falling through to session.Serve, and runSteps does its own
-	// fetching -- one fetch per step, not one at the end.
-	if len(p.Spec.Cmds) > 0 {
-		return runSteps(ctx, out, sink, client, sshexec.New(client.SSH()), p.Spec, so, runDir, p.Offer.Price)
+	if err := p.ready(ctx, out, sink, client, so); err != nil {
+		return err
 	}
 
-	// A TYPED BATCH, OF WHICHEVER KIND THIS RUN IS. Same rule as above -- a
-	// node rented to generate something stops when it has -- reached a
-	// different way per kind: sd keeps the weights in VRAM between jobs, and
-	// speech pays a fresh process per utterance because piper has no server
-	// to keep anything in.
+	// A TYPED BATCH, OF WHICHEVER KIND THIS RUN IS. A node rented to generate
+	// something stops when it has, reached a different way per kind: sd keeps
+	// the weights in VRAM between jobs, and speech pays a fresh process per
+	// utterance because piper has no server to keep anything in.
 	//
 	// THIS LINE USED TO READ `if len(p.Spec.Serve) > 0`, which is a question
 	// about sd-server's argv standing in for the question "which kind is
 	// this". It answered correctly while there was one kind and had no answer
 	// at all for a second -- see batchOf, which is now the one place that
 	// decides.
+	var batchErr error
 	if b := p.batchOf(); b != nil {
-		return b.Run(ctx, out, sink, client, sshexec.New(client.SSH()), p.Spec, so, runDir, p.Offer.Price)
+		batchErr = b.Run(ctx, out, sink, client, sshexec.New(client.SSH()), p.Spec, so, runDir, p.Offer.Price)
 	}
 
-	serveErr := session.Serve(ctx, out, client, session.Forwards(p.Spec.Ports), so)
-
-	// Outputs are fetched even when the session ended badly, and on a context
+	// Outputs are fetched even when the batch ended badly, and on a context
 	// that survives the operator's Ctrl-C. The node is about to be destroyed
 	// either way: whatever it produced is about to stop existing, and a run
 	// that failed halfway is often exactly the one whose partial output and
 	// logs are worth having.
+	//
+	// AND FOR A RUN WITH NO BATCH AT ALL, which is the shape a configuration
+	// with neither `sd:` nor `tts:` describes: rent the machine, prove the
+	// card, verify the weights, bring `outputs:` home and destroy it. That is
+	// a provider smoke test and it costs a minute rather than a TTL, because
+	// nothing holds the node afterwards.
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputTimeout)
 	defer cancel()
 
-	if err := fetchOutputs(fetchCtx, out, sshexec.New(client.SSH()), p.Spec.Outputs, runDir, ""); err != nil {
-		if serveErr != nil {
-			return errors.Join(serveErr, err)
+	if err := fetchOutputs(fetchCtx, out, sshexec.New(client.SSH()), p.Spec.Outputs, runDir); err != nil {
+		if batchErr != nil {
+			return errors.Join(batchErr, err)
 		}
 		return err
 	}
-	return serveErr
+	return batchErr
 }
 
 // collectNodeLog brings embernode's own log home, and cannot fail a run.
@@ -310,7 +313,7 @@ func collectNodeLog(ctx context.Context, r sshx.Runner, dir string, log *slog.Lo
 	defer cancel()
 
 	res, err := transfer.Fetch(fetchCtx, r,
-		[]node.OutputPath{{Remote: logx.NodeLogPath}}, dir, "")
+		[]node.OutputPath{{Remote: logx.NodeLogPath}}, dir)
 	if err != nil {
 		log.Debug("could not bring the node's own log home", "path", logx.NodeLogPath, "err", err)
 		return
@@ -325,156 +328,6 @@ func collectNodeLog(ctx context.Context, r sshx.Runner, dir string, log *slog.Lo
 // node is already being torn down -- so a stalled connection here would hold
 // up a destroy, and a destroy that is held up is a bill that keeps running.
 const nodeLogTimeout = time.Minute
-
-// fetchMarker is the file on the node whose mtime bounds the next fetch.
-//
-// /tmp and not the output directory, so it never lands in an archive and is
-// never mistaken for a result.
-const fetchMarker = "/tmp/.ember-fetch-mark"
-
-// runSteps runs each command in turn and brings that step's output home
-// before the next one starts.
-//
-// Fetching between steps rather than once at the end is the point. A ten-step
-// batch is over an hour on a rented card; fetching only at the end means an
-// expired deadline, a dropped connection or a closed laptop loses all of it
-// rather than everything so far, and an operator cannot look at the third
-// result and decide to stop paying for the other seven.
-//
-// The first step fetches everything, which is exactly what a single-command
-// run did before this existed. Each later step fetches only what is newer
-// than the previous fetch, so a file already home is not sent again -- which
-// matters little for a 2 MB image and a great deal for the minutes of video
-// the store was built for.
-func runSteps(
-	ctx context.Context,
-	out io.Writer,
-	sink report.Sink,
-	client tunnel.Dialer,
-	r sshx.Runner,
-	spec node.Spec,
-	so session.Options,
-	runDir string,
-	rate node.Rate,
-) error {
-	var errs []error
-	since := ""
-	var spent node.MicroUSD
-
-	for i, cmd := range spec.Cmds {
-		if len(spec.Cmds) > 1 {
-			sink.Emit(report.Event{
-				Kind: report.KindUnitStarted, Unit: report.UnitStep,
-				Index: i + 1, Total: len(spec.Cmds), Desc: workload.Describe(cmd),
-			})
-		}
-		// Timed from here and not from workload.Run's own duration, because
-		// the fetch below is billed too: the card stays rented while the
-		// output comes over the wire, which for the minutes of video the
-		// store was built for is not a rounding error. "Card time" has to
-		// mean all of the card's time or the figure is just wrong.
-		stepStart := time.Now()
-
-		stepErr := runWorkload(ctx, out, client, r, cmd, spec.Ports, so)
-		if stepErr != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", report.Label(report.UnitStep, i+1, len(spec.Cmds)), stepErr))
-		}
-
-		// On a context that survives Ctrl-C, for the same reason the
-		// single-command path does it: the node is about to be destroyed and
-		// a step that failed is often the one whose output is worth having.
-		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputTimeout)
-		ferr := fetchOutputs(fetchCtx, out, r, spec.Outputs, runDir, since)
-		cancel()
-		if ferr != nil {
-			errs = append(errs, ferr)
-		}
-
-		// The accumulating price, so an operator watching a ten-step batch can
-		// decide to stop paying for the rest -- which is half the reason the
-		// outputs come home as they are produced rather than at the end.
-		//
-		// Card time, and the wording says so: the rental also billed for
-		// provisioning, the image pull and the asset verify, and a batch pays
-		// those once for all of it rather than once per step. Folding them
-		// into a per-step figure would overstate what batching saves, which is
-		// the number this whole feature exists to improve.
-		//
-		// Printed only for a real batch. A single command's output is
-		// byte-for-byte what it was before `cmds` existed, because somebody is
-		// parsing it.
-		if len(spec.Cmds) > 1 {
-			step := rate.Cost(time.Since(stepStart))
-			spent += step
-			sink.Emit(report.Event{
-				Kind: report.KindUnitCost, Unit: report.UnitStep,
-				Index: i + 1, Total: len(spec.Cmds), Cost: step, Spent: spent,
-			})
-		}
-
-		// Stop at the first failure. A batch where step 3 failed and 4
-		// through 10 ran anyway is a batch nobody can trust, and the
-		// remaining steps would bill for work the operator no longer wants.
-		if stepErr != nil {
-			break
-		}
-		if i < len(spec.Cmds)-1 {
-			if err := markFetched(ctx, r); err != nil {
-				// Not fatal: a missing marker means the next fetch sends
-				// everything again, which is wasteful rather than wrong.
-				so.Log.Warn("could not mark the fetch point; the next step will re-send what is already home", "err", err)
-				since = ""
-			} else {
-				since = fetchMarker
-			}
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// markFetched touches the marker on the node, after a fetch, so the next one
-// sends only what the next step writes.
-func markFetched(ctx context.Context, r sshx.Runner) error {
-	// workload.Run reports a non-zero exit as an error as well as a code, so
-	// the error is the whole answer; a separate ExitCode check here would be
-	// unreachable.
-	_, err := workload.Run(ctx, r, []string{"touch", fetchMarker}, io.Discard)
-	return err
-}
-
-// runWorkload holds the forwards open while the command runs.
-//
-// The forwards run alongside rather than instead: a workload may well want to
-// reach a service on the node, and a ComfyUI run is exactly that. They are
-// torn down when the command finishes, because the node is about to be.
-// Both seams are parameters rather than one client, so the decision and the
-// reporting here are testable against a recording dialer and runner instead
-// of needing a node.
-func runWorkload(ctx context.Context, out io.Writer, d tunnel.Dialer, r sshx.Runner, cmd []string, ports []node.PortMap, so session.Options) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	if fwds := session.Forwards(ports); len(fwds) > 0 {
-		for _, f := range fwds {
-			outf(out, "  %-12s http://%s\n", f.Name, f.Local[0])
-		}
-		go func() {
-			// A forward that fails while a workload is running is logged and
-			// not fatal: the command may not be using it, and killing a
-			// four-minute generation because a port ember opened on the
-			// operator's behalf went away would be the wrong trade.
-			f := &tunnel.Forwarder{Dialer: d, Log: so.Log}
-			if err := f.Run(ctx, fwds); err != nil && ctx.Err() == nil {
-				so.Log.Warn("a forward stopped while the workload was running", "err", err)
-			}
-		}()
-	}
-
-	outf(out, "running: %s\n", workload.Describe(cmd))
-	res, err := workload.Run(ctx, r, cmd, out)
-	outf(out, "workload finished in %s\n", res.Duration.Round(time.Millisecond))
-	return err
-}
 
 // outputTimeout bounds the output fetch.
 //
@@ -492,14 +345,14 @@ const outputTimeout = 30 * time.Minute
 // be computed here from time.Now(), which was invisible while a run fetched
 // once and wrong the moment it fetched per step: three steps produced three
 // directories a minute apart, for one run.
-func fetchOutputs(ctx context.Context, out io.Writer, r sshx.Runner, outputs []node.OutputPath, dir, since string) error {
+func fetchOutputs(ctx context.Context, out io.Writer, r sshx.Runner, outputs []node.OutputPath, dir string) error {
 	if len(outputs) == 0 {
 		return nil
 	}
 
 	outf(out, "fetching %d output path(s) into %s\n", len(outputs), dir)
 
-	res, err := transfer.Fetch(ctx, r, outputs, dir, since)
+	res, err := transfer.Fetch(ctx, r, outputs, dir)
 
 	// What arrived is reported even when something failed, because "3 of 4
 	// paths, 1.2 GiB" is what tells the operator whether the run is worth
@@ -557,7 +410,7 @@ func EnsureAssets(ctx context.Context, out io.Writer, r sshx.Runner, spec node.S
 // Shared by `up` and `store sync` rather than written twice: the host key is
 // pinned the same way for both, and a second copy is a second place for the
 // one security decision in this program to drift.
-func dialNode(ctx context.Context, s provision.Session, opts provision.Options, hold time.Duration) (*sshdial.Client, session.Options, error) {
+func dialNode(ctx context.Context, s provision.Session, opts provision.Options) (*sshdial.Client, session.Options, error) {
 	signers := []ssh.Signer{opts.Identity.Signer}
 	if agentSigners, err := keys.AgentSigners(); err == nil {
 		signers = append(signers, agentSigners...)
@@ -567,7 +420,7 @@ func dialNode(ctx context.Context, s provision.Session, opts provision.Options, 
 	// provision.WithNode attached once. Reading it off Options here would
 	// hand every package below -- session, tunnel, gpucheck, sdserver -- a
 	// logger whose lines cannot be joined to the node they are about.
-	so := session.Options{Log: s.Log, Hold: hold}
+	so := session.Options{Log: s.Log}
 	client, err := session.Dial(ctx, sshdial.Target{
 		NodeID:   s.Node.Handle().ID,
 		Endpoint: s.Node.Endpoint(),

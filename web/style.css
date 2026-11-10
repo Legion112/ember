@@ -50,7 +50,7 @@ h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
      color: var(--dim); margin: 1.4rem 0 .6rem }
 h2:first-child { margin-top: 0 }
 
-code, pre, .price, .status, input, select, textarea { font-family: var(--mono) }
+code, pre, .price, .status, .when, input, select, textarea { font-family: var(--mono) }
 code { font-size: .92em; color: var(--accent) }
 
 header { border-bottom: 1px solid var(--line); padding-bottom: .8rem; margin-bottom: 1.2rem }
@@ -128,10 +128,27 @@ button.link, a.link { border: 0; background: 0; padding: 0 .3rem; color: var(--a
 
 table { border-collapse: collapse; width: 100%; font-size: .85rem }
 td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
+/* The column names. `text-align: left` is written out because a `th` defaults
+   to centred and `td` above sets no alignment, so without this every header
+   would float over the middle of a left-aligned column -- furthest from its
+   own data in the widest column, which is the reason text. Smaller and dimmer
+   than a row because it is read once and the rows are read every time. */
+th { padding: .25rem .5rem; border-bottom: 1px solid var(--line);
+     text-align: left; font-size: .72rem; font-weight: 500; color: var(--dim) }
+/* The money header follows its column rather than the rest of the row: a
+   right-aligned column of figures under a left-aligned word is a header
+   pointing at the wrong place, and the figure is the one an operator scans. */
+th.price { text-align: right }
 .offers tr { cursor: pointer }
 .offers tr:hover td { background: color-mix(in oklab, var(--accent) 10%, transparent) }
 .price { text-align: right; white-space: nowrap }
 .status { color: var(--dim) }
+/* When a finding's cost started accruing, set beside the cost. `nowrap` for
+   the reason .price has it: a timestamp that wraps turns one row into two and
+   the column stops being something an operator scans down. Dim because it is
+   context for the figure next to it rather than the figure itself -- the
+   reason column is what a reader is meant to land on first. */
+.when { color: var(--dim); white-space: nowrap }
 /* ONE REQUEST IS A ROW GROUP, because it can be two rows: the request and,
    when it ended with something to say, its reason. The highlight is on the
    group so that it covers the pair -- on the row it would mark the request
@@ -178,6 +195,14 @@ td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
    would be a side effect this server's threat model has never argued for. */
 .ledger { margin: .3rem 0 }
 .ledger td:first-child { white-space: nowrap }
+
+/* THE ONE ROW IN THE FLEET THAT MEANS SOMEBODY HAS TO LOOK: a worker that has
+   stopped answering while its card bills. The same colour the verdict uses for
+   the same reason -- a page has to say with a word and a colour what `ember ls`
+   says with an exit code -- and on exactly one state, because a table that is
+   red while a node is merely starting up is a table nobody reads. */
+.fleet tr.bad td { color: var(--bad) }
+.fleet tr.bad td.status { font-weight: 600 }
 
 .hint { color: var(--dim); font-size: .78rem; margin: .4rem 0 }
 

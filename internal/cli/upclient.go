@@ -184,9 +184,6 @@ func submitRun(ctx context.Context, c *http.Client, ask app.RunAsk) (genstore.Re
 		GPU:          ask.Overrides.GPU,
 		MaxHourlyUSD: ask.Overrides.MaxHourlyUSD,
 		TTL:          durStr(ask.Overrides.TTL),
-		Hold:         durStr(ask.Hold),
-		Ports:        ask.Overrides.Ports,
-		Cmd:          ask.Overrides.Cmd,
 	})
 	if err != nil {
 		return "", err

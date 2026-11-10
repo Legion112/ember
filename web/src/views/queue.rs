@@ -210,7 +210,17 @@ pub fn Queue(route: RwSignal<Route>) -> impl IntoView {
                             // carrying it would draw two outlines with a seam
                             // between them, which is the thing the grouping
                             // exists to avoid.
-                            <tbody class:running=move || list.get().running == running_id>
+                            //
+                            // AND `running` IS A LIST SINCE max_nodes (#204),
+                            // so this is a membership test rather than an
+                            // equality. At max_nodes>1 several requests
+                            // generate at once, one per rental, and an
+                            // equality against a single id would have marked
+                            // one of them and left the others looking queued
+                            // -- on the table an operator reads to see what
+                            // their cards are doing. The `iter().any()` stays
+                            // INSIDE the closure for the reason above.
+                            <tbody class:running=move || list.get().is_running(&running_id)>
                                 <tr>
                                     <td>
                                         // A LINK AND NOT A BUTTON, which is
@@ -522,7 +532,7 @@ mod tests {
                 "jobs": [{"prompt": "a paper boat"}],
                 "cost": {"micro_usd": micro, "display": display},
             }],
-            "running": "",
+            "running": [],
         });
         serde_json::from_value(json).expect("the listing decodes")
     }

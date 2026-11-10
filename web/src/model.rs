@@ -564,6 +564,17 @@ pub struct Finding {
     #[serde(default)]
     pub reason: String,
 
+    /// When ember wrote the intent record this row is about, RFC3339 in UTC,
+    /// and empty where there is no record.
+    ///
+    /// It is the instant `accrued` below is measured from -- Go computes that
+    /// figure as `Estimate(price, record.Created, now)` -- so the two belong
+    /// beside each other: without it a row says "$55.764" and leaves an
+    /// operator unable to tell a fast rate over an hour from a slow one over
+    /// a fortnight.
+    #[serde(default)]
+    pub created: String,
+
     /// Money already spent, which stops when the node is destroyed.
     #[serde(default)]
     pub accrued: Option<Money>,
@@ -595,6 +606,183 @@ impl Finding {
         } else {
             self.id.clone()
         }
+    }
+
+    /// When this started, as a person reads it.
+    ///
+    /// THE ZONE IS NAMED AND NOT DROPPED. The server sends UTC and the
+    /// operator reading this page is on the machine serving it -- `ember
+    /// serve` binds loopback and nothing it serves is reachable from
+    /// anywhere else -- so the two clocks are one clock in some offset. A
+    /// `2026-11-10 11:26` with the `Z` quietly removed is that offset's worth
+    /// of lie about when money started burning, three hours of it from
+    /// Moscow, and the lie is in the safe-looking direction: it reads EARLIER
+    /// than the truth, so the leak looks fresher than it is.
+    ///
+    /// SECONDS ARE DROPPED AND THE ZONE IS NOT, which is `ember history`'s
+    /// own shape (`2006-01-02 15:04`). A finding is minutes to weeks old; the
+    /// seconds on it are noise, and the zone is the part a reader acts on.
+    pub fn created_text(&self) -> String {
+        // ANYTHING THIS CANNOT PARSE IS SHOWN WHOLE RATHER THAN BLANKED.
+        // Parse, don't grep: a `replace('T', ' ')` would happily render an
+        // offset instant as a UTC one. If the server ever sends a shape this
+        // does not know, the raw string is wrong-looking and readable, where
+        // an empty cell is a creation time an operator concludes ember does
+        // not have.
+        utc_minute(&self.created).unwrap_or_else(|| self.created.clone())
+    }
+}
+
+/// utc_minute reads one RFC3339 UTC instant and writes `2026-11-10 11:26 UTC`.
+///
+/// Every byte of the twenty is checked, which is what lets the slices below be
+/// taken by index: a string that reaches `format!` here is ASCII in all twenty
+/// positions, so there is no character boundary to panic on. `None` is "this
+/// is not that shape", and the caller decides what to show instead -- this
+/// function never guesses.
+fn utc_minute(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    if b.len() != 20 || b[19] != b'Z' {
+        return None;
+    }
+    for (i, want) in [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')] {
+        if b[i] != want {
+            return None;
+        }
+    }
+    for i in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18] {
+        if !b[i].is_ascii_digit() {
+            return None;
+        }
+    }
+    Some(format!("{} {} UTC", &s[..10], &s[11..16]))
+}
+
+/// The four states `queue.WorkerState` can be in, as Go spells them.
+///
+/// CONSTANTS AND NOT AN ENUM WITH A `Deserialize`, which is the same decision
+/// [`Finding::kind`] takes one type up and for the same two reasons: a state
+/// Go adds later must reach the page as a word an operator can read rather
+/// than as a deserialisation failure that drops the whole envelope, and the
+/// words themselves are the vocabulary the Go side prints. What these names
+/// are for is the one thing the page genuinely decides -- which row is
+/// painted as wrong -- and that is `Worker::needs_attention` below.
+const STATE_STALE: &str = "stale";
+const STATE_STARTING: &str = "starting";
+
+/// One rental `ember serve` is holding right now.
+///
+/// THE FLEET IS THIS PROCESS'S BOOKKEEPING AND THE FINDINGS ARE THE
+/// PROVIDERS', joined on the server by the node's handle. They overlap and
+/// they are not the same set, in both directions: an orphan from a crashed run
+/// is a finding with no worker, and a rental in the middle of its create call
+/// is a worker with no finding -- no node exists yet, so no listing mentions
+/// it, and it is money already committed.
+///
+/// EVERY DERIVED FIGURE ARRIVES DERIVED. `state` is `queue.Worker.State`,
+/// `beat` and `up` and `remaining` are Go-formatted durations, and `accrued`
+/// is a [`Money`] that carries its own rendering. Nothing here is computed
+/// from a timestamp, because the only clock this page has is the BROWSER's --
+/// a different clock from the one a beat was stamped by, and one an operator
+/// can have set wrong.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Worker {
+    /// `provider/id`, the same string `ember ls` prints and `requests.node`
+    /// records. Empty while the rental is being created.
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub card: String,
+    #[serde(default)]
+    pub image: String,
+
+    /// The request that paid for this rental to exist, and the one generating
+    /// on it now. At `max_nodes` > 1 they are usually different, and the
+    /// second is empty in the gap between two batches.
+    #[serde(default)]
+    pub opener: String,
+    #[serde(default)]
+    pub request: String,
+
+    /// `starting`, `live`, `stale` or `quiet`.
+    #[serde(default)]
+    pub state: String,
+
+    /// How long ago ember last heard this rental's worker. Empty when it never
+    /// has, which is NOT "a moment ago" and must not render as it.
+    #[serde(default)]
+    pub beat: String,
+
+    /// How long ember has been holding this rental.
+    #[serde(default)]
+    pub up: String,
+
+    /// What the node has cost so far and how long until its deadline, both
+    /// from the sweep. Absent together when the sweep found no node for this
+    /// handle -- a rental mid-create -- rather than zero, because a `$0.00`
+    /// against a card about to be billed for is ember pricing a rental at
+    /// nothing.
+    #[serde(default)]
+    pub accrued: Option<Money>,
+    #[serde(default)]
+    pub remaining: Option<String>,
+}
+
+impl Worker {
+    /// What names this rental on screen: the machine where there is one, and
+    /// what it is becoming where there is not.
+    ///
+    /// A ROW WITH A BLANK NAME COLUMN IS A ROW AN OPERATOR CANNOT SCAN, which
+    /// is [`Finding::names`]'s own reason for falling back to the provider.
+    /// Here the fallback says what is happening instead, because "the create
+    /// call has not returned" is the whole content of that row.
+    pub fn names(&self) -> String {
+        if self.node.is_empty() {
+            format!("{} (being created)", self.provider)
+        } else {
+            self.node.clone()
+        }
+    }
+
+    /// Whether this row is one a person has to look at.
+    ///
+    /// ONLY `stale`, and the three exclusions are each a decision. `live` is
+    /// working. `starting` is a create call in flight, which is money
+    /// committed and nothing wrong -- a red row there would be red on every
+    /// rental this server ever opens, for its first minute. `quiet` is a
+    /// speech rental, which has no worker to beat because piper is run over
+    /// `ssh exec`: there being nobody to answer is a different fact from not
+    /// answering, and painting it red would teach an operator to ignore the
+    /// colour -- which is `reconcile.KindStore`'s argument about exit 2,
+    /// reached through a stylesheet.
+    ///
+    /// NOT FOLDED INTO `Nodes::attention`, which is `reconcile`'s count of
+    /// what `ember ls` exits 2 for and must stay exactly that: a wedged
+    /// worker is this process's own observation and `ember ls` has never seen
+    /// one. Two numbers for two questions, rather than one number that means
+    /// something different depending on who is running.
+    pub fn needs_attention(&self) -> bool {
+        self.state == STATE_STALE
+    }
+
+    /// What this row says is wrong with it, or nothing.
+    ///
+    /// THE SENTENCE IS HERE AND NOT IN THE VIEW, for [`Nodes::verdict`]'s
+    /// reason: prose chosen by a branch inside a view macro can only be
+    /// checked by a browser. And it is a SENTENCE rather than the word
+    /// `stale`, because the word alone is read as a cache that needs
+    /// refreshing -- the opposite of what it means here, which is that the
+    /// card is billing and nobody on it is answering.
+    pub fn note(&self) -> String {
+        if self.state == STATE_STALE {
+            return "not answering, and still billing".into();
+        }
+        if self.state == STATE_STARTING {
+            return "the create call has not returned".into();
+        }
+        String::new()
     }
 }
 
@@ -646,6 +834,16 @@ pub struct Nodes {
     /// why `Money` crosses this wire twice as well.
     #[serde(default)]
     pub attention: i64,
+
+    /// The rentals `ember serve` is holding, sorted by the request that
+    /// opened each.
+    ///
+    /// A FOURTH SLICE AND NOT A FLAG ON A FINDING. The three above are what
+    /// EXISTS at the providers; this is what THIS PROCESS is doing with it,
+    /// and the rows that differ are the ones worth seeing -- a rental whose
+    /// create has not returned has no finding at all.
+    #[serde(default, deserialize_with = "nullable")]
+    pub workers: Vec<Worker>,
 }
 
 impl Nodes {
@@ -696,6 +894,17 @@ impl Nodes {
     /// operator needs both -- so this is not an enum: a `Partial` arm would
     /// have hidden the count, and a count alone would have read as the whole
     /// picture.
+    /// How many rentals this process is holding that a person has to look at.
+    ///
+    /// SEPARATE FROM `attention`, which is reconcile's count of what
+    /// `ember ls` exits 2 for. A worker that has stopped answering is this
+    /// process's own observation and no `ember ls` has ever seen one, so
+    /// adding it in would change what that number means depending on whether
+    /// an `ember serve` happened to be running.
+    pub fn wedged(&self) -> usize {
+        self.workers.iter().filter(|w| w.needs_attention()).count()
+    }
+
     pub fn verdict(&self) -> String {
         let blind = self.unreachable();
         if self.attention == 0 && self.nothing_running() {
@@ -1711,8 +1920,40 @@ impl<'de> Deserialize<'de> for Rows {
 pub struct RequestList {
     #[serde(default, deserialize_with = "nullable")]
     pub requests: Rows,
-    #[serde(default)]
-    pub running: String,
+
+    /// Which requests are generating right now.
+    ///
+    /// A LIST SINCE `max_nodes` (#204), and that is the one place this change
+    /// reaches Rust. ember used to hold one rental by construction, so this
+    /// was a single id and `views/queue.rs` compared it; with several rentals
+    /// in flight several requests generate at once, and an equality would mark
+    /// one row and leave the others looking queued.
+    ///
+    /// `nullable` FOR THE REASON `requests` HAS IT, which is not about today's
+    /// server: `webapi.Server.running` answers `[]` and never nil. The rule
+    /// has to hold for the field somebody adds later, because Go marshals a
+    /// nil slice as `null` and a `null` into a `Vec` fails the WHOLE envelope
+    /// -- which is how this page once showed an empty queue over a table full
+    /// of requests.
+    #[serde(default, deserialize_with = "nullable")]
+    pub running: Vec<String>,
+}
+
+impl RequestList {
+    /// Whether this request is one of the ones generating right now.
+    ///
+    /// A METHOD AND NOT AN `iter().any()` IN THE VIEW MACRO, which is this
+    /// page's settled pattern -- `Rows::note`, `Rows::price`, `Request::reason`
+    /// and `Stream::note` are all here for the same reason. A decision written
+    /// inside a `view!` can only be checked by driving a browser, and this one
+    /// is the difference between a queue table that marks every generating
+    /// request and one that marks the first and leaves the rest looking
+    /// queued. The `.get()` that reads the signal stays in the view, inside
+    /// the closure, because that is the frozen-row defect this page has been
+    /// bitten by four times.
+    pub fn is_running(&self, id: &str) -> bool {
+        self.running.iter().any(|r| r == id)
+    }
 }
 
 /// What `POST /api/requests/{id}/cancel` answered.
@@ -1902,8 +2143,20 @@ pub struct Envelope {
     pub events: Vec<Event>,
     #[serde(default, deserialize_with = "nullable")]
     pub request: Option<Request>,
-    #[serde(default)]
-    pub running: String,
+
+    /// Which requests are generating, as the socket reports them.
+    ///
+    /// A LIST SINCE `max_nodes` (#204), AND THE TYPE IS LOAD-BEARING ALTHOUGH
+    /// NOTHING READS THE FIELD. `grep -rn '.running' web/src` finds one
+    /// reader and it is the queue table's, not this -- so this is a field with
+    /// a writer, a wire name and no reader, which is the `cancelling` shape
+    /// and is older than this change. It still has to change type: serde
+    /// decodes what it is given whether or not a view asks for it, so an array
+    /// arriving into a `String` is an error that drops the whole envelope and
+    /// takes the watched request's state with it. A field nothing reads is
+    /// cheap to leave and was NOT cheap to leave at the wrong type.
+    #[serde(default, deserialize_with = "nullable")]
+    pub running: Vec<String>,
 }
 
 /// Stream is what a watcher's progress socket is doing, and what the page
@@ -2765,6 +3018,62 @@ mod tests {
         }
     }
 
+    /// `max_nodes` means several requests generate at once, and the mark is a
+    /// MEMBERSHIP rather than an equality (#204).
+    ///
+    /// WHY THIS IS A TEST AND NOT A COMMENT. `class:running` used to compare
+    /// one id, and the shape of the defect being refused is a table that marks
+    /// the first generating request and leaves the second looking queued --
+    /// with both cards billing. Only a browser can see the class land, which
+    /// is why the DECISION is a method: `TestServe_UI` asserts the row and
+    /// this asserts what it will be told.
+    ///
+    /// THE THIRD ID IS THE HALF THAT MATTERS. An assertion that only looked
+    /// for the two generating rows being marked would pass against a
+    /// membership test that answered true for everything, which is the mark on
+    /// every row -- a highlight that says nothing. So a queued request in the
+    /// same listing must NOT be marked, and an empty list must mark nothing at
+    /// all.
+    #[test]
+    fn every_generating_request_is_marked_and_nothing_else_is() {
+        const LISTING: &str = r#"{
+            "requests": [],
+            "running": ["req-a", "req-c"]
+        }"#;
+        let list: RequestList = serde_json::from_str(LISTING).expect("the listing decodes");
+        for id in ["req-a", "req-c"] {
+            assert!(
+                list.is_running(id),
+                "{id} is generating and the table would not mark it, so an operator reading \
+                 the queue cannot see which of their cards are busy"
+            );
+        }
+        assert!(
+            !list.is_running("req-b"),
+            "a queued request was marked as generating: a mark on every row is a mark that \
+             says nothing"
+        );
+
+        let idle: RequestList = serde_json::from_str(r#"{"requests":[]}"#).expect("decodes");
+        assert!(
+            !idle.is_running("req-a"),
+            "nothing is generating and a row was still marked"
+        );
+        assert!(
+            idle.running.is_empty(),
+            "a missing `running` did not default to an empty list"
+        );
+
+        // AND A NULL DECODES, which is the rule that has to hold for the
+        // field somebody adds later rather than for this server: Go marshals a
+        // nil slice as `null`, and a `null` into a `Vec` without `nullable`
+        // fails the WHOLE envelope -- which is how this page once showed an
+        // empty queue over a table full of requests.
+        let nulled: RequestList =
+            serde_json::from_str(r#"{"requests":[],"running":null}"#).expect("a null decodes");
+        assert!(nulled.running.is_empty());
+    }
+
     /// The envelope the old row read `$0` out of, verbatim from the wire.
     ///
     /// `ws.go` sends the request alongside the events, and mid-generation
@@ -2788,7 +3097,7 @@ mod tests {
             "request": {"id":"req-1","status":"running","provider":"local",
                         "gpu":"localhost","cost":{"micro_usd":0,"display":"$0"},
                         "jobs":[],"images":[]},
-            "running": "req-1"
+            "running": ["req-1"]
         }"#;
 
         let env: Envelope = serde_json::from_str(ENVELOPE).expect("envelope decodes");
@@ -4391,5 +4700,192 @@ mod tests {
         .expect("a wav artifact decodes");
         assert_eq!(r.results().count(), 1);
         assert_eq!(r.images[0].artifact(), Artifact::Audio);
+    }
+
+    /// THE FOURTH SLICE DECODES, which is this envelope's own history: for
+    /// the life of `GET /api/nodes` there was no Rust type for the answer at
+    /// all, and the route answered 501 in every shipped `ember serve`.
+    #[test]
+    fn a_fleet_decodes_what_the_queue_reported() {
+        let n: Nodes = serde_json::from_str(
+            r#"{"findings":[],"leftovers":[],"stores":[],"monthly_storage":{"micro_usd":0,
+                "display":"$0.00"},"attention":0,"workers":[
+                {"node":"local/n1","provider":"local","card":"rtx2080ti","image":"ember:sd",
+                 "opener":"req-a","request":"req-b","state":"live","beat":"2s","up":"9m0s",
+                 "accrued":{"micro_usd":11333,"display":"$0.01"},"remaining":"42m0s"}]}"#,
+        )
+        .expect("a fleet decodes");
+        assert_eq!(n.workers.len(), 1);
+        let w = &n.workers[0];
+        assert_eq!(w.node, "local/n1");
+        assert_eq!(w.opener, "req-a");
+        assert_eq!(w.request, "req-b");
+        assert_eq!(w.beat, "2s");
+        assert_eq!(w.remaining.as_deref(), Some("42m0s"));
+        assert_eq!(w.accrued.as_ref().map(|m| m.text()), Some("$0.01"));
+        assert!(!w.needs_attention());
+    }
+
+    /// A NULL IS A `null` AND NOT A MISSING FIELD, which is the defect this
+    /// repository has already paid for once: Go marshals a nil slice as
+    /// `null`, serde's `default` covers a field that is ABSENT, and a whole
+    /// websocket envelope -- with it a request's state -- was dropped on a
+    /// type error nobody could see. Go sends `[]` now; this is the belt.
+    #[test]
+    fn a_null_fleet_is_an_empty_fleet_and_not_a_dropped_envelope() {
+        let n: Nodes = serde_json::from_str(r#"{"workers":null,"attention":3}"#)
+            .expect("a null workers list must not drop the whole answer");
+        assert!(n.workers.is_empty());
+        assert_eq!(n.attention, 3, "the rest of the envelope survived");
+    }
+
+    fn worker(state: &str) -> Worker {
+        Worker {
+            node: "local/n1".into(),
+            provider: "local".into(),
+            state: state.into(),
+            ..Default::default()
+        }
+    }
+
+    /// ONLY `stale` IS RED, and the three exclusions are each a decision.
+    ///
+    /// `starting` is a create call in flight -- money committed and nothing
+    /// wrong -- so a red row there would be red on every rental this server
+    /// ever opens, for its first minute. `quiet` is a speech rental, which
+    /// has no worker to beat at all: there being nobody to answer is a
+    /// different fact from not answering, and painting it red would teach an
+    /// operator to ignore the colour, which is `reconcile.KindStore`'s
+    /// argument about exit 2 reached through a stylesheet.
+    ///
+    /// THE NEGATIVE CONTROL IS `stale` ITSELF: without it these assertions
+    /// are all satisfied by a method that answers false for everything.
+    #[test]
+    fn only_a_worker_that_stopped_answering_is_painted_as_wrong() {
+        assert!(worker("stale").needs_attention());
+        for ok in ["live", "starting", "quiet", "something-go-added-later"] {
+            assert!(
+                !worker(ok).needs_attention(),
+                "a {ok} rental was painted as needing a person"
+            );
+        }
+    }
+
+    /// The sentence and not the word.
+    ///
+    /// "stale" alone reads as a cache that needs refreshing, which is the
+    /// opposite of what it means here: the card is billing and nobody on it
+    /// is answering.
+    #[test]
+    fn a_wedged_row_says_what_is_wrong_with_it() {
+        assert_eq!(worker("stale").note(), "not answering, and still billing");
+        assert_eq!(
+            worker("starting").note(),
+            "the create call has not returned"
+        );
+        assert_eq!(worker("live").note(), "");
+        assert_eq!(worker("quiet").note(), "");
+    }
+
+    /// A ROW WITH A BLANK NAME COLUMN IS A ROW AN OPERATOR CANNOT SCAN, which
+    /// is `Finding::names`'s own reason. A rental being created has no node,
+    /// and what that row is about is precisely that.
+    #[test]
+    fn a_rental_being_created_still_names_itself() {
+        let mut w = worker("starting");
+        w.node = String::new();
+        w.provider = "runpod".into();
+        assert_eq!(w.names(), "runpod (being created)");
+        assert_eq!(worker("live").names(), "local/n1");
+    }
+
+    /// THE FLEET'S COUNT IS NOT `attention`, and that is the whole point of
+    /// it being a separate method.
+    ///
+    /// `attention` is `reconcile`'s count of what `ember ls` exits 2 for, and
+    /// no `ember ls` has ever seen a wedged worker -- it is this process's own
+    /// observation. Adding it in would change what that number means depending
+    /// on whether an `ember serve` happened to be running when it was taken.
+    #[test]
+    fn a_wedged_worker_is_counted_apart_from_the_sweeps_own_findings() {
+        let n = Nodes {
+            workers: vec![
+                worker("stale"),
+                worker("live"),
+                worker("stale"),
+                worker("quiet"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(n.wedged(), 2);
+        assert_eq!(n.attention, 0, "the sweep found nothing, and still has not");
+        assert!(
+            n.verdict().contains("nothing is running"),
+            "a wedged worker changed reconcile's own sentence: {}",
+            n.verdict()
+        );
+    }
+
+    fn dated(created: &str) -> Finding {
+        Finding {
+            created: created.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The shape Go sends, as a person reads it.
+    #[test]
+    fn a_creation_time_is_a_date_a_time_and_the_zone_it_is_in() {
+        assert_eq!(
+            dated("2026-11-10T11:26:44Z").created_text(),
+            "2026-11-10 11:26 UTC"
+        );
+    }
+
+    /// THE ZONE IS NOT DECORATION. Go sends UTC and the operator is on the
+    /// machine serving the page, so dropping the marker would show a Moscow
+    /// reader 11:26 for something that happened at 14:26 their time -- three
+    /// hours of understatement about how long a card has been billing, in the
+    /// direction that makes a leak look fresher than it is.
+    #[test]
+    fn the_zone_is_said_and_never_dropped() {
+        let t = dated("2026-11-10T11:26:44Z").created_text();
+        assert!(t.ends_with(" UTC"), "the zone went missing from {t:?}");
+    }
+
+    /// AN OFFSET INSTANT IS NOT A UTC ONE, and this is the case that would be
+    /// a silent three-hour lie. A `replace('T', ' ')` would render
+    /// `2026-11-10T14:26:44+03:00` as `2026-11-10 14:26` and the column would
+    /// read as UTC like every row beside it. Parse, don't grep: an unknown
+    /// shape is shown whole, which is wrong-looking rather than wrong.
+    #[test]
+    fn an_instant_that_is_not_utc_is_not_dressed_up_as_one() {
+        let raw = "2026-11-10T14:26:44+03:00";
+        assert_eq!(dated(raw).created_text(), raw);
+    }
+
+    /// A record ember has no creation time for sends nothing, and nothing is
+    /// what the cell shows. The one spelling of "ember cannot say".
+    #[test]
+    fn no_creation_time_is_an_empty_cell() {
+        assert_eq!(dated("").created_text(), "");
+    }
+
+    /// Every rejected shape falls back to the raw string rather than to a
+    /// guess. The last is the one that would panic a slice taken on faith:
+    /// twenty BYTES that are nineteen characters, so `&s[..10]` is fine and
+    /// a careless `&s[..19]` would land inside one and abort the whole page.
+    #[test]
+    fn a_shape_this_does_not_know_is_shown_whole() {
+        for raw in [
+            "2026-11-10 11:26:44Z",       // no T
+            "2026-11-10T11:26:44",        // no zone at all
+            "2026-11-10T11:26:4Z",        // nineteen bytes
+            "26-11-10T11:26:44Z",         // two-digit year
+            "2026-11-10TXX:26:44Z",       // not digits
+            "2026-11-10T11:26:4\u{042F}", // twenty bytes, nineteen characters
+        ] {
+            assert_eq!(dated(raw).created_text(), raw, "{raw:?} was reshaped");
+        }
     }
 }

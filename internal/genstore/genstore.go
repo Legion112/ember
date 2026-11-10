@@ -462,12 +462,10 @@ func (r Request) Validate() error { return r.validate(true) }
 // two of these. Validate refuses a batch with none because such a row would
 // sit in the queue being skipped forever: it "would rent a card, load the
 // weights and generate nothing", which is a statement about work nobody has
-// done yet. Two of the three shapes `ember up` has have never had a job at
-// all -- a forwarded session has ports and no batch, and a `cmds` run has
-// argv ember deliberately does not read -- so applying that refusal to a
-// record of what already ran would refuse to record the cheapest thing ember
-// does and the easiest to leak. Zero jobs there is a fact, not a request
-// nothing can satisfy.
+// done yet. An `ember up` whose configuration describes no jobs has never had
+// one, so applying that refusal to a record of what already ran would refuse
+// to record the cheapest thing ember does and the easiest to leak. Zero jobs
+// there is a fact, not a request nothing can satisfy.
 func (r Request) ValidateRun() error { return r.validate(false) }
 
 func (r Request) validate(needJobs bool) error {
@@ -511,14 +509,85 @@ func (r Request) validate(needJobs bool) error {
 	return nil
 }
 
+// Shape is the rental a request names: a kind, a provider and a card.
+//
+// IT IS EXACTLY WHAT A REQUEST MAY CHOOSE, which is why it is a type. A
+// request names a provider, a card, a kind and a batch of jobs and nothing
+// else -- no image, no store, no mount, no argv -- so these three fields are
+// the whole of what distinguishes two rentals one process can be asked for.
+// Everything else about a rental comes from the config this process loaded
+// once, which no request can touch.
+//
+// THE GPU HERE IS THE ASK AND NOT THE CARD, and that distinction is the whole
+// of Compat.Card: an empty GPU is "whatever the provider has", and two
+// requests that both asked for nothing can land on different silicon.
+// Anything keyed on a Shape is therefore keyed on what the request said, which
+// is all a caller has before a node exists -- see the caps cache, whose
+// lookup happens at enqueue time.
+type Shape struct {
+	// Kind is read through KindOf, so '' and "sd" are one shape.
+	Kind string
+
+	Provider string
+
+	// GPU is the request's own selection, empty for "any card this provider
+	// has". It is NOT normalised here: node.NormalizeGPU is applied where a
+	// request is accepted, so by the time a Shape is built the spelling is
+	// already the one spelling.
+	GPU string
+}
+
+// Shape is which rental this request asked for.
+func (r Request) Shape() Shape {
+	return NewShape(r.Kind, r.Provider, r.GPU)
+}
+
+// Shape is the rental this compat describes, without its exclusions.
+func (c Compat) Shape() Shape {
+	return NewShape(c.Kind, c.Provider, c.GPU)
+}
+
+// NewShape normalises a kind and a card name into the one spelling anything
+// keyed on a shape is keyed on.
+//
+// BOTH FOLDS IN ONE PLACE, because a key built two ways is two keys. The kind
+// goes through KindOf, so a row written before that column and a compat
+// holding "sd" are one shape. The card goes through node.NormalizeGPU, which
+// is idempotent and is already what config.Filter runs an operator's typed
+// string through -- without it "RTX 4090" from a browser and "rtx4090" from a
+// config would cache two capability documents for one card, and the enqueue
+// that read the wrong one would refuse a sampler the card has.
+func NewShape(kind, provider, gpu string) Shape {
+	return Shape{
+		Kind:     KindOf(kind),
+		Provider: provider,
+		GPU:      string(node.NormalizeGPU(gpu)),
+	}
+}
+
 // Compat is what a live rental can serve.
 //
-// THE RULE, and it is deliberately narrow: a queued request joins a rental
-// that is already up when the provider and the GPU selection are identical.
-// Everything else about the rental was settled when its offer was chosen, and
-// the model is fixed by `sd.serve` in the config -- which a request may not
-// touch -- so every request in one serve process targets the same weights and
-// compatibility is mostly automatic.
+// THE RULE: a queued request joins a rental that is already up when the kind
+// and the provider agree and the rental's card satisfies what the request
+// asked for. Everything else about the rental was settled when its offer was
+// chosen, and the image, the store and the mount are resolved from the config
+// this process loaded -- which a request may not touch -- so they are
+// functions of the three fields here and need no field of their own. See
+// Card for the one of those that is a FACT rather than an ask, and
+// servesClause for the relation itself.
+//
+// WHAT IS DELIBERATELY NOT HERE, because it is not a dimension of the match:
+// the worker's queue depth. It is not a column of `requests`, so it cannot be
+// compared against anything in the one statement ClaimNext is; as a per-rental
+// constant it would be a gate and not a match, and a gate belongs in the
+// caller. It is also already known: ember pushes one request's batch and
+// pushBatch does not return until every job of it has ended, so the depth is
+// `len(req.Jobs)` of the request this rental is serving and ember wrote that
+// number itself. Asking a rented machine for a number ember derives from its
+// own bookkeeping would be a new thing to believe for no decision it could
+// change -- and using it to exclude on the create side is exactly the
+// scale-out strict packing refuses: ~27s of per-rental overhead and 80-96s
+// per image of model reload are what riding a busy rental buys.
 //
 // What a request cannot do is ask for a longer life than the node it joins has
 // left. That is not checked here: the node's own deadline ends the rental, and
@@ -554,10 +623,124 @@ type Compat struct {
 	Kind     string
 	Provider string
 	GPU      string
+
+	// Card is the card this rental actually got, empty until its offer has
+	// been chosen.
+	//
+	// THE ONE ADVERTISED FACT, and it is ember's own rather than the node's.
+	// The three fields above are what a request ASKED for, and matching ask
+	// against ask under-packs in the direction that costs money: a request
+	// that named no card was refused a ride on a rental that asked for an
+	// rtx4090 and got one, and a request that named rtx4090 was refused a
+	// ride on a rental that asked for nothing and landed on exactly that --
+	// so ember rented a second node for work the first one could serve. The
+	// fact closes both: an ask of "" is satisfied by any card, and a named
+	// ask is satisfied by a card node.GPUModel.Accepts admits.
+	//
+	// IT IS NOT ADVERTISED BY THE WORKER, which is the shape this field
+	// deliberately is not. ember chose the offer, so ember holds the card;
+	// asking the rented machine to name its own silicon would make a packing
+	// decision -- and therefore a decision about money -- rest on a rented
+	// machine's self-report, which is the trust edge "a tar stream from a
+	// rented machine is untrusted input" generalises. The same argument
+	// disposes of the image and the mounted store: both are app.ResolveImage
+	// and app.Filter over this process's own config and this card, so the
+	// node's copy of them is derived from ember's and worth nothing extra.
+	// What the node genuinely knows and ember does not is the generation
+	// server's capability document, and that already travels verbatim on
+	// control.KindPrepared.
+	//
+	// CardKnown IS A SECOND FIELD BECAUSE THE UNCERTAIN STATE IS REAL, AND
+	// THE TWO SIDES OF fit-or-create ANSWER IT DIFFERENTLY. The supervisor
+	// registers a rental before its goroutine exists -- that is what stops
+	// runaway scale-out -- and the offer is not chosen until Plan returns, so
+	// a live rental has no card for the width of that call. While that is
+	// true the EXCLUSION widens to kind and provider alone, and the RIDE
+	// relation does not, because a rental must never take a request for a
+	// card it does not have. servesClause and servesPendingClause are the two,
+	// and an empty Card with CardKnown set is a rental whose offer carries no
+	// card at all, where they coincide again.
+	//
+	// THE WIDE EXCLUSION IS NOT OPTIONAL, AND THAT IS A MEASUREMENT. The
+	// window looked like "one offer lookup" and is in fact hit on the
+	// supervisor's very next iteration, every time: `claim` spawns and
+	// `continue`s, so the next create-side decision is taken before the slot
+	// goroutine has run Plan at all. With the exact relation there, two
+	// queued requests whose asks differ and whose silicon agrees provoke two
+	// nodes deterministically -- which is precisely the defect Card was added
+	// to close.
+	//
+	// WHAT THE WIDE SIDE COSTS, because it is a stall and stalls are not
+	// free. A request of the same kind and provider waits out the rental's
+	// Plan before it can be given a node of its own: an offer lookup of
+	// seconds in the ordinary case, and up to 14m47s when the store is empty
+	// and a machine with no card fetches the weights. The long case is the
+	// one that looks alarming and is not, because the weights are the
+	// config's and are shared: a second rental of that kind would want the
+	// same store, StoreFills already serialises the fetch, and it would wait
+	// for it holding a slot instead of waiting here holding nothing. A
+	// request of a DIFFERENT kind is not excluded at all, which is what keeps
+	// a speech request out of an image rental's store fill. Queue.advertise
+	// kicks the supervisor the moment the card is known, so nothing waits out
+	// a poll interval on top.
+	Card      node.GPUModel
+	CardKnown bool
+
+	// Live is every rental that is already up, for a claim whose job is to
+	// find work that NONE of them can take.
+	//
+	// THE SELECTION EXPRESSED AS ITS COMPLEMENT, which is how fit-or-create
+	// is built without a second window. #204 describes the N>1 scheduler as
+	// `Compat` becoming "a selection -- which of these N can take it" -- and
+	// a central selection would mean ember deciding which node gets a request
+	// and then writing that decision, which reintroduces exactly the
+	// read-then-write gap ClaimNext's ONE STATEMENT argument exists to close.
+	// The rentals pull instead: each one's own drain loop claims what it can
+	// serve with the fields above. So the only question left for the
+	// supervisor is the create side -- "the oldest queued request no live
+	// rental can serve" -- and that is this field, as one `AND NOT (...)` per
+	// entry in the same statement.
+	//
+	// AND IT IS WHY THE CLAUSE IS A BUILDER. Both sides of fit-or-create are
+	// built from the same one, so the relation a rental rides by and the
+	// relation the supervisor excludes by cannot drift: a request excluded
+	// here that no rental will then claim is a request that waits out a whole
+	// rental for nothing.
+	//
+	// IT IS WHAT MAKES PACKING STRICT. A request a busy rental could serve is
+	// excluded here, so it waits for that rental rather than getting a node of
+	// its own: ~27s of per-rental overhead and up to 80-96s per image of model
+	// reload are what that buys, and the cost is that a homogeneous queue sees
+	// no parallelism at all. See config.MaxNodes.
+	//
+	// NEVER SET WITH THE THREE FIELDS ABOVE. A ride claim does not care what
+	// other nodes are doing, and a rider claim carrying Live would exclude
+	// every request it could ride -- including itself. A nested Live on an
+	// entry here is ignored for the same reason: an entry describes one live
+	// rental and nothing about its neighbours.
+	Live []Compat
 }
 
-// IsZero reports whether no rental is up.
+// IsZero reports whether no rental is up to ride.
+//
+// IT IS ABOUT THE RIDE FIELDS AND NOT ABOUT Live, which is what lets a
+// create-side claim carry exclusions and still take the oldest queued request
+// whatever it asked for: the take-anything branch is chosen by this and the
+// exclusions are applied either way.
 func (c Compat) IsZero() bool { return c.Provider == "" }
+
+// LeaseTerm is how long a claim holds a request before something may take it
+// back. See Store.Renew for why it is a heartbeat term and not a work bound.
+//
+// TWO MINUTES AGAINST A FIFTEEN-SECOND SUPERVISOR POLL, which is the ratio
+// that matters rather than the number: Queue.Run renews every row it holds at
+// the top of each iteration, and the loop's longest park is idlePoll. Eight
+// missed renewals is a process that is not running. Shorter would reclaim a
+// live rental's row over one slow statement, and the cost of longer is only
+// how stale a dead process's row looks -- which nothing spends money on,
+// because what destroys a leaked node is internal/reconcile reading the
+// provider's label and not this column.
+const LeaseTerm = 2 * time.Minute
 
 // Image is one file a request produced.
 type Image struct {
@@ -963,15 +1146,23 @@ type Store interface {
 	// separate from Job: a value the operator is billed against must not be
 	// settable by the thing being billed.
 	//
-	// Its one unhappy interaction is with Interrupt, whose premise -- anything
-	// running belonged to a process that is gone -- an `ember up` in another
-	// terminal makes false. A serve started beside a live `up` marks that
-	// run interrupted, and the run's own ending writes over it a moment
-	// later. Said out loud rather than fixed, because the alternative is a
-	// per-row holder and a liveness check, and the direction this gets wrong
-	// is transient and self-correcting; the direction it gets RIGHT is an
-	// `ember up` killed with SIGKILL, whose row would otherwise read as
-	// running forever.
+	// IT TAKES A LEASE OF ITS OWN, and that is what its unhappy interaction
+	// with the startup sweep became. The sweep marked anything running as
+	// interrupted on the premise that it belonged to a process that is gone,
+	// which an `ember up` in another terminal makes false; Reclaim keys on
+	// the lease instead, so a row needs one or it is reclaimable the moment
+	// anything looks. This writes `now + TTL`: the run's node is destroyed by
+	// its own deadline, so nothing it does can outlive that, and `ember up`
+	// is one process with no renewal loop to keep a heartbeat going.
+	//
+	// IT IS SHORT BY THE WIDTH OF THE CREATE CALL, said rather than fudged.
+	// The row is written BEFORE the create, so the node's deadline is
+	// `created + TTL` and this is `adopted + TTL` -- a few seconds earlier.
+	// A run that uses its whole TTL therefore has its row reclaimed just
+	// before it ends, and the run's own ending writes over it a moment later.
+	// That is the same transient the sweep had and the same self-correcting
+	// direction; what it gets RIGHT is an `ember up` killed with SIGKILL,
+	// whose row would otherwise read as running for ever.
 	Adopt(ctx context.Context, r Request) (ReqID, error)
 
 	// Get returns one request with its jobs, or ErrNotFound.
@@ -989,7 +1180,38 @@ type Store interface {
 	// two is neither claimed nor counted -- so the node is destroyed with
 	// work outstanding and the operator's request sits in a queue nothing is
 	// draining.
+	//
+	// IT TAKES A LEASE AND NOT JUST A LABEL. runID is written to
+	// requests.run_id and the row is stamped with an expiry LeaseTerm from
+	// now; Renew extends it and Reclaim takes back what expired. Without the
+	// expiry a claimed row read `running` for ever if the process that
+	// claimed it died, and the only thing that cleared one was a blanket
+	// sweep at the next startup -- see Reclaim.
 	ClaimNext(ctx context.Context, runID string, c Compat) (Request, bool, error)
+
+	// Renew extends the lease on the requests this process is still
+	// responsible for, and returns how many rows it touched.
+	//
+	// WHY A HEARTBEAT AND NOT A DEADLINE COMPUTED AT CLAIM TIME. The obvious
+	// expiry is "the claim plus the request's TTL", because a node cannot
+	// outlive its own deadline -- and it is wrong by however long planning
+	// takes. The node's deadline is derived from the moment it was CREATED,
+	// and between the claim and the create sits an offer lookup and, when the
+	// store is empty, a second rental that fetches fifty-six gigabytes of
+	// weights: measured at 14m47s. A lease that expired during that would be
+	// reclaimed out from under a request whose card was still being got
+	// ready.
+	//
+	// ids ARE THE ROWS THE CALLER IS RESPONSIBLE FOR and not a run id,
+	// because that set is the one the caller actually tracks: Queue.held is
+	// "anywhere between the claim and the end of its batch", which is exactly
+	// the set of rows reading `running` because this process is alive. A
+	// renewal keyed on run_id would renew a rental's rows, and a submitted
+	// run's row has no claim lease at all.
+	//
+	// It touches only rows that are still running, so a renewal racing a
+	// request's own ending cannot resurrect a finished row's lease.
+	Renew(ctx context.Context, ids []ReqID) (int, error)
 
 	// UpdateJob applies fn to what one job did and writes it back.
 	//
@@ -1069,16 +1291,62 @@ type Store interface {
 	// needs the server's own capability list, which is only available once a
 	// node is up and the weights are loaded -- so without this, a mistyped
 	// sampler is refused about a minute into a rented card instead of at the
-	// moment it was typed. `sd.serve` is fixed by the config, so the
-	// capabilities are the same for every rental in one process: the first one
-	// learns them and every later enqueue is checked against them.
-	PutCaps(ctx context.Context, c sdserver.Capabilities) error
-	Caps(ctx context.Context) (sdserver.Capabilities, bool, error)
+	// moment it was typed.
+	//
+	// ONE ROW PER SHAPE, AND IT USED TO BE ONE ROW PER PROCESS. That single
+	// row was defended with "`sd.serve` is fixed by the config, so every
+	// rental in this process reports the same capabilities", and the premise
+	// does not survive the request seal it rests on: a request names a
+	// provider AND a card, so two live rentals of one process can differ in
+	// both -- and a generation server's reported capabilities legitimately
+	// differ with the card, which is why `images:` exists at all. With one
+	// row the last rental to come up overwrote the cache, and the next
+	// enqueue was validated against the WRONG node's capability list: a
+	// sampler that card A's build has and card B's does not was accepted for
+	// B and refused for A, whichever had answered most recently.
+	//
+	// THE KEY IS THE ASK AND NOT THE CARD, which bounds what this can do. A
+	// lookup happens at enqueue, where no node exists and the card is
+	// therefore unknowable; all the request has is its own Shape. So a
+	// request that named no card is checked against whatever card the last
+	// "any card" rental landed on -- which is the same uncertainty as before
+	// for that one shape, and exact for every shape that names its card.
+	// Keying on the card would make the cache unreadable by the only caller
+	// that needs it.
+	PutCaps(ctx context.Context, s Shape, c sdserver.Capabilities) error
+	Caps(ctx context.Context, s Shape) (sdserver.Capabilities, bool, error)
 
-	// Interrupt marks everything it finds running as interrupted, and returns
-	// how many. Called once at startup: a request that was in flight when the
-	// process died cannot be resumed, because its rental is gone.
-	Interrupt(ctx context.Context) (int, error)
+	// Reclaim takes back the leases that expired and marks those requests
+	// interrupted, returning how many.
+	//
+	// IT REPLACED A BLANKET SWEEP WHOSE PREMISE WAS FALSE. That sweep marked
+	// EVERY running row interrupted at startup, and the argument for it was
+	// "a request that was in flight when the process died cannot be resumed,
+	// because its rental is gone". The first half still holds and is why a
+	// reclaimed row is not re-queued: renting a second card for work the
+	// operator may no longer want is the kind of help nobody asked for, and
+	// whatever images it produced stay listed because they were paid for.
+	//
+	// The second half -- "its rental is gone" -- is not true. A node carries
+	// the run id and the deadline in the provider's own label, the label is
+	// the source of truth, and internal/reconcile reads it: a node can be
+	// alive and billing when ember restarts, and an ember that has just
+	// written `interrupted` over that node's row has orphaned the one record
+	// that said what the machine was for. Two ember processes against one
+	// store made it worse in the direction that costs money, because the
+	// second one's startup swept the first one's live rentals.
+	//
+	// So the sweep is keyed on the lease instead: a row whose lease has run
+	// out belonged to a process that is not renewing it, and a row being
+	// renewed is left alone. Called at startup AND on the supervisor's own
+	// loop, because "the process that held this is gone" becomes true while
+	// ember is running and not only before it started.
+	//
+	// A ZERO LEASE IS AN EXPIRED ONE, never "no expiry". Every row written
+	// before the column existed holds zero, so an upgraded file behaves
+	// exactly as the blanket sweep did for its old rows -- and the dangerous
+	// default, a row nothing will ever reclaim, is unrepresentable.
+	Reclaim(ctx context.Context) (int, error)
 
 	// PruneEvents drops the events of finished requests that ended before the
 	// horizon, keeping the request, its jobs, its costs and its images.

@@ -61,13 +61,6 @@ type Overrides struct {
 	// because one run is one image and picking silently would mean watching
 	// the wrong binary start.
 	Workload string
-
-	// Ports and Cmd replace the whole list when non-empty, never append.
-	// Appending would mean a `--port` on the command line could not override
-	// a configured one, only add to it, so the forward an operator was trying
-	// to replace would still be open.
-	Ports []string
-	Cmd   []string
 }
 
 // Apply lets each set value beat the file.
@@ -114,12 +107,6 @@ func (o Overrides) Apply(cfg *config.Config) error {
 	if o.TTL > 0 {
 		cfg.TTL = o.TTL
 	}
-	if len(o.Ports) > 0 {
-		cfg.Ports = o.Ports
-	}
-	if len(o.Cmd) > 0 {
-		cfg.Cmd = o.Cmd
-	}
 	return nil
 }
 
@@ -146,7 +133,6 @@ func (o Overrides) Apply(cfg *config.Config) error {
 type RunAsk struct {
 	Config    string
 	Overrides Overrides
-	Hold      time.Duration
 }
 
 // Validate refuses an ask that could only be a mistake.
@@ -162,14 +148,12 @@ func (a RunAsk) Validate() error {
 	switch {
 	case a.Config == "":
 		return errors.New("a run needs a config file to read: " +
-			"the image, the store, the ports and the sd.serve argv come from it, and this " +
+			"the image, the store, the jobs and the sd.serve argv come from it, and this " +
 			"channel carries only the values a flag replaces")
 	case !filepath.IsAbs(a.Config):
 		return fmt.Errorf("the config path %q is relative, and ember serve runs from its own "+
 			"working directory rather than yours -- so it would read a different file than you "+
 			"meant. Send an absolute path", a.Config)
-	case a.Hold < 0:
-		return fmt.Errorf("hold is %v, which is not a length of time anything can wait", a.Hold)
 	case a.Overrides.TTL < 0:
 		return fmt.Errorf("ttl is %v, and a node cannot be given a deadline in the past", a.Overrides.TTL)
 	}

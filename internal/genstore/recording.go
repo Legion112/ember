@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 )
@@ -44,7 +45,18 @@ type RecordingStore struct {
 	events map[ReqID][]report.Event
 	images map[ReqID][]Image
 	runs   map[ReqID]map[int]*JobRun
-	caps   *sdserver.Capabilities
+	caps   map[Shape]sdserver.Capabilities
+
+	// leases is when each row's claim stops being held.
+	//
+	// BESIDE THE ROWS AND NOT ON Request, because the real store keeps it in
+	// a column that genstore.Request deliberately does not carry: a lease a
+	// caller could read back through Get is a lease a caller could write
+	// through Update, and an expiry anybody can move is not an expiry. A
+	// missing entry is zero, which is expired -- the same reading the column
+	// has.
+	leases map[ReqID]time.Time
+
 	nextID int
 }
 
@@ -70,6 +82,14 @@ func (s *RecordingStore) record(op, arg string) error {
 		return fmt.Errorf("injected failure on %q", call)
 	}
 	return nil
+}
+
+// lease records when a row's claim runs out. The caller holds s.mu.
+func (s *RecordingStore) lease(id ReqID, until time.Time) {
+	if s.leases == nil {
+		s.leases = map[ReqID]time.Time{}
+	}
+	s.leases[id] = until
 }
 
 func (s *RecordingStore) at() time.Time {
@@ -153,6 +173,14 @@ func (s *RecordingStore) put(op string, r Request, status Status, started bool) 
 			copied.Started = r.Created
 		}
 	}
+	if started {
+		// AND THE LEASE, which is the real store's `r.Created.Add(r.TTL)`:
+		// Adopt is the only entry point that writes a running row, and a
+		// running row with no lease is one the next Reclaim takes. A fake
+		// that left it at zero would report an `ember up` as interrupted the
+		// instant anything looked.
+		s.lease(r.ID, copied.Created.Add(r.TTL))
+	}
 	s.reqs[r.ID] = &copied
 	s.order = append(s.order, r.ID)
 	return r.ID, nil
@@ -223,16 +251,102 @@ func (s *RecordingStore) ClaimNext(_ context.Context, runID string, c Compat) (R
 		// this right by comparing raw strings while the real store normalised
 		// -- or the other way round -- is the divergence the conformance
 		// table exists to catch, which is why both spell the same rule.
-		if !c.IsZero() && (WorkloadOf(r.Workload, r.Kind) != WorkloadOf(c.Workload, c.Kind) ||
-			r.Provider != c.Provider || r.GPU != c.GPU) {
+		if !c.IsZero() && !serves(c, *r) {
+			continue
+		}
+		// AND THE CREATE SIDE: a request some live rental can serve is not
+		// taken by a claim looking for work none of them can. Through
+		// WorkloadOf on both sides for the reason the ride check is -- see the
+		// SQL store, where a raw comparison here hands a migrated row a second
+		// card.
+		if servedByLive(*r, c.Live) {
 			continue
 		}
 		r.Status = StatusRunning
 		r.RunID = runID
 		r.Started = s.at()
+		// THE LEASE, IN THE SAME BREATH AS THE CLAIM, because the real store
+		// writes both in one statement: a fake that left the lease at zero
+		// would hand every claimed row straight to the next Reclaim, which is
+		// a fake LESS capable than the thing it stands in for in the
+		// direction that loses a live rental's row.
+		s.lease(id, s.at().Add(LeaseTerm))
 		return clone(*r), true, nil
 	}
 	return Request{}, false, nil
+}
+
+// serves is the fake's spelling of the claim relation: could the rental c
+// describes run request r.
+//
+// A SECOND IMPLEMENTATION OF THE PREDICATE, as Spend and Filter.matches here
+// already are, and for the same reason: servesClause is where this is most
+// likely to be subtly wrong, and a fake that delegated to it could not
+// disagree. The conformance table drives both.
+//
+// THREE ADMISSIONS FOR THE CARD, and only the third needs the advertised fact:
+//
+//   - the request named no card, so any card this provider has satisfies it;
+//   - the request named exactly what this rental asked for, which is the whole
+//     of the rule before Compat.Card existed;
+//   - the request named something this rental's actual card Accepts, which is
+//     the capacity-suffix rule node.GPUModel owns -- "a100" is satisfied by
+//     "a100-80g" -- and is also how a rental that asked for nothing serves a
+//     request that asked for the card it happens to have got.
+//
+// THROUGH KindOf ON BOTH SIDES, which is what servesClause's CASE does in SQL:
+// a row written before the kind column holds ”, and a compat built from one
+// holds 'sd', so comparing the raw strings would make an upgraded queue
+// unclaimable. A fake that got this right by comparing raw strings while the
+// real store normalised -- or the other way round -- is the divergence the
+// conformance table exists to catch.
+//
+// AND Accepts RATHER THAN A PREFIX WRITTEN OUT HERE. servesClause enumerates
+// the spellings a card admits because SQL cannot call Accepts; this one can,
+// so it does. Writing the prefix rule a second time is how two copies of one
+// rule drift, and the copy in SQL is already as far as that had to go.
+func serves(c Compat, r Request) bool {
+	// THROUGH WorkloadOf AND NOT KindOf, which is this branch's narrowing
+	// applied where master moved the comparison. A declared file may hold two
+	// `sd` entries pointing at different images, and a match on the driver
+	// alone admits both: same provider, same card, the claim succeeds, and the
+	// drain loop hands a request for one model to a resident server holding
+	// the other -- after a card has been paid for. Strictly narrower and never
+	// wider, because two entries with different drivers necessarily have
+	// different ids, so every refusal the driver made is still made.
+	if WorkloadOf(r.Workload, r.Kind) != WorkloadOf(c.Workload, c.Kind) ||
+		r.Provider != c.Provider {
+		return false
+	}
+	return r.GPU == "" || r.GPU == c.GPU ||
+		(c.Card != "" && c.Card.Accepts(node.GPUModel(r.GPU)))
+}
+
+// servesPending is serves widened by what is not known yet: the create side's
+// question. See servesPendingClause, which is the half with the measurement
+// in it.
+func servesPending(c Compat, r Request) bool {
+	if !c.CardKnown {
+		return WorkloadOf(r.Workload, r.Kind) == WorkloadOf(c.Workload, c.Kind) &&
+			r.Provider == c.Provider
+	}
+	return serves(c, r)
+}
+
+// servedByLive reports whether any rental already up could take this request.
+//
+// A FUNCTION RATHER THAN A CONDITION INSIDE THE LOOP, so the fake's spelling of
+// the exclusion is one expression that can be read against the SQL store's one
+// `AND NOT (...)` -- two rules written in two languages is how `dataCenter`
+// against `dataCenterId` stayed invisible, and the conformance table is what
+// holds these two to each other.
+func servedByLive(r Request, live []Compat) bool {
+	for _, l := range live {
+		if servesPending(l, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // began is the real store's first act, reproduced because its absence here is
@@ -383,44 +497,86 @@ func (s *RecordingStore) Images(_ context.Context, id ReqID) ([]Image, error) {
 	return out, nil
 }
 
-// PutCaps caches what the generation server said it can do.
-func (s *RecordingStore) PutCaps(_ context.Context, c sdserver.Capabilities) error {
+// PutCaps caches what the generation server said it can do, for one shape.
+func (s *RecordingStore) PutCaps(_ context.Context, sh Shape, c sdserver.Capabilities) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.record("PutCaps", c.Model); err != nil {
 		return err
 	}
-	s.caps = &c
+	if s.caps == nil {
+		s.caps = map[Shape]sdserver.Capabilities{}
+	}
+	// KEYED THROUGH KindOf FOR THE REAL STORE'S REASON: the caps table stores
+	// the normalised kind, so '' and 'sd' are one row there and must be one
+	// entry here, or the fake answers a cached document where SQLite answers
+	// "nothing has learned them yet".
+	s.caps[normShape(sh)] = c
 	return nil
 }
 
-// Caps reads the cached capabilities back.
-func (s *RecordingStore) Caps(_ context.Context) (sdserver.Capabilities, bool, error) {
+// normShape is the key both stores agree on.
+func normShape(sh Shape) Shape {
+	sh.Kind = KindOf(sh.Kind)
+	return sh
+}
+
+// Caps reads the cached capabilities for one shape back.
+func (s *RecordingStore) Caps(_ context.Context, sh Shape) (sdserver.Capabilities, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.record("Caps", ""); err != nil {
 		return sdserver.Capabilities{}, false, err
 	}
-	if s.caps == nil {
-		return sdserver.Capabilities{}, false, nil
-	}
-	return *s.caps, true, nil
+	c, ok := s.caps[normShape(sh)]
+	return c, ok, nil
 }
 
-// Interrupt marks everything running as interrupted.
-func (s *RecordingStore) Interrupt(_ context.Context) (int, error) {
+// Renew extends the lease on the rows the caller is still responsible for.
+func (s *RecordingStore) Renew(_ context.Context, ids []ReqID) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.record("Interrupt", ""); err != nil {
+	if err := s.record("Renew", ""); err != nil {
 		return 0, err
 	}
 	n := 0
-	for _, id := range s.order {
-		if s.reqs[id].Status == StatusRunning {
-			s.reqs[id].Status = StatusInterrupted
-			s.reqs[id].Ended = s.at()
-			n++
+	for _, id := range ids {
+		r, ok := s.reqs[id]
+		// Running only, for the real store's reason: a renewal races a
+		// request's own ending, and a terminal row carrying a live lease is a
+		// state nothing reads and nothing would notice.
+		if !ok || r.Status != StatusRunning {
+			continue
 		}
+		s.lease(id, s.at().Add(LeaseTerm))
+		n++
+	}
+	return n, nil
+}
+
+// Reclaim marks interrupted every running request whose lease has expired.
+func (s *RecordingStore) Reclaim(_ context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("Reclaim", ""); err != nil {
+		return 0, err
+	}
+	now := s.at()
+	n := 0
+	for _, id := range s.order {
+		if s.reqs[id].Status != StatusRunning {
+			continue
+		}
+		// NOT After, SO THAT A LEASE EXPIRING EXACTLY NOW IS EXPIRED: the SQL
+		// half is `lease_until_unix <= ?`, and a fake using the strict
+		// comparison would disagree with it on the one instant a test with an
+		// injected clock is most likely to pick.
+		if s.leases[id].After(now) {
+			continue
+		}
+		s.reqs[id].Status = StatusInterrupted
+		s.reqs[id].Ended = now
+		n++
 	}
 	return n, nil
 }

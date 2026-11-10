@@ -3,10 +3,9 @@
 //
 // It exists because of one concrete provider behaviour. On RunPod a port
 // declared `8188/http` is served at https://{id}-8188.proxy.runpod.net with no
-// authentication of any kind -- no token, no basic auth, nothing -- and the
-// workload ember is built to run there is ComfyUI, which has arbitrary file
-// read and arbitrary code execution through custom nodes. One wrong field in
-// one API body is therefore not a misconfiguration, it is a public shell on a
+// authentication of any kind -- no token, no basic auth, nothing -- so one
+// wrong field in one API body is not a misconfiguration, it is a generation
+// server, with file paths in its request body, open to whoever finds it on a
 // machine billed to the operator. So the decision is made in a type that
 // cannot spell the dangerous thing (PortRequest), and then the result is read
 // back from the provider and checked independently (AssertSSHOnly), because a
@@ -42,16 +41,6 @@ func SSHPort() PortRequest {
 	return PortRequest{port: 22, proto: node.ProtoTCP, public: true}
 }
 
-// Internal asks for a port the node may listen on but nothing outside may
-// reach. Workload ports are these: they are reached by forwarding over the SSH
-// connection, so they never need to be published at all.
-func Internal(port uint16) (PortRequest, error) {
-	if port == 0 {
-		return PortRequest{}, fmt.Errorf("port 0 is not a port: it is the zero value, and to net.Listen it means \"any free port\"")
-	}
-	return PortRequest{port: port, proto: node.ProtoTCP}, nil
-}
-
 func (r PortRequest) Port() uint16      { return r.port }
 func (r PortRequest) Proto() node.Proto { return r.proto }
 
@@ -72,21 +61,18 @@ func (r PortRequest) String() string {
 // provider that forwards it to an API gets whatever that API does with 0.
 func (r PortRequest) IsZero() bool { return r == PortRequest{} }
 
-// Requests is the canonical set ember asks for: sshd, and the workload ports
-// as internal-only.
+// Requests is the canonical set ember asks for, and it is sshd alone.
 //
-// This is the one place the set is built, so "workload ports are never
-// published" is a property of this function rather than something each
-// provider has to remember. A provider receives the list and maps it; it never
-// decides visibility.
-func Requests(workload []node.PortMap) ([]PortRequest, error) {
-	out := []PortRequest{SSHPort()}
-	for _, p := range workload {
-		r, err := Internal(p.Remote)
-		if err != nil {
-			return nil, fmt.Errorf("workload port %q: %w", p.Name, err)
-		}
-		out = append(out, r)
-	}
-	return out, nil
+// IT TAKES NO ARGUMENT, which is the seal rather than a simplification. A
+// generation server runs on the node's own loopback and is reached by dialling
+// it over the SSH connection, so there is no second port for a caller to name
+// -- and a parameter is how one would arrive. SSHPort is the only constructor
+// that produces anything, so the set cannot grow a member without a line here.
+//
+// This is the one place it is built, so "nothing but sshd is published" is a
+// property of this function rather than something each provider has to
+// remember. A provider receives the list and maps it; it never decides
+// visibility.
+func Requests() []PortRequest {
+	return []PortRequest{SSHPort()}
 }

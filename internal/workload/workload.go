@@ -1,14 +1,21 @@
-// Package workload runs the command a node was rented for.
+// Package workload runs one of ember's own commands on a node.
+//
+// EVERY ARGV THAT REACHES HERE IS EMBER'S. The fetch marker, the GPU probe,
+// the memory probe, the asset fetch, the generation server and piper are the
+// callers, and each of those commands is built by the package that owns the
+// question it answers — sdserver.ServeCommand, assets.Command, tts.Command.
+// Nothing arriving over HTTP or out of a config file is handed to a shell on
+// a rented machine.
 //
 // It runs over the SSH connection ember already has, rather than as the
 // container's entrypoint. That ordering is the design: a node ember cannot
 // reach is a node ember cannot destroy either, so there is no value in a
-// workload that outlives the connection — and running it here means the
+// process that outlives the connection — and running it here means the
 // operator watches the output live instead of reading a log afterwards, and
 // the exit status is known at the moment it happens rather than polled for
 // through a file.
 //
-// The consequence worth naming: if the connection drops, the workload is
+// The consequence worth naming: if the connection drops, the process is
 // orphaned on a node ember is about to destroy anyway. The deadline and the
 // node's own self-destruct both still apply.
 package workload
@@ -36,7 +43,7 @@ type Result struct {
 	ExitCode int
 }
 
-// Run executes spec.Cmd on the node and streams its output.
+// Run executes cmd on the node and streams its output.
 //
 // Both streams go to out as they arrive. A workload that spends four minutes
 // loading a model and then fails deserves to have shown what it was doing;

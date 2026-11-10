@@ -256,7 +256,7 @@ func (p *Provider) filter(f node.Filter, offers []node.Offer) ([]node.Offer, err
 // is never ready: RunPod leaves ssh.direct null until the public 22/tcp
 // mapping is assigned, which happens well after the status reads RUNNING.
 func (p *Provider) Create(ctx context.Context, req node.CreateRequest) (node.Handle, error) {
-	ports, err := p.ports(req.Spec.Ports)
+	ports, err := mapPorts(exposure.Requests())
 	if err != nil {
 		return node.Handle{}, err
 	}
@@ -357,26 +357,6 @@ func (p *Provider) env(req node.CreateRequest) map[string]string {
 		// dies mid-run.
 		"EMBER_TTL_SECONDS": fmt.Sprintf("%d", int(time.Until(req.Deadline).Seconds())),
 	}
-}
-
-func (p *Provider) ports(workload []node.PortMap) ([]string, error) {
-	// A workload port that collides with the platform's own mapping would be
-	// served through RunPod's unauthenticated proxy. ember tolerates that
-	// port only because nothing listens on it; a workload binding it is
-	// exactly the case that stops being true.
-	for _, w := range workload {
-		if w.Remote == WebTerminalPort {
-			return nil, fmt.Errorf(
-				"workload port %q asks for %d, which RunPod maps to its public proxy on every pod: "+
-					"a service there is reachable at {pod-id}-%d.proxy.runpod.net with no authentication. Move it to another port",
-				w.Name, WebTerminalPort, WebTerminalPort)
-		}
-	}
-	reqs, err := exposure.Requests(workload)
-	if err != nil {
-		return nil, err
-	}
-	return mapPorts(reqs)
 }
 
 // Inspect reports what RunPod says about one pod right now.

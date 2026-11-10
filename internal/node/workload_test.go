@@ -2,10 +2,14 @@ package node
 
 import "testing"
 
-// TestSpec_WorkloadNamesWhatThisNodeRuns covers the three answers and, with
-// them, the reason this method exists: app.NewPlan refuses a speech batch
-// beside another kind and has only a finished Spec to name the other one
-// with.
+// TestSpec_WorkloadNamesWhatThisNodeRuns covers both answers and, with them,
+// the reason this method exists: app.NewPlan refuses a speech batch beside
+// another kind and has only a finished Spec to name the other one with.
+//
+// THE EMPTY ANSWER IS THE HALF THAT MATTERS, because it is what a speech run
+// and a run with no batch at all both give -- so a method that answered
+// something for every spec would make the refusal one layer up fire on a
+// configuration naming one kind.
 func TestSpec_WorkloadNamesWhatThisNodeRuns(t *testing.T) {
 	cases := []struct {
 		name string
@@ -14,13 +18,6 @@ func TestSpec_WorkloadNamesWhatThisNodeRuns(t *testing.T) {
 	}{
 		{"nothing", Spec{}, ""},
 		{"a serve command", Spec{Serve: []string{"sd-server"}}, "sd.serve"},
-		{"one command", Spec{Cmds: [][]string{{"true"}}}, "cmd or cmds"},
-		{"several commands", Spec{Cmds: [][]string{{"a"}, {"b"}}}, "cmd or cmds"},
-		// Serve wins, which is not a precedence anybody relies on: NewSpec
-		// refuses the combination, so this arm only decides which word an
-		// unreachable state would use. Asserted so that the ordering is a
-		// decision rather than whichever case was written first.
-		{"both", Spec{Serve: []string{"sd-server"}, Cmds: [][]string{{"true"}}}, "sd.serve"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -31,26 +28,28 @@ func TestSpec_WorkloadNamesWhatThisNodeRuns(t *testing.T) {
 	}
 }
 
-// TestSpec_WorkloadSaysCmdOrCmdsBecauseASpecCannotTellThemApart is the one
-// thing about this method a reader would call a bug: NewSpec folds `cmd` into
-// Cmds as its first entry, so naming one of the two would name the wrong key
-// for half of all configs -- and an operator looking for a key that is not in
-// their file concludes the message is about somebody else's.
-func TestSpec_WorkloadSaysCmdOrCmdsBecauseASpecCannotTellThemApart(t *testing.T) {
-	a := validSpecOptions()
-	a.Cmd = []string{"true"}
-	fromCmd, err := NewSpec(a)
+// TestSpec_WorkloadReadsAFinishedSpecAndNotAConfig: the answer has to survive
+// NewSpec, because the caller that needs it -- app.NewPlan, finding out a
+// speech batch was configured beside a generation server -- holds a Spec and
+// not the options it was built from.
+func TestSpec_WorkloadReadsAFinishedSpecAndNotAConfig(t *testing.T) {
+	o := validSpecOptions()
+	o.Serve = []string{"sd-server", "--model", "/models/x.gguf"}
+	s, err := NewSpec(o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := validSpecOptions()
-	b.Cmds = [][]string{{"true"}}
-	fromCmds, err := NewSpec(b)
+	if got := s.Workload(); got != "sd.serve" {
+		t.Errorf("Workload() = %q, want sd.serve", got)
+	}
+
+	bare := validSpecOptions()
+	bare.Serve = nil
+	b, err := NewSpec(bare)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fromCmd.Workload() != fromCmds.Workload() {
-		t.Errorf("cmd and cmds produced different answers: %q and %q",
-			fromCmd.Workload(), fromCmds.Workload())
+	if got := b.Workload(); got != "" {
+		t.Errorf("Workload() = %q for a spec naming no workload, want empty", got)
 	}
 }

@@ -385,20 +385,19 @@ func (c Config) validateWorkloads() error {
 	if len(c.TTS.Voices) > 0 || len(c.TTS.Jobs) > 0 || c.TTS.Voice != "" {
 		also = append(also, "tts")
 	}
-	if len(c.Cmd) > 0 {
-		also = append(also, "cmd")
-	}
-	if len(c.Cmds) > 0 {
-		also = append(also, "cmds")
-	}
+	// NO `cmd` OR `cmds` ARM, because the keys are gone. They were refused
+	// here beside the others when this was written, and the plan at #203
+	// deleted them from the config entirely -- a request names a provider, a
+	// card, a kind and a batch of jobs, and no argv an operator wrote reaches
+	// a node. `KnownFields` refuses the spelling now, with a message naming
+	// the removal, so a file carrying one never reaches this function.
 	if len(also) == 0 {
 		return nil
 	}
 	return fmt.Errorf("workloads: is set and so is top-level %s; the top-level keys are the "+
 		"one unnamed workload a file without workloads: describes, so a file with both declares "+
 		"a workload no request can name beside ones it can.\n"+
-		"Move each of those keys into the workloads: entry it belongs to. `cmd` and `cmds` have "+
-		"no entry form yet, so a file that runs argv does not declare workloads",
+		"Move each of those keys into the workloads: entry it belongs to.",
 		strings.Join(also, ", "))
 }
 

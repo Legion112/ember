@@ -226,8 +226,12 @@ func TestWorkloads_RefusedBesideTheTopLevelKeysTheyReplace(t *testing.T) {
 		{"an images map", "images:\n  sm_89: " + ref + "\n", "images"},
 		{"an sd block", "sd:\n  serve: [\"sd-server\"]\n", "sd"},
 		{"a tts block", "tts:\n  voices:\n    - id: a\n      voice: /v.onnx\n", "tts"},
-		{"a cmd", "cmd: [\"echo\", \"hi\"]\n", "cmd"},
-		{"a cmds list", "cmds:\n  - [\"echo\", \"hi\"]\n", "cmds"},
+		// NO `cmd` OR `cmds` CASE. They were in this table when it was
+		// written and the keys are gone from the config now, so
+		// `rejectRemovedKeys` answers the spelling first with a message
+		// naming the removal -- a file carrying one never reaches the
+		// workloads check, and asserting the second refusal here would be
+		// asserting a message nothing can produce.
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -441,12 +445,16 @@ func TestWorkload_ATTSJobsBlockUnderAnSDDriverIsRefused(t *testing.T) {
 // TestWorkload_AnSDEntryWithNoServeSaysSoNamingTheKey.
 //
 // THE OTHER ARM OF `Unservable`, and the state it is for is the one every
-// `ember up`-only configuration is in: a file with `image:` and `cmds:` and no
-// `sd:` block describes an image entry that cannot be SERVED, which is why no
-// tab appears for it and why `ember serve` refuses to start from such a file
-// at all.
+// `ember up`-only configuration is in: a file with `image:` and no `sd:` block
+// describes an image entry that cannot be SERVED, which is why no tab appears
+// for it and why `ember serve` refuses to start from such a file at all.
+//
+// THE FIXTURE WAS `image:` PLUS `cmds:` and is `image:` alone now, because the
+// key that used to make this file an `ember up` one has been deleted from the
+// config. The state it describes is unchanged and is in fact more common: a
+// file naming an image and no driver block.
 func TestWorkload_AnSDEntryWithNoServeSaysSoNamingTheKey(t *testing.T) {
-	cfg, err := load(t, "image: "+ref+"\ncmds:\n  - [\"echo\", \"hi\"]\n")
+	cfg, err := load(t, "image: "+ref+"\n")
 	if err != nil {
 		t.Fatal(err)
 	}

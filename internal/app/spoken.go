@@ -39,13 +39,9 @@ import (
 // the first failure because a batch where job 3 failed and 4 through 10 ran
 // anyway is a batch nobody can trust.
 //
-// WHAT IT DOES NOT BORROW IS THE MARKER. runSteps bounds each fetch by a file
-// it touches on the node, because a `cmds` step's output is a whole directory
-// whose contents ember cannot name in advance. Here ember composed the
-// filename, so each fetch names exactly one file and there is nothing for a
-// marker to bound -- which also means this path cannot re-send what is already
-// home, and does not need the "a marker that cannot be touched is wasteful,
-// not fatal" concession.
+// EACH FETCH NAMES EXACTLY ONE FILE, because ember composed the filename. The
+// `outputs:` fetch is a whole directory whose contents ember cannot name in
+// advance; here there is nothing to bound and nothing to re-send.
 type spokenBatch struct{ run tts.Run }
 
 func (b spokenBatch) Describe() string {
@@ -151,11 +147,14 @@ func (p Plan) WithSpoken(ctx context.Context, out io.Writer, sink report.Sink,
 ) error {
 	return provision.WithNode(ctx, p.Provider, p.Spec, p.Offer, p.lifecycle(sink),
 		func(ctx context.Context, s provision.Session) error {
-			client, so, err := p.prepare(ctx, out, sink, s)
+			client, so, err := dialNode(ctx, s, p.Options)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = client.Close() }()
+			if err := p.ready(ctx, out, sink, client, so); err != nil {
+				return err
+			}
 			// The node's own log, for the reason Plan.serve collects it: the
 			// component whose failures are hardest to diagnose is the one
 			// whose evidence a destroy removes. A drain loop has no single
@@ -174,15 +173,12 @@ func (p Plan) WithSpoken(ctx context.Context, out io.Writer, sink report.Sink,
 // IT IGNORES TWO OF THE NINE PARAMETERS THE SEAM CARRIES, and both omissions
 // are decisions rather than oversights.
 //
-// THE DIALER: no forwards. A `cmds` run holds `ports:` open because a workload
-// may want to reach a service on the node and a ComfyUI run is exactly that;
-// piper reads stdin and writes a file, so a forward here would be a listener
-// opened for nothing -- and the rule that every listener is loopback is a rule
-// about listeners that exist.
+// THE DIALER: nothing on the node is dialled. sd-server is reached on the
+// node's own loopback over the SSH connection; piper reads stdin and writes a
+// file, so there is no port to reach at all.
 //
 // THE SPEC: nothing on it describes a speech run. `Serve` and `ServeTimeout`
-// are sd-server's, `Cmds` is the opaque-argv path, `Ports` is the forward this
-// does not open, and `Outputs` is the `outputs:` fetch -- which this path
+// are sd-server's, and `Outputs` is the `outputs:` fetch -- which this path
 // deliberately does not use, because ember composed each filename and fetches
 // them one at a time. That absence is the same seal `Plan.Spoken` rests on:
 // `node.Spec` has no speech field, so a request can never be consulted about
@@ -263,7 +259,7 @@ func runSpoken(
 			// that was never going to exist, stacked on the real one.
 			fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputTimeout)
 			res, ferr = transfer.Fetch(fetchCtx, r,
-				[]node.OutputPath{{Remote: remote}}, runDir, "")
+				[]node.OutputPath{{Remote: remote}}, runDir)
 			cancel()
 		}
 

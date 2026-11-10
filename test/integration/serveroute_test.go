@@ -603,14 +603,21 @@ func TestServe_UILeavingAReconnectingWatcherDoesNotTrapTheWasm(t *testing.T) {
 // `ember serve` answers a 404 rather than the page, the handshake has no 101
 // and the browser calls `onclose`. A closed port would do it too and would
 // mean finding one that stays closed for the length of the lab.
+// ONE NAME FOR THE PATH, not one per call site, which is the journal's
+// "nodes" subdirectory rule: two labs break these sockets -- this one and the
+// reconnect lab's `noteOnALostStream`, which sets it inline because its set,
+// read and clear have to be one round trip -- and a second spelling is a
+// second thing to keep in step with what `ember serve` actually 404s.
+const brokenSocketPath = "/api/no-such-socket"
+
 func breakSockets(t *testing.T, ctx context.Context) {
 	t.Helper()
-	got, err := chromedp.Run(ctx, chromedp.Evaluate[string](
+	got, err := chromedp.Run(ctx, chromedp.Evaluate[string](fmt.Sprintf(
 		`(function () {
 			if (!window.__emberSockets) { return "not wrapped"; }
-			window.__emberBreak = "/api/no-such-socket";
+			window.__emberBreak = %q;
 			return "broken";
-		})()`))
+		})()`, brokenSocketPath)))
 	if err != nil {
 		t.Fatalf("breaking the page's websockets: %v", err)
 	}

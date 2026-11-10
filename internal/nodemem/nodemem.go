@@ -1,11 +1,11 @@
 // Package nodemem records what a rented node says about its memory.
 //
 // IT EXISTS BECAUSE OF 81 SECONDS AND $0.056 PER IMAGE THAT NOBODY COULD
-// EXPLAIN. The FLUX.2 measurement in AGENTS.md rented the same card in the
-// same datacentre eight times with the same prompts and seeds, and the `cmds`
-// arm split in two: on a node that kept the 56 GiB of weights in page cache
-// each step took 145.3s, and on one that did not, 226.6s, because every step
-// re-read the whole model off the network store at a measured 868 MiB/s. All
+// EXPLAIN. The FLUX.2 measurement in docs/money rented the same card in the
+// same datacentre eight times with the same prompts and seeds, and the arm
+// that read the weights per image split in two: on a node that kept the
+// 56 GiB in page cache that read cost 145.3s, and on one that did not,
+// 226.6s, because it came off the network store at a measured 868 MiB/s. All
 // eight nodes reported 620-708 GiB of free RAM, and the caching run was the
 // last of the three rather than the first, so neither host memory nor warm-up
 // explains it.
