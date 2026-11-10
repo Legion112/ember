@@ -197,8 +197,8 @@ func TestWithServed_RefusesAConfigWithNoServer(t *testing.T) {
 // dollar a mistake.
 func TestServed_GenerateRefusesEveryBadJobBeforeGeneratingAnything(t *testing.T) {
 	f := newFakeSD(t)
-	c, _ := f.start(t)
-	s := served{client: c, caps: sdserver.Capabilities{Samplers: []string{"euler"}}}
+	n := startNode(t, f)
+	s := n.served(t, 0)
 
 	err := s.Generate(t.Context(), report.Discard, testRun(
 		sdserver.Job{Prompt: "fine", Sampler: "euler"},
@@ -215,17 +215,16 @@ func TestServed_GenerateRefusesEveryBadJobBeforeGeneratingAnything(t *testing.T)
 	if !errorsIsUsage(err) {
 		t.Errorf("err = %v, want it to be an ErrUsage", err)
 	}
-	if len(f.submitted) != 0 {
-		t.Errorf("%d job(s) were generated before the refusal", len(f.submitted))
+	if f.submits() != 0 {
+		t.Errorf("%d job(s) were generated before the refusal", f.submits())
 	}
 }
 
 // TestServed_GenerateRunsTheBatchAndReportsIt.
 func TestServed_GenerateRunsTheBatchAndReportsIt(t *testing.T) {
-	shrinkPoll(t)
 	f := newFakeSD(t)
-	c, _ := f.start(t)
-	s := served{client: c, caps: sdserver.Capabilities{Samplers: []string{"euler"}}, rate: node.Rate(2_000_000)}
+	n := startNode(t, f)
+	s := n.served(t, node.Rate(2_000_000))
 
 	dir := t.TempDir()
 	events := &collect{}
@@ -236,8 +235,8 @@ func TestServed_GenerateRunsTheBatchAndReportsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(f.submitted) != 2 {
-		t.Errorf("submitted %d job(s), want 2", len(f.submitted))
+	if f.submits() != 2 {
+		t.Errorf("submitted %d job(s), want 2", f.submits())
 	}
 	// The names travel on the event, from sdserver.WriteImages, so a reader
 	// recording where the bytes went does not re-derive the naming.

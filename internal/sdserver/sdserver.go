@@ -74,6 +74,16 @@ func New(dial func(ctx context.Context, network, addr string) (net.Conn, error))
 }
 
 // Capabilities reports what this server build can do.
+//
+// ITS ONE PRODUCTION CALLER IS THE WORKER ON THE NODE, which is where this
+// decoding now happens: the generation server is on the node's own loopback,
+// and the worker needs one field out of the answer -- whether the build will
+// stop a generation already in flight -- while ember needs the rest to refuse
+// a bad job before a card has been paid to discover it. So the document is
+// decoded once, here, and the resulting value travels up the control channel.
+// Relaying the server's own bytes instead would mean this mapper running at
+// both ends, and it is the mapper that learned `capabilities.model` is an
+// object and not the string api.md's field list implies.
 func (c Client) Capabilities(ctx context.Context) (Capabilities, error) {
 	var w wireCapabilities
 	if err := c.HTTP.Get(ctx, pathCapabilities, &w); err != nil {
@@ -97,6 +107,17 @@ func (c Client) ModelStatus(ctx context.Context) (ModelStatus, error) {
 
 // Submit queues one job and returns its id.
 //
+// IT TAKES THE BODY AND NOT A Job, which is the shape the worker needs and the
+// one that keeps a number intact across two processes. ember builds the body
+// with Job.Body and pushes those bytes down the control channel as a
+// json.RawMessage that is never parsed on the way: a body decoded into
+// map[string]any comes back with every number as a float64, so a seed above
+// 2^53 -- or anything an operator put in `extra:` -- would be re-encoded as a
+// DIFFERENT number, and the node would generate a picture ember did not ask
+// for while recording the one it did. Relaying the bytes makes that
+// unrepresentable, and it leaves Body as the one place that decides what a
+// job looks like on a wire.
+//
 // NOT RETRYABLE, and nothing in this package or httpx will retry it. A
 // transport failure here is ambiguous: the request may have reached the server
 // and created a job whose id ember never learned. Sending it again would
@@ -104,10 +125,9 @@ func (c Client) ModelStatus(ctx context.Context) (ModelStatus, error) {
 // invisible -- ember would be polling the first id while the second ran. The
 // same reasoning as running destroy on a context that survives Ctrl-C: the
 // expensive mistake is the one you cannot see.
-func (c Client) Submit(ctx context.Context, j Job, preview string, interval int) (string, error) {
-	body, err := j.Body(preview, interval)
-	if err != nil {
-		return "", err
+func (c Client) Submit(ctx context.Context, body json.RawMessage) (string, error) {
+	if len(body) == 0 {
+		return "", errors.New("an empty job body: there is nothing to submit")
 	}
 	var w wireAccepted
 	if err := c.HTTP.Post(ctx, pathImageGen, body, &w); err != nil {

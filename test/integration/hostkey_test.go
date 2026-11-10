@@ -4,11 +4,14 @@ package integration
 
 import (
 	"errors"
+	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Legion112/ember/internal/control"
 	"github.com/Legion112/ember/internal/hostkey"
 	"github.com/Legion112/ember/test/integration/harness"
 )
@@ -112,7 +115,7 @@ func TestHostKey_AMismatchIsNotRetried(t *testing.T) {
 	}
 }
 
-// TestNodeImage_ListensOnNothingButSSH is the evidence the platform-port
+// TestNodeImage_PublishesNothingButSSH is the evidence the platform-port
 // concession rests on.
 //
 // RunPod maps its web terminal port to every pod, publicly and with no
@@ -122,11 +125,44 @@ func TestHostKey_AMismatchIsNotRetried(t *testing.T) {
 // to an empty room. That is a property of this image, so it is checked here
 // rather than assumed, and it would stop being true the moment the image
 // gained a service.
-func TestNodeImage_ListensOnNothingButSSH(t *testing.T) {
-	assertListensOnlyOnSSH(t, "")
+//
+// IT WAS "LISTENS ON NOTHING BUT SSH" AND THE NODE IMAGE NOW HAS A WORKER,
+// which is the one listener in it that is not sshd -- so the rule had to be
+// stated properly rather than loosened. What a provider can publish is a
+// port on the container's ROUTABLE address: a mapping targets the container's
+// own interface, so a socket bound to 127.0.0.1 inside the pod's network
+// namespace is not reachable through one however the provider maps it. The
+// assertion is therefore about the ADDRESS and not only the port, which is
+// strictly stronger than counting ports was: a worker that bound `0.0.0.0:7311`
+// is caught by the rule itself now rather than by somebody noticing a number.
+//
+// AND THE WORKER'S OWN SOCKET IS ASSERTED, not merely tolerated. Permitting
+// "any loopback listener" would pass against an image that had lost its
+// worker entirely, which is a node ember cannot give work to -- so the port
+// has to be there, and it has to be loopback.
+func TestNodeImage_PublishesNothingButSSH(t *testing.T) {
+	out := assertListensOnlyOnSSH(t, "")
+
+	var worker *listener
+	for _, l := range listeners(out) {
+		if l.port == strconv.Itoa(control.Port) {
+			found := l
+			worker = &found
+		}
+	}
+	if worker == nil {
+		t.Fatalf("nothing is listening on %d, so this image has no worker and ember could give "+
+			"a node built from it no work. Listening sockets:\n%s", control.Port, out)
+	}
+	if !isLoopback(worker.addr) {
+		t.Errorf("the worker is bound to %s rather than to loopback, which is an address a "+
+			"provider's port mapping can reach:\n%s", worker.addr, out)
+	}
 }
 
-func assertListensOnlyOnSSH(t *testing.T, image string) {
+// assertListensOnlyOnSSH is the rule, and it returns `ss`'s own output so a
+// caller can say something more specific about the image it asked about.
+func assertListensOnlyOnSSH(t *testing.T, image string) string {
 	t.Helper()
 	l := harness.New(t)
 
@@ -170,9 +206,23 @@ func assertListensOnlyOnSSH(t *testing.T, image string) {
 		t.Fatalf("sshd never bound 22 within %v; found %v:\n%s", 15*time.Second, ports, out)
 	}
 
-	for _, p := range ports {
-		if p != "22" {
-			t.Errorf("the image listens on %s as well as 22; everything it binds is a candidate for a provider to publish. Listening sockets:\n%s", p, out)
+	// THE ADDRESS AND NOT ONLY THE PORT. A provider publishes a port on the
+	// container's routable address, so a socket on loopback inside the pod's
+	// network namespace is not reachable through a mapping however the
+	// provider makes one -- while anything bound to a wildcard or to the
+	// container's own interface is exactly what this lab exists to catch.
+	//
+	// Every tolerated loopback socket is NAMED on the way past, because a
+	// concession that passes silently is one nobody re-examines -- which is
+	// this repository's own argument for why `exposure.Tolerated` exists.
+	for _, l := range listeners(out) {
+		switch {
+		case l.port == "22":
+		case isLoopback(l.addr):
+			t.Logf("tolerated: %s:%s is on loopback, which no port mapping can reach", l.addr, l.port)
+		default:
+			t.Errorf("the image listens on %s:%s, which is an address a provider's port mapping "+
+				"can reach. Listening sockets:\n%s", l.addr, l.port, out)
 		}
 	}
 
@@ -180,25 +230,55 @@ func assertListensOnlyOnSSH(t *testing.T, image string) {
 	if strings.Contains(out, "19123") {
 		t.Errorf("the image listens on RunPod's public proxy port:\n%s", out)
 	}
+	return out
 }
 
-// listeningPorts reads the port column out of `ss -H -ltn`.
+// listener is one socket `ss -H -ltn` reported.
+type listener struct{ addr, port string }
+
+// listeners reads the local-address column out of `ss -H -ltn`.
 //
-// Extracted so the poll above and the assertion below cannot disagree about
-// what counts as a listener.
-func listeningPorts(out string) []string {
-	var ports []string
+// Extracted so the poll above and the assertions below cannot disagree about
+// what counts as a listener -- and parsed from the right rather than split on
+// every colon, because an IPv6 address is full of them.
+func listeners(out string) []listener {
+	var found []listener
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		f := strings.Fields(line)
 		if len(f) < 4 {
 			continue
 		}
-		addr := f[3]
-		i := strings.LastIndex(addr, ":")
+		local := f[3]
+		i := strings.LastIndex(local, ":")
 		if i < 0 {
 			continue
 		}
-		ports = append(ports, addr[i+1:])
+		found = append(found, listener{addr: local[:i], port: local[i+1:]})
+	}
+	return found
+}
+
+// listeningPorts is the ports alone, for the poll that waits for sshd.
+func listeningPorts(out string) []string {
+	var ports []string
+	for _, l := range listeners(out) {
+		ports = append(ports, l.port)
 	}
 	return ports
+}
+
+// isLoopback decides whether an address `ss` printed is one no port mapping
+// can reach.
+//
+// netip decides, after the brackets come off: `*` and `0.0.0.0` and `[::]` are
+// the wildcards ss prints for a socket bound to everything, and none of them
+// parses as an address -- which is the answer wanted, because a wildcard is
+// the publishable case. Guessing ahead of the real parser is how
+// loopback.ParseBind's first version sent readers somewhere the bug was not.
+func isLoopback(addr string) bool {
+	a, err := netip.ParseAddr(strings.Trim(addr, "[]"))
+	if err != nil {
+		return false
+	}
+	return a.IsLoopback()
 }

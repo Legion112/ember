@@ -9,7 +9,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -42,24 +41,38 @@ func main() {
 	// logger that cannot open its file still returns one.
 	log := logger()
 
-	// One subcommand, and everything else is the node entrypoint.
+	// Two subcommands, and everything else is the node entrypoint.
 	//
 	// Dispatching on os.Args rather than growing a flag package at the top:
 	// embernode is PID 1 in the container and is started by the image's
 	// ENTRYPOINT with no arguments at all. A parser that could fail on the
 	// empty case would be a node that does not come up.
-	if len(os.Args) > 1 && os.Args[1] == "fetch" {
-		if err := runFetch(os.Args[2:]); err != nil {
-			// Logged AND printed in the old spelling. `embernode fetch` runs
-			// over ember's SSH connection, so this stream is the operator's
-			// own terminal and a timestamped record is not what they are
-			// reading there; the log copy is for the node's file, which is
-			// the only one that survives the node.
-			log.Error("asset fetch failed; the workload will not start", "err", err)
-			fmt.Fprintf(os.Stderr, "embernode fetch: %v\n", err)
-			os.Exit(1)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "fetch":
+			if err := runFetch(os.Args[2:]); err != nil {
+				// Logged AND printed in the old spelling. `embernode fetch`
+				// runs over ember's SSH connection, so this stream is the
+				// operator's own terminal and a timestamped record is not
+				// what they are reading there; the log copy is for the node's
+				// file, which is the only one that survives the node.
+				log.Error("asset fetch failed; the workload will not start", "err", err)
+				fmt.Fprintf(os.Stderr, "embernode fetch: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "worker":
+			// NOT PRINTED TO STDERR AS WELL, unlike fetch: nobody is watching
+			// this stream. The worker is started by the entrypoint above and
+			// its output is the node's own log, which ember brings home --
+			// which is the one place a failure here can be read, because the
+			// operator's terminal is not attached to it.
+			if err := runWorker(log, os.Args[2:]); err != nil {
+				log.Error("the worker stopped", "err", err)
+				os.Exit(1)
+			}
+			return
 		}
-		return
 	}
 
 	code, err := run(log)
@@ -112,47 +125,61 @@ func run(log *slog.Logger) (int, error) {
 		return 0, fmt.Errorf("start sshd: %w", err)
 	}
 
+	g := newGroup(log)
+	g.add(childSSHD, cmdProc{cmd: cmd})
 	log.Info("sshd started", "pid", cmd.Process.Pid)
 
-	stopDeadline := armDeadline(log, cmd)
+	// THE WORKER IS STARTED BESIDE sshd AND NOT INSTEAD OF IT, and a worker
+	// that could not start is NOT fatal.
+	//
+	// The choice is between a node that cannot work and a node that cannot be
+	// asked why. Returning here would exit PID 1, the container would stop,
+	// and ember would report a handshake failure with the real reason -- a
+	// port collision in the workload image, a read-only /tmp -- sitting in a
+	// log file on a machine that no longer exists and was never reachable.
+	// That is the failure log.go was written against, one layer out. Keeping
+	// sshd means ember's first job push is refused, that request fails, the
+	// rental ends and the destroy runs, so the loss is bounded by one request
+	// rather than by the TTL -- and the node's log comes home with the
+	// sentence in it.
+	if err := startWorker(log, g); err != nil {
+		log.Error("the worker did not start; this node can accept no work and ember will say so on its first push", "err", err)
+	}
+
+	stopDeadline := armDeadline(log, g)
 	defer stopDeadline()
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigs)
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	return supervise(log, g, sigs)
+}
 
-	select {
-	case sig := <-sigs:
-		log.Info("signal received, forwarding it to sshd and stopping", "signal", sig.String())
-		// Forward and wait, so `docker stop` is quick rather than taking the
-		// full ten-second grace period before a kill.
-		_ = cmd.Process.Signal(sig)
-		// Wait for sshd to finish exiting so docker stop is quick. Its exit
-		// status is not interesting here: the node is being stopped on
-		// purpose, and reporting sshd's reaction to a signal we sent would
-		// turn an orderly shutdown into a non-zero container exit.
-		<-done //nolint:errcheck // deliberate: see above
-		return 0, nil
-	case err := <-done:
-		// sshd exiting on its own is the interesting case, and the one that
-		// had no record at all: "no hostkeys available -- exiting" is what a
-		// private key one byte short produces, it happens in the second
-		// before ember's first dial, and what ember then reports is a
-		// connection refused on a node that looks perfectly healthy.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			log.Error("sshd exited on its own; nothing can connect to this node",
-				"exit", exitErr.ExitCode())
-			return exitErr.ExitCode(), nil
-		}
-		if err != nil {
-			return 0, fmt.Errorf("sshd: %w", err)
-		}
-		return 0, nil
+// startWorker starts this same binary's worker subcommand as a child.
+//
+// os.Executable AND NOT os.Args[0], which would be whatever the container's
+// ENTRYPOINT was spelled as. The image spells it absolutely today; a relative
+// argv0 with a working directory that is not where the binary lives would make
+// this fail at exec time, on a node, with nothing in the image looking wrong.
+func startWorker(log *slog.Logger, g *group) error {
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find this binary to start the worker: %w", err)
 	}
+	cmd := exec.Command(self, "worker") //nolint:gosec // this binary's own path
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start the worker: %w", err)
+	}
+	// Its environment is this process's, which by here has had the host key
+	// and the authorized key unset. The child therefore never holds either,
+	// and `cat /proc/<worker>/environ` carries no key material -- the same
+	// property the unset above was written for, extended to the one process
+	// that did not exist when it was.
+	g.add(childWorker, cmdProc{cmd: cmd})
+	log.Info("the worker started", "pid", cmd.Process.Pid)
+	return nil
 }
 
 func installHostKey() error {
@@ -200,10 +227,17 @@ func installAuthorizedKey() error {
 // dies mid-run. Here it exercises the same path, so the lab proves the timer
 // works rather than assuming it.
 //
+// IT SIGNALS EVERY CHILD AND NOT sshd ALONE, which is the change a second
+// child forced. It took an *exec.Cmd -- sshd's -- and the arrival of a worker
+// would have left a deadline that stopped the one process ember uses to reach
+// the node while the one spending the card carried on. A deadline that stops
+// half of a node is advisory, and the half it left running is the expensive
+// half.
+//
 // A missing or unreadable TTL is not fatal: the node still runs and ember's
 // own watchdog still destroys it. Refusing to start would turn a bad number
 // into an outage.
-func armDeadline(log *slog.Logger, cmd *exec.Cmd) func() {
+func armDeadline(log *slog.Logger, g *group) func() {
 	raw := os.Getenv(envTTL)
 	if raw == "" {
 		// Previously silent, and it is the state worth naming: a node with no
@@ -222,10 +256,8 @@ func armDeadline(log *slog.Logger, cmd *exec.Cmd) func() {
 	log.Info("deadline armed", "seconds", secs)
 
 	timer := time.AfterFunc(time.Duration(secs)*time.Second, func() {
-		log.Warn("deadline reached, stopping", "seconds", secs)
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-		}
+		log.Warn("deadline reached, stopping", "seconds", secs, "children", g.names())
+		g.signalAll(syscall.SIGTERM)
 	})
 	return func() { timer.Stop() }
 }

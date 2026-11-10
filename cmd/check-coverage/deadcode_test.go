@@ -283,6 +283,7 @@ var testSupport = []struct{ path, why string }{
 	{"internal/sshx/recording.go", "the sshx.Runner fake"},
 	{"internal/tunnel/dialer_fake.go", "the tunnel dialer fake"},
 	{"internal/provider/providertest/", "the provider conformance harness, imported by provider tests and by the labs"},
+	{"internal/control/controltest/", "the control channel's rig: it runs control.Serve over net.Pipe so both ends of the worker protocol can be driven with no node, and it is a package rather than a helper in each test file because internal/worker and internal/app both need it -- a second copy of a websocket listener is a second thing to get subtly wrong"},
 	{"internal/repotree/repotree.go", "the nested-checkout prune for the guards that walk this tree; a package rather than three copies because nothing can assert that three copies agree, and not a _test.go file because the callers are in internal/cli, internal/hostkey and cmd/check-coverage"},
 }
 

@@ -174,6 +174,11 @@ Back to [the threat model index](../threat-model.md) · [AGENTS.md](../../AGENTS
   a workload outliving the connection — and running it here means the output
   streams live and the exit status is known when it happens rather than
   polled for through a file.
+  **The worker is the one thing that is part of the entrypoint, and it obeys
+  the same rule rather than being an exception to it**: it stops when the
+  channel ember opened goes away, so a job finished after the laptop died is
+  not a card paid for a picture nobody will fetch. See
+  [control-channel.md](control-channel.md).
 - **A node rented to run something stops when it has run it.** Holding
   afterwards bills for a machine with nothing left to do.
 - **The exit status is read after the stream, and always.** A `tar` that failed

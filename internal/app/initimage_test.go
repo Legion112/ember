@@ -185,15 +185,14 @@ func TestJobsFromRequest_ReportsAStagingDirectoryItCannotOpen(t *testing.T) {
 // A feature built end to end and never connected passes every test it has;
 // this is the test that crosses the gap.
 func TestServed_GenerateSendsTheStagedPixels(t *testing.T) {
-	shrinkPoll(t)
 	dir, ref, pixels := stagePNG(t, 8, 4)
 
 	f := newFakeSD(t)
-	_, d := f.start(t)
+	n := startNode(t, f)
 	spec := servedSpec(t, []string{"sd-server"})
 	strength := 0.0
 
-	err := servedRun(t, dir, d, spec, testRun(sdserver.Job{
+	err := servedRun(t, dir, n, spec, testRun(sdserver.Job{
 		Prompt: "a paper boat", Output: "boat",
 		Params: sdserver.Params{InitImage: ref, Strength: &strength},
 	}))
@@ -201,8 +200,8 @@ func TestServed_GenerateSendsTheStagedPixels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(f.submitted) != 1 {
-		t.Fatalf("%d job(s) submitted, want 1", len(f.submitted))
+	if f.submits() != 1 {
+		t.Fatalf("%d job(s) submitted, want 1", f.submits())
 	}
 	got, ok := f.submitted[0]["init_image"].(string)
 	if !ok {
@@ -227,23 +226,22 @@ func TestServed_GenerateSendsTheStagedPixels(t *testing.T) {
 // something the submissions can show: what they can show is that every job
 // got the right pixels.
 func TestServed_GenerateReadsOneReferenceOnce(t *testing.T) {
-	shrinkPoll(t)
 	dir, ref, pixels := stagePNG(t, 4, 4)
 	want := base64.StdEncoding.EncodeToString(pixels)
 
 	f := newFakeSD(t)
-	_, d := f.start(t)
+	n := startNode(t, f)
 	spec := servedSpec(t, []string{"sd-server"})
 
 	jobs := make([]sdserver.Job, 3)
 	for i := range jobs {
 		jobs[i] = sdserver.Job{Prompt: "a boat", Params: sdserver.Params{InitImage: ref}}
 	}
-	if err := servedRun(t, dir, d, spec, testRun(jobs...)); err != nil {
+	if err := servedRun(t, dir, n, spec, testRun(jobs...)); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.submitted) != 3 {
-		t.Fatalf("%d job(s) submitted, want 3", len(f.submitted))
+	if f.submits() != 3 {
+		t.Fatalf("%d job(s) submitted, want 3", f.submits())
 	}
 	for i, s := range f.submitted {
 		if s["init_image"] != want {
@@ -260,14 +258,13 @@ func TestServed_GenerateReadsOneReferenceOnce(t *testing.T) {
 // after the others have been paid for -- the same order Validate keeps for a
 // mistyped sampler.
 func TestServed_GenerateRefusesTheWholeBatchForAMissingImage(t *testing.T) {
-	shrinkPoll(t)
 	dir, _, _ := stagePNG(t, 4, 4)
 
 	f := newFakeSD(t)
-	_, d := f.start(t)
+	n := startNode(t, f)
 	spec := servedSpec(t, []string{"sd-server"})
 
-	err := servedRun(t, dir, d, spec, testRun(
+	err := servedRun(t, dir, n, spec, testRun(
 		sdserver.Job{Prompt: "a", Params: sdserver.Params{InitImage: unstagedRef("gone")}},
 	))
 	if err == nil {
@@ -276,8 +273,8 @@ func TestServed_GenerateRefusesTheWholeBatchForAMissingImage(t *testing.T) {
 	if !errorsIsUsage(err) {
 		t.Errorf("err = %v, want an ErrUsage", err)
 	}
-	if len(f.submitted) != 0 {
-		t.Errorf("%d job(s) were submitted before the refusal", len(f.submitted))
+	if f.submits() != 0 {
+		t.Errorf("%d job(s) were submitted before the refusal", f.submits())
 	}
 }
 
@@ -288,12 +285,11 @@ func TestServed_GenerateRefusesTheWholeBatchForAMissingImage(t *testing.T) {
 // the field dropped. Dropping it would generate a plain text-to-image image
 // and bill for it, which is the quiet half of the defect.
 func TestServed_GenerateRefusesAnImageWithNoStagingDirectory(t *testing.T) {
-	shrinkPoll(t)
 	f := newFakeSD(t)
-	_, d := f.start(t)
+	n := startNode(t, f)
 	spec := servedSpec(t, []string{"sd-server"})
 
-	err := runServed(t.Context(), io.Discard, report.Discard, d, liveServer(), spec,
+	err := runServed(t.Context(), io.Discard, report.Discard, n, &nodeShell{t: t}, spec,
 		testRun(sdserver.Job{Prompt: "a",
 			Params: sdserver.Params{InitImage: unstagedRef("x")}}),
 		session.Options{Log: discardLog()}, filepath.Join(t.TempDir(), "r"), 0)
@@ -303,8 +299,8 @@ func TestServed_GenerateRefusesAnImageWithNoStagingDirectory(t *testing.T) {
 	if !strings.Contains(err.Error(), "no staging directory") {
 		t.Errorf("err = %v, want a refusal naming the missing staging directory", err)
 	}
-	if len(f.submitted) != 0 {
-		t.Errorf("%d job(s) were submitted", len(f.submitted))
+	if f.submits() != 0 {
+		t.Errorf("%d job(s) were submitted", f.submits())
 	}
 }
 
@@ -334,11 +330,11 @@ func TestResolvePaths_PutsInputsUnderTheStateDirectory(t *testing.T) {
 // runServed itself passes none on purpose -- `ember up` has no route for an
 // image -- so a test about images has to go through withServer the way
 // WithServed does.
-func servedRun(t *testing.T, inputsDir string, d *countingDialer, spec node.Spec,
+func servedRun(t *testing.T, inputsDir string, n *fakeNode, spec node.Spec,
 	run sdserver.Run) error {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "run")
-	return withServer(t.Context(), io.Discard, report.Discard, d, liveServer(), spec,
+	return withServer(t.Context(), io.Discard, report.Discard, n, &nodeShell{t: t}, spec,
 		session.Options{Log: discardLog()}, 0, len(run.Jobs), inputsDir,
 		func(ctx context.Context, s Served) error {
 			return s.Generate(ctx, report.Discard, run, dir, nil)
