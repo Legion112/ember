@@ -1041,6 +1041,32 @@ type findingView struct {
 	ID       string `json:"id,omitempty"`
 	Reason   string `json:"reason"`
 
+	// Created is when ember wrote the intent record this finding is about,
+	// RFC3339 in UTC, and empty where there is no record.
+	//
+	// IT IS THE INSTANT THE MONEY BESIDE IT IS MEASURED FROM. reconcile.accrued
+	// is `node.Estimate(f.Record.Price, f.Record.Created, now, 0)`, so a row
+	// already showed a figure derived from a time it did not show -- an
+	// operator could read "$55.764" and had no way to tell whether that was a
+	// fast rate over an hour or a slow one over a fortnight. The two fields
+	// come from one struct field for that reason: a creation time read from
+	// anywhere else could disagree with the cost standing next to it.
+	//
+	// THE RECORD'S TIME AND NOT THE NODE'S, because node.Node.Created is a
+	// field no provider fills -- runpod parses `createdAt` into
+	// runpod.types and nothing carries it across, and the local provider
+	// never sets it. Projecting it would put a zero time on every row that
+	// has a node, which reads as 1970 rather than as "not known".
+	//
+	// SO IT IS WHEN EMBER DECIDED TO RENT, which is BEFORE the create call by
+	// design -- "the intent record is written before the create call" -- and
+	// is therefore slightly earlier than any machine that resulted. That is
+	// the honest reading for the kind that needs it most: an orphan is a
+	// record that never got an id, so what ember recorded is the only time
+	// there is, and the question it answers is "how long has this been
+	// unaccounted for", which starts exactly here.
+	Created string `json:"created,omitempty"`
+
 	// Accrued is money already spent and it stops when the node is
 	// destroyed. Monthly is money that keeps being spent until somebody
 	// removes the store -- there is no deadline, no reaper and no Ctrl-C that
@@ -1181,6 +1207,15 @@ func viewFinding(f reconcile.Finding) findingView {
 		v.ID = f.Node.Handle.String()
 	case f.Record != nil:
 		v.ID = string(f.Provider) + "/" + string(f.Record.RunID)
+	}
+	// THE ZERO TIME IS CHECKED AND NOT ONLY THE POINTER. A record written by
+	// an older ember, or one restored from a journal that lost the field,
+	// has a Record and a zero Created -- and `0001-01-01T00:00:00Z` on a row
+	// is not "unknown", it is a confident answer that is wrong by two
+	// millennia. Empty is the one spelling of "ember cannot say", and it is
+	// the same spelling the Accrued below uses for the same records.
+	if f.Record != nil && !f.Record.Created.IsZero() {
+		v.Created = f.Record.Created.UTC().Format(time.RFC3339)
 	}
 	if f.Accrued != nil {
 		m := usd(f.Accrued.Cost)

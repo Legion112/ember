@@ -2105,6 +2105,23 @@ subnetted`. Every remedy is a command — `ember reap`, `ember down`,
 `ember store rm` — and there are deliberately no buttons here: a destroy from a
 browser is a side effect this server's threat model has never argued for.
 
+Beside the figure on a row is **when ember recorded the intent to rent**, in
+UTC, which is the instant that figure is measured from — a cost is the quoted
+rate times the time since it. Without the two together `$55.764` is a number an
+operator cannot check: a fast card for an hour and a slow one for a fortnight
+read identically and call for very different afternoons. It is deliberately
+earlier than any machine, because ember writes the record *before* the create
+call, which is also what makes it the right instant for an **orphan** — a
+record that never got a node id has no machine to date, and the question worth
+answering is how long it has been unaccounted for.
+
+The zone is printed because it is not yours. The server sends UTC and the page
+says so; an unmarked time would be the local offset's worth of understatement
+about how long a card has been billing. A finding ember has no record of — an
+**untracked** node, a **store**, a **leftover** — has no time and no cost, and
+both cells are blank together: the same absence, said once in two columns
+rather than half-said in one.
+
 ### What the fleet rows show
 
 Above the sweep's own tables, the same press lists **what this `ember serve` is

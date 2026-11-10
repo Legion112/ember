@@ -3548,6 +3548,20 @@ func TestServe_UIReportsWhatIsBilling(t *testing.T) {
 			t.Errorf("the rows do not mention %q: %q", want, found["rows"])
 		}
 	}
+	// NEITHER OF THESE TWO HAS A CREATION TIME, and a browser is where that
+	// is worth checking. A store and a leftover are the two kinds ember holds
+	// no record for -- node.Store carries no creation time at all and
+	// node.Leftover carries only the run's deadline -- so the cell is blank,
+	// and it is blank beside a cost that is blank for the same reason. The
+	// page appends the zone to every time it prints and Go's zero time
+	// formats as `0001-01-01T00:00:00Z`, so those two strings are what a
+	// projection that started answering here anyway would put on screen.
+	for _, never := range []string{" UTC", "0001-01-01"} {
+		if strings.Contains(found["rows"], never) {
+			t.Errorf("a store or a leftover dated itself with %q, and ember has no "+
+				"record of either: %q", never, found["rows"])
+		}
+	}
 	// The verdict counts the leftover and not the store, which is
 	// `reconcile.Kind.NeedsAttention`'s own decision carried across the wire
 	// rather than re-derived in the page.

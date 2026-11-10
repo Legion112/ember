@@ -511,6 +511,17 @@ pub struct Finding {
     #[serde(default)]
     pub reason: String,
 
+    /// When ember wrote the intent record this row is about, RFC3339 in UTC,
+    /// and empty where there is no record.
+    ///
+    /// It is the instant `accrued` below is measured from -- Go computes that
+    /// figure as `Estimate(price, record.Created, now)` -- so the two belong
+    /// beside each other: without it a row says "$55.764" and leaves an
+    /// operator unable to tell a fast rate over an hour from a slow one over
+    /// a fortnight.
+    #[serde(default)]
+    pub created: String,
+
     /// Money already spent, which stops when the node is destroyed.
     #[serde(default)]
     pub accrued: Option<Money>,
@@ -543,6 +554,55 @@ impl Finding {
             self.id.clone()
         }
     }
+
+    /// When this started, as a person reads it.
+    ///
+    /// THE ZONE IS NAMED AND NOT DROPPED. The server sends UTC and the
+    /// operator reading this page is on the machine serving it -- `ember
+    /// serve` binds loopback and nothing it serves is reachable from
+    /// anywhere else -- so the two clocks are one clock in some offset. A
+    /// `2026-11-10 11:26` with the `Z` quietly removed is that offset's worth
+    /// of lie about when money started burning, three hours of it from
+    /// Moscow, and the lie is in the safe-looking direction: it reads EARLIER
+    /// than the truth, so the leak looks fresher than it is.
+    ///
+    /// SECONDS ARE DROPPED AND THE ZONE IS NOT, which is `ember history`'s
+    /// own shape (`2006-01-02 15:04`). A finding is minutes to weeks old; the
+    /// seconds on it are noise, and the zone is the part a reader acts on.
+    pub fn created_text(&self) -> String {
+        // ANYTHING THIS CANNOT PARSE IS SHOWN WHOLE RATHER THAN BLANKED.
+        // Parse, don't grep: a `replace('T', ' ')` would happily render an
+        // offset instant as a UTC one. If the server ever sends a shape this
+        // does not know, the raw string is wrong-looking and readable, where
+        // an empty cell is a creation time an operator concludes ember does
+        // not have.
+        utc_minute(&self.created).unwrap_or_else(|| self.created.clone())
+    }
+}
+
+/// utc_minute reads one RFC3339 UTC instant and writes `2026-11-10 11:26 UTC`.
+///
+/// Every byte of the twenty is checked, which is what lets the slices below be
+/// taken by index: a string that reaches `format!` here is ASCII in all twenty
+/// positions, so there is no character boundary to panic on. `None` is "this
+/// is not that shape", and the caller decides what to show instead -- this
+/// function never guesses.
+fn utc_minute(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    if b.len() != 20 || b[19] != b'Z' {
+        return None;
+    }
+    for (i, want) in [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')] {
+        if b[i] != want {
+            return None;
+        }
+    }
+    for i in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18] {
+        if !b[i].is_ascii_digit() {
+            return None;
+        }
+    }
+    Some(format!("{} {} UTC", &s[..10], &s[11..16]))
 }
 
 /// The four states `queue.WorkerState` can be in, as Go spells them.
@@ -4689,5 +4749,68 @@ mod tests {
             "a wedged worker changed reconcile's own sentence: {}",
             n.verdict()
         );
+    }
+
+    fn dated(created: &str) -> Finding {
+        Finding {
+            created: created.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The shape Go sends, as a person reads it.
+    #[test]
+    fn a_creation_time_is_a_date_a_time_and_the_zone_it_is_in() {
+        assert_eq!(
+            dated("2026-11-10T11:26:44Z").created_text(),
+            "2026-11-10 11:26 UTC"
+        );
+    }
+
+    /// THE ZONE IS NOT DECORATION. Go sends UTC and the operator is on the
+    /// machine serving the page, so dropping the marker would show a Moscow
+    /// reader 11:26 for something that happened at 14:26 their time -- three
+    /// hours of understatement about how long a card has been billing, in the
+    /// direction that makes a leak look fresher than it is.
+    #[test]
+    fn the_zone_is_said_and_never_dropped() {
+        let t = dated("2026-11-10T11:26:44Z").created_text();
+        assert!(t.ends_with(" UTC"), "the zone went missing from {t:?}");
+    }
+
+    /// AN OFFSET INSTANT IS NOT A UTC ONE, and this is the case that would be
+    /// a silent three-hour lie. A `replace('T', ' ')` would render
+    /// `2026-11-10T14:26:44+03:00` as `2026-11-10 14:26` and the column would
+    /// read as UTC like every row beside it. Parse, don't grep: an unknown
+    /// shape is shown whole, which is wrong-looking rather than wrong.
+    #[test]
+    fn an_instant_that_is_not_utc_is_not_dressed_up_as_one() {
+        let raw = "2026-11-10T14:26:44+03:00";
+        assert_eq!(dated(raw).created_text(), raw);
+    }
+
+    /// A record ember has no creation time for sends nothing, and nothing is
+    /// what the cell shows. The one spelling of "ember cannot say".
+    #[test]
+    fn no_creation_time_is_an_empty_cell() {
+        assert_eq!(dated("").created_text(), "");
+    }
+
+    /// Every rejected shape falls back to the raw string rather than to a
+    /// guess. The last is the one that would panic a slice taken on faith:
+    /// twenty BYTES that are nineteen characters, so `&s[..10]` is fine and
+    /// a careless `&s[..19]` would land inside one and abort the whole page.
+    #[test]
+    fn a_shape_this_does_not_know_is_shown_whole() {
+        for raw in [
+            "2026-11-10 11:26:44Z",       // no T
+            "2026-11-10T11:26:44",        // no zone at all
+            "2026-11-10T11:26:4Z",        // nineteen bytes
+            "26-11-10T11:26:44Z",         // two-digit year
+            "2026-11-10TXX:26:44Z",       // not digits
+            "2026-11-10T11:26:4\u{042F}", // twenty bytes, nineteen characters
+        ] {
+            assert_eq!(dated(raw).created_text(), raw, "{raw:?} was reshaped");
+        }
     }
 }

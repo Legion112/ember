@@ -50,7 +50,7 @@ h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
      color: var(--dim); margin: 1.4rem 0 .6rem }
 h2:first-child { margin-top: 0 }
 
-code, pre, .price, .status, input, select, textarea { font-family: var(--mono) }
+code, pre, .price, .status, .when, input, select, textarea { font-family: var(--mono) }
 code { font-size: .92em; color: var(--accent) }
 
 header { border-bottom: 1px solid var(--line); padding-bottom: .8rem; margin-bottom: 1.2rem }
@@ -132,6 +132,12 @@ td { padding: .25rem .5rem; border-bottom: 1px solid var(--line) }
 .offers tr:hover td { background: color-mix(in oklab, var(--accent) 10%, transparent) }
 .price { text-align: right; white-space: nowrap }
 .status { color: var(--dim) }
+/* When a finding's cost started accruing, set beside the cost. `nowrap` for
+   the reason .price has it: a timestamp that wraps turns one row into two and
+   the column stops being something an operator scans down. Dim because it is
+   context for the figure next to it rather than the figure itself -- the
+   reason column is what a reader is meant to land on first. */
+.when { color: var(--dim); white-space: nowrap }
 /* ONE REQUEST IS A ROW GROUP, because it can be two rows: the request and,
    when it ended with something to say, its reason. The highlight is on the
    group so that it covers the pair -- on the row it would mark the request

@@ -172,11 +172,21 @@ fn findings_table(fs: Vec<crate::model::Finding>) -> AnyView {
                     // skimmed "$2.80" off a store row and off an orphan row
                     // would have read two very different numbers the same way.
                     let monthly = f.monthly.as_ref().map(|m| format!("{}/month", m.text()));
+                    // IMMEDIATELY BEFORE THE MONEY, because it is what the
+                    // money is measured from: Go accrues a finding's cost as
+                    // `Estimate(price, record.Created, now)`, so these two
+                    // cells are one claim split in half and a column between
+                    // them would be a reader having to hold the first in mind
+                    // to read the second. Empty where ember has no record,
+                    // which is the same absence that leaves the cost blank --
+                    // an untracked node is untracked in both columns at once.
+                    let when = f.created_text();
                     view! {
                         <tr>
                             <td class="status">{f.kind.clone()}</td>
                             <td><code>{f.names()}</code></td>
                             <td>{f.reason.clone()}</td>
+                            <td class="when">{when}</td>
                             <td class="price">{spent.or(monthly).unwrap_or_default()}</td>
                         </tr>
                     }
