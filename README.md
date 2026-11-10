@@ -2512,24 +2512,27 @@ The chooser's entries are the `tts.voices` list from `GET /api/config`, by
 **display name**, and the request carries the **id**. Neither the voice file
 nor espeak's data directory is on that wire — a request has no field for
 either, which is what keeps every containment rule upstream of anything a
-browser can say. A configuration with no `tts.voices` says so in the panel and
-names the key, rather than showing an empty dropdown: a `<select>` with no
-options posts a blank voice id, and the refusal for that arrives after the
-operator has typed their sentence.
+browser can say. A configuration with no `tts.voices` does not offer speech at
+all, rather than showing an empty dropdown: a `<select>` with no options posts
+a blank voice id, and the refusal for that arrives after the operator has typed
+their sentence. A client that names the kind anyway — a `?kind=` in a URL, or a
+page older than the server — still gets a refusal that names the key.
 
 **Changing the kind empties the batch.** One rental runs one driver, so a batch
 holding an image job and an utterance is not something the wire can carry; the
 page not building one is cheaper than a 400 naming a job index nobody can see.
 
-**The selector offers every kind this build knows, not every kind your config
-can run.** `GET /api/config`'s `kinds` is a static list, so a speech-only
-configuration still offers a pickable `sd` — and picking it gives the image
-controls and a request that fails once a node is up, because there is no
-generation server to start. What warns you is the red line under the header,
-which says a configuration with no `sd:` block has nothing for an image
-request to run. The other direction is closed: a configuration with no
-`tts.voices` offers `tts` and then refuses it in the panel, naming the key,
-before anything is rented.
+**The selector offers the kinds your configuration can run, and nothing else.**
+`GET /api/config`'s `kinds` used to be the static list of everything the build
+knows, so a server publishing no voices offered a pickable `tts` and then
+answered *this ember serve publishes no voices, so it serves no speech* once
+somebody chose it — a choice offered in order to be refused, which is worse
+than no choice, because the refusal lands after the deciding is done. A
+speech-only configuration had it worse in the other direction: `sd` was
+offered, nothing refused it, and the request failed once a node was up. One
+option is no choice, so a configuration that runs a single kind shows no
+selector at all. A configuration that can run **neither** cannot start: `ember
+serve` refuses it at launch and names both keys.
 
 **The artifact plays in the page.** A finished utterance is an `<audio
 controls>` beside the gallery's `<img>` for an image, and the element is chosen

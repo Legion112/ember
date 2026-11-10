@@ -362,6 +362,21 @@ impl Config {
     /// twice, by two mechanisms, and `cargo test` reaches this one because it
     /// is a state of this type rather than of the DOM.
     ///
+    /// IT IS KEYED ON `providers` AND IT USED TO BE KEYED ON `kinds`, which is
+    /// what had to move before the server could narrow that list at all. The
+    /// server now sends the kinds THIS CONFIGURATION can run, so `[]` is a
+    /// real answer -- "this process serves nothing" -- and a page reading it
+    /// as "ember has not spoken yet" would wait for ever over a server that
+    /// had already told it everything. `unrunnable` above was keyed on
+    /// `providers` from the start and for exactly this reason; the two now
+    /// agree, which is the state its own comment described as already true.
+    ///
+    /// `providers` is the right discriminator because a registry with no
+    /// providers in it is not a configuration anybody can reach: the registry
+    /// is built from the config and `ember serve` cannot start without one.
+    /// So empty means unanswered and nothing else, which is the property
+    /// `kinds` had until it stopped being a constant.
+    ///
     /// A KIND THIS BUILD DOES NOT KNOW IS NAMED. The server's own `kinds` is
     /// the only source of the selector's options, so reaching it means the
     /// server published something this page has no controls for -- a newer
@@ -370,7 +385,7 @@ impl Config {
         match kind {
             "" | "sd" => Composing::Image,
             "tts" if !self.voices.is_empty() => Composing::Speech(self.voices.clone()),
-            "tts" if self.kinds.is_empty() => {
+            "tts" if self.providers.is_empty() => {
                 Composing::Refused("ember has not said which voices it publishes yet.".into())
             }
             "tts" => Composing::Refused(
@@ -4239,10 +4254,24 @@ mod tests {
     /// `<select>` with no options posts an empty `voice_id`, the server
     /// refuses it after the operator has typed their text, and the control
     /// looked like it worked the whole time.
+    /// THE FIXTURE CARRIES A PROVIDER, and that is the whole of what changed
+    /// here. "ember has not answered" is keyed on `providers` rather than on
+    /// `kinds`, because the server now narrows `kinds` to what the
+    /// configuration can run and `[]` became a real answer. A fixture with no
+    /// providers is an unanswered config, so without this it was asserting
+    /// about the wait and not about the refusal.
+    ///
+    /// The arm itself is now reachable only by a client that did not take its
+    /// kind from `kinds` -- a `?kind=` in a URL, or a page older than the
+    /// server -- because the selector no longer offers `tts` to a process
+    /// publishing no voices. It stays because that is the second mechanism,
+    /// and because a refusal naming the key is what an operator needs in the
+    /// one case where they typed the kind themselves.
     #[test]
     fn a_process_with_no_voices_says_so_rather_than_offering_an_empty_chooser() {
-        let c: Config = serde_json::from_str(r#"{"kinds":["sd","tts"],"voices":[]}"#)
-            .expect("a config publishing none decodes");
+        let c: Config =
+            serde_json::from_str(r#"{"providers":[{"name":"local"}],"kinds":["sd"],"voices":[]}"#)
+                .expect("a config publishing none decodes");
         match c.composing("tts") {
             Composing::Refused(why) => {
                 assert!(
@@ -4255,6 +4284,56 @@ mod tests {
                 );
             }
             other => panic!("a tts kind with no voices gave {other:?}"),
+        }
+    }
+
+    /// A CONFIG THAT HAS NOT ANSWERED IS A WAIT, AND AN ANSWER OF `[]` IS NOT.
+    ///
+    /// This is the pair the discriminator exists for, and it is the thing that
+    /// had to be true before the server could narrow `kinds` at all. While
+    /// "unanswered" meant `kinds.is_empty()`, a configuration able to run
+    /// neither kind published `[]` and this page would have told the operator
+    /// to keep waiting for a server that had already said everything it had
+    /// to say -- for ever, since nothing was going to arrive.
+    ///
+    /// `providers` carries it because an empty registry is not a state a real
+    /// answer can be in: it is built from the config, and `ember serve` cannot
+    /// start without a provider. So empty means "no answer yet" and nothing
+    /// else, which is the property `kinds` had right up until it stopped being
+    /// a constant.
+    #[test]
+    fn an_unanswered_config_waits_and_a_config_that_runs_nothing_does_not() {
+        // Nothing has arrived. The remedy is to wait, so the sentence must
+        // not tell anybody to go and edit a file.
+        let waiting = Config::default();
+        match waiting.composing("tts") {
+            Composing::Refused(why) => {
+                assert!(
+                    why.contains("not said"),
+                    "an unanswered config does not read as a wait: {why}"
+                );
+                assert!(
+                    !why.contains("ember.yaml"),
+                    "an unanswered config sends the operator to edit a file: {why}"
+                );
+            }
+            other => panic!("an unanswered config gave {other:?}"),
+        }
+
+        // ANSWERED, AND THE ANSWER IS THAT IT RUNS NOTHING. `kinds` is empty
+        // and that is now information rather than silence, so the remedy is
+        // the file and not patience.
+        let nothing: Config =
+            serde_json::from_str(r#"{"providers":[{"name":"local"}],"kinds":[],"voices":[]}"#)
+                .expect("a config that runs nothing decodes");
+        match nothing.composing("tts") {
+            Composing::Refused(why) => {
+                assert!(
+                    why.contains("ember.yaml"),
+                    "a config that runs nothing reads as a wait: {why}"
+                );
+            }
+            other => panic!("a config that runs nothing gave {other:?}"),
         }
     }
 

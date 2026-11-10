@@ -59,49 +59,47 @@ type configView struct {
 	// where it stops.
 	Ceilings ceilings `json:"ceilings"`
 
-	// Kinds is every workload THIS BUILD KNOWS, and Voices the speech models
-	// this configuration publishes.
+	// Kinds is what THIS CONFIGURATION CAN RUN, and Voices the speech models
+	// it publishes.
 	//
-	// NOT "WHAT THIS PROCESS CAN RUN", which is what this line used to say and
-	// which the code does not do: `viewConfig` sends `genstore.Kinds()`
-	// unconditionally, so a config with no `sd:` block still offers `sd` and
-	// one with no `tts.voices` still offers `tts`. The sentence persuaded about
-	// a filtering nobody wired, which is the shape this repository keeps
-	// recording: an argument a reader believes about a mechanism that is not
-	// there. The field is the static list rather than an answer about this
-	// configuration.
+	// IT WAS `genstore.Kinds()` UNCONDITIONALLY, and this paragraph used to
+	// argue for that at length. The argument was wrong and an operator found
+	// it by using the page: the selector offered `tts` on a server with no
+	// voices, and choosing it answered "this ember serve publishes no voices,
+	// so it serves no speech. Add a tts.voices list to ember.yaml and restart
+	// it." A choice offered in order to be refused is worse than no choice,
+	// because the refusal arrives after the operator has spent attention on
+	// deciding. On a speech-only server the same list offered `sd`, where
+	// nothing refused it at all and the request failed once a node was up --
+	// the same defect with a rental attached. See servableKinds.
 	//
-	// AND THE GUARD CAUGHT THE FIRST WORDING OF THIS PARAGRAPH, which is worth
-	// one line because it is the same rule twice. That wording named the
-	// deleted flag as the precedent, with `ember` and a backticked `--all` on
-	// one line, and `TestComments_CiteNoFlagThatNoFlagSetDeclares` reported it
-	// -- so the comment correcting a claim about an unimplemented mechanism
-	// was itself citing a command nobody can type.
+	// WHAT HAD TO MOVE FIRST, which is why this sat written-down rather than
+	// fixed for as long as it did. The page read an empty `kinds` as "ember
+	// has not answered yet", so narrowing the list would have made a config
+	// that can run NEITHER kind publish `[]` and the page wait for ever over a
+	// server that had already told it everything. That discriminator is now
+	// `providers` -- which `Config::unrunnable` was keyed on from the start,
+	// for this reason, and which cannot be empty in a real answer because the
+	// registry is built from the config. `TestConfig_PublishesAtLeastOneKind`
+	// was the floor under the old reading and now asserts the precondition
+	// that replaces it: a RUNNING ember serve always has a kind, because
+	// `runServe` refuses to start a configuration that can serve nothing.
 	//
-	// WHERE THE RUNNABLE QUESTION IS ANSWERED, since it is not here. For
-	// speech, by `Voices` below and the two readers of it: the page's
-	// `Config::composing` refuses the kind naming `tts.voices`, and
-	// `POST /api/requests` refuses the request the same way, so a browser
-	// cannot get past a kind it has no voice for. For images, by `Servable`
-	// and the Posture line `Config::unrunnable` drives, which says a
-	// configuration with no `sd:` block has no generation server to start.
+	// AND THE GUARD CAUGHT THE FIRST WORDING OF THE PARAGRAPH THIS REPLACES,
+	// which is worth one line because it is the same rule twice. That wording
+	// named the deleted flag as the precedent, with `ember` and a backticked
+	// `--all` on one line, and `TestComments_CiteNoFlagThatNoFlagSetDeclares`
+	// reported it -- so the comment correcting a claim about an unimplemented
+	// mechanism was itself citing a command nobody can type.
 	//
-	// THE RESIDUAL, PLAINLY: on a speech-only server `sd` is still a kind the
-	// selector offers and an operator can pick, and the only thing that warns
-	// them is that Posture line. Picking it gives the image controls and a
-	// request that fails once a node is up, because there is no server to
-	// start. Filtering the list would close it -- and would make `kinds` an
-	// answer about this configuration, which is a second place for "can this
-	// run" to be decided and the first direction a drift would show up in. It
-	// would collide with the page's own "has /api/config answered yet"
-	// discriminator, which reads an empty `kinds` as unanswered: a config able
-	// to run NEITHER kind would publish `[]` and the page would sit waiting for
-	// ever. `TestConfig_PublishesAtLeastOneKind` is the exit code behind that
-	// one case, and only that one -- a speech-only config filtered to `["tts"]`
-	// is non-empty and stays green -- so it is a floor under the worst
-	// narrowing rather than a guard against the whole idea. The residual is
-	// therefore written down rather than fixed here, and whoever wants the
-	// narrower list decides again with this paragraph in front of them.
+	// THE OTHER TWO REFUSALS STAY, because this one is about what is offered
+	// and they are about what is accepted. `Config::composing` still refuses a
+	// speech kind naming `tts.voices`, and `POST /api/requests` still refuses
+	// the request the same way -- reachable now only by a client that did not
+	// get its kind from this field, which is a `?kind=` in a URL or a page
+	// older than the server. Containment twice, by two mechanisms, is the rule
+	// here and narrowing the list is the first of them rather than a
+	// replacement for the second.
 	//
 	// WHY A UI HAS TO BE TOLD RATHER THAN KNOWING. A request names a voice by
 	// **id** and nothing else -- the whole seal is that it cannot name a path
@@ -236,6 +234,53 @@ type limitView struct {
 // drain loop resolving the same id against two derivations is a browser
 // offering ids the loop cannot resolve, and the trigger would be the next
 // --config reload somebody adds rather than anything in today's code.
+// servableKinds is genstore.Kinds() narrowed to what this configuration can
+// actually run.
+//
+// THE DEFECT IT CLOSES, which an operator found by using the thing: the kind
+// selector offered `tts` on a server publishing no voices, and picking it
+// answered "this ember serve publishes no voices, so it serves no speech. Add
+// a tts.voices list to ember.yaml and restart it." A control that is always
+// refused is not a control, and a page that offers a choice in order to deny
+// it has spent the operator's attention to tell them something it knew before
+// they clicked. The same was true of `sd` on a speech-only server, which was
+// worse: nothing refused it, so the request was accepted and failed once a
+// node was up, which is a refusal with a rental attached.
+//
+// A `switch` OVER THE KINDS IS A SECOND SPELLING OF genstore.Kinds(), which
+// that function's own comment warns is where the kind added last gets
+// forgotten. The fallthrough here is therefore deliberate and in the SAFE
+// direction -- an unhandled kind stays offered, which is exactly the behaviour
+// every kind had before this function existed, so adding one cannot make the
+// page worse than it already was. What makes that recoverable rather than
+// permanent is TestConfig_AConfigThatCanRunNothingOffersNoKinds: an empty
+// config must narrow to an empty list, so a kind with no case here is red at
+// once rather than shipped.
+func servableKinds(cfg config.Config, voices tts.Catalogue) []string {
+	out := []string{}
+	for _, k := range genstore.Kinds() {
+		switch k {
+		case genstore.KindSD:
+			// The same test `Servable` is built from and `runServe` refuses
+			// on: without a serve argv there is no generation server to start,
+			// so an image request has nowhere to run.
+			if len(cfg.SD.Serve) == 0 {
+				continue
+			}
+		case genstore.KindTTS:
+			// An empty catalogue is "this process serves no speech" and is
+			// already what POST /api/requests refuses a speech request
+			// against, naming `tts.voices`. This is the same refusal moved to
+			// the moment before the operator chooses instead of after.
+			if len(voices) == 0 {
+				continue
+			}
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
 func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps *sdserver.Capabilities,
 	voices tts.Catalogue,
 ) configView {
@@ -247,7 +292,7 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 		// whole response.
 		Providers: []providerView{},
 		// Empty lists and never null, for the same reason.
-		Kinds:           genstore.Kinds(),
+		Kinds:           servableKinds(cfg, voices),
 		Voices:          []voiceView{},
 		Ceilings:        ceilings{TTL: dur(cfg.TTL), MaxHourly: rate(hourly), MaxRun: usd(run)},
 		AllowPaid:       allowPaid,
