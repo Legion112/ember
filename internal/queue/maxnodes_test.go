@@ -45,6 +45,32 @@ type fleetPlanner struct {
 
 	// cards maps an ask to the card a rental for it lands on. See cardFor.
 	cards map[string]string
+
+	// beat is what every worker this planner's rentals open last said, zero
+	// meaning "now".
+	//
+	// SETTABLE, BECAUSE THE WHOLE QUESTION A FLEET VIEW ASKS OF THIS VALUE IS
+	// HOW IT CHANGES. A fake answering a fixed instant would make every
+	// staleness assertion a test of the clock, and one answering `now` for
+	// ever could not produce the state the heartbeat exists for.
+	beat time.Time
+}
+
+// stoppedBeatingAt makes every worker this planner opened last heard-from at t.
+func (p *fleetPlanner) stoppedBeatingAt(t time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.beat = t
+}
+
+// lastBeat is what those workers say now.
+func (p *fleetPlanner) lastBeat() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.beat.IsZero() {
+		return time.Now()
+	}
+	return p.beat
 }
 
 func newFleetPlanner() *fleetPlanner {
@@ -109,7 +135,14 @@ func (p *fleetPlanner) Plan(_ context.Context, r genstore.Request) (Rental, erro
 	p.mu.Unlock()
 	// The hold is taken here rather than in the rental, so that a test can
 	// release a card before its rental has even opened.
-	return fleetRental{p: p, gpu: r.GPU, card: p.cardFor(r.GPU), hold: p.hold(r.GPU)}, nil
+	// The image is derived from the ask so that two rentals of one test have
+	// different ones: a fake answering one image for every rental could not
+	// tell a table that printed each row's own image from one that printed
+	// the first row's twice.
+	return fleetRental{
+		p: p, gpu: r.GPU, card: p.cardFor(r.GPU),
+		image: "ember:" + r.GPU, hold: p.hold(r.GPU),
+	}, nil
 }
 
 // cardFor is the card an ask lands on, which defaults to the ask itself.
@@ -129,15 +162,18 @@ func (p *fleetPlanner) cardFor(ask string) string {
 }
 
 type fleetRental struct {
-	p    *fleetPlanner
-	gpu  string
-	card string
-	hold chan struct{}
+	p     *fleetPlanner
+	gpu   string
+	card  string
+	image string
+	hold  chan struct{}
 }
 
 // Card is what cardFor said this ask lands on, which is the ask itself unless
 // a test said otherwise.
 func (r fleetRental) Card() node.GPUModel { return node.GPUModel(r.card) }
+
+func (r fleetRental) Image() string { return r.image }
 
 func (r fleetRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	return r.rent(ctx, sink, func(ctx context.Context) error {
@@ -183,6 +219,15 @@ type countingServed struct {
 func (c *countingServed) Caps() sdserver.Capabilities {
 	return sdserver.Capabilities{Model: "sd15"}
 }
+
+// Beat is what the planner says this rental's worker last managed.
+//
+// THROUGH THE PLANNER AND NOT A CONSTANT, so a test can stop the beats under a
+// rental that is still open -- which is the state the whole heartbeat exists
+// for and the one a fake answering `time.Now()` can never reach. The default
+// is `now`, because a real worker beats every control.HeartbeatEvery and the
+// packing tests around this are not about liveness.
+func (c *countingServed) Beat() time.Time { return c.p.lastBeat() }
 
 func (c *countingServed) Generate(_ context.Context, _ report.Sink, _ sdserver.Run, _ string, _ <-chan struct{}) error {
 	c.p.mu.Lock()
@@ -622,6 +667,8 @@ type generatingRental struct {
 
 func (r generatingRental) Card() node.GPUModel { return node.GPUModel(r.gpu) }
 
+func (r generatingRental) Image() string { return "ember:lab" }
+
 func (r generatingRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	return fleetRental{p: r.p, gpu: r.gpu, hold: r.hold}.rent(ctx, sink, func(ctx context.Context) error {
 		return fn(ctx, &blockingServed{in: r.in})
@@ -639,6 +686,8 @@ type blockingServed struct{ in func() }
 func (b *blockingServed) Caps() sdserver.Capabilities {
 	return sdserver.Capabilities{Model: "sd15"}
 }
+
+func (b *blockingServed) Beat() time.Time { return time.Now() }
 
 func (b *blockingServed) Generate(_ context.Context, _ report.Sink, _ sdserver.Run, _ string, _ <-chan struct{}) error {
 	b.in()
@@ -792,6 +841,8 @@ type loggingRental struct {
 }
 
 func (r loggingRental) Card() node.GPUModel { return node.GPUModel(r.gpu) }
+
+func (r loggingRental) Image() string { return "ember:lab" }
 
 func (r loggingRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	sink.Emit(report.Event{Kind: report.KindLog, Text: "bytes for " + string(r.req) + "\n"})

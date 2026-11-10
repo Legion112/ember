@@ -42,9 +42,34 @@ type fakeServed struct {
 	// frame: a fake tidier than the thing it stands in for tests a program
 	// that does not exist.
 	onStop func(stop <-chan struct{}, n int) error
+
+	// beat is what this rental's worker last said, read under the mutex
+	// because a fleet listing runs on a different goroutine than the drain
+	// loop -- which is the production arrangement exactly: see app.Served.Beat.
+	//
+	// A FAKE THAT ANSWERED A FIXED TIME WOULD BE LESS CAPABLE THAN A WORKER.
+	// The whole question a fleet view asks of this value is how it CHANGES,
+	// so a constant here would make every staleness assertion in this package
+	// a test of the clock.
+	beat time.Time
 }
 
 func (f *fakeServed) Caps() sdserver.Capabilities { return f.caps }
+
+// Beat defaults to NOW rather than to the zero time, for the card field's
+// reason on fakeRental: a worker beats every control.HeartbeatEvery, so a fake
+// stuck at "has never spoken" would put every rental in this package into the
+// state a fleet view paints red -- and the assertions about that state would
+// then be measuring the fake. A test that wants a row to go stale sets the
+// field.
+func (f *fakeServed) Beat() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.beat.IsZero() {
+		return time.Now()
+	}
+	return f.beat
+}
 
 func (f *fakeServed) Generate(_ context.Context, sink report.Sink, jobs sdserver.Run, dir string, stop <-chan struct{}) error {
 	f.mu.Lock()
@@ -88,7 +113,13 @@ type fakeRental struct {
 	// offer lookup -- and a fake stuck in that state would leave every
 	// create-side assertion in this package measuring the conservative
 	// exclusion instead of the exact one.
-	card      node.GPUModel
+	card node.GPUModel
+
+	// image is what the fleet view prints for this rental. A field rather
+	// than a constant, because a fake that answered one image for every
+	// rental could not tell a fleet table that printed each row's own image
+	// from one that printed the first row's N times.
+	image     string
 	served    *fakeServed
 	rentals   *int
 	destroyed *int
@@ -135,6 +166,17 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 }
 
 func (r fakeRental) Card() node.GPUModel { return r.card }
+
+// Image defaults rather than answering empty, for the card field's reason
+// above: `ember serve` refuses a config with no image, so a rental that named
+// none is a state the program cannot be in and a fake stuck in it would make
+// every assertion about this column vacuous.
+func (r fakeRental) Image() string {
+	if r.image == "" {
+		return "ember:lab"
+	}
+	return r.image
+}
 
 func (r fakeRental) rent(ctx context.Context, sink report.Sink, fn func(context.Context) error) error {
 	r.mu.Lock()

@@ -22,6 +22,7 @@ import (
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provider/local"
 	"github.com/Legion112/ember/internal/provider/providertest"
+	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 )
@@ -91,6 +92,15 @@ type RecordingDrain struct {
 	running []genstore.ReqID
 	holding genstore.ReqID
 	reached bool
+
+	// fleet is what this fake says it is renting.
+	//
+	// SEPARATE FROM `running` AND NOT DERIVED FROM IT, for the reason the
+	// Drain interface keeps the two methods apart: a rental with nothing
+	// generating on it is a node billing for nothing, and a fake that built
+	// its fleet out of its running list could not produce that row -- which
+	// is the one row this whole table exists for.
+	fleet []queue.Worker
 }
 
 func (d *RecordingDrain) Kick() { d.Calls = append(d.Calls, "Kick") }
@@ -111,6 +121,11 @@ func (d *RecordingDrain) Cancel(id genstore.ReqID) bool {
 		}
 	}
 	return false
+}
+
+func (d *RecordingDrain) Fleet() []queue.Worker {
+	d.Calls = append(d.Calls, "Fleet")
+	return d.fleet
 }
 
 func (d *RecordingDrain) Holding(id genstore.ReqID) bool {

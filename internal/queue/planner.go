@@ -626,3 +626,11 @@ func (a appRental) Card() node.GPUModel {
 	}
 	return a.plan.Offer.GPU
 }
+
+// Image is the workload image this plan will run, off the resolved spec.
+//
+// FROM THE SPEC AND NOT FROM THE CONFIG FILE, which is the same reading every
+// other fact about a rental uses: NewPlan has already applied whatever this
+// request's kind selects, so this is the image that will actually be pulled
+// rather than the one `images:` lists first.
+func (a appRental) Image() string { return a.plan.Spec.Image }

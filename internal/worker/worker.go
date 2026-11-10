@@ -138,7 +138,60 @@ func Session(ctx context.Context, c *control.Conn, o Options) error {
 		}
 	}()
 
+	// AND THE BEAT, which is the one thing on this channel that is not about
+	// a job. It runs for the session's whole life rather than only while a
+	// job is on the card, because the state it exists to make visible is
+	// precisely a rental where nothing is progressing: see
+	// control.HeartbeatEvery.
+	//
+	// ENDED WITH THIS FUNCTION AND NOT WITH ctx, which is a difference that
+	// matters on a node. The session's context is cancelled when the node is
+	// told to stop; this returns a moment earlier, when the queue is drained
+	// and run() is about to send `done`. A beat racing that last frame would
+	// be a worker that said goodbye and then spoke again, which ember's
+	// drainWorker loop reads as "the worker did not say goodbye".
+	beatsOver := make(chan struct{})
+	defer close(beatsOver)
+	go beat(ctx, c, beatsOver, control.HeartbeatEvery, o.Log)
+
 	return run(ctx, c, q, o)
+}
+
+// beat sends one frame every control.HeartbeatEvery until the session ends.
+//
+// A SECOND WRITER ON THIS END OF THE CHANNEL, which is what control.Conn's
+// send mutex is for and why that mutex is now load-bearing at both ends rather
+// than only at ember's. It is also the property that makes a stale beat mean
+// something: a worker whose writes are blocked cannot beat, because the beat
+// queues behind the write that is stuck.
+//
+// EVERY FAILURE IS DROPPED AND NONE ENDS THE SESSION. A beat that cannot be
+// sent means the channel has gone, and the reader goroutine above is already
+// the thing that notices that and ends the work -- so returning an error from
+// here would be a second, racing answer to one question. A send that merely
+// timed out against a busy peer is not a reason to abandon a rented card.
+// THE INTERVAL IS A PARAMETER AND THE PRODUCTION VALUE IS PASSED AT THE ONE
+// CALL SITE, so that a test can watch this loop beat, back off when told to
+// stop and stop when the session ends -- three behaviours that at five seconds
+// apiece would be fifteen seconds of a suite that is supposed to need no
+// network. A knob on Options would be a setting; a parameter on an unexported
+// function is the seam, and control.HeartbeatEvery stays the only answer the
+// program has.
+func beat(ctx context.Context, c *control.Conn, over <-chan struct{}, every time.Duration, log *slog.Logger) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-over:
+			return
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := c.Send(ctx, control.Frame{Kind: control.KindHeartbeat}); err != nil {
+				log.Debug("could not send a heartbeat", "err", err)
+			}
+		}
+	}
 }
 
 // run is the runner goroutine: one item at a time, in the order ember pushed
