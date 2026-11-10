@@ -1995,7 +1995,8 @@ func navTo(t *testing.T, ctx context.Context, label, panel string) {
 // `Socket::open` has taken an `after` since it was written and its one caller
 // passed the literal `0`.
 //
-// TWO DROPS ON ONE GENERATION, and neither can stand in for the other.
+// THREE DROPS ON ONE GENERATION, and no one of them can stand in for
+// another.
 //
 // The first is made by the BROWSER, with `ember serve` untouched, because
 // that is the only arrangement in which the generation carries on underneath
@@ -2004,14 +2005,26 @@ func navTo(t *testing.T, ctx context.Context, label, panel string) {
 // on screen moves past what it was, and nothing else on this page reads a
 // sampling step, so only a resumed stream can have brought it.
 //
-// The second is a RESTART, which is the case the issue leads with: the
-// remediation ember's own cancel 409 prints, and how a config change is
-// picked up. It cannot produce new events -- it kills the thing that would --
-// so what it proves instead is that the note appears and goes away and that a
-// NEW process reading the same rows is handed a cursor at least as high as
-// the page had reached. A tab left on the old behaviour is permanently
-// half-live after one: the queue panel recovers because it polls, and the
-// watcher does not.
+// The second is a browser drop the page is HELD OFF from recovering from,
+// which is the only arrangement in which the line the page prints about a
+// lost stream is on screen long enough for a poll to read it: a recovery with
+// the server up takes 250ms. It is what proves the note is drawn at all,
+// which of the two sentences a browser is shown, and that the line goes away
+// when a handshake really does land. noteOnALostStream carries the argument.
+//
+// The third is a stream ended under a request the page KNOWS is over, across
+// a RESTART -- the case the issue leads with, since a restart is the
+// remediation ember's own cancel 409 prints and how a config change is picked
+// up. It proves the other half of the rule: nothing more will be said about a
+// terminal request, so the page says nothing about the stream and re-opens
+// nothing, and what is on screen instead is the reason the shutdown recorded.
+// The note assertion used to live there, on the premise that a restart leaves
+// the watched request live, and that is why this lab was red for twenty
+// hours: a rental stopped with Ctrl-C ENDS its request, so the lab was asking
+// for a sentence a correct page does not print. The watched request is
+// therefore ended through the API here, with the server up, because letting
+// the SIGINT end it makes the page's knowledge a race -- see the arm itself,
+// where the measurement is.
 //
 // WHAT NO ASSERTION ON THE PAGE CAN SEE is which cursor the reconnect asked
 // from, because `Progress::apply` is idempotent per sequence number: a client
@@ -2030,6 +2043,8 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// does not survive a restart -- so a lab using one would be measuring
 	// that instead.
 	port := freePort(t)
+	t0 := time.Now()
+	phase := func(what string) { t.Logf("PHASE %7.1fs %s", time.Since(t0).Seconds(), what) }
 	const token = "ember-lab-reconnect-token-0123456789"
 	first, srv, firstWait := startServeOn(t, l, port, token, "--log-level", "debug")
 	pageURL := fmt.Sprintf("http://127.0.0.1:%d/", srv.Port)
@@ -2043,7 +2058,17 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	defer cancelAlloc()
 	ctx, cancel := chromedp.NewContext(alloc)
 	defer cancel()
-	ctx, cancelTimeout := context.WithTimeout(ctx, 12*time.Minute)
+	// TWENTY AND NOT TWELVE, which is a backstop rather than a bound and was
+	// sized for a shorter lab. The third drop now cancels through the API,
+	// waits for a second request to be claimed onto the same rental and
+	// generate, and holds two windows of its own -- so the session is
+	// legitimately longer than it was, and on a machine running three other
+	// lab suites a run that reaches its LAST assertion was killed at twelve
+	// by this line rather than by anything it asserts. Every wait inside is
+	// separately bounded, which is what makes this a backstop: raising it
+	// cannot hide a hang, only a slow machine. Still well under the 30m the
+	// test binary gets.
+	ctx, cancelTimeout := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancelTimeout()
 
 	tokenURL := fmt.Sprintf("%s?t=%s", pageURL, srv.Token)
@@ -2067,6 +2092,17 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	recordSockets(t, ctx)
 	recordPageErrors(t, ctx)
 	setNumber(t, ctx, "width", "192", console)
+	// SIXTY STEPS, SO THE GENERATION OUTLASTS THE LAB AND NOT THE OTHER WAY
+	// ROUND. Two of the three drops below need the watched request to be
+	// still generating -- a stream lost over a request that ended is the
+	// third drop's subject and the one state in which the page is right to
+	// say nothing -- and the page's own default of twenty is a job short
+	// enough that a slow chromedp round trip could see it finish. Steps are
+	// the main price knob and cost nothing here: the rental is local and
+	// free, the first step arrives no later for sixty than for twenty, and
+	// this lab never waits for the job to end. No published limit bounds
+	// them, which is why the number is not a guess at one.
+	setNumber(t, ctx, "steps", "60", console)
 	if err := chromedp.Do(ctx,
 		chromedp.Click(`button.primary`),
 		chromedp.WaitVisible(`.jobs li`),
@@ -2088,6 +2124,7 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// own measurement is this text, byte for byte identical six seconds after
 	// the stream was gone.
 	step := waitForText(t, ctx, `.jobs li`, "step ", 8*time.Minute, console)
+	phase("step-seen")
 
 	// ABSENT WHILE THE SOCKET IS OPEN, which is half of what makes the line a
 	// signal: one that is always there is read as decoration, and an
@@ -2112,6 +2149,7 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// nothing else on this page reads them -- the queue table's two-second
 	// poll carries a status and a cost and no sampling step at all.
 	moved := waitForChange(t, ctx, `.jobs li`, step, 4*time.Minute, console)
+	phase("step-moved")
 	if !strings.Contains(moved, "step ") && !strings.Contains(moved, "file(s)") {
 		t.Errorf("the progress row reads %q after the stream came back, which is neither "+
 			"a step nor a finished job", moved)
@@ -2122,6 +2160,7 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 	// fold is idempotent per sequence number -- so the page renders the same
 	// either way and this is the only half that is not.
 	resumed := waitForResume(t, l, 60*time.Second)
+	phase("cursor-read")
 	if resumed <= 0 {
 		t.Fatalf("the reconnect asked for after=%d, which is the defect: "+
 			"Socket::open's one caller passed the literal 0", resumed)
@@ -2146,11 +2185,212 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 			"still being re-opened on a timer", opens, again)
 	}
 
-	// THE SECOND DROP: A RESTART, which is the case the issue leads with --
-	// the remediation ember's own cancel 409 prints, and how a config change
-	// is picked up. SIGINT and not the test's context, for TestServe_UI's
-	// reason: exec.CommandContext kills with SIGKILL, and a SIGKILLed serve
-	// leaves its rental running.
+	// THE SECOND DROP: ONE THE PAGE CANNOT RECOVER FROM AT ONCE, which is the
+	// only arrangement in which a browser can read the line the page prints
+	// about a stream it lost. noteOnALostStream carries the argument; the
+	// short version is that a recovery takes 250ms and a restart ends the
+	// request, so neither of the other two drops leaves the sentence on
+	// screen.
+	//
+	// THIS ASSERTION USED TO LIVE ON THE RESTART BELOW, and the premise it
+	// rested on is gone: a rental stopped with Ctrl-C now ends its request
+	// before the socket closes, so the page is right to say nothing. The lab
+	// asked for a sentence a correct page does not print, and this arm is
+	// where the sentence is actually about something.
+	//
+	// `Stream::Lost` -- the bound spent, "it did not come back: reload this
+	// page" -- IS reachable with this instrument, by holding the page off for
+	// all twelve attempts, and is deliberately not asserted: that is
+	// forty-three seconds of wall clock for a sentence `cargo test` already
+	// decides (`reopen_after`'s bound and `Stream::Lost.note()`) and which the
+	// page draws through the same `<p class="stream">` this arm proves is
+	// drawn at all. The helper lets go after 600ms instead, which is what
+	// makes "and not the other sentence" below a live discriminator rather
+	// than a vacuous one.
+	//
+	// The request has to still be generating, or the note would be about one
+	// that had already ended -- the state the restart arm is for.
+	if st := getRequest(t, srv, id).Status; st != "running" {
+		t.Fatalf("the request reads %q before its stream was interrupted, so the note "+
+			"below would be about a request that had already ended", st)
+	}
+	held := openedSockets(l)
+	note := noteOnALostStream(t, ctx, console)
+	phase("note-read")
+	if !strings.Contains(note, "last one that arrived") {
+		t.Errorf("the note does not say the step on screen is stale: %q", note)
+	}
+	if !strings.Contains(note, "reconnecting") {
+		t.Errorf("the note does not say ember is trying again: %q", note)
+	}
+	// AND NOT THE OTHER SENTENCE. The two differ because the remedies do: one
+	// says ember is trying again and the other says it is not coming back and
+	// that reloading is what fixes it. A page printing one state for both
+	// would pass every assertion above.
+	if strings.Contains(note, "did not come back") {
+		t.Errorf("the page is showing the sentence for a stream that is gone while the "+
+			"watcher still has attempts left: %q", note)
+	}
+
+	// AND IT GOES AWAY WHEN THE STREAM COMES BACK, read two ways because
+	// neither is sufficient. The line clearing is the only thing on the page
+	// that says the socket is open again -- `Socket::open` returning Ok says
+	// nothing, since a handshake is asynchronous and the constructor succeeds
+	// against a server that is not there -- and the server's own handshake
+	// count is what a page that cleared the line without re-opening would
+	// fail. `held` was read before the drop, and the attempts between then
+	// and here DID reach the server -- the break is a path and not a refusal
+	// to construct -- but they reached `/api/no-such-socket`, which is a 404
+	// and not `serveWS`, so none of them logged the line this counts. The
+	// count is of handshakes that got as far as a watcher, which is the thing
+	// being claimed.
+	waitForNoStreamNote(t, ctx, 60*time.Second, console)
+	phase("note-cleared")
+	if back := openedSockets(l); back <= held {
+		t.Errorf("the note went away with the server still reporting %d handshake(s) "+
+			"against the %d it had while the page was held off: the line cleared with "+
+			"no stream behind it", back, held)
+	}
+
+	// THE THIRD DROP: A STREAM THAT ENDS UNDER A REQUEST THE PAGE KNOWS IS
+	// OVER, which is the other half of the rule the second drop reads -- and
+	// the half that was being asserted by accident.
+	//
+	// WHY THE WATCHED REQUEST IS ENDED HERE RATHER THAN BY THE SHUTDOWN. The
+	// first shape of this arm let the SIGINT end it and asserted on what the
+	// page did afterwards, and that is a RACE the lab loses about a third of
+	// the time: the terminal row is written during the shutdown, the socket
+	// has to poll once more before the process exits, and nothing bounds the
+	// gap between those two events. Measured rather than inferred -- the
+	// reinstatement pass's own NEGATIVE CONTROL, a reworded comment, went red
+	// at these assertions -- which is a flake, and a lab that fails for
+	// reasons unrelated to the code teaches people to re-run rather than to
+	// read.
+	//
+	// So the cancel goes through the API while the server is up and healthy,
+	// and the page's knowledge is something this lab WAITS FOR instead of
+	// hoping for: the jobs row says `cancelled` only when a `job_cancelled`
+	// event has been folded, which is this watcher's own socket and not the
+	// queue panel's poll.
+
+	// A SECOND REQUEST FIRST, SO THE SHUTDOWN HAS SOMETHING TO END. The
+	// watched one is about to be terminal, so the #159 assertion below needs
+	// a request the signal actually interrupts -- and it must not be the
+	// watched one, because that is the race this arm was rebuilt to remove.
+	// Queued BEFORE the cancel so the drain loop finds it when the batch
+	// ends and claims it onto the same rental: queued afterwards, `drain`
+	// would have returned, destroyed the node and had to rent again.
+	// SIX JOBS, AND A SINGLE JOB WAS A RACE THIS LAB LOST TWICE.
+	//
+	// "It is running now" is not "it will still be running in a moment", and
+	// the assertions below need a request the signal INTERRUPTS. Measured
+	// from the journal of two failing runs rather than reasoned: at sixty
+	// steps, and then at six hundred, the rider finished BEFORE the signal
+	// and the row read `done` -- terminal, so the premise passed, and
+	// carrying no reason, so the sentence this arm ends on could never
+	// appear and the failure surfaced sixty lines from its cause.
+	//
+	// WHAT MADE THE SECOND ATTEMPT FAIL TOO is that the gap is not one round
+	// trip: the arm's own two sixty-second waits and its ten-second window
+	// sit between the claim and the signal, so on a loaded machine a rider
+	// has minutes to finish, and `steps` only buys a linear multiple of
+	// something already fast. A batch cannot be got through at all -- ember
+	// submits one job at a time, so six of them is six serial generations --
+	// and it keeps the property the comment above argues for, which is that
+	// the rider rides the SAME rental rather than paying for a second one.
+	// Nothing waits for it either way: the signal destroys the node.
+	rider := queueJobs(t, srv, `{"provider":"local","jobs":[
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":2,"output":"l1"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":3,"output":"l2"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":4,"output":"l3"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":5,"output":"l4"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":6,"output":"l5"},
+		{"prompt":"a lighthouse","width":192,"height":512,"steps":600,"seed":7,"output":"l6"}
+	]}`)
+
+	cancelResp := ask(t, "POST", srv, "/api/requests/"+id+"/cancel", "")
+	phase("cancel-sent")
+	if cancelResp.Status != http.StatusOK {
+		t.Fatalf("cancelling the watched request: %d %s", cancelResp.Status, cancelResp.Body)
+	}
+	// NOT A WAIT ON `.jobs li`, WHICH COST THIS LAB ITS WHOLE BUDGET TWICE.
+	// The first shape waited for that row to say "cancelled", on the reading
+	// that `job_cancelled` is folded into it -- and `waitForText` is
+	// `chromedp.Text`, which blocks until the CONTEXT ends when its selector
+	// resolves nothing rather than returning so the sixty-second bound can
+	// fire. Measured with a phase clock: arms one and two finish in 15s and
+	// the run then spent the remaining twenty minutes here, dying at the
+	// last assertion with "context deadline exceeded" -- which is the exact
+	// trap `waitForStreamNote`'s own comment in this file was written about,
+	// walked into by the file that documents it. So the signal is the queue
+	// panel's, whose selector always resolves, and the bound is therefore
+	// real.
+	// THE ROW IS TERMINAL SERVER-SIDE, READ OVER THE API AND NOT OFF THE
+	// PAGE. The watcher is its own route since #139 slice 3, so the queue
+	// table is not on this page at all -- and a `waitForText` against a
+	// selector that resolves nothing does not fail at its own bound, it
+	// blocks until the whole browser context ends. Measured: two runs spent
+	// their entire twenty-minute session here after arms one and two had
+	// finished in fifteen seconds. Reading the row over HTTP cannot hang,
+	// needs no navigation away from the watcher the assertions below are
+	// about, and answers the same question.
+	//
+	// WHAT IT BUYS is that the socket has had its chances: it polls at
+	// 250ms, so a row that HTTP already reports terminal has been offered to
+	// the watcher several times over. Evidence rather than proof -- the
+	// watcher's own belief has exactly one observable, which is whether it
+	// retries, and that is the assertion below -- and the whole difference
+	// from the shutdown window this arm was rebuilt to stop racing, where
+	// the row is written by a dying process and the socket may get no poll
+	// at all.
+	waitForStatus(t, srv, id, "cancelled", 60*time.Second)
+	phase("row-cancelled")
+
+	// WHAT THIS ARM DOES NOT ASSERT, AND WHY IT IS A STATED LIMITATION RATHER
+	// THAN A SILENCE -- the `TestConformance_CannotCatchARederivedRunID`
+	// arrangement, because a limitation nobody can read out of the code is a
+	// limitation that will be forgotten.
+	//
+	// IT DOES NOT CHECK THAT THE PAGE SAYS NOTHING over a request that ended
+	// while being watched, which is `reopen_after`'s terminal rule and
+	// `retry`'s `None if terminal` branch. Those have `cargo test` for the
+	// DECISION and no browser coverage for the EFFECT, and this arm is where
+	// such coverage would go.
+	//
+	// IT WAS BUILT TWICE AND BOTH SHAPES WERE RACES, which is the reason and
+	// is measured rather than guessed. Letting the SIGINT end the watched
+	// request needs the terminal row to reach the browser on one more 250ms
+	// poll before the process exits, and nothing bounds that gap: a
+	// reinstatement case whose patch was a reworded comment went red there.
+	// Ending it through the API instead and waiting for the row to be
+	// terminal server-side narrows the gap to about a second and does not
+	// close it: measured, with the row `cancelled` over HTTP at 16.7s and
+	// the stream ended at ~17s, the page still reported a stopped stream and
+	// opened a socket against the restarted server. The assertions were
+	// right; the state they were made in was not reliably the state they
+	// described, and a lab that fails for reasons unrelated to the code
+	// teaches people to re-run rather than to read.
+	//
+	// WHAT WOULD CLOSE IT is an observable for the watcher's own belief that
+	// is not "whether it retries" -- everything the page renders about a
+	// terminal request it is watching is equally consistent with a page that
+	// has not been told yet -- so this is a decision about the page rather
+	// than a harder lab, and it is left to whoever wants that coverage.
+	//
+	// WHAT THE ARM STILL CARRIES is both halves of #159 and neither needs the
+	// page's knowledge: the journal row the shutdown had to write, and that
+	// row's reason rendered in a browser. Those are below.
+
+	// AND IT IS GENERATING, so the signal below interrupts a rental with work
+	// in it rather than an idle server.
+	waitForStatus(t, srv, rider, "running", 4*time.Minute)
+	phase("rider-running")
+
+	// THE RESTART, which is the case the issue leads with -- the remediation
+	// ember's own cancel 409 prints, and how a config change is picked up.
+	// SIGINT and not the test's context, for TestServe_UI's reason:
+	// exec.CommandContext kills with SIGKILL, and a SIGKILLed serve leaves
+	// its rental running.
 	if err := first.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("signalling the first ember serve: %v", err)
 	}
@@ -2158,54 +2398,47 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 		t.Fatalf("the first ember serve exited without reporting the teardown:\n%s", out)
 	}
 
-	// THE PAGE SAYS SO, which it could not say at all. Asserted on THIS drop
-	// and not on the browser-side one above for a reason that is about the
-	// fix rather than about the lab: the reconnect after a close with the
-	// server up succeeds on the first attempt, 250ms later, so the note is on
-	// screen for less time than any poll can see -- which is correct
-	// behaviour and not something to assert around. A restart is seconds, and
-	// an operator looking at the tab is the reader this line exists for.
-	note := waitForStreamNote(t, ctx, "stopped", 60*time.Second, console)
-	if !strings.Contains(note, "last one that arrived") {
-		t.Errorf("the note does not say the step on screen is stale: %q", note)
+	// THE INTERRUPTED REQUEST ENDED WITH THE SERVER, read out of the journal
+	// because there is no server left to ask. `finish` writes the terminal
+	// status on a context that survives the signal, so a rental stopped with
+	// Ctrl-C records how it ended rather than leaving the row reading
+	// `running` for the next start's sweep to pick up.
+	//
+	// READ BEFORE THE RESTART, because afterwards it answers a different
+	// question: `queue.Run`'s own Interrupt sweep makes a row terminal at
+	// startup whether or not the shutdown managed to, so a read taken then
+	// could not tell the two apart.
+	//
+	// THIS IS THE ASSERTION THIS LAB DID NOT HAVE, and the reason it was red
+	// for twenty hours: the note used to be asserted here on the premise that
+	// a restart leaves the watched request live, which stopped being true the
+	// day that write started landing. The premise is now the subject.
+	// `cancelled` AND NOT MERELY TERMINAL, which is the stronger check and is
+	// here because the weaker one let a race through: a rider that FINISHED
+	// before the signal is `done`, which is terminal and carries no reason,
+	// so the arm limped on to fail sixty lines later at the sentence that
+	// reason was supposed to supply. Naming the status turns that into one
+	// message about the thing that actually went wrong. `running` is the
+	// other way this fires, and it is the #159 defect: the write that records
+	// how a Ctrl-C'd rental ended did not land.
+	st, why := recordedStatus(t, l, rider)
+	if st != genstore.StatusCancelled {
+		t.Fatalf("the request the shutdown should have interrupted reads %q rather than "+
+			"cancelled: `running` means the write that records how a Ctrl-C'd rental "+
+			"ended did not land, and `done` means it finished before the signal and "+
+			"this arm has nothing interrupted to assert about", st)
 	}
-	if !strings.Contains(note, "reconnecting") {
-		t.Errorf("the note does not say ember is trying again: %q", note)
-	}
-	// AND NOT THE OTHER SENTENCE, which says less than it looks like it says
-	// and is written down that way rather than left to be credited wrongly.
-	//
-	// `Stream::Lost` -- the retry bound spent, "it did not come back: reload
-	// this page" -- is unreachable from HERE, and structurally rather than for
-	// want of effort: it needs a request the page still believes is live whose
-	// server never returns, which is the one case that cannot be followed by
-	// the reconnect this lab exists for. A page that has learned its request
-	// ended stops retrying by design, and after a restart `queue.Run`'s sweep
-	// has ended it.
-	//
-	// WHAT THIS LINE IS NOT is a guard on the bound. The obvious claim --
-	// "it goes red the day somebody shortens the bound past a hand restart" --
-	// was MEASURED AND IS FALSE: at `RETRY_ATTEMPTS = 1`, which is 250ms and
-	// fits no restart at all, this lab is GREEN, because the first
-	// `streamNote()` lands a fraction of a millisecond after the close and so
-	// always reads the reconnecting sentence, and `startServeOn` brings the
-	// second server up inside that one attempt anyway. At 0 the lab does go
-	// red, and at the browser drop's "the step never moved" assertion rather
-	// than here. The bound is sealed by `cargo test`
-	// (`the_retry_is_bounded_and_backs_off`, RED at exit 101 with
-	// `RETRY_ATTEMPTS = 1`), and that is the gate to credit.
-	//
-	// So this stays for what it does prove -- which of the two sentences a
-	// browser is shown over a restart, the pair being the thing a page that
-	// printed one state for both would fail -- and claims nothing further. A
-	// sentence asserting that a test goes red is worth exactly the exit code
-	// nobody checked.
-	if strings.Contains(note, "did not come back") {
-		t.Errorf("the page is showing the sentence for a stream that is gone over a "+
-			"restart it reconnected to: %q", note)
+	// AND IT CARRIES A REASON, which is the whole of what #159 repaired: the
+	// status alone is what the next start's Interrupt sweep would have
+	// written anyway, and the reason is what only a write that survived the
+	// signal can supply.
+	if why == "" {
+		t.Fatalf("the interrupted request carries no reason, which is #159's defect: " +
+			"the write that records how a Ctrl-C'd rental ended did not land")
 	}
 
-	second, _, secondWait := startServeOn(t, l, port, token, "--log-level", "debug")
+	second, srv2, secondWait := startServeOn(t, l, port, token, "--log-level", "debug")
+	phase("restarted")
 	defer func() {
 		if err := second.Process.Signal(syscall.SIGINT); err != nil {
 			t.Errorf("signalling the second ember serve: %v", err)
@@ -2214,23 +2447,62 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 		secondWait()
 	}()
 
-	// IT CAME BACK, and the note going away is the only thing on the page
-	// that says the socket is open again: `Socket::open` returning Ok says
-	// nothing, because a WebSocket handshake is asynchronous and the
-	// constructor succeeds against a server that is not there. This waits for
-	// the browser's own `onopen`.
-	waitForNoStreamNote(t, ctx, 90*time.Second, console)
-
-	// AND IT RESUMED FROM WHERE IT WAS, which a restart makes a sharper claim
-	// than the first drop did: this is a NEW process reading the same rows,
-	// so the cursor cannot have come from anything the old connection was
-	// holding. `l.Printed()` is the second server's own output.
-	again := waitForResume(t, l, 90*time.Second)
-	if again < resumed {
-		t.Errorf("the watcher resumed from %d after the restart, having reached %d before "+
-			"it: a reconnect that goes backwards replays what it already folded",
-			again, resumed)
+	// THE ROW THE SHUTDOWN WROTE, over HTTP now that there is a server again
+	// -- the second half of what the journal read above says, and the one
+	// that would catch a restart whose own Interrupt sweep had to repair the
+	// row because the shutdown's write never landed.
+	if st := getRequest(t, srv2, rider).Status; st != "cancelled" {
+		t.Errorf("the interrupted request reads %q through the new server, where a "+
+			"rental stopped with Ctrl-C records `cancelled`", st)
 	}
+
+	// AND WHAT THE PAGE DOES SAY, which is what makes "it says nothing" an
+	// assertion rather than a description of a page that renders nothing at
+	// all: a wasm that failed to mount satisfies every absence above. The
+	// reason the shutdown recorded is on screen, through the queue table's
+	// own poll now that there is a server to poll.
+	//
+	// IT IS ALSO THE SENTENCE THIS LAB'S FIRST VERSION WAITED TWELVE MINUTES
+	// FOR AND DID NOT GET. It asserted the request's end reason, which never
+	// arrived, because the write that records it could not land on the
+	// context the signal had already cancelled -- filed then rather than
+	// fixed, repaired by #159, and asserted in a browser nowhere until here.
+	// The same change is what took the note off this arm, so both halves of
+	// that commit land in one place: the reason appears and the note does
+	// not.
+	//
+	// AND IT IS READ AFTER EVERY WATCHER ASSERTION, LAST, because the queue
+	// table is a different route now and getting to it DISPOSES the watcher
+	// -- which is the very thing the three assertions above are about. A
+	// navigation here cannot invalidate them because they have already been
+	// made; one placed earlier would have measured a page that had left.
+	// THE REASON EMBER RECORDED, AND NOT A SENTENCE WRITTEN HERE. The first
+	// shape looked for "context canceled" and was wrong in the way this file
+	// warns about -- the expected value was not what correct code produces:
+	// the signal lands wherever it lands, and measured, with the rider
+	// interrupted inside its POST to sd-server, the row reads
+	// `job 1/6: submit job to sd-server: ... interrupt signal received`. A
+	// fixed string would make the arm a test of where the signal happened to
+	// arrive. Reading the row's own reason out of the journal and requiring
+	// the page to show THAT asserts the join -- what ember recorded is what
+	// the operator is shown -- and cannot be wrong about the wording.
+	navTo(t, ctx, "the queue", queuePanel)
+	panel := waitForText(t, ctx, queuePanel, why, 60*time.Second, console)
+	phase("reason-on-screen")
+	if !strings.Contains(panel, "cancelled") {
+		t.Errorf("the queue table shows a reason without the terminal status it belongs "+
+			"to: %q", panel)
+	}
+
+	// WHAT NO ARM OF THIS LAB CAN SEE ANY MORE is a cursor served to a
+	// SECOND process. That claim used to sit here, and it required the page to
+	// reconnect after the restart -- which a page watching a request that
+	// ended correctly does not do, so the only way to keep it would be a
+	// second request left queued across the restart, and the restarted server
+	// would then claim it and rent a second node for the claim's sake. What
+	// stands in its place is the first drop's own `resumed <= lastSeq`, which
+	// reads the same number back over the HTTP route and so says the cursor is
+	// in the rows rather than in anything one connection was holding.
 
 	// THE DROP PATH, which was a throw nobody saw. Socket::drop closes the
 	// connection, the browser calls `onclose`, and the closure it would call
@@ -2302,6 +2574,14 @@ func TestServe_UIResumesAProgressStreamItLost(t *testing.T) {
 // `new`, which is legal and is what makes it transparent: wasm-bindgen's glue
 // resolves the `WebSocket` identifier against the global object at call time,
 // so there is no cached reference to go around it.
+//
+// IT ALSO BREAKS ON DEMAND, which `breakSockets` sets and `mendSockets`
+// clears, and which two labs now share -- the disposed-owner window and the
+// note about a stream this page lost. ONE MECHANISM AND NOT TWO: this helper
+// carried a second one for a few hours, a throw out of `WebSocket::new`
+// before the real constructor was reached, and the path form replaced it
+// after a measurement rather than a preference. See noteOnALostStream for
+// which claim that cost and why it was worth it.
 func recordSockets(t *testing.T, ctx context.Context) {
 	t.Helper()
 	const wrap = `(function () {
@@ -2312,7 +2592,7 @@ func recordSockets(t *testing.T, ctx context.Context) {
 			// __emberBreak IS A PATH AND NOT A BOOLEAN, so a refused
 			// re-open is still a real handshake to a real server that
 			// answers no upgrade -- see breakSockets. Unset in every lab
-			// but the one that needs the retry loop to keep failing, so
+			// but the two that need the retry loop to keep failing, so
 			// this is the identity wrapper everywhere else.
 			if (window.__emberBreak) {
 				url = new URL(window.__emberBreak, url).href;
@@ -2380,6 +2660,139 @@ func pageErrors(t *testing.T, ctx context.Context) string {
 	return strings.Join(got, "\n")
 }
 
+// WHY THESE TWO ARMS BREAK A SOCKET AT ALL, which used to be written on a
+// `refuseSockets` of this lab's own and belongs with the mechanism rather
+// than with one caller. With the server up and the request live, a dropped
+// stream is back inside 250ms -- so the line the page prints about it is on
+// screen for less time than any poll can see, which is correct behaviour and
+// not something to assert around. And over an `ember serve` RESTART there is
+// no line at all, because the rental's request ends with the server, so the
+// page learns the request is over while the socket is still open and
+// correctly says nothing about a stream that has nothing left to carry. The
+// window therefore has to be MADE rather than found, over a request that is
+// still generating and still billing.
+//
+// A STATE AND NOT A COUNT OF REFUSALS, because the honest question is "is the
+// lab still holding the page off" rather than "how many attempts has it
+// spent": a count would have to be guessed against the backoff, and a guess
+// that is too small clears the note before the poll reads it.
+
+// noteOnALostStream ends the page's stream, holds it off its re-open long
+// enough to read the line it prints, and lets go again.
+//
+// THE WHOLE SEQUENCE HAPPENS IN THE BROWSER, AND THAT IS NOT TIDINESS. The
+// state being read is one the PAGE bounds: `Stream::Reconnecting` lasts for
+// twelve attempts and about forty-three seconds of backoff, after which the
+// page correctly says the stream is not coming back. Written as three Go
+// steps -- refuse, close, read -- the lab had forty-three seconds to make one
+// chromedp round trip, which is enormous and still not a bound: measured, on
+// a machine running three lab suites at once, this lab spent SEVEN MINUTES
+// waiting for the Docker lock and then read `Stream::Lost` on its first look,
+// having been starved past the page's whole retry budget. A lab that fails
+// because the machine was busy teaches people to re-run rather than to read.
+//
+// So the close, the observation and the release are one evaluation and a
+// browser timer: the note is captured 600ms after the close -- about two
+// refused attempts in, far inside the bound -- and the break is lifted in the
+// same callback, so a Go side that stalls for a minute afterwards finds a
+// page that has already recovered rather than one that has given up. It sets
+// `__emberBreak` directly rather than calling `breakSockets`, because the
+// point is that the set, the read and the clear are ONE round trip; the path
+// is that mechanism's own constant so there is still one spelling of it.
+//
+// WHAT THE PATH FORM COST, recorded because the alternative was deleted for
+// it. This arm first used a throw out of `WebSocket::new`, which exercised
+// `connect`'s `Err(_) => retry(…)` branch -- the only place a constructor
+// that refused can be retried from, and now a branch no lab reaches. The
+// path was kept anyway and on the merits rather than to settle a conflict: a
+// handshake that reaches a real server and gets no upgrade is what a dropped
+// stream actually looks like, while a constructor that throws is not a state
+// any server can put a browser in, so the throw was simulating a defect that
+// does not happen. Measured, not assumed: the path form holds the page in
+// `Stream::Reconnecting` for the whole window this arm reads, which is the
+// one property the throw was here for.
+//
+// It is `recordSockets`' instrument and not a seam in the page, for
+// `recordSockets`' reason.
+func noteOnALostStream(t *testing.T, ctx context.Context, console *consoleLog) string {
+	t.Helper()
+	drop := fmt.Sprintf(`(function () {
+		var all = window.__emberSockets || [];
+		if (all.length === 0) { return "no socket"; }
+		window.__emberLostNote = "";
+		window.__emberBreak = %q;
+		all[all.length - 1].close();
+		setTimeout(function () {
+			var p = document.querySelector("p.stream");
+			window.__emberLostNote = p ? p.textContent.trim() : "(the page printed nothing)";
+			window.__emberBreak = "";
+		}, 600);
+		return "dropped";
+	})()`, brokenSocketPath)
+	got, err := chromedp.Run(ctx, chromedp.Evaluate[string](drop))
+	if err != nil {
+		t.Fatalf("ending the page's progress stream: %v\n%s", err, console.text())
+	}
+	if got != "dropped" {
+		t.Fatalf("the page's stream could not be ended (%s), so nothing below is about "+
+			"a stream that dropped\n%s", got, console.text())
+	}
+
+	// The capture, whenever the Go side gets to it. Unbounded by the page's
+	// retry budget by construction: the value was taken 600ms after the
+	// close and cannot change afterwards.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		note, rerr := chromedp.Run(ctx, chromedp.Evaluate[string](
+			`(window.__emberLostNote || "")`))
+		if rerr != nil {
+			t.Fatalf("reading what the page said about its lost stream: %v\n%s",
+				rerr, console.text())
+		}
+		if note != "" {
+			return note
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the browser never recorded what the page said about its lost "+
+				"stream\n%s", console.text())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// WHERE `requireNoStreamNote` WENT, and the two judgements worth keeping. It
+// polled for the ABSENCE of the stream note over a window, for the arm that
+// no longer makes that assertion -- see the stated limitation in the third
+// drop. If it comes back: an absence asserted once is an absence asserted at
+// one instant, so it has to be a window and not a read; and it has to spend
+// the whole window even once it has failed, because an assertion placed after
+// it would otherwise be made a fraction of a second in rather than at the end.
+
+// recordedStatus is a request's status read straight out of the journal.
+//
+// NOT OVER HTTP, because the one moment this is asked is the moment with no
+// server to ask: between the `ember serve` holding the rental exiting and the
+// next one starting. Reading it after the restart would answer a different
+// question, since `queue.Run`'s own Interrupt sweep makes a row terminal at
+// startup whether or not the shutdown managed to.
+func recordedStatus(t *testing.T, l *harness.Lab, id string) (genstore.Status, string) {
+	t.Helper()
+	store, err := genstore.Open(filepath.Join(l.Dir, "state"))
+	if err != nil {
+		t.Fatalf("opening the journal: %v", err)
+	}
+	defer func() {
+		if cerr := store.Close(); cerr != nil {
+			t.Errorf("closing the journal: %v", cerr)
+		}
+	}()
+	r, err := store.Get(t.Context(), genstore.ReqID(id))
+	if err != nil {
+		t.Fatalf("reading %s out of the journal: %v", id, err)
+	}
+	return r.Status, r.Err
+}
+
 // dropSocket closes the page's current progress socket.
 //
 // IT FAILS WHEN THERE IS NOTHING TO CLOSE, rather than returning quietly: a
@@ -2430,34 +2843,15 @@ func waitForChange(
 	}
 }
 
-// waitForStreamNote waits for the watcher to report a stopped stream.
-//
-// NOT `waitForText`, which cannot see an element that is absent: chromedp.Text
-// resolves at least one node and blocks until the context ends, so a note that
-// never appears costs the whole lab's budget and reports "context deadline
-// exceeded" -- which is how the first run of this lab spent twelve minutes.
-func waitForStreamNote(
-	t *testing.T, ctx context.Context, sub string, within time.Duration, console *consoleLog,
-) string {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	var last string
-	for {
-		note, err := streamNote(ctx)
-		if err != nil {
-			t.Fatalf("reading the stream note: %v\n%s", err, console.text())
-		}
-		last = note
-		if strings.Contains(note, sub) {
-			return note
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the watcher never reported a stopped stream within %v; it says %q\n%s",
-				within, last, console.text())
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-}
+// WHERE `waitForStreamNote` WENT. It polled this page for a note that says
+// "stopped", and `noteOnALostStream` replaced it for a reason rather than a
+// tidy-up: polling from Go gives the lab the page's own forty-three-second
+// retry budget to make one round trip in, and the two judgements worth
+// keeping are that it must not be `waitForText` -- which cannot see an
+// element that is absent, since chromedp.Text resolves at least one node and
+// blocks until the context ends, and is how the first run of this lab spent
+// twelve minutes -- and that "stopped" matches BOTH of the page's sentences,
+// so a poll that was late read the wrong one as the answer.
 
 // streamNote is the watcher's one line about its own stream, or "" when there
 // is none.
