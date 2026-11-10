@@ -23,10 +23,21 @@ import (
 // here survives an empty config, so this goes red the moment one is added --
 // before anybody can offer an operator a choice that is always refused.
 func TestConfig_AConfigThatCanRunNothingOffersNoKinds(t *testing.T) {
-	if got := servableKinds(config.Config{}, nil); len(got) != 0 {
+	got, unoffered := servableKinds(config.Config{}, nil)
+	if len(got) != 0 {
 		t.Errorf("an empty configuration offers %v.\nEvery kind in genstore.Kinds() needs a "+
 			"case in servableKinds saying what makes it runnable; one of these has none, "+
 			"so it is offered to an operator who cannot run it", got)
+	}
+	// AND EVERY ONE OF THEM IS ACCOUNTED FOR ON THE OTHER SIDE. The two lists
+	// are a partition of genstore.Kinds() and not two filters that happen to
+	// agree -- a kind that fell out of both would be one the page can neither
+	// offer nor mention, which is the state that made an operator ask whether
+	// speech had been deleted.
+	if len(unoffered) != len(genstore.Kinds()) {
+		t.Errorf("an empty configuration offers nothing but accounts for %v of %v; a kind in "+
+			"neither list is one the page can neither run nor name",
+			unoffered, genstore.Kinds())
 	}
 }
 
@@ -55,7 +66,7 @@ func TestConfig_OffersEachKindOnlyWhenItIsRunnable(t *testing.T) {
 		{"both", serve, voices, []string{genstore.KindSD, genstore.KindTTS}},
 		{"neither", config.Config{}, nil, nil},
 	} {
-		got := servableKinds(c.cfg, c.voices)
+		got, _ := servableKinds(c.cfg, c.voices)
 		if len(got) != len(c.want) {
 			t.Errorf("%s offers %v, want %v", c.what, got, c.want)
 			continue
@@ -78,7 +89,8 @@ func TestConfig_OffersEachKindOnlyWhenItIsRunnable(t *testing.T) {
 // rather than one that is present and null, and this repository has already
 // lost a whole websocket envelope to that distinction.
 func TestConfig_NeverSendsANilKindList(t *testing.T) {
-	if servableKinds(config.Config{}, nil) == nil {
+	offered, unoffered := servableKinds(config.Config{}, nil)
+	if offered == nil || unoffered == nil {
 		t.Error("a configuration that can run nothing sends a nil kind list, which marshals " +
 			"as `null` and fails the client's whole response rather than one field of it")
 	}

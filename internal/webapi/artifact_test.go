@@ -193,8 +193,9 @@ func TestConfig_PublishesOnlyTheKindsThisServeCanRun(t *testing.T) {
 		t.Fatalf("status = %d: %s", res.Status, res.Body)
 	}
 	var v struct {
-		Kinds  []string `json:"kinds"`
-		Voices []struct {
+		Kinds     []string `json:"kinds"`
+		Unoffered []string `json:"unoffered"`
+		Voices    []struct {
 			ID string `json:"id"`
 		} `json:"voices"`
 	}
@@ -220,5 +221,15 @@ func TestConfig_PublishesOnlyTheKindsThisServeCanRun(t *testing.T) {
 	if len(v.Kinds) != 1 || v.Kinds[0] != "sd" {
 		t.Errorf("kinds = %v, want exactly [sd] for a config with a serve argv and no voices",
 			v.Kinds)
+	}
+	// AND IT SAYS WHAT IT IS NOT OFFERING, which is the half that narrowing
+	// the list took away. With one kind there is no selector -- one option is
+	// no choice -- so a panel showing image controls and nothing else is
+	// indistinguishable from an ember that only generates images. An operator
+	// looking at exactly that asked whether speech had been removed from the
+	// program; it had not, and the page had no way to tell them so.
+	if len(v.Unoffered) != 1 || v.Unoffered[0] != "tts" {
+		t.Errorf("unoffered = %v, want [tts]: the page cannot say what this serve is not "+
+			"doing, so a narrowed selector reads as a build with one workload", v.Unoffered)
 	}
 }

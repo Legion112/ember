@@ -116,6 +116,30 @@ type configView struct {
 	Kinds  []string    `json:"kinds"`
 	Voices []voiceView `json:"voices"`
 
+	// Unoffered is what this build can do that this configuration does not,
+	// which exists because narrowing Kinds took something away.
+	//
+	// THE QUESTION IT ANSWERS WAS ASKED BY AN OPERATOR LOOKING AT THE PAGE:
+	// "have you just removed tts?" Nothing had -- `internal/tts`, the config
+	// key and the speech runner were untouched -- but the selector had gone,
+	// because one option is no choice, and a panel that offers one kind
+	// without saying so is indistinguishable from a build that only has one.
+	// The previous list said what ember could do and lied about what this
+	// process would accept; the narrowed one is honest about the process and
+	// silent about ember. This field is the half that went missing.
+	//
+	// A STATEMENT AND NEVER A CONTROL, which is the whole distinction being
+	// drawn. The defect being fixed was a selector offering a choice in order
+	// to refuse it, so the answer cannot be a disabled option or a greyed row:
+	// those are the same defect with a different cursor. It is a sentence, in
+	// the register of the `ember.yaml` ceiling hints beside it.
+	//
+	// DERIVED FROM THE SAME LOOP as Kinds and not from a second pass over
+	// genstore.Kinds(), so the two cannot disagree about a kind -- a page
+	// saying "this serve runs sd, and not tts" while offering tts is worse
+	// than either half alone.
+	Unoffered []string `json:"unoffered"`
+
 	// AllowPaid says whether this process was started with --allow-paid. A UI
 	// that did not know would offer a card it cannot rent and surface the
 	// refusal as a failure.
@@ -256,8 +280,14 @@ type limitView struct {
 // permanent is TestConfig_AConfigThatCanRunNothingOffersNoKinds: an empty
 // config must narrow to an empty list, so a kind with no case here is red at
 // once rather than shipped.
-func servableKinds(cfg config.Config, voices tts.Catalogue) []string {
-	out := []string{}
+// ONE LOOP AND TWO LISTS, which is why this returns a pair rather than being
+// called twice. A second pass deciding the complement is a second place for a
+// kind to be judged, and the first thing a drift there produces is a page
+// saying "this serve runs sd, and not tts" while offering tts -- worse than
+// either half alone, because the two halves disagreeing is the one state an
+// operator cannot resolve by reading.
+func servableKinds(cfg config.Config, voices tts.Catalogue) (offered, unoffered []string) {
+	offered, unoffered = []string{}, []string{}
 	for _, k := range genstore.Kinds() {
 		switch k {
 		case genstore.KindSD:
@@ -265,6 +295,7 @@ func servableKinds(cfg config.Config, voices tts.Catalogue) []string {
 			// on: without a serve argv there is no generation server to start,
 			// so an image request has nowhere to run.
 			if len(cfg.SD.Serve) == 0 {
+				unoffered = append(unoffered, k)
 				continue
 			}
 		case genstore.KindTTS:
@@ -273,18 +304,20 @@ func servableKinds(cfg config.Config, voices tts.Catalogue) []string {
 			// against, naming `tts.voices`. This is the same refusal moved to
 			// the moment before the operator chooses instead of after.
 			if len(voices) == 0 {
+				unoffered = append(unoffered, k)
 				continue
 			}
 		}
-		out = append(out, k)
+		offered = append(offered, k)
 	}
-	return out
+	return offered, unoffered
 }
 
 func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps *sdserver.Capabilities,
 	voices tts.Catalogue,
 ) configView {
 	hourly, run, _ := cfg.Budgets()
+	offered, unoffered := servableKinds(cfg, voices)
 
 	v := configView{
 		// An empty list and never null, for the reason ws.go gives: a client
@@ -292,7 +325,8 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 		// whole response.
 		Providers: []providerView{},
 		// Empty lists and never null, for the same reason.
-		Kinds:           servableKinds(cfg, voices),
+		Kinds:           offered,
+		Unoffered:       unoffered,
 		Voices:          []voiceView{},
 		Ceilings:        ceilings{TTL: dur(cfg.TTL), MaxHourly: rate(hourly), MaxRun: usd(run)},
 		AllowPaid:       allowPaid,

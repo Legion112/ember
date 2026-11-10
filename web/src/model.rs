@@ -234,14 +234,29 @@ pub struct Config {
     /// are: `genstore.Kinds()` is the one list, and a second copy in this
     /// crate is a place for the kind added last to be forgotten.
     ///
-    /// EMPTY MEANS `/api/config` HAS NOT ANSWERED, not that this process runs
-    /// nothing -- the `caps` distinction one field over. `genstore.Kinds()`
-    /// is derived from nothing and cannot be empty, and
-    /// `TestConfig_PublishesAtLeastOneKind` is the exit code behind that, so
-    /// the only way this list is empty is that nothing has replaced
-    /// `Config::default()` yet.
+    /// EMPTY MEANS THIS PROCESS RUNS NOTHING, and it used to mean
+    /// `/api/config` has not answered. The server narrows this to what the
+    /// configuration can actually run, so `[]` is a real answer now and the
+    /// "has it answered" question is keyed on `providers` -- see `composing`,
+    /// which carries the whole argument.
     #[serde(default, deserialize_with = "nullable")]
     pub kinds: Vec<String>,
+
+    /// What this build can do that this configuration does not offer.
+    ///
+    /// IT EXISTS BECAUSE NARROWING `kinds` TOOK SOMETHING AWAY. The selector
+    /// is hidden when there is one kind -- one option is no choice -- so a
+    /// panel offering images and nothing else is indistinguishable from an
+    /// ember that only does images. An operator looking at exactly that asked
+    /// whether speech had been removed. It had not; the page had simply
+    /// stopped being able to say so.
+    ///
+    /// A SENTENCE AND NEVER A CONTROL. The defect this whole change is about
+    /// was a selector offering a choice in order to refuse it, so the remedy
+    /// cannot be a disabled option or a greyed row: those are the same defect
+    /// with a different cursor.
+    #[serde(default, deserialize_with = "nullable")]
+    pub unoffered: Vec<String>,
 
     /// The speech models this process publishes, which may legitimately be
     /// none: an `ember serve` whose config has no `tts.voices` serves no
@@ -319,6 +334,40 @@ impl Config {
     /// one here, and they agree -- both are non-empty in every real response
     /// -- so this is left as it was rather than changed under a sentence that
     /// is about something else.
+    /// What this serve runs, for the case where no selector says it.
+    ///
+    /// SHOWN ONLY WHERE THE SELECTOR IS NOT. With two kinds the `<select>` is
+    /// the answer and a sentence repeating it is noise; with one, the panel
+    /// would otherwise be silent about which of ember's workloads an operator
+    /// is looking at. Silent until `/api/config` answers, keyed on `providers`
+    /// like everything else that must not shout at a default `Config`.
+    ///
+    /// THE KEY IS NAMED BECAUSE THE REMEDY IS AN EDIT. "this serve does not do
+    /// speech" leaves an operator searching; `tts.voices` is the thing they
+    /// type. The mapping lives here beside `composing`'s refusal, which names
+    /// the same key for the same reason -- and the `_` arm means a kind added
+    /// later is still NAMED rather than silently dropped, which is the failure
+    /// this method exists to prevent happening again.
+    pub fn kind_note(&self) -> Option<String> {
+        if self.providers.is_empty() || self.kinds.len() != 1 || self.unoffered.is_empty() {
+            return None;
+        }
+        let runs = &self.kinds[0];
+        let missing: Vec<String> = self
+            .unoffered
+            .iter()
+            .map(|k| match k.as_str() {
+                "tts" => "tts, which needs a tts.voices list".to_string(),
+                "sd" => "sd, which needs an sd.serve block".to_string(),
+                other => other.to_string(),
+            })
+            .collect();
+        Some(format!(
+            "this ember serve runs {runs} only. It could also run {} in ember.yaml.",
+            missing.join(", and ")
+        ))
+    }
+
     pub fn unrunnable(&self) -> Option<&'static str> {
         if self.providers.is_empty() || self.servable {
             return None;
@@ -4891,5 +4940,49 @@ mod tests {
         ] {
             assert_eq!(dated(raw).created_text(), raw, "{raw:?} was reshaped");
         }
+    }
+
+    /// THE QUESTION THIS ANSWERS WAS "have you just removed tts?", asked by an
+    /// operator looking at a panel with no kind selector on it. Nothing had
+    /// been removed; the page had stopped being able to say what it was.
+    #[test]
+    fn a_single_kind_serve_says_which_one_and_what_it_is_missing() {
+        let c: Config = serde_json::from_str(
+            r#"{"providers":[{"name":"local"}],"kinds":["sd"],"unoffered":["tts"]}"#,
+        )
+        .expect("a single-kind config decodes");
+        let note = c.kind_note().expect("a single-kind serve says so");
+        assert!(note.contains("sd"), "it does not say what it runs: {note}");
+        assert!(
+            note.contains("tts"),
+            "it does not name what it cannot: {note}"
+        );
+        // THE KEY, because the remedy is an edit and a sentence without it
+        // leaves an operator searching for the word.
+        assert!(
+            note.contains("tts.voices"),
+            "it names no key to add: {note}"
+        );
+    }
+
+    /// WITH A CHOICE, THE SELECTOR IS THE ANSWER and a sentence repeating it
+    /// is noise -- which is the thing this page has been punished for four
+    /// times over in other shapes.
+    #[test]
+    fn a_serve_with_a_choice_says_nothing_extra() {
+        let c: Config = serde_json::from_str(
+            r#"{"providers":[{"name":"local"}],"kinds":["sd","tts"],"unoffered":[]}"#,
+        )
+        .expect("a two-kind config decodes");
+        assert_eq!(c.kind_note(), None);
+    }
+
+    /// AND IT IS SILENT BEFORE THE CONFIG LANDS, keyed on `providers` like
+    /// every other line that would otherwise shout at a default `Config`. A
+    /// panel that announced "this ember serve runs  only." for the moment
+    /// before the fetch returned would be worse than saying nothing.
+    #[test]
+    fn an_unanswered_config_announces_nothing() {
+        assert_eq!(Config::default().kind_note(), None);
     }
 }

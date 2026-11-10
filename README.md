@@ -2531,8 +2531,13 @@ than no choice, because the refusal lands after the deciding is done. A
 speech-only configuration had it worse in the other direction: `sd` was
 offered, nothing refused it, and the request failed once a node was up. One
 option is no choice, so a configuration that runs a single kind shows no
-selector at all. A configuration that can run **neither** cannot start: `ember
-serve` refuses it at launch and names both keys.
+selector at all — and in its place a line saying which kind this serve runs and
+which key would add the other, because a panel with no selector is otherwise
+indistinguishable from a build with one workload. `GET /api/config` carries
+both halves: `kinds` is what this configuration runs and `unoffered` is what
+the build could run and this file does not ask for. A configuration that can
+run **neither** cannot start: `ember serve` refuses it at launch and names both
+keys.
 
 **The artifact plays in the page.** A finished utterance is an `<audio
 controls>` beside the gallery's `<img>` for an image, and the element is chosen

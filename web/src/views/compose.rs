@@ -365,6 +365,17 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
                 </div>
             </Show>
 
+            // AND WHERE THERE IS NO SELECTOR, A SENTENCE. One option is no
+            // choice, so a single-kind server shows no `<select>` -- which
+            // left the panel unable to say which of ember's workloads it was,
+            // and an operator looking at it asked whether speech had been
+            // removed from the program. Read inside the closure, like
+            // everything else on this page that depends on the config.
+            {move || match config.get().kind_note() {
+                Some(note) => view! { <p class="hint">{note}</p> }.into_any(),
+                None => ().into_any(),
+            }}
+
             // WHICH CONTROLS, FROM THE METHOD AND NOT FROM A CHAIN OF `if`
             // HERE. Read inside the closure, which is the rule four keyed-list
             // defects on this page were paid for: a kind changed after the
