@@ -10,6 +10,7 @@ import (
 
 	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/internal/tts"
@@ -112,6 +113,14 @@ type fleetRental struct {
 	gpu  string
 	hold chan struct{}
 }
+
+// Card is the ask, because these fakes rent exactly what was asked for.
+//
+// The empty ask is the interesting one and it stays empty here: a fake that
+// invented a card for it would make these tests assert the card admission
+// where what they are about is the ask, and genstore's own conformance table
+// is where the card rule is measured.
+func (r fleetRental) Card() node.GPUModel { return node.GPUModel(r.gpu) }
 
 func (r fleetRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	return r.rent(ctx, sink, func(ctx context.Context) error {
@@ -594,6 +603,8 @@ type generatingRental struct {
 	hold chan struct{}
 }
 
+func (r generatingRental) Card() node.GPUModel { return node.GPUModel(r.gpu) }
+
 func (r generatingRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	return fleetRental{p: r.p, gpu: r.gpu, hold: r.hold}.rent(ctx, sink, func(ctx context.Context) error {
 		return fn(ctx, &blockingServed{in: r.in})
@@ -762,6 +773,8 @@ type loggingRental struct {
 	req  genstore.ReqID
 	hold chan struct{}
 }
+
+func (r loggingRental) Card() node.GPUModel { return node.GPUModel(r.gpu) }
 
 func (r loggingRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	sink.Emit(report.Event{Kind: report.KindLog, Text: "bytes for " + string(r.req) + "\n"})

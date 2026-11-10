@@ -85,6 +85,7 @@ import (
 
 	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/tts"
 )
@@ -127,6 +128,22 @@ type Rental interface {
 	// put a type assertion in the drain loop, which is the dispatch this
 	// change exists to remove rather than relocate.
 	WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error
+
+	// Card is the card this plan's offer carries, and it is the one fact the
+	// scheduler advertises.
+	//
+	// ON THE RENTAL AND NOT ON Planner.Plan's SIGNATURE, because it is a
+	// property of the thing that was planned: a plan knows which offer it
+	// chose, and a second return value would mean every caller carrying a
+	// card beside a rental it already has.
+	//
+	// READABLE BEFORE ANYTHING IS RENTED, which is what makes advertising it
+	// cheap: Plan chooses the offer and rents nothing, so the card is known
+	// one statement after the claim and the window in which a live rental has
+	// no card is an offer lookup rather than a create call. See
+	// genstore.Compat.Card for what the window costs and why ember holds this
+	// fact rather than asking the node for it.
+	Card() node.GPUModel
 }
 
 // Queue is the drain loop.
@@ -274,6 +291,12 @@ type Queue struct {
 	// the rental -- harmless today, because Holding is only consulted for a
 	// row that says `running`, and exactly the kind of "harmless" that stops
 	// being so when somebody reads the field's name instead of this paragraph.
+	//
+	// AND IT IS WHAT THE LEASE RENEWAL READS, which is a second reader of one
+	// set rather than a second set. Both ask the same question -- "which rows
+	// read `running` because this process is alive" -- and a map kept
+	// separately for the renewal would be a second answer to it, free to fall
+	// behind in the direction where a live rental's row is reclaimed.
 	held map[genstore.ReqID]struct{}
 
 	// stops is the channel that cancels each generating request, by id.
@@ -593,14 +616,18 @@ func (q *Queue) Cancel(id genstore.ReqID) bool {
 // the fact is the counter that argument refuses, and a single goroutine
 // deciding is not.
 func (q *Queue) Run(ctx context.Context) error {
-	// Anything found running belonged to a process that is gone. Its rental
-	// cannot be resumed, so it is marked rather than re-queued -- see
-	// genstore.StatusInterrupted.
-	if n, err := q.Store.Interrupt(ctx); err != nil {
-		q.log().Error("could not mark interrupted requests; the history is wrong but the queue still works", "err", err)
-	} else if n > 0 {
-		q.log().Warn("requests were in flight when ember last stopped; their rentals are gone", "count", n)
-	}
+	// A row whose lease has run out belonged to a process that is not
+	// renewing it. Its rental cannot be resumed, so it is marked rather than
+	// re-queued -- see genstore.StatusInterrupted.
+	//
+	// IT NO LONGER SWEEPS EVERY RUNNING ROW, and the line it logs no longer
+	// claims their rentals are gone. That claim was the sweep's whole
+	// justification and it is not ember's to make: a node carries its run id
+	// and its deadline in the provider's own label, the label is the source of
+	// truth, and internal/reconcile is what reads it. A second `ember serve`
+	// starting beside a live one used to mark every one of the first's
+	// in-flight requests interrupted on that premise.
+	q.reclaim(ctx)
 
 	// EVERY SLOT IS WAITED FOR, AND THE DEFER IS THE FIRST STATEMENT AFTER THE
 	// SWEEP. See the doc comment: unbounded, on purpose.
@@ -629,6 +656,24 @@ func (q *Queue) Run(ctx context.Context) error {
 			q.dropPending(pending)
 			return nil
 		}
+
+		// THE LEASE HEARTBEAT, AT THE TOP OF THE LOOP AND NOT ON A TICKER OF
+		// ITS OWN. What has to stay true is that a row reads `running` for
+		// only as long as some process is alive and responsible for it, and
+		// the supervisor is the one goroutine that is always alive while this
+		// process is: its longest park is idlePoll, which is one eighth of
+		// genstore.LeaseTerm. A ticker would be a second goroutine whose
+		// liveness is a separate question from the loop's, and a lease
+		// renewed by a goroutine that outlives a wedged supervisor is a lease
+		// that says nothing.
+		q.renew(ctx)
+
+		// AND THE SWEEP RUNS HERE TOO, not only at startup. "The process that
+		// held this row is gone" becomes true while ember is running -- a
+		// second ember on the same store, killed with SIGKILL -- and a sweep
+		// that only ever ran before the first claim would leave that row
+		// reading `running` until the next restart.
+		q.reclaim(ctx)
 
 		slots, live := q.free()
 
@@ -735,6 +780,85 @@ func (q *Queue) Run(ctx context.Context) error {
 		case <-q.kicks():
 		case <-time.After(idlePoll):
 		}
+	}
+}
+
+// renew pushes the lease forward on every row this process is responsible for.
+//
+// REPORTED AND NEVER RETURNED, for the reason the claim's own error is: a
+// store that could not be written for a moment is not a reason to stop
+// draining a queue. What a missed renewal costs is bounded and is not money --
+// the row is reclaimed early and the request's own ending writes over it, the
+// same transient genstore.Store.Adopt already documents -- and what returning
+// here would cost is every later request in the queue.
+func (q *Queue) renew(ctx context.Context) {
+	ids := q.heldIDs()
+	if len(ids) == 0 {
+		return
+	}
+	if _, err := q.Store.Renew(ctx, ids); err != nil {
+		q.log().Warn("could not renew the lease on the requests this process is running; "+
+			"they may be reported as interrupted while they are still generating", "err", err)
+	}
+}
+
+// reclaim marks interrupted whatever lease has run out.
+func (q *Queue) reclaim(ctx context.Context) {
+	n, err := q.Store.Reclaim(ctx)
+	if err != nil {
+		q.log().Error("could not reclaim expired requests; the history is wrong but the queue still works", "err", err)
+		return
+	}
+	if n > 0 {
+		// WHAT THIS SAYS AND WHAT IT CAREFULLY DOES NOT. It says nobody is
+		// renewing the lease, which is what was measured. It does NOT say the
+		// rentals are gone, which the sweep this replaced did say and could
+		// not know: `ember ls` reads the provider's labels and is the only
+		// thing that can answer that.
+		q.log().Warn("requests were left running by a process that is no longer renewing their lease; "+
+			"check `ember ls` for nodes they may have left behind", "count", n)
+	}
+}
+
+// heldIDs is every request this process is responsible for.
+func (q *Queue) heldIDs() []genstore.ReqID {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make([]genstore.ReqID, 0, len(q.held))
+	for id := range q.held {
+		out = append(out, id)
+	}
+	// Sorted so the statement's parameter list is stable, which is what makes
+	// a recorded call comparable between runs.
+	slices.Sort(out)
+	return out
+}
+
+// advertise records the card a rental actually got, so the supervisor's next
+// exclusion is exact rather than conservative.
+//
+// ON THE SLOT AND NOT ON THE SUPERVISOR, which is the one registration that
+// could not happen before the goroutine: the card is in the offer, the offer
+// is chosen by Plan, and Plan is what the slot does first. Everything the
+// supervisor has to know before it spawns -- the kind, the provider and the
+// ask -- `reserve` already wrote.
+//
+// IT KICKS, which is what bounds the window where this rental's card is not
+// yet known to the offer lookup itself. Until this call a request naming the
+// card this rental turns out to have is not excluded by it, so it can be given
+// a node of its own; without the kick that window would be idlePoll wide
+// instead of Plan wide. See genstore.Compat.Card for the wider exclusion that
+// would close it entirely and what it was measured to cost.
+func (q *Queue) advertise(opener genstore.ReqID, card node.GPUModel) {
+	q.mu.Lock()
+	c, ok := q.live[opener]
+	if ok {
+		c.Card = card
+		q.live[opener] = c
+	}
+	q.mu.Unlock()
+	if ok {
+		q.Kick()
 	}
 }
 
@@ -860,6 +984,20 @@ func (q *Queue) once(ctx context.Context, lease string, first genstore.Request, 
 		return fmt.Errorf("request %s: %w", first.ID, err)
 	}
 
+	// THE ADVERTISEMENT, AND IT IS THE FIRST STATEMENT AFTER THE PLAN. The
+	// offer is chosen and nothing is rented yet, so this is the earliest
+	// moment the card exists and the latest one at which the supervisor is
+	// still excluding conservatively. Both copies are written here: the local
+	// compat, which this rental rides by for the rest of its life, and the
+	// live entry the supervisor excludes by.
+	//
+	// IT IS WHY THE RIDE SIDE IS EXACT FROM THE FIRST CLAIM. drain's own
+	// ClaimNext reads `compat`, and a rental that learned its card only when
+	// the node came up would spend its whole provisioning refusing requests it
+	// could serve -- which is the create-side defect in the other direction.
+	compat.Card = rental.Card()
+	q.advertise(first.ID, compat.Card)
+
 	// Released after the rental returns and not inside it: the rental's cost
 	// and a destroy that failed arrive from the deferred teardown, which runs
 	// after the closure below has finished.
@@ -887,11 +1025,26 @@ func (q *Queue) once(ctx context.Context, lease string, first genstore.Request, 
 		})
 	default:
 		rentErr = rental.WithServed(ctx, q.lifecycle(first.ID), func(ctx context.Context, s app.Served) error {
-			// Learned once per process and cached, so a mistyped sampler is
-			// refused at the moment it is typed rather than a minute into a
-			// rented card. `sd.serve` is fixed by the config, so every rental
-			// in this process reports the same capabilities.
-			if err := q.Store.PutCaps(ctx, s.Caps()); err != nil {
+			// Learned once per RENTAL SHAPE and cached, so a mistyped sampler
+			// is refused at the moment it is typed rather than a minute into
+			// a rented card.
+			//
+			// KEYED, WHERE IT USED TO BE ONE ROW PER PROCESS. The defence for
+			// the single row was "`sd.serve` is fixed by the config, so every
+			// rental in this process reports the same capabilities", and the
+			// request seal it rests on is what refutes it: a request names a
+			// provider AND a card, so two live rentals of one process differ
+			// in both -- and a generation server's capability list legitimately
+			// differs with the card, which is the entire reason `images:`
+			// maps an architecture to a build. With one row the last rental up
+			// overwrote the cache and the next enqueue was validated against
+			// another node's answer. See genstore.Store.PutCaps.
+			//
+			// THE SHAPE COMES FROM THE COMPAT AND NOT FROM THE OFFER, which is
+			// deliberate even though the card is in hand by now: the only
+			// reader is enqueue validation, which has a request and no node,
+			// so the key has to be something a request can produce.
+			if err := q.Store.PutCaps(ctx, compat.Shape(), s.Caps()); err != nil {
 				q.log().Warn("could not cache the server's capabilities; the next request will be "+
 					"checked against a card instead of against a cache", "err", err)
 			}

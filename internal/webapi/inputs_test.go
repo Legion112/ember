@@ -274,7 +274,7 @@ func TestPostRequest_RefusesAStrengthWithNoImage(t *testing.T) {
 func TestPostRequest_RefusesAnImageTheModelDoesNotTake(t *testing.T) {
 	h := newHarness(t)
 	no := false
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Model:     "sd15.gguf",
 		Supported: sdserver.Supported{InitImage: &no},
 	}); err != nil {
@@ -301,7 +301,7 @@ func TestPostRequest_RefusesAnImageTheModelDoesNotTake(t *testing.T) {
 func TestConfig_PublishesTheImageFlagSoThePageCanGreyThePicker(t *testing.T) {
 	h := newHarness(t)
 	no := false
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Model:     "sd15.gguf",
 		Supported: sdserver.Supported{InitImage: &no},
 	}); err != nil {
@@ -318,7 +318,7 @@ func TestConfig_PublishesTheImageFlagSoThePageCanGreyThePicker(t *testing.T) {
 	// And a silent server publishes nothing rather than a false, which the
 	// page reads as "gates nothing".
 	h2 := newHarness(t)
-	if err := h2.store.PutCaps(t.Context(), sdserver.Capabilities{Model: "sd15.gguf"}); err != nil {
+	if err := h2.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{Model: "sd15.gguf"}); err != nil {
 		t.Fatal(err)
 	}
 	raw := h2.do(t, "GET", "/api/config", "").Body.String()

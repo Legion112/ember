@@ -168,6 +168,16 @@ func newHarness(t *testing.T, mut ...func(*Options)) *harness {
 	return &harness{Server: s, store: store, blobs: blobs, inputs: o.Inputs, reg: reg}
 }
 
+// harnessShape is the rental shape every request in this suite names: an
+// image generation on the harness's own provider, with no card chosen.
+//
+// A NAMED VALUE BECAUSE THE CACHE IS KEYED NOW. A test that cached
+// capabilities under one shape and posted a request naming another would get
+// the pre-rental path -- the static half of the validation and nothing else --
+// and would pass for the wrong reason, which is the one failure the caps half
+// of validateJobs cannot report for itself.
+var harnessShape = genstore.NewShape(genstore.KindSD, "local", "")
+
 // upload posts raw bytes to the one route that takes them.
 //
 // NO Content-Type THAT MEANS ANYTHING, deliberately: the server does not
@@ -371,7 +381,7 @@ func TestConfig_SaysWhatAUICanOffer(t *testing.T) {
 
 func TestConfig_ReportsTheCapabilitiesOnceSomethingHasLearnedThem(t *testing.T) {
 	h := newHarness(t)
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Model: "sd15.gguf", Samplers: []string{"euler"},
 		Limits: sdserver.Limits{MaxWidth: 2048},
 	}); err != nil {
@@ -398,7 +408,7 @@ func TestConfig_ReportsTheCapabilitiesOnceSomethingHasLearnedThem(t *testing.T) 
 func TestConfig_ReportsTheFeatureFlagsAndLeavesTheSilencesOut(t *testing.T) {
 	h := newHarness(t)
 	no, yes := false, true
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Model:     "sd15.gguf",
 		Supported: sdserver.Supported{ClipSkip: &no, SLG: &yes},
 	}); err != nil {
@@ -593,7 +603,7 @@ func TestPostRequest_RefusesWhenThereIsNoServerToRunOn(t *testing.T) {
 // still looking at the form.
 func TestPostRequest_RefusesASamplerTheServerDoesNotHave(t *testing.T) {
 	h := newHarness(t)
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Samplers: []string{"euler", "heun"},
 	}); err != nil {
 		t.Fatal(err)
@@ -1400,7 +1410,7 @@ func TestRequestView_OmitsTheBlocksAJobDidNotSet(t *testing.T) {
 // harness seeds them.
 func TestPostRequest_RefusesAParameterOutsideItsRange(t *testing.T) {
 	h := newHarness(t)
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Samplers: []string{"euler"}, OutputFormats: []string{"png"},
 		Upscalers: []string{"Latent"},
 	}); err != nil {

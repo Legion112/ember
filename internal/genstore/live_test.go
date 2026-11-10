@@ -3,6 +3,8 @@ package genstore
 import (
 	"testing"
 	"time"
+
+	"github.com/Legion112/ember/internal/node"
 )
 
 // The create side of fit-or-create (#204), against both stores.
@@ -18,6 +20,22 @@ import (
 // reason: the SQL spells the exclusion as one `AND NOT (...)` per live rental
 // and `RecordingStore` spells it in Go, so two rules in two languages is
 // exactly how `dataCenter` against `dataCenterId` stayed invisible.
+
+// up is a rental that is already up and knows what card it got.
+//
+// THE CARD IS SET IN EVERY FIXTURE HERE, because that is the production state:
+// Queue.advertise writes it one statement after Plan returns and before
+// anything is rented, so a live rental with no card is a rental in the middle
+// of an offer lookup. A fixture that left it unset would be asking the WIDER
+// create-side question in every test below -- see
+// TestClaimNext_ARentalStillChoosingItsOfferExcludesItsWholeKind, which is the
+// one test that asks it on purpose.
+func up(gpu, card string) Compat {
+	return Compat{
+		Kind: KindSD, Provider: "local", GPU: gpu,
+		Card: node.GPUModel(card),
+	}
+}
 
 // TestClaimNext_SkipsWorkALiveRentalCouldServe is strict packing.
 //
@@ -47,7 +65,7 @@ func TestClaimNext_SkipsWorkALiveRentalCouldServe(t *testing.T) {
 		// One rental is up on rtx2080ti. The create-side claim must skip the
 		// OLDER request -- which that rental will absorb through its own ride
 		// claim -- and take the one nothing up can serve.
-		live := []Compat{{Kind: KindSD, Provider: "local", GPU: "rtx2080ti"}}
+		live := []Compat{up("rtx2080ti", "rtx2080ti")}
 		got, ok, err := s.ClaimNext(t.Context(), "run-2", Compat{Live: live})
 		if err != nil || !ok {
 			t.Fatalf("a create-side claim found nothing for a card nothing up has: ok=%v err=%v",
@@ -62,7 +80,7 @@ func TestClaimNext_SkipsWorkALiveRentalCouldServe(t *testing.T) {
 		// AND NOTHING IS LEFT FOR A THIRD NODE, which is the half that makes
 		// packing strict rather than merely preferred: with both rentals up,
 		// the rideable request still waits for the one that can serve it.
-		live = append(live, Compat{Kind: KindSD, Provider: "local", GPU: "h100-80g"})
+		live = append(live, up("h100-80g", "h100-80g"))
 		if _, ok, err := s.ClaimNext(t.Context(), "run-3", Compat{Live: live}); err != nil || ok {
 			t.Errorf("a third node was claimed for work a live rental can serve: ok=%v err=%v",
 				ok, err)
@@ -84,7 +102,7 @@ func TestClaimNext_IsExcludedByOneLiveRentalAndNotAnother(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		live := []Compat{{Kind: KindSD, Provider: "local", GPU: "h100-80g"}}
+		live := []Compat{up("h100-80g", "h100-80g")}
 		got, ok, err := s.ClaimNext(t.Context(), "run-1", Compat{Live: live})
 		if err != nil || !ok {
 			t.Fatalf("a rental on a different card excluded this request: ok=%v err=%v", ok, err)
@@ -128,7 +146,7 @@ func TestClaimNext_AMigratedRowIsExcludedByAnSDRental(t *testing.T) {
 				"for: a raw comparison would agree with KindOf on it", stored.Kind)
 		}
 
-		live := []Compat{{Kind: KindSD, Provider: "local", GPU: "rtx2080ti"}}
+		live := []Compat{up("rtx2080ti", "rtx2080ti")}
 		if _, ok, err := s.ClaimNext(t.Context(), "run-2", Compat{Live: live}); err != nil || ok {
 			t.Errorf("an sd rental did not exclude a migrated row, so it gets a card of its "+
 				"own while the node already up was about to serve it: ok=%v err=%v", ok, err)
@@ -136,7 +154,8 @@ func TestClaimNext_AMigratedRowIsExcludedByAnSDRental(t *testing.T) {
 
 		// And a tts rental does not exclude it, which is what stops the
 		// normalisation above being "exclude everything".
-		live = []Compat{{Kind: KindTTS, Provider: "local", GPU: "rtx2080ti"}}
+		live = []Compat{{Kind: KindTTS, Provider: "local", GPU: "rtx2080ti",
+			Card: node.GPUModel("rtx2080ti")}}
 		got, ok, err := s.ClaimNext(t.Context(), "run-3", Compat{Live: live})
 		if err != nil || !ok {
 			t.Fatalf("a speech rental excluded an image request: ok=%v err=%v", ok, err)
