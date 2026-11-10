@@ -609,28 +609,41 @@ type Compat struct {
 	// server's capability document, and that already travels verbatim on
 	// control.KindPrepared.
 	//
-	// EMPTY IS "NOT ADVERTISED YET", AND IT WIDENS NOTHING. The supervisor
+	// CardKnown IS A SECOND FIELD BECAUSE THE UNCERTAIN STATE IS REAL, AND
+	// THE TWO SIDES OF fit-or-create ANSWER IT DIFFERENTLY. The supervisor
 	// registers a rental before its goroutine exists -- that is what stops
 	// runaway scale-out -- and the offer is not chosen until Plan returns, so
-	// for the width of one offer lookup a live rental has no card and the two
-	// card admissions that do not need one are all that apply. Both sides of
-	// fit-or-create read the same relation, so that window narrows the ride
-	// side and the exclusion side together and cannot starve a request.
+	// a live rental has no card for the width of that call. While that is
+	// true the EXCLUSION widens to kind and provider alone, and the RIDE
+	// relation does not, because a rental must never take a request for a
+	// card it does not have. servesClause and servesPendingClause are the two,
+	// and an empty Card with CardKnown set is a rental whose offer carries no
+	// card at all, where they coincide again.
 	//
-	// WHAT THAT WINDOW COSTS, AND THE WIDER EXCLUSION THAT WAS REFUSED. A
-	// request naming a card that a still-provisioning rental turns out to
-	// have can be given a node of its own, because nothing yet knows the two
-	// match. Excluding on "might" instead -- kind and provider alone until
-	// the card arrives -- would save that rental and was measured against
-	// what it costs: Plan is an offer lookup of seconds in the ordinary case,
-	// and up to 14m47s when the store is empty and a second machine fetches
-	// the weights. The wide exclusion would stall EVERY request of that kind
-	// and provider, including requests for cards the rental provably cannot
-	// serve, for the whole of that -- a minutes-long stall on every request
-	// to save one rental in the narrow case where two asks differ and the
-	// silicon agrees. Queue.advertise kicks the supervisor the moment the
-	// card is known, so the exposed window is the lookup and not a poll.
-	Card node.GPUModel
+	// THE WIDE EXCLUSION IS NOT OPTIONAL, AND THAT IS A MEASUREMENT. The
+	// window looked like "one offer lookup" and is in fact hit on the
+	// supervisor's very next iteration, every time: `claim` spawns and
+	// `continue`s, so the next create-side decision is taken before the slot
+	// goroutine has run Plan at all. With the exact relation there, two
+	// queued requests whose asks differ and whose silicon agrees provoke two
+	// nodes deterministically -- which is precisely the defect Card was added
+	// to close.
+	//
+	// WHAT THE WIDE SIDE COSTS, because it is a stall and stalls are not
+	// free. A request of the same kind and provider waits out the rental's
+	// Plan before it can be given a node of its own: an offer lookup of
+	// seconds in the ordinary case, and up to 14m47s when the store is empty
+	// and a machine with no card fetches the weights. The long case is the
+	// one that looks alarming and is not, because the weights are the
+	// config's and are shared: a second rental of that kind would want the
+	// same store, StoreFills already serialises the fetch, and it would wait
+	// for it holding a slot instead of waiting here holding nothing. A
+	// request of a DIFFERENT kind is not excluded at all, which is what keeps
+	// a speech request out of an image rental's store fill. Queue.advertise
+	// kicks the supervisor the moment the card is known, so nothing waits out
+	// a poll interval on top.
+	Card      node.GPUModel
+	CardKnown bool
 
 	// Live is every rental that is already up, for a claim whose job is to
 	// find work that NONE of them can take.

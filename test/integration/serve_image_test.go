@@ -1025,7 +1025,13 @@ func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutCaps(t.Context(), sdserver.Capabilities{
+	// UNDER THE SHAPE THIS LAB'S CONFIG NAMES, because the cache is keyed now:
+	// `harness.Lab` writes `provider: local` and no `gpu:`, and
+	// `GET /api/config` reads the shape the operator's own file would rent. A
+	// row under any other key is a miss, and the page would report no
+	// capabilities at all -- which is a pass for the three assertions below
+	// that look for an ABSENT flag.
+	if err := store.PutCaps(t.Context(), genstore.NewShape(genstore.KindSD, "local", ""), sdserver.Capabilities{
 		Model:      "sd15.gguf",
 		Samplers:   []string{"euler", "heun"},
 		Schedulers: []string{"discrete"},

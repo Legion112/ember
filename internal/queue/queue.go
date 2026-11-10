@@ -843,17 +843,17 @@ func (q *Queue) heldIDs() []genstore.ReqID {
 // supervisor has to know before it spawns -- the kind, the provider and the
 // ask -- `reserve` already wrote.
 //
-// IT KICKS, which is what bounds the window where this rental's card is not
-// yet known to the offer lookup itself. Until this call a request naming the
-// card this rental turns out to have is not excluded by it, so it can be given
-// a node of its own; without the kick that window would be idlePoll wide
-// instead of Plan wide. See genstore.Compat.Card for the wider exclusion that
-// would close it entirely and what it was measured to cost.
+// IT KICKS, and that is what makes the conservative window cheap rather than
+// merely short. Until this call the supervisor excludes every request of this
+// rental's kind and provider from getting a node of its own -- see
+// genstore.Compat.Card -- so a request this rental turns out NOT to be able to
+// serve is waiting on exactly this call. Without the kick it would wait out
+// idlePoll on top of the plan.
 func (q *Queue) advertise(opener genstore.ReqID, card node.GPUModel) {
 	q.mu.Lock()
 	c, ok := q.live[opener]
 	if ok {
-		c.Card = card
+		c.Card, c.CardKnown = card, true
 		q.live[opener] = c
 	}
 	q.mu.Unlock()
@@ -995,7 +995,7 @@ func (q *Queue) once(ctx context.Context, lease string, first genstore.Request, 
 	// ClaimNext reads `compat`, and a rental that learned its card only when
 	// the node came up would spend its whole provisioning refusing requests it
 	// could serve -- which is the create-side defect in the other direction.
-	compat.Card = rental.Card()
+	compat.Card, compat.CardKnown = rental.Card(), true
 	q.advertise(first.ID, compat.Card)
 
 	// Released after the rental returns and not inside it: the rental's cost

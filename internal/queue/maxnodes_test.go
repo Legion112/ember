@@ -42,6 +42,9 @@ type fleetPlanner struct {
 	planned []string
 	batches map[string]int
 	holds   map[string]chan struct{}
+
+	// cards maps an ask to the card a rental for it lands on. See cardFor.
+	cards map[string]string
 }
 
 func newFleetPlanner() *fleetPlanner {
@@ -49,6 +52,7 @@ func newFleetPlanner() *fleetPlanner {
 		gate:    &rentalGate{},
 		batches: map[string]int{},
 		holds:   map[string]chan struct{}{},
+		cards:   map[string]string{},
 	}
 }
 
@@ -105,22 +109,35 @@ func (p *fleetPlanner) Plan(_ context.Context, r genstore.Request) (Rental, erro
 	p.mu.Unlock()
 	// The hold is taken here rather than in the rental, so that a test can
 	// release a card before its rental has even opened.
-	return fleetRental{p: p, gpu: r.GPU, hold: p.hold(r.GPU)}, nil
+	return fleetRental{p: p, gpu: r.GPU, card: p.cardFor(r.GPU), hold: p.hold(r.GPU)}, nil
+}
+
+// cardFor is the card an ask lands on, which defaults to the ask itself.
+//
+// A MAP SO THAT "ASKED FOR NOTHING AND GOT SOMETHING" IS EXPRESSIBLE, because
+// that is the production case the card advertisement exists for and the one
+// an identity fake cannot produce: a rental whose request named no card still
+// has one, and a second request naming that card must ride it rather than
+// provoke a node. See TestRun_PacksOntoTheCardARentalAdvertised.
+func (p *fleetPlanner) cardFor(ask string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c, ok := p.cards[ask]; ok {
+		return c
+	}
+	return ask
 }
 
 type fleetRental struct {
 	p    *fleetPlanner
 	gpu  string
+	card string
 	hold chan struct{}
 }
 
-// Card is the ask, because these fakes rent exactly what was asked for.
-//
-// The empty ask is the interesting one and it stays empty here: a fake that
-// invented a card for it would make these tests assert the card admission
-// where what they are about is the ask, and genstore's own conformance table
-// is where the card rule is measured.
-func (r fleetRental) Card() node.GPUModel { return node.GPUModel(r.gpu) }
+// Card is what cardFor said this ask lands on, which is the ask itself unless
+// a test said otherwise.
+func (r fleetRental) Card() node.GPUModel { return node.GPUModel(r.card) }
 
 func (r fleetRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	return r.rent(ctx, sink, func(ctx context.Context) error {

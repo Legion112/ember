@@ -312,6 +312,16 @@ func serves(c Compat, r Request) bool {
 		(c.Card != "" && c.Card.Accepts(node.GPUModel(r.GPU)))
 }
 
+// servesPending is serves widened by what is not known yet: the create side's
+// question. See servesPendingClause, which is the half with the measurement
+// in it.
+func servesPending(c Compat, r Request) bool {
+	if !c.CardKnown {
+		return KindOf(r.Kind) == KindOf(c.Kind) && r.Provider == c.Provider
+	}
+	return serves(c, r)
+}
+
 // servedByLive reports whether any rental already up could take this request.
 //
 // A FUNCTION RATHER THAN A CONDITION INSIDE THE LOOP, so the fake's spelling of
@@ -321,7 +331,7 @@ func serves(c Compat, r Request) bool {
 // holds these two to each other.
 func servedByLive(r Request, live []Compat) bool {
 	for _, l := range live {
-		if serves(l, r) {
+		if servesPending(l, r) {
 			return true
 		}
 	}

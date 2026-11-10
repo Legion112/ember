@@ -1012,6 +1012,28 @@ func servesClause(c Compat) (string, []any) {
 		` AND (gpu = '' OR gpu = ?` + in + `))`, args
 }
 
+// servesPendingClause is servesClause widened by what is not known yet, which
+// is the create side's question: MIGHT this rental absorb that row.
+//
+// A SECOND CLAUSE AND NOT A FLAG, because the two are read in opposite
+// directions and a reader has to see which one they have. For a rental whose
+// offer has not come back the answer is yes for everything of its kind and
+// provider, and the money-safe reading of "might" on the side that spends
+// money is "does". See genstore.Compat.Card for the measurement that made this
+// mandatory rather than a refinement, and for what the stall costs.
+//
+// IT CANNOT STARVE A ROW. The widening ends when the card arrives or when the
+// slot exits, and both of those kick the supervisor -- Queue.advertise and
+// Queue.freeSlot -- so a row this excluded is reconsidered within one offer
+// lookup rather than at the next poll.
+func servesPendingClause(c Compat) (string, []any) {
+	if !c.CardKnown {
+		return `((CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ?)`,
+			[]any{KindSD, KindOf(c.Kind), c.Provider}
+	}
+	return servesClause(c)
+}
+
 // cardAdmits is every ask this rental's actual card satisfies beyond the
 // rental's own, which is node.GPUModel.Accepts enumerated.
 //
@@ -1090,7 +1112,7 @@ func (s *SQLite) ClaimNext(ctx context.Context, runID string, c Compat) (Request
 	// the exclusion starves a request for the length of a rental, and an
 	// exclusion narrower than the ride hands a request a SECOND card.
 	for _, l := range c.Live {
-		clause, cargs := servesClause(l)
+		clause, cargs := servesPendingClause(l)
 		where += " AND NOT " + clause
 		args = append(args, cargs...)
 	}
@@ -1339,13 +1361,13 @@ func (s *SQLite) Renew(ctx context.Context, ids []ReqID) (int, error) {
 	// on a row that has finished would leave a terminal row carrying a live
 	// lease. Nothing reads it there, which is exactly why it would never be
 	// noticed.
+	//nolint:gosec // G202: the only interpolation is a fixed-text placeholder list sized by len(ids)
 	q := `UPDATE requests SET lease_until_unix = ? WHERE status = ? AND id IN (?` +
 		strings.Repeat(`, ?`, len(ids)-1) + `)`
 	args := []any{s.at().Add(LeaseTerm).UnixMilli(), string(StatusRunning)}
 	for _, id := range ids {
 		args = append(args, string(id))
 	}
-	//nolint:gosec // G202: the only interpolation is a fixed-text placeholder list sized by len(ids)
 	res, err := s.db.ExecContext(ctx, q, args...)
 	if err != nil {
 		return 0, fmt.Errorf("renew the lease on %d request(s) in %s: %w", len(ids), s.path, err)

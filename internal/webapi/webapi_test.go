@@ -1619,3 +1619,77 @@ func TestRequests_AListingWithARowTheBrowserCannotRead(t *testing.T) {
 			list.Requests[1].Jobs[0].Width)
 	}
 }
+
+// TestPostRequest_ChecksTheCapabilitiesOfTheShapeItNamed.
+//
+// THE DEFECT WAS THE CACHE HAVING NO KEY. One `caps` row per process, written
+// by whichever rental came up last, was read to refuse a job for whatever
+// shape asked next -- so a sampler that one card's build has and another's
+// does not was accepted or refused depending on which node had answered most
+// recently, with nothing anywhere reporting which. "`sd.serve` is fixed by the
+// config" was the defence, and the request seal refutes it: a request names a
+// provider AND a card.
+//
+// BOTH DIRECTIONS IN ONE BODY, because each alone passes against the bug. The
+// request for the card whose build has `dpm++2m` must be accepted, and the
+// request for the card whose build does not must be refused -- and with one
+// unkeyed row exactly one of those is wrong whichever document is cached.
+func TestPostRequest_ChecksTheCapabilitiesOfTheShapeItNamed(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.AllowPaid = true })
+
+	rich := genstore.NewShape(genstore.KindSD, "local", "rtx-pro-6000")
+	poor := genstore.NewShape(genstore.KindSD, "local", "rtx2080ti")
+	if err := h.store.PutCaps(t.Context(), rich, sdserver.Capabilities{
+		Model: "flux2.gguf", Samplers: []string{"euler", "dpm++2m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutCaps(t.Context(), poor, sdserver.Capabilities{
+		Model: "sd15.gguf", Samplers: []string{"euler"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ok := h.do(t, "POST", "/api/requests",
+		`{"provider":"local","gpu":"rtx-pro-6000","jobs":[{"prompt":"a","sampler":"dpm++2m"}]}`)
+	if ok.Code != http.StatusAccepted {
+		t.Errorf("a sampler the named card's build HAS was refused with %d: %s; the check read "+
+			"another node's capability list", ok.Code, ok.Body.String())
+	}
+
+	no := h.do(t, "POST", "/api/requests",
+		`{"provider":"local","gpu":"rtx2080ti","jobs":[{"prompt":"a","sampler":"dpm++2m"}]}`)
+	if no.Code != http.StatusBadRequest {
+		t.Errorf("a sampler the named card's build does NOT have was accepted with %d: %s; "+
+			"the refusal it should have got costs a whole rental to discover on the node",
+			no.Code, no.Body.String())
+	}
+}
+
+// TestPostRequest_NormalisesTheCardNameItStores.
+//
+// THREE READERS OF requests.gpu AND ALL THREE WERE COMPARING A BROWSER'S
+// SPELLING. genstore.Compat matches the column against a live rental's card,
+// the capability cache is keyed on it, and `ember spend --by gpu` groups by it
+// -- so "NVIDIA GeForce RTX 4090" and "rtx4090" were two cards to the
+// scheduler and two buckets in the ledger. node.NormalizeGPU is what
+// config.Filter already runs an operator's typed string through, and
+// genstore.Filter's own comment has claimed since the column existed that this
+// was already true.
+func TestPostRequest_NormalisesTheCardNameItStores(t *testing.T) {
+	h := newHarness(t)
+	w := h.do(t, "POST", "/api/requests",
+		`{"provider":"local","gpu":"NVIDIA GeForce RTX 4090","jobs":[{"prompt":"a"}]}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	id := genstore.ReqID(decode[map[string]string](t, w)["id"])
+	got, err := h.store.Get(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GPU != "rtx4090" {
+		t.Errorf("stored gpu = %q, want the one spelling rtx4090: a card a browser spelled its "+
+			"own way is a card the scheduler cannot match and the ledger counts twice", got.GPU)
+	}
+}
