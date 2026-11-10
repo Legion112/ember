@@ -69,7 +69,15 @@ workloads:
   # nothing to download and nothing billing by the month. A shared `store:`
   # would have made the free path create a volume.
   - id: free
-    label: Free (sd15, this machine)
+    # NOT "Free", WHICH IS WHAT THIS SAID AND WAS MISLEADING. `flux2-local`
+    # is equally free -- both run on the local provider, where the card is this
+    # machine's and a Docker volume costs nothing -- so a label promising free
+    # on one of them implies the other is not. The only entry that spends money
+    # is `flux2`, and its label says rented. What separates these two is the
+    # model and what it takes to start: sd15 is baked into the image and serves
+    # in two minutes, where FLUX.2 is 56 GiB to fetch once and twenty minutes
+    # to load.
+    label: sd15 (this machine)
     driver: sd
     image: ember:sd
 
