@@ -291,6 +291,19 @@ func Serve(ctx context.Context, ln net.Listener, log *slog.Logger, fn func(conte
 		// Close and not Shutdown: Shutdown waits for handlers, and the handler
 		// this is answering is the one that just sent on done.
 		_ = srv.Close()
+		// THE NODE BEING STOPPED WINS OVER WHATEVER THE SESSION SAID ABOUT
+		// IT, which is the inverse of orExited's rule one package over and is
+		// right for the inverse reason. Cancelling the session's context is
+		// how a stopped node ends a read, and the library reports that as
+		// either the context's error or `use of closed network connection`
+		// depending on where in a read it landed -- so the session's answer
+		// here is a consequence of the stop and not a fact about the worker.
+		// Without this, a node that reached its deadline logged its worker as
+		// having crashed, at ERROR, on every single deadline: "this node can
+		// no longer be given work" about a node that was told to stop.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return err
 	case err := <-serveErr:
 		return fmt.Errorf("the worker's control listener stopped: %w", err)

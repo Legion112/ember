@@ -233,11 +233,18 @@ func TestServe_WaitsForTheSessionWhenTheNodeIsStopped(t *testing.T) {
 
 	stopNode()
 
+	// THAT THE READ ENDED, AND NOT WHICH WAY. Cancelling the context is how a
+	// stopped node ends a read, and the library reports that as either the
+	// context's error or `use of closed network connection` depending on where
+	// in a read it landed -- so asserting the identity is asserting the
+	// library's internals, and it was flaky at 2 of 12 stressed instances
+	// before this comment existed. What has to be true is that the read ends
+	// at all: with the request's context it never returned, which is the arm
+	// below.
 	select {
 	case err := <-noticed:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("the session's read ended with %v, want context.Canceled: a session that "+
-				"cannot be interrupted is a card nothing releases", err)
+		if err == nil {
+			t.Error("the session's read returned no error on a node that was stopped")
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("WEDGED: the session never noticed the node being stopped, so a deadline would " +
@@ -245,12 +252,22 @@ func TestServe_WaitsForTheSessionWhenTheNodeIsStopped(t *testing.T) {
 	}
 
 	select {
-	case <-served:
+	case err := <-served:
 		select {
 		case <-left:
 		default:
 			t.Error("Serve returned while the session was still running, so a worker goroutine " +
 				"outlives the thing that started it")
+		}
+		// AND THE ANSWER IS THAT THE NODE WAS STOPPED, which is the fact the
+		// node's own log reads. The session's error is a consequence of the
+		// stop; reporting it instead made a node that reached its deadline
+		// log its worker as having crashed, at ERROR, on every deadline --
+		// "this node can no longer be given work" about a node that was told
+		// to stop.
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Serve answered %v, want context.Canceled: what the node's log says about a "+
+				"deadline must be that the node was stopped and not that its worker failed", err)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("WEDGED: Serve did not return after the session did")
