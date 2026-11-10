@@ -2105,6 +2105,14 @@ subnetted`. Every remedy is a command — `ember reap`, `ember down`,
 `ember store rm` — and there are deliberately no buttons here: a destroy from a
 browser is a side effect this server's threat model has never argued for.
 
+The columns are named — `kind`, `what`, `why`, `recorded`, `cost` — and the
+fourth is why the header exists at all. The other four cells say what they are:
+a kind is a word, an id is plainly an id, a reason is a sentence and a cost
+carries its own `$`. A bare `2026-10-30 09:29 UTC` reads equally as created,
+started, last seen, destroyed or deadline, and on this panel those are not
+close together — under `deadline` that row expired days ago, under `recorded`
+it has been accruing for days. The fleet table below it is headed the same way.
+
 Beside the figure on a row is **when ember recorded the intent to rent**, in
 UTC, which is the instant that figure is measured from — a cost is the quoted
 rate times the time since it. Without the two together `$55.764` is a number an

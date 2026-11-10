@@ -326,6 +326,16 @@ func TestServe_UIShowsAWorkerOnTheJobAndThenOneThatStopsAnswering(t *testing.T) 
 	if !strings.Contains(says["verdict"], "not answering and are still billing") {
 		t.Errorf("the panel's verdict does not mention the wedged rental: %q", says["verdict"])
 	}
+	// AND EVERY COLUMN OF THIS TABLE IS NAMED. Three of the seven are a bare
+	// duration or a single word out of queue.WorkerState -- `starting`, `2s`,
+	// `30m left` -- so this table needs its header more than the findings
+	// table beside it, not less. `heartbeat` covers both things that cell
+	// holds: the age of the last beat, and the sentence that replaces it when
+	// the row is wrong.
+	const want = "state // node // card · image // generating // heartbeat // deadline // cost"
+	if got := says["fleetheader"]; got != want {
+		t.Errorf("the fleet table's columns are named %q, want %q", got, want)
+	}
 
 	unpause()
 	stopServe()

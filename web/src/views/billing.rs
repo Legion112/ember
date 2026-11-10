@@ -160,6 +160,29 @@ fn findings_table(fs: Vec<crate::model::Finding>) -> AnyView {
     }
     view! {
         <table class="ledger">
+            // A HEADER BECAUSE ONE COLUMN CANNOT NAME ITSELF, which is what
+            // the creation time changed about this table. `orphan` is a word,
+            // `runpod/a646…` is plainly an id, the reason is a sentence and
+            // `$16.0088` is labelled by its own `$` -- four columns that
+            // needed nothing. `2026-10-30 09:29 UTC` is none of those: it
+            // reads equally as created, started, last seen, destroyed or
+            // deadline, and on a panel about leaking money those are not
+            // close together. Under `deadline` that row expired eleven days
+            // ago; under `recorded` it has been accruing for eleven days.
+            //
+            // `recorded` AND NOT `created`, because the instant is when ember
+            // wrote the intent record -- before the create call, by design --
+            // and `created` would claim a machine that, for an orphan,
+            // frequently never existed.
+            <thead>
+                <tr>
+                    <th>"kind"</th>
+                    <th>"what"</th>
+                    <th>"why"</th>
+                    <th>"recorded"</th>
+                    <th class="price">"cost"</th>
+                </tr>
+            </thead>
             <tbody>
                 {fs.into_iter().map(|f| {
                     // The accrued cost where ember knows enough to say it.
@@ -227,6 +250,23 @@ fn fleet_table(ws: Vec<crate::model::Worker>) -> AnyView {
              not returned is here with no node, because the money is committed from the plan."
         </p>
         <table class="ledger fleet">
+            // SEVEN COLUMNS, and three of them are bare durations or a word
+            // out of `queue.WorkerState` -- `starting`, `2s`, `30m left` --
+            // so this table had the findings table's problem over again and
+            // worse. `heartbeat` covers both of what that cell can hold: the
+            // age of the last beat, or, when the row is wrong, the sentence
+            // saying what is wrong with it.
+            <thead>
+                <tr>
+                    <th>"state"</th>
+                    <th>"node"</th>
+                    <th>"card \u{b7} image"</th>
+                    <th>"generating"</th>
+                    <th>"heartbeat"</th>
+                    <th>"deadline"</th>
+                    <th class="price">"cost"</th>
+                </tr>
+            </thead>
             <tbody>
                 {ws.into_iter().map(|w| {
                     // READ HERE, INSIDE THE CLOSURE THAT BUILDS THIS ROW, and
