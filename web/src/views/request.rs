@@ -21,7 +21,7 @@
 use leptos::prelude::*;
 
 use crate::api;
-use crate::model::{Envelope, Job, Progress, Rental, Request, Stream};
+use crate::model::{subtype, Artifact, Envelope, ImageRef, Job, Progress, Rental, Request, Stream};
 
 /// Watcher is everything one request's progress stream writes into.
 ///
@@ -554,6 +554,24 @@ pub fn RequestPage(id: String) -> impl IntoView {
 /// was pinned.
 #[component]
 fn Parameters(job: Job, index: usize, total: usize) -> impl IntoView {
+    // NOTHING ARRIVED, SO NOTHING IS CLAIMED. `viewRequest` projects a job in
+    // the image shape and carries no `tts` and no `kind`, so a finished speech
+    // request reaches this component as one job with every field at its zero
+    // -- and `settings` would then render seven rows of dashes under an empty
+    // prompt, which reads as ember having lost the request. The decision is
+    // `Job::has_parameters`, where `cargo test` reaches it; this is the
+    // sentence. It names what is missing rather than what it suspects, because
+    // the page genuinely cannot tell a speech job from an empty one.
+    if !job.has_parameters() {
+        return view! {
+            <p class="hint">
+                {format!("job {} of {total}: ", index + 1)}
+                "ember did not send this job's own parameters to the page. A speech
+                 request's text is not in the request view yet."
+            </p>
+        }
+        .into_any();
+    }
     let settings = job.settings();
     let seed = settings
         .iter()
@@ -597,6 +615,7 @@ fn Parameters(job: Job, index: usize, total: usize) -> impl IntoView {
             </dl>
         </details>
     }
+    .into_any()
 }
 
 /// Gallery is the results, and the preview frame while there are none.
@@ -610,12 +629,11 @@ fn Gallery(request: RwSignal<Option<Request>>, progress: RwSignal<Progress>) -> 
                 key=|i| i.path.clone()
                 let:im
             >
-                <figure>
-                    <a href=im.path.clone() target="_blank">
-                        <img src=im.path.clone() alt=format!("job {}", im.job) />
-                    </a>
-                    <figcaption>{format!("job {}", im.job)}</figcaption>
-                </figure>
+                // THE ELEMENT IS CHOSEN BY `ImageRef::artifact`, where cargo
+                // test reaches it, and the dispatch is a named function below
+                // for the reason `answered` is one: a match inside a `view!`
+                // can only be checked by driving a browser.
+                {result(im)}
             </For>
 
             // The progress frame, while a job is still sampling. Cache-busted
@@ -654,5 +672,87 @@ fn Gallery(request: RwSignal<Option<Request>>, progress: RwSignal<Progress>) -> 
                     .collect::<Vec<_>>()
             }}
         </div>
+    }
+}
+
+/// One finished artifact, in whichever element it wants.
+///
+/// DECIDED FROM THE ARTIFACT AND NOT FROM THE REQUEST'S KIND, which is the
+/// only form in which the element and the bytes cannot disagree. The server
+/// derives `media` from the blob key with the same closed switch that sets the
+/// `Content-Type` on this very path, so what this function reads is what the
+/// browser is about to be sent. A kind is a property of the REQUEST: it
+/// answers the same today, because a speech rental writes wavs and an image
+/// rental writes pngs, and it stops answering the same the first time one kind
+/// writes two sorts of file -- at which point a page switching on the kind
+/// renders every artifact as whichever one the kind implied, with nothing
+/// reporting it. The page would also then hold a second reading of a question
+/// Go already answers, which is `queue.Cost`'s shape.
+///
+/// WHICH of the three it is belongs to `ImageRef::artifact`, where `cargo
+/// test` reaches it; this function is the layout.
+fn result(im: ImageRef) -> AnyView {
+    let caption = format!("job {}", im.job);
+    match im.artifact() {
+        Artifact::Image => view! {
+            <figure>
+                <a href=im.path.clone() target="_blank">
+                    <img src=im.path.clone() alt=caption.clone() />
+                </a>
+                <figcaption>{caption}</figcaption>
+            </figure>
+        }
+        .into_any(),
+
+        // `controls` AND NOTHING ELSE, which is the whole player: the browser
+        // already has a transport, a scrubber, a volume and a download item,
+        // and a hand-rolled one would be a dependency and a set of buttons to
+        // keep working. No `autoplay`: a page that starts making noise on
+        // load is a page an operator mutes, and a batch of eight would start
+        // eight.
+        //
+        // THE LINK IS KEPT BESIDE IT, as the image has one, because the one
+        // thing `<audio controls>` does not offer on every browser is "give
+        // me the file" -- and the artifact is what the rental was for.
+        Artifact::Audio => view! {
+            <figure class="audio">
+                <audio controls preload="metadata" src=im.path.clone() />
+                <figcaption>
+                    {caption}
+                    " "
+                    // THE SUBTYPE THE SERVER DECLARED AND NOT THE WORD "wav",
+                    // which is what this said: ember writes one audio format
+                    // today, so the literal was right and would have gone on
+                    // reading "wav" over the first artifact that was not one.
+                    // The same reason the element is chosen from `media`
+                    // rather than from the kind, one caption down.
+                    <a href=im.path.clone() target="_blank">{subtype(&im.media)}</a>
+                </figcaption>
+            </figure>
+        }
+        .into_any(),
+
+        // SAID, AND NOT RENDERED AS AN IMAGE. `GET` on this path answers 500
+        // for an artifact ember declares no type for, and both `<img>` and
+        // `<audio>` render perfectly over a failed fetch and show nothing --
+        // so a guess here produces a gallery that looks loaded and is empty.
+        // The link stays, because the bytes are on disk and the operator paid
+        // for them.
+        Artifact::Unknown(media) => view! {
+            <figure class="unknown">
+                <figcaption>
+                    {caption}
+                    ": ember does not know what kind of file this is"
+                    {if media.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({media})")
+                    }}
+                    ". "
+                    <a href=im.path.clone() target="_blank">"try to open it"</a>
+                </figcaption>
+            </figure>
+        }
+        .into_any(),
     }
 }

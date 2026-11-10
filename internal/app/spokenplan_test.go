@@ -31,8 +31,8 @@ func TestNewPlan_ASpeechBatchTravelsBesideTheSpecAndNotOnIt(t *testing.T) {
 	}
 	// The defaults the image bakes in, resolved once by the config rather than
 	// by the driver, so a dry run prints what will actually be sent.
-	if plan.Spoken.Voice != config.DefaultVoice {
-		t.Errorf("voice = %q, want %q", plan.Spoken.Voice, config.DefaultVoice)
+	if plan.Spoken.Jobs[0].Voice != config.DefaultVoice {
+		t.Errorf("voice = %q, want %q", plan.Spoken.Jobs[0].Voice, config.DefaultVoice)
 	}
 	// AND NOTHING ON THE SPEC, which is the seal rather than a detail: a spec
 	// field is a thing a request could one day be consulted about, and
@@ -40,8 +40,8 @@ func TestNewPlan_ASpeechBatchTravelsBesideTheSpecAndNotOnIt(t *testing.T) {
 	if plan.Spec.Workload() != "" {
 		t.Errorf("the spec names a workload (%q) for a speech run", plan.Spec.Workload())
 	}
-	if len(plan.Spec.Serve) != 0 || len(plan.Spec.Cmds) != 0 {
-		t.Errorf("the spec carries serve=%v cmds=%v", plan.Spec.Serve, plan.Spec.Cmds)
+	if len(plan.Spec.Serve) != 0 {
+		t.Errorf("the spec carries serve=%v for a speech run", plan.Spec.Serve)
 	}
 	// And the dispatch finds it.
 	b := plan.batchOf()
@@ -52,43 +52,35 @@ func TestNewPlan_ASpeechBatchTravelsBesideTheSpecAndNotOnIt(t *testing.T) {
 
 // TestNewPlan_RefusesTwoWorkloadKinds.
 //
-// node.NewSpec already refuses any two of `cmd`, `cmds` and `sd.serve`, and
-// CANNOT see this one, because Spec has no speech field. Without the refusal a
-// layer up, Plan.serve reaches `len(p.Spec.Cmds) > 0` first and runs the
-// commands -- leaving an operator who wrote both with a rental that said
-// nothing and no line anywhere saying why.
+// node.NewSpec CANNOT see this one, because Spec has no speech field. Without
+// the refusal a layer up, `Plan.batchOf` would pick one of the two and the
+// other would be silently dropped -- leaving an operator who wrote both with
+// a rental that generated the wrong thing and no line saying why.
+//
+// THE ACCEPTANCE IS ASSERTED BESIDE IT, because a NewPlan that refused every
+// speech configuration would satisfy the refusal on its own -- and a speech
+// config with no `sd:` block is the shape every tts run has.
 func TestNewPlan_RefusesTwoWorkloadKinds(t *testing.T) {
-	cases := []struct {
-		name string
-		edit func(*config.Config)
-		want string
-	}{
-		{"with cmd", func(c *config.Config) { c.Cmd = []string{"true"} }, "cmd or cmds"},
-		{"with cmds", func(c *config.Config) { c.Cmds = [][]string{{"true"}} }, "cmd or cmds"},
-		{"with sd.serve", func(c *config.Config) {
-			c.SD = config.SDConfig{
-				Serve: []string{"sd-server", "--model", "/m.gguf"},
-				Jobs:  []config.SDJob{{Prompt: "a cat"}},
-			}
-		}, "sd.serve"},
+	cfg := spokenConfig()
+	cfg.SD = config.SDConfig{
+		Serve: []string{"sd-server", "--model", "/m.gguf"},
+		Jobs:  []config.SDJob{{Prompt: "a cat"}},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			cfg := spokenConfig()
-			c.edit(&cfg)
-			_, err := NewPlan(t.Context(), Request{Config: cfg, Deps: planDeps(t)}, nil)
-			if err == nil {
-				t.Fatal("two workload kinds were accepted")
-			}
-			if !strings.Contains(err.Error(), "tts.jobs") || !strings.Contains(err.Error(), c.want) {
-				t.Errorf("error = %q, want it to name tts.jobs and %s", err, c.want)
-			}
-			// A usage error, so `ember up` exits 3 rather than 1: a config
-			// with two answers is a thing the operator typed.
-			if !errors.Is(err, ErrUsage) {
-				t.Errorf("error is not a usage error: %v", err)
-			}
-		})
+	_, err := NewPlan(t.Context(), Request{Config: cfg, Deps: planDeps(t)}, nil)
+	if err == nil {
+		t.Fatal("two workload kinds were accepted")
+	}
+	if !strings.Contains(err.Error(), "tts.jobs") || !strings.Contains(err.Error(), "sd.serve") {
+		t.Errorf("error = %q, want it to name tts.jobs and sd.serve", err)
+	}
+	// A usage error, so `ember up` exits 3 rather than 1: a config with two
+	// answers is a thing the operator typed.
+	if !errors.Is(err, ErrUsage) {
+		t.Errorf("error is not a usage error: %v", err)
+	}
+
+	if _, err := NewPlan(t.Context(), Request{Config: spokenConfig(), Deps: planDeps(t)}, nil); err != nil {
+		t.Fatalf("a speech configuration naming one kind was refused: %v", err)
 	}
 }
 

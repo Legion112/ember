@@ -6,17 +6,27 @@ import (
 	"time"
 )
 
+// withPaths fills the two fields a catalogue entry supplies, so a table of
+// bounds is about the bound and not about the paths. The two are checked on
+// their own in TestJob_ValidateNeedsTheTwoPathsACatalogueSupplies.
+func withPaths(j Job) Job {
+	j.Voice = "/opt/voices/v.onnx"
+	j.EspeakData = "/opt/piper/espeak-ng-data"
+	return j
+}
+
 func f(v float64) *float64 { return &v }
 func i(v int) *int         { return &v }
 
 // goodRun is a batch every check accepts, so a test that breaks one field is
 // breaking exactly that field.
 func goodRun() Run {
-	return Run{
-		Voice:      "/opt/voices/en_US-lessac-medium.onnx",
-		EspeakData: "/opt/piper/espeak-ng-data",
-		Jobs:       []Job{{Text: "Hello from ember.", Output: "hello"}},
-	}
+	return Run{Jobs: []Job{goodJob()}}
+}
+
+// goodJob is an utterance every check accepts.
+func goodJob() Job {
+	return withPaths(Job{Text: "Hello from ember.", Output: "hello"})
 }
 
 func TestRun_ValidateAcceptsABatchAndRefusesEachWayItCanBeWrong(t *testing.T) {
@@ -32,8 +42,6 @@ func TestRun_ValidateAcceptsABatchAndRefusesEachWayItCanBeWrong(t *testing.T) {
 		edit func(*Run)
 		want string
 	}{
-		{"no voice", func(r *Run) { r.Voice = "  " }, "tts.voice is empty"},
-		{"no espeak data", func(r *Run) { r.EspeakData = "" }, "tts.espeak_data is empty"},
 		{"no jobs", func(r *Run) { r.Jobs = nil }, "tts.jobs is empty"},
 		{"a job with no text", func(r *Run) { r.Jobs[0].Text = " \n" }, "text is empty"},
 	}
@@ -57,7 +65,9 @@ func TestRun_ValidateAcceptsABatchAndRefusesEachWayItCanBeWrong(t *testing.T) {
 // that says "a job is wrong" sends the operator to read all twenty.
 func TestRun_ValidateNamesTheJobThatIsWrong(t *testing.T) {
 	r := goodRun()
-	r.Jobs = append(r.Jobs, Job{Text: "ok"}, Job{Text: ""})
+	bad := goodJob()
+	bad.Text = ""
+	r.Jobs = append(r.Jobs, goodJob(), bad)
 	err := r.Validate()
 	if err == nil {
 		t.Fatal("a batch with an empty third utterance was accepted")
@@ -73,20 +83,20 @@ func TestJob_ValidateBoundsEveryNumberPiperPublishes(t *testing.T) {
 		job  Job
 		want string
 	}{
-		{"length_scale zero", Job{Text: "x", LengthScale: f(0)}, "length_scale"},
-		{"length_scale negative", Job{Text: "x", LengthScale: f(-1)}, "length_scale"},
-		{"length_scale too large", Job{Text: "x", LengthScale: f(10.5)}, "length_scale"},
-		{"noise_scale negative", Job{Text: "x", NoiseScale: f(-0.1)}, "noise_scale"},
-		{"noise_scale too large", Job{Text: "x", NoiseScale: f(11)}, "noise_scale"},
-		{"noise_w negative", Job{Text: "x", NoiseW: f(-1)}, "noise_w"},
-		{"noise_w too large", Job{Text: "x", NoiseW: f(10.1)}, "noise_w"},
-		{"sentence_silence negative", Job{Text: "x", SentenceSilence: f(-1)}, "sentence_silence"},
-		{"sentence_silence too large", Job{Text: "x", SentenceSilence: f(61)}, "sentence_silence"},
-		{"speaker negative", Job{Text: "x", Speaker: i(-1)}, "speaker"},
+		{"length_scale zero", withPaths(Job{Text: "x", LengthScale: f(0)}), "length_scale"},
+		{"length_scale negative", withPaths(Job{Text: "x", LengthScale: f(-1)}), "length_scale"},
+		{"length_scale too large", withPaths(Job{Text: "x", LengthScale: f(10.5)}), "length_scale"},
+		{"noise_scale negative", withPaths(Job{Text: "x", NoiseScale: f(-0.1)}), "noise_scale"},
+		{"noise_scale too large", withPaths(Job{Text: "x", NoiseScale: f(11)}), "noise_scale"},
+		{"noise_w negative", withPaths(Job{Text: "x", NoiseW: f(-1)}), "noise_w"},
+		{"noise_w too large", withPaths(Job{Text: "x", NoiseW: f(10.1)}), "noise_w"},
+		{"sentence_silence negative", withPaths(Job{Text: "x", SentenceSilence: f(-1)}), "sentence_silence"},
+		{"sentence_silence too large", withPaths(Job{Text: "x", SentenceSilence: f(61)}), "sentence_silence"},
+		{"speaker negative", withPaths(Job{Text: "x", Speaker: i(-1)}), "speaker"},
 		// Through Job.Validate and not only through ValidateOutput directly,
 		// because a check that is written and not called is this
 		// repository's own recurring defect.
-		{"an output that is a path", Job{Text: "x", Output: "../a"}, "not a plain filename"},
+		{"an output that is a path", withPaths(Job{Text: "x", Output: "../a"}), "not a plain filename"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -106,10 +116,10 @@ func TestJob_ValidateBoundsEveryNumberPiperPublishes(t *testing.T) {
 // defect it guards is a zero sentinel making these unrequestable.
 func TestJob_ZeroIsAValueWhereverPipersDefaultIsNot(t *testing.T) {
 	for _, j := range []Job{
-		{Text: "x", Speaker: i(0)},
-		{Text: "x", NoiseScale: f(0)},
-		{Text: "x", NoiseW: f(0)},
-		{Text: "x", SentenceSilence: f(0)},
+		withPaths(Job{Text: "x", Speaker: i(0)}),
+		withPaths(Job{Text: "x", NoiseScale: f(0)}),
+		withPaths(Job{Text: "x", NoiseW: f(0)}),
+		withPaths(Job{Text: "x", SentenceSilence: f(0)}),
 	} {
 		if err := j.Validate(); err != nil {
 			t.Errorf("a deliberate zero was refused: %v", err)
@@ -118,7 +128,7 @@ func TestJob_ZeroIsAValueWhereverPipersDefaultIsNot(t *testing.T) {
 }
 
 func TestJob_ValidateBoundsTheText(t *testing.T) {
-	j := Job{Text: strings.Repeat("a", MaxText+1)}
+	j := withPaths(Job{Text: strings.Repeat("a", MaxText+1)})
 	err := j.Validate()
 	if err == nil {
 		t.Fatal("text past the bound was accepted")
@@ -132,7 +142,7 @@ func TestJob_ValidateBoundsTheText(t *testing.T) {
 	}
 	// Exactly the bound is accepted: "too large" and "exactly the bound" are
 	// different answers, which is internal/s3's `do` rule one package over.
-	if err := (Job{Text: strings.Repeat("a", MaxText)}).Validate(); err != nil {
+	if err := (withPaths(Job{Text: strings.Repeat("a", MaxText)})).Validate(); err != nil {
 		t.Errorf("text at exactly the bound was refused: %v", err)
 	}
 }
@@ -166,9 +176,9 @@ func TestValidateOutput_RefusesAnythingThatIsNotAPlainFilename(t *testing.T) {
 // like shell has to arrive as data.
 func TestCommand_EveryValueIsAPositionalParameterAndNeverScriptText(t *testing.T) {
 	hostile := `"; rm -rf / #$(whoami)` + "`id`" + ` '\'' $HOME`
-	r := goodRun()
-	j := Job{Text: hostile, Output: "x"}
-	cmd := r.Command(j, "/workspace/out/speech/x.wav")
+	j := goodJob()
+	j.Text, j.Output = hostile, "x"
+	cmd := j.Command("/workspace/out/speech/x.wav")
 
 	if cmd[0] != "sh" || cmd[1] != "-c" {
 		t.Fatalf("command does not start with sh -c: %q", cmd[:2])
@@ -182,7 +192,7 @@ func TestCommand_EveryValueIsAPositionalParameterAndNeverScriptText(t *testing.T
 	// $0, then the four positional parameters in the order the script reads
 	// them. Asserted by position, because the script names them $1..$4 and a
 	// reordering here would be silent.
-	want := []string{"ember-tts", hostile, r.Voice, r.EspeakData, "/workspace/out/speech/x.wav"}
+	want := []string{"ember-tts", hostile, j.Voice, j.EspeakData, "/workspace/out/speech/x.wav"}
 	for n, w := range want {
 		if cmd[3+n] != w {
 			t.Errorf("argv[%d] = %q, want %q", 3+n, cmd[3+n], w)
@@ -191,12 +201,10 @@ func TestCommand_EveryValueIsAPositionalParameterAndNeverScriptText(t *testing.T
 }
 
 func TestCommand_SendsOnlyTheFlagsThatWereSet(t *testing.T) {
-	r := goodRun()
-
 	// Nothing set: piper's own defaults apply and ember names none of them.
 	// A flag carrying the value piper would have chosen is a flag that can
 	// come to disagree with it.
-	bare := r.Command(Job{Text: "x"}, "/o.wav")
+	bare := withPaths(Job{Text: "x"}).Command("/o.wav")
 	for _, flag := range []string{"--speaker", "--length_scale", "--noise_scale", "--noise_w", "--sentence_silence"} {
 		for _, a := range bare {
 			if a == flag {
@@ -205,10 +213,10 @@ func TestCommand_SendsOnlyTheFlagsThatWereSet(t *testing.T) {
 		}
 	}
 
-	full := r.Command(Job{
+	full := withPaths(Job{
 		Text: "x", Speaker: i(3), LengthScale: f(1.5), NoiseScale: f(0.5),
 		NoiseW: f(0.25), SentenceSilence: f(0),
-	}, "/o.wav")
+	}).Command("/o.wav")
 	joined := strings.Join(full, " ")
 	for _, want := range []string{
 		"--speaker 3", "--length_scale 1.5", "--noise_scale 0.5",
@@ -302,7 +310,7 @@ func TestJob_DescribeIsOneLineAndCutsOnARuneBoundary(t *testing.T) {
 
 	// Multi-byte, and longer than the bound: cutting on a byte index would
 	// put a replacement character in the operator's log.
-	long := Job{Text: strings.Repeat("д", 200)}
+	long := withPaths(Job{Text: strings.Repeat("д", 200)})
 	if d := long.Describe(); strings.Contains(d, "�") {
 		t.Errorf("Describe cut a rune in half: %q", d)
 	}
@@ -310,7 +318,35 @@ func TestJob_DescribeIsOneLineAndCutsOnARuneBoundary(t *testing.T) {
 	// With no output name, the text alone -- app.SpokenStem is what numbers
 	// it, and naming a stem here that the caller may not use would be a
 	// second spelling of the filename.
-	if d := (Job{Text: "x"}).Describe(); strings.Contains(d, Ext) {
+	if d := (withPaths(Job{Text: "x"})).Describe(); strings.Contains(d, Ext) {
 		t.Errorf("Describe named an artifact for a job with no output: %q", d)
+	}
+}
+
+// TestJob_ValidateNeedsTheTwoPathsACatalogueSupplies.
+//
+// They moved from the Run to the Job when the measurement said a one-shot
+// invocation names its own model, so these are the refusals an operator sees
+// when a catalogue entry is half-written -- and they are checked here because
+// withPaths fills them for every other case in this file.
+func TestJob_ValidateNeedsTheTwoPathsACatalogueSupplies(t *testing.T) {
+	for _, c := range []struct {
+		name, want string
+		edit       func(*Job)
+	}{
+		{"no voice", "voice is empty", func(j *Job) { j.Voice = "  " }},
+		{"no espeak data", "espeak_data is empty", func(j *Job) { j.EspeakData = "" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			j := goodJob()
+			c.edit(&j)
+			err := j.Validate()
+			if err == nil {
+				t.Fatalf("%s was accepted", c.name)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error = %q, want it to contain %q", err, c.want)
+			}
+		})
 	}
 }

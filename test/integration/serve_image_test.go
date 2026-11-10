@@ -110,6 +110,13 @@ func queueJobs(t *testing.T, srv served, body string) string {
 type requestState struct {
 	Status string `json:"status"`
 	Node   string `json:"node"`
+
+	// Cost is the RENTAL's, charged to the request that opened it. Read here
+	// so that "a rider gets the node and not the cost" can be asserted as
+	// one statement rather than as two labs.
+	Cost struct {
+		Micro int64 `json:"micro_usd"`
+	} `json:"cost"`
 	Images []struct {
 		Path    string `json:"path"`
 		Preview bool   `json:"preview"`
@@ -157,6 +164,15 @@ func waitForStatus(t *testing.T, srv served, id string, want string, within time
 //
 // It is asserted by counting "node ready" in ember's own output, which is the
 // only number that cannot be argued with: two of them is two machines.
+//
+// AND SINCE max_nodes IT IS THE LAB-LEVEL PROOF OF STRICT PACKING (#204). The
+// lab's config names no `max_nodes`, so this `ember serve` runs at the default
+// of TWO -- there is a free slot throughout, and the only thing keeping the
+// second request off a node of its own is the create-side claim asking for
+// work no live rental can serve (`genstore.Compat.Live`). Until #204 this
+// assertion was a consequence of there being one drain goroutine and could not
+// have failed; it is now the behaviour itself, against a real daemon, and it
+// goes red if packing ever becomes "prefer" rather than "strict".
 func TestServe_DrainsTheQueueOntoOneRental(t *testing.T) {
 	l := servableLab(t)
 	cmd, srv, wait := startServe(t, l)
@@ -199,16 +215,41 @@ func TestServe_DrainsTheQueueOntoOneRental(t *testing.T) {
 		}
 	}
 
-	// The rental's node and cost go to the request that opened it; the rider
-	// gets its own per-job card time. Summing the per-request figures would
-	// understate the bill and attributing the rental to each would multiply
-	// it, so the two differ on purpose.
+	// THE RIDER NAMES THE MACHINE AND IS NOT CHARGED FOR IT, which is a
+	// CHANGE to this assertion and the sharp edge of the fleet view.
+	//
+	// It read "the rider names a node (%s); the rental belongs to the one that
+	// opened it" -- true of the mechanism and wrong as a rule. `requests.node`
+	// is written through from the node_ready EVENT, and Queue.lifecycle routes
+	// that event to the opener alone because run_cost travels the same road:
+	// "attributing the whole rental to every request would multiply it." So
+	// the rider's node column was empty, and at max_nodes>1 that is a hole
+	// exactly where a fleet view looks -- a request that generated on a real
+	// machine whose row cannot say which.
+	//
+	// The node is a LABEL: every request this rental served ran on that
+	// machine, so writing it to each says one true thing N times. The cost is
+	// a QUANTITY: writing it to each says one bill N times.
+	//
+	// THE COST HALF IS NOT ASSERTED HERE AND CANNOT BE, which is said rather
+	// than left as an absence: this lab rents from the local provider, whose
+	// offer is free, so BOTH rows carry zero and the figure cannot tell "the
+	// rider was not charged" from "nothing cost anything". It is held by
+	// TestFleet_ARiderGetsTheNodeAndNotTheCost in internal/queue, whose fake
+	// rental emits a run_cost -- which is the one thing a free provider makes
+	// a lab unable to see.
 	if firstDone.Node == "" {
 		t.Error("the request that opened the rental does not name its node")
 	}
-	if secondDone.Node != "" {
-		t.Errorf("the rider names a node (%s); the rental belongs to the one that opened it",
-			secondDone.Node)
+	if secondDone.Node != firstDone.Node {
+		t.Errorf("the rider says it ran on %q and the opener says %q; this is one rental and "+
+			"one machine", secondDone.Node, firstDone.Node)
+	}
+	if secondDone.Cost.Micro != firstDone.Cost.Micro {
+		// Both are zero on a free provider. Compared rather than asserted
+		// against a constant, so that this line becomes meaningful rather
+		// than wrong if the lab ever rents from something that charges.
+		t.Logf("opener cost %d, rider cost %d", firstDone.Cost.Micro, secondDone.Cost.Micro)
 	}
 
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
@@ -1016,7 +1057,13 @@ func TestServe_UIGreysWhatTheServerSaysItCannotDo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutCaps(t.Context(), sdserver.Capabilities{
+	// UNDER THE SHAPE THIS LAB'S CONFIG NAMES, because the cache is keyed now:
+	// `harness.Lab` writes `provider: local` and no `gpu:`, and
+	// `GET /api/config` reads the shape the operator's own file would rent. A
+	// row under any other key is a miss, and the page would report no
+	// capabilities at all -- which is a pass for the three assertions below
+	// that look for an ABSENT flag.
+	if err := store.PutCaps(t.Context(), genstore.NewShape(genstore.KindSD, "local", ""), sdserver.Capabilities{
 		Model:      "sd15.gguf",
 		Samplers:   []string{"euler", "heun"},
 		Schedulers: []string{"discrete"},
@@ -3354,7 +3401,9 @@ func TestServe_GeneratesADifferentImageFromAnUploadedOne(t *testing.T) {
 			"not given, which is exactly the failure this path exists to avoid")
 	}
 
-	// And one rental served both, which is the saving the queue is for.
+	// And one rental served both, which is the saving the queue is for -- and
+	// since max_nodes it is also strict packing, because this serve runs at
+	// the default of two slots and the second request could have had one.
 	out := stop()
 	if n := strings.Count(out, "node ready"); n != 1 {
 		t.Errorf("ember rented %d node(s) for two requests, want 1. Output:\n%s", n, out)
@@ -3665,13 +3714,47 @@ const billingProbe = `(function () {
 		var e = panel.querySelector(sel);
 		return e ? e.textContent.replace(/\s+/g, " ").trim() : "";
 	}
-	var rows = Array.from(panel.querySelectorAll("table.ledger tr"))
+	// NOT .fleet, WHICH IS THE OTHER TABLE IN THIS PANEL. The sweep's three
+	// tables are what exists at the providers; the fleet is what this process
+	// is renting, and it has a probe of its own in fleetui_test.go. One
+	// selector matching both would make every assertion here about "rows"
+	// pass or fail on whether an ember serve happened to be renting.
+	// tbody tr, AND NOT tr. The tables grew a header row, and a bare "tr"
+	// takes it as data. No assertion collides with a column name TODAY --
+	// kind, what, why, recorded, cost -- and that is exactly why it is worth
+	// a line: every check here is a substring match over the joined rows, so
+	// the day a column is named after anything this file looks for, the
+	// assertion passes on the header and the defect it guards walks through.
+	// Nothing would report it, because a header is present on every run that
+	// has rows at all. The fleet probe in fleetui_test.go was already written
+	// this way; this one was not.
+	var rows = Array.from(panel.querySelectorAll("table.ledger:not(.fleet) tbody tr"))
 		.map(function (r) { return r.innerText.replace(/\s+/g, " ").trim(); })
 		.join(" // ");
 	return [
 		"panel|present",
-		"verdict|" + text("p.verdict"),
+		// EVERY VERDICT AND NOT THE FIRST, because there are two now and
+		// they answer different questions: reconcile's count of what
+		// ember ls exits 2 for, and the rentals THIS process is holding
+		// that have stopped answering. The old text(p.verdict) took whichever
+		// came first in the DOM, so an assertion about the second one was
+		// silently an assertion about the first -- which is how the fleet
+		// lab's wedged-verdict check read "nothing needs attention".
+		"verdict|" + Array.from(panel.querySelectorAll("p.verdict"))
+			.map(function (e) { return e.textContent.replace(/\s+/g, " ").trim(); })
+			.join(" // "),
 		"rows|" + rows,
+		// THE COLUMN NAMES, separately from the rows, because a header is the
+		// one part of a table that an assertion about rows cannot see. Both
+		// tables, kept apart for the reason rows are: this panel holds the
+		// sweep's findings and the fleet, and one selector matching both
+		// would make a check about either pass on the other.
+		"header|" + Array.from(panel.querySelectorAll("table.ledger:not(.fleet) thead th"))
+			.map(function (e) { return e.textContent.trim(); })
+			.join(" // "),
+		"fleetheader|" + Array.from(panel.querySelectorAll("table.fleet thead th"))
+			.map(function (e) { return e.textContent.trim(); })
+			.join(" // "),
 		"storage|" + Array.from(panel.querySelectorAll("p.hint"))
 			.map(function (e) { return e.textContent.replace(/\s+/g, " ").trim(); })
 			.filter(function (s) { return s.indexOf("storage:") === 0; })
@@ -3826,28 +3909,36 @@ func TestServe_UIReportsWhatIsBilling(t *testing.T) {
 	// measured it.
 	navTo(t, ctx, "what is billing", billingPanel)
 
-	// NOTHING UNTIL SOMEBODY ASKS. See the header: the empty answer and the
-	// answer nobody asked for must not render the same, and the empty one is
-	// the reassuring sentence.
+	// IT ANSWERS ON ARRIVAL, AND NOBODY PRESSES ANYTHING HERE. This assertion
+	// was the opposite of itself until this change: it required the panel to
+	// be silent until pressed, which is the rule the page was built to and the
+	// rule an operator kept walking into -- a leaking card was invisible on
+	// the one page whose subject is leaking cards until somebody thought to
+	// ask. "A button and never a poll" survives and is still the reason there
+	// is no timer; answering once per visit is not a timer.
+	//
+	// THE PRESS BELOW IS THEREFORE A REFRESH AND NOT A FIRST ASK, which is why
+	// it stays in this lab rather than coming out: the button has a job still,
+	// and a page that answered on arrival and then ignored the button would
+	// pass an assertion about findings while being useless to look at twice.
+	//
+	// What is NOT asserted here, and cannot honestly be: that the brief moment
+	// before the first answer renders nothing rather than `Nodes::default()`'s
+	// "nothing is running and nothing was left behind". That window is one
+	// fetch wide and racing it from here would be a flake rather than a check.
+	// It is the `Option` in `Billing` that holds it, and the comment there
+	// carries the argument.
 	before := billingSays(t, ctx)
 	if before["panel"] != "present" {
 		t.Fatalf("the billing panel is not on the page at all: %+v", before)
-	}
-	if before["verdict"] != "" || before["rows"] != "" {
-		t.Errorf("the panel answered before anything was asked: verdict=%q rows=%q",
-			before["verdict"], before["rows"])
 	}
 
 	// A CLEAN DAEMON FIRST, so the finding below is a change and not the only
 	// thing this lab has ever seen. Reversed, an assertion that merely found
 	// the word "leftover" would pass against a panel that printed it always.
-	if err := chromedp.Do(ctx,
-		chromedp.Click(`//button[contains(text(), "check what is running")]`)); err != nil {
-		t.Fatalf("pressing the button: %v\n%s", err, console.text())
-	}
 	clean := waitForBilling(t, ctx, func(s map[string]string) bool {
 		return s["verdict"] != ""
-	}, 60*time.Second, "answered at all")
+	}, 60*time.Second, "answered on arrival with nobody pressing anything")
 	if !strings.Contains(clean["verdict"], "nothing is running") {
 		t.Errorf("a clean daemon did not read as clean: %q", clean["verdict"])
 	}
@@ -3878,6 +3969,37 @@ func TestServe_UIReportsWhatIsBilling(t *testing.T) {
 		if !strings.Contains(found["rows"], want) {
 			t.Errorf("the rows do not mention %q: %q", want, found["rows"])
 		}
+	}
+	// NEITHER OF THESE TWO HAS A CREATION TIME, and a browser is where that
+	// is worth checking. A store and a leftover are the two kinds ember holds
+	// no record for -- node.Store carries no creation time at all and
+	// node.Leftover carries only the run's deadline -- so the cell is blank,
+	// and it is blank beside a cost that is blank for the same reason. The
+	// page appends the zone to every time it prints and Go's zero time
+	// formats as `0001-01-01T00:00:00Z`, so those two strings are what a
+	// projection that started answering here anyway would put on screen.
+	for _, never := range []string{" UTC", "0001-01-01"} {
+		if strings.Contains(found["rows"], never) {
+			t.Errorf("a store or a leftover dated itself with %q, and ember has no "+
+				"record of either: %q", never, found["rows"])
+		}
+	}
+
+	// EVERY COLUMN IS NAMED. Four of these cells say what they are -- a kind
+	// is a word, an id is plainly an id, a reason is a sentence and a cost
+	// carries its own `$` -- and the timestamp is the one that does not: bare,
+	// it reads equally as created, started, last seen, destroyed or deadline,
+	// and on this panel those are not close together.
+	if got := found["header"]; got != "kind // what // why // recorded // cost" {
+		t.Errorf("the findings table's columns are named %q", got)
+	}
+	// `recorded` AND NOT `created`, which is the distinction the column is
+	// for: ember writes the intent record BEFORE the create call, so for an
+	// orphan -- a record that never got an id -- `created` would name a
+	// machine that in the common case was refused and never existed.
+	if strings.Contains(found["header"], "created") {
+		t.Error("the time column is headed `created`; it is when ember RECORDED the " +
+			"intent, which is before any machine and often before none at all")
 	}
 	// The verdict counts the leftover and not the store, which is
 	// `reconcile.Kind.NeedsAttention`'s own decision carried across the wire

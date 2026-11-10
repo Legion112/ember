@@ -63,6 +63,7 @@ import (
 	"github.com/Legion112/ember/internal/loopback"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
+	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/internal/tts"
@@ -88,8 +89,13 @@ type Drain interface {
 	// Kick says there may be work. Never blocks.
 	Kick()
 
-	// Running is which request is generating right now, if any.
-	Running() (genstore.ReqID, bool)
+	// Running is which requests are generating right now, sorted.
+	//
+	// A LIST SINCE max_nodes (#204). It was `(ReqID, bool)` while one rental
+	// was structural; with several rentals in flight several requests
+	// generate at once, and a single id would mark one row in the queue table
+	// and leave the others looking queued.
+	Running() []genstore.ReqID
 
 	// Cancel stops one request's generation and reports whether it reached
 	// it. False means that request is not the one generating, which a caller
@@ -103,6 +109,26 @@ type Drain interface {
 	// NOT A SECOND SPELLING OF Running, and the difference is a rental the
 	// operator is paying for: see cancelRequest's two 409s.
 	Holding(genstore.ReqID) bool
+
+	// Fleet is every rental this process is holding, sorted: what each one
+	// is, which request is generating on it, and when its worker last beat.
+	//
+	// A FOURTH METHOD RATHER THAN A FIELD ON Running's ANSWER, because the
+	// two lists answer different questions and have different lifetimes. A
+	// request is `running` from the claim; a rental exists from the plan and
+	// outlives every request that rode it. Folding one into the other would
+	// have made "which requests are generating" and "what am I paying for"
+	// one list, and the row that disagrees is the rental with nothing on it
+	// -- which is a node billing for nothing and the one row an operator most
+	// needs to see.
+	//
+	// IT RETURNS queue.Worker AND NOT A LOCAL TYPE, which is the one import
+	// this package takes from the loop. The alternative is a second struct
+	// with the same fields, converted in `cmd_serve`, and a second place for
+	// a field added to one and not the other -- and this package already
+	// takes genstore.ReqID from the same direction. Nothing here can reach a
+	// plan, a provider or a rental through it: Worker is data.
+	Fleet() []queue.Worker
 }
 
 // Options are what a server needs.
@@ -110,6 +136,23 @@ type Options struct {
 	// Config is the operator's own file, read once at startup. It is the
 	// ceiling and everything a request may not choose.
 	Config config.Config
+
+	// Voices is the speech catalogue a request's voice id is checked
+	// against, derived from Config at startup by the one function that reads
+	// it.
+	//
+	// A FIELD AND NOT A READ OF Config IN THE HANDLER, which is #105's lesson
+	// applied before it costs anything: GET /api/nodes answered 501 in every
+	// shipped `ember serve` because Options had no Scan field and the three
+	// assignments in the tree were all in test files reaching past the
+	// constructor. The trap is available here too -- a handler calling
+	// s.opts.Config.TTSCatalogue() would work, and then the queue's copy and
+	// this one would be two derivations of one file that could come apart.
+	// One derivation, wired once in cmd_serve, handed to both.
+	//
+	// Empty means this process publishes no speech, which validateSpoken
+	// refuses with a sentence naming tts.voices rather than with a 501.
+	Voices tts.Catalogue
 
 	// Registry is what this process can reach. A provider with no credential
 	// is deliberately absent, so the UI does not offer a button that cannot
@@ -491,7 +534,14 @@ func serveOn(ctx context.Context, srv *http.Server, lns ...net.Listener) error {
 
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	var caps *sdserver.Capabilities
-	if c, ok, err := s.opts.Store.Caps(r.Context()); err != nil {
+	// THE CONFIG'S OWN SHAPE, because that is what this endpoint describes:
+	// the page asks "what can this server offer me" before it has chosen
+	// anything, and the answer it should be given is the one for the rental
+	// the operator's file would start. A page that then asks for a different
+	// card gets its own shape's answer from the refusal at POST time --
+	// validateJobs reads the request's shape, not this one.
+	shape := genstore.NewShape(genstore.KindSD, s.opts.Config.Provider, s.opts.Config.GPU)
+	if c, ok, err := s.opts.Store.Caps(r.Context(), shape); err != nil {
 		// Reported and not fatal: a UI without the capability list offers
 		// free-text controls instead of menus, which is worse than ideal and
 		// better than a blank page.
@@ -499,7 +549,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	} else if ok {
 		caps = &c
 	}
-	s.ok(w, viewConfig(s.opts.Config, s.registry(), s.opts.AllowPaid, caps))
+	s.ok(w, viewConfig(s.opts.Config, s.registry(), s.opts.AllowPaid, caps, s.opts.Voices))
 }
 
 func (s *Server) getOffers(w http.ResponseWriter, r *http.Request) {
@@ -563,7 +613,12 @@ func (s *Server) getNodes(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadGateway, err)
 		return
 	}
-	s.ok(w, viewNodes(sc))
+	// THE FLEET IS THIS PROCESS'S OWN BOOKKEEPING AND THE SWEEP IS THE
+	// PROVIDERS', joined below by the node's handle. Read AFTER the sweep so
+	// the two are as close together as they can be: a rental that ended
+	// during those three provider calls is better left out of the fleet than
+	// listed against a finding that no longer mentions it.
+	s.ok(w, viewNodes(sc, s.fleet(), time.Now()))
 }
 
 // postRequest queues a batch.
@@ -600,9 +655,21 @@ func (s *Server) postRequest(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusForbidden, err)
 		return
 	}
-	if len(s.opts.Config.SD.Serve) == 0 {
-		s.fail(w, http.StatusConflict, errors.New("this configuration has no sd.serve block, so "+
-			"there is no generation server to start and a queued request would have nowhere to run"))
+	// CAN THIS SERVER RUN THIS KIND? Per kind, because the two have different
+	// answers: an image needs `sd.serve` and an utterance needs a voice in
+	// `tts.voices`, and a configuration with one of them can serve one of
+	// them.
+	//
+	// IT USED TO ASK ONLY ABOUT sd.serve, which was the same question while
+	// there was one kind -- and the second kind made it a wall: a server
+	// publishing voices and no sd block refused every request there was,
+	// including the ones it could run. Found by the lab that posts to a real
+	// server, after the identical defect in `ember serve`'s own startup
+	// check; both were invisible to `go test ./...`, which builds a
+	// `webapi.Options` directly and never asks whether the configuration
+	// behind it could serve anything.
+	if err := s.canServe(genstore.KindOf(req.Kind)); err != nil {
+		s.fail(w, http.StatusConflict, err)
 		return
 	}
 	if err := s.validateJobs(r.Context(), req); err != nil {
@@ -665,6 +732,17 @@ func (s *Server) refusePaid(name string) error {
 // the schedulers and the format lists have no static answer, because a list
 // ember has not been told is not a list it can check against.
 func (s *Server) validateJobs(ctx context.Context, req genstore.Request) error {
+	// SPEECH IS VALIDATED AGAINST THE CATALOGUE AND RETURNS, because none of
+	// what follows is about it: there is no preview, no sampler list and no
+	// cached capabilities -- piper publishes nothing, so the only thing a
+	// refusal can rest on is the list of voices the operator published and
+	// the bounds internal/tts holds. A fall-through would run sdserver's
+	// static validation over a job with no prompt and refuse every utterance
+	// there is.
+	if genstore.KindOf(req.Kind) == genstore.KindTTS {
+		return s.validateSpoken(req)
+	}
+
 	preview, err := sdserver.ParsePreview(req.Preview)
 	if err != nil {
 		return fmt.Errorf("preview: %w", err)
@@ -674,7 +752,15 @@ func (s *Server) validateJobs(ctx context.Context, req genstore.Request) error {
 		return fmt.Errorf("preview_interval: %w", err)
 	}
 
-	caps, haveCaps, cerr := s.opts.Store.Caps(ctx)
+	// AGAINST THIS REQUEST'S OWN SHAPE AND NOT AGAINST WHATEVER CAME UP LAST.
+	// The cache used to be one row per process, so a request naming a
+	// provider and a card was checked against the capability list of
+	// whichever rental had most recently reported one -- a different card,
+	// possibly a different provider, and a sampler list that is legitimately
+	// allowed to differ between them. A miss here is the pre-rental case and
+	// is handled exactly as it always was: the static half still runs, and
+	// the capability half is caught on the node.
+	caps, haveCaps, cerr := s.opts.Store.Caps(ctx, req.Shape())
 	if cerr != nil {
 		s.log().Warn("could not read the cached capabilities; a bad sampler will be caught "+
 			"after the node is up instead of now", "err", cerr)
@@ -726,16 +812,28 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 		out = append(out, viewRequest(req, nil))
 	}
 
-	running, _ := s.running()
-	s.ok(w, map[string]any{"requests": out, "running": running})
+	s.ok(w, map[string]any{"requests": out, "running": s.running()})
 }
 
-func (s *Server) running() (string, bool) {
+// running is which requests are generating, as the wire carries them.
+//
+// NEVER NIL, which is not tidiness: Go marshals a nil slice as `null`, and a
+// client whose field is a list gets a type error that drops the WHOLE
+// envelope -- which cost this program its entire queue table once, over one
+// number the server could say and the browser could not hear. So this answers
+// `[]` for no queue and for an idle one alike, and `web/src/model.rs`
+// tolerates a null anyway, because the rule has to hold for a field somebody
+// adds later.
+func (s *Server) running() []string {
 	if s.opts.Queue == nil {
-		return "", false
+		return []string{}
 	}
-	id, ok := s.opts.Queue.Running()
-	return string(id), ok
+	ids := s.opts.Queue.Running()
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, string(id))
+	}
+	return out
 }
 
 func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {
@@ -855,6 +953,22 @@ func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 	// this is a no-op.
 	s.cancelRunning(id)
 	s.ok(w, map[string]any{"id": string(id), "status": string(genstore.StatusCancelled)})
+}
+
+// fleet is what this process is renting, tolerating no queue the way
+// cancelRunning and running() do.
+//
+// NIL IS AN EMPTY FLEET AND NOT A MISSING ONE. A server with no drain loop is
+// renting nothing, so "no rows" is the true answer rather than an absence --
+// the opposite of the `sweep` signal in the page, where "not asked" and "asked
+// and found nothing" must never render the same. The difference is that this
+// process KNOWS what it is holding, and a handler test holding nothing is
+// correct about it.
+func (s *Server) fleet() []queue.Worker {
+	if s.opts.Queue == nil {
+		return nil
+	}
+	return s.opts.Queue.Fleet()
 }
 
 // cancelRunning asks the drain loop to stop one request, tolerating no queue.
@@ -1017,11 +1131,11 @@ func (s *Server) getImage(w http.ResponseWriter, r *http.Request) {
 	// ServeContent reads the name ONLY to guess a type when none is declared,
 	// and one always is here -- the switch above is closed and its unknown
 	// path 500s -- so passing nothing costs this route nothing. What passing
-	// `path.Base(key)` cost was the TEST: with the declaration deleted,
-	// ServeContent's FIRST fallback is `mime.TypeByExtension` and not
-	// sniffing, and on a box with /etc/mime.types that answers `audio/wav` --
-	// the identical spelling -- so every header assertion on this route
-	// passed over a lost Content-Type.
+	// `path.Base(key)` cost was the test: with the declaration deleted,
+	// ServeContent's FIRST fallback is `mime.TypeByExtension`, not sniffing,
+	// and on a box with /etc/mime.types that answers `audio/wav` -- the
+	// identical spelling -- so every header assertion on this route passed
+	// over a lost Content-Type.
 	//
 	// IT WAS WORSE THAN A DEAD ASSERTION BECAUSE IT WAS ENVIRONMENT-DEPENDENT.
 	// `.wav` is not in Go's builtin mime table, so the same defect goes red on
@@ -1130,4 +1244,74 @@ func (s *Server) failStore(w http.ResponseWriter, err error) {
 		return
 	}
 	s.fail(w, http.StatusInternalServerError, err)
+}
+
+// validateSpoken refuses a speech request before it is queued.
+//
+// THE VOICE IS RESOLVED HERE AND THE RESULT IS THROWN AWAY, which looks
+// wasteful and is the point: what reaches the store is the ASK -- a voice id
+// and no path -- and what this proves is that the id names something the
+// operator published, at the cheapest moment there is. The resolution that
+// matters happens again in the drain loop, from the same catalogue, because
+// the loop builds its batch from the STORED request for every request it
+// claims. Two resolutions of one id, each the only one available on its path.
+//
+// A refusal here costs nothing. The same mistake found at the node costs a
+// rental: the create call, the wait for sshd, the probe and the image pull,
+// all of it billed, to discover that an id has a typo in it.
+func (s *Server) validateSpoken(req genstore.Request) error {
+	// AN EMPTY CATALOGUE IS ITS OWN SENTENCE AND NOT "no voice <id>". An
+	// operator who has not configured speech asked for something this process
+	// cannot do; one who has, and typed an id wrong, needs the list. Lookup
+	// answers both, and the distinction is why it does rather than why this
+	// does.
+	if len(req.Jobs) == 0 {
+		// Unreachable through toRequest, which refuses a jobless request
+		// before this, and here because Adopt and a hand-written body reach
+		// genstore.Request without passing through it. A rental that said
+		// nothing is the thing being refused.
+		return errors.New("a speech request with no utterances would rent a machine and say nothing")
+	}
+	for i, j := range req.Jobs {
+		if j.TTS == nil {
+			return fmt.Errorf("jobs[%d]: this is a %s request and the job carries no utterance",
+				i, genstore.KindTTS)
+		}
+		// Resolved rather than only looked up, so the bounds on the five
+		// numbers are the SAME function the node will apply -- one authority,
+		// and a refusal an operator reads once rather than twice in different
+		// words.
+		if _, err := j.TTS.Resolve(s.opts.Voices); err != nil {
+			return fmt.Errorf("jobs[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// canServe answers whether this configuration can run one kind.
+//
+// A 409 AND NOT A 400, which the status it replaced already had right: the
+// body is well-formed and the request is one ember understands -- what is
+// missing is a block in the operator's own file, which no edit to the request
+// can fix. A 400 would tell a page to change what it sent.
+//
+// The speech arm is deliberately NOT "is there a tts: block": a configuration
+// with `tts.jobs` and no `tts.voices` can run `ember up` and cannot serve a
+// browser, because a request names an id and there would be none to name. The
+// catalogue is the thing a request needs, so the catalogue is what is asked
+// about.
+func (s *Server) canServe(kind string) error {
+	switch kind {
+	case genstore.KindTTS:
+		if len(s.opts.Voices) == 0 {
+			return errors.New("this configuration publishes no tts.voices, so there is no voice " +
+				"a request could name: add a tts.voices list to ember.yaml")
+		}
+	default:
+		if len(s.opts.Config.SD.Serve) == 0 {
+			return errors.New("this configuration has no sd.serve block, so there is no " +
+				"generation server to start and a queued request would have nowhere to run")
+		}
+	}
+	return nil
 }

@@ -57,6 +57,25 @@ func serveFile(t *testing.T, name string) http.HandlerFunc {
 }
 
 // serveJSON answers one literal body with one status.
+// bodyOf is Job.Body, for the tests that used to reach it through Submit.
+//
+// Submit takes the request body rather than a Job because that body crosses a
+// control channel between two processes as bytes nobody parses -- see its own
+// comment on the seed a map[string]any would have changed. So building it is
+// the caller's step, and these tests take it explicitly.
+func bodyOf(t *testing.T, j Job, preview string, interval int) json.RawMessage {
+	t.Helper()
+	body, err := j.Body(preview, interval)
+	if err != nil {
+		t.Fatalf("build the job body: %v", err)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encode the job body: %v", err)
+	}
+	return raw
+}
+
 func serveJSON(code int, body string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -139,7 +158,7 @@ func TestEveryCall_ReportsATransportFailure(t *testing.T) {
 	if _, err := c.ModelStatus(t.Context()); err == nil {
 		t.Error("ModelStatus reported no error")
 	}
-	if _, err := c.Submit(t.Context(), Job{Prompt: "x"}, PreviewNone, 0); err == nil {
+	if _, err := c.Submit(t.Context(), bodyOf(t, Job{Prompt: "x"}, PreviewNone, 0)); err == nil {
 		t.Error("Submit reported no error")
 	}
 	if _, err := c.Poll(t.Context(), "j"); err == nil {
@@ -221,7 +240,7 @@ func TestSubmit_SendsTheBodyAndReadsTheID(t *testing.T) {
 		_, _ = w.Write(fixture(t, "job_accepted.json"))
 	})
 
-	id, err := c.Submit(t.Context(), Job{Prompt: "a cat", Width: 512, Steps: 20, Sampler: "euler"}, PreviewProj, 5)
+	id, err := c.Submit(t.Context(), bodyOf(t, Job{Prompt: "a cat", Width: 512, Steps: 20, Sampler: "euler"}, PreviewProj, 5))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,17 +266,38 @@ func TestSubmit_SendsTheBodyAndReadsTheID(t *testing.T) {
 // be polled, cancelled or collected: it generates, bills, and is purged.
 func TestSubmit_RefusesAnAcceptanceWithNoID(t *testing.T) {
 	c := newTestClient(t, serveJSON(202, `{"kind":"img_gen","status":"queued"}`))
-	_, err := c.Submit(t.Context(), Job{Prompt: "x"}, PreviewNone, 0)
+	_, err := c.Submit(t.Context(), bodyOf(t, Job{Prompt: "x"}, PreviewNone, 0))
 	if err == nil || !strings.Contains(err.Error(), "without returning an id") {
 		t.Fatalf("err = %v, want a refusal naming the missing id", err)
 	}
 }
 
-func TestSubmit_ReportsABadJob(t *testing.T) {
-	c := newTestClient(t, serveJSON(202, `{"id":"x"}`))
-	_, err := c.Submit(t.Context(), Job{Prompt: "x", Extra: map[string]any{"preview": "vae"}}, PreviewProj, 5)
+// TestBody_RefusesABadJobBeforeAnythingIsSubmitted.
+//
+// It used to go through Submit, which built the body itself. Submit takes the
+// body now -- see its comment on the seed a map[string]any would have changed
+// -- so the refusal is the caller's to hit, one step earlier, which is the
+// step ember takes before pushing anything to a worker. The assertion is the
+// same one: a key the body owns cannot be overwritten from `extra:`.
+func TestBody_RefusesABadJobBeforeAnythingIsSubmitted(t *testing.T) {
+	_, err := Job{Prompt: "x", Extra: map[string]any{"preview": "vae"}}.Body(PreviewProj, 5)
 	if err == nil || !strings.Contains(err.Error(), "preview") {
 		t.Fatalf("err = %v, want the body builder's refusal", err)
+	}
+}
+
+// TestSubmit_RefusesAnEmptyBody.
+//
+// The body arrives over a control channel from another process, so "nothing
+// came" is a state that exists -- and posting an empty body would make
+// sd-server answer with a refusal about a missing prompt, which sends the
+// reader looking at the job instead of at the channel.
+func TestSubmit_RefusesAnEmptyBody(t *testing.T) {
+	c := newTestClient(t, serveJSON(202, `{"id":"x"}`))
+	for _, body := range []json.RawMessage{nil, {}} {
+		if _, err := c.Submit(t.Context(), body); err == nil {
+			t.Errorf("an empty body was submitted")
+		}
 	}
 }
 
@@ -533,7 +573,7 @@ func TestSubmit_ReportsTheServersOwnRefusal(t *testing.T) {
 	body := fixture(t, "error_model_not_loaded.json")
 	c := newTestClient(t, serveJSON(http.StatusServiceUnavailable, string(body)))
 
-	_, err := c.Submit(t.Context(), Job{Prompt: "a paper boat"}, PreviewNone, 0)
+	_, err := c.Submit(t.Context(), bodyOf(t, Job{Prompt: "a paper boat"}, PreviewNone, 0))
 	if err == nil {
 		t.Fatal("want an error")
 	}
@@ -572,7 +612,7 @@ func TestEveryCall_ReportsTheServersOwnRefusal(t *testing.T) {
 	}{
 		{"Capabilities", func() error { _, err := c.Capabilities(t.Context()); return err }},
 		{"ModelStatus", func() error { _, err := c.ModelStatus(t.Context()); return err }},
-		{"Submit", func() error { _, err := c.Submit(t.Context(), Job{Prompt: "x"}, PreviewNone, 0); return err }},
+		{"Submit", func() error { _, err := c.Submit(t.Context(), bodyOf(t, Job{Prompt: "x"}, PreviewNone, 0)); return err }},
 		{"Poll", func() error { _, err := c.Poll(t.Context(), "j"); return err }},
 		{"Cancel", func() error { return c.Cancel(t.Context(), "j") }},
 	} {

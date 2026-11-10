@@ -9,7 +9,10 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::api;
-use crate::model::{Answer, Config, Hires, Input, Job, Listing, NewRequest, Offers, VaeTiling};
+use crate::model::{
+    Answer, Composing, Config, Hires, Input, Job, Listing, NewRequest, Offers, Utterance,
+    VaeTiling, Voice,
+};
 use crate::route::{self, Route};
 
 /// Compose is the card picker and the batch.
@@ -43,6 +46,37 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
         height: 512,
         steps: 20,
         ..Default::default()
+    });
+
+    // WHICH WORKLOAD, and the empty string is an image generation -- which is
+    // what `genstore.KindOf` resolves an absent `kind` to, so the panel's
+    // opening state is the one that was here before speech existed and the
+    // body it posts is unchanged.
+    let kind = RwSignal::new(String::new());
+
+    // The utterance being composed, which is the speech half's draft.
+    //
+    // A SECOND DRAFT AND NOT MORE FIELDS ON THE FIRST, because the server
+    // refuses a job that sets both halves: `crossKind` compares a speech
+    // job's remaining fields against the zero value, and this panel's image
+    // draft opens at 512, 512 and 20 -- so sharing one draft would post
+    // exactly the three leftovers that refuse the whole request. They share
+    // the `batch`, because a batch is a list of `Job` and the utterance is a
+    // field on one.
+    let utterance = RwSignal::new(Utterance::default());
+
+    // The voice defaults to the first one ember published, so the chooser is
+    // usable without a choice being made -- the same shape the provider
+    // selector uses, and the first of the two mechanisms that stop an empty
+    // `voice_id` reaching the server. The second is `Utterance::refusal`.
+    Effect::new(move |_| {
+        let c = config.get();
+        if utterance.get_untracked().voice_id.is_empty() {
+            if let Some(v) = c.voices.first() {
+                let id = v.id.clone();
+                utterance.update(|u| u.voice_id = id);
+            }
+        }
     });
 
     // The provider defaults to the config's first one that can actually be
@@ -118,13 +152,49 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
         });
     };
 
+    // Whether there is a choice of kind to offer. Built outside the macro
+    // because a bare `>` inside a `view!` attribute closes the tag, and the
+    // parenthesised form is a lint `make web-test` turns into an error.
+    let choosable = move || config.get().kinds.len() > 1;
+
     let queue = move || {
         error.set(String::new());
         let mut jobs = batch.get();
+
+        // WHAT IS SENT IS DECIDED BY THE SAME METHOD THAT DECIDED WHAT IS ON
+        // SCREEN, so the panel cannot show one kind's controls and post the
+        // other's. A refusal here is the one `composing` already built -- the
+        // sentence the panel is printing -- rather than a second wording of
+        // it.
+        let speech = match config.get().composing(&kind.get()) {
+            Composing::Image => false,
+            Composing::Speech(_) => true,
+            Composing::Refused(why) => {
+                error.set(why);
+                return;
+            }
+        };
+
         // A single composed job needs no "add" first: the obvious thing to do
-        // with one prompt is generate it.
-        if jobs.is_empty() && !draft.get().prompt.trim().is_empty() {
-            jobs.push(draft.get());
+        // with one prompt, or one sentence, is to run it.
+        if jobs.is_empty() {
+            if speech {
+                let u = utterance.get();
+                if let Some(why) = u.refusal() {
+                    error.set(why);
+                    return;
+                }
+                // FROM `Job::default()` AND NOT FROM THE IMAGE DRAFT, which is
+                // the whole reason there are two drafts: every image field has
+                // to be its zero or `crossKind` refuses the request naming the
+                // index.
+                jobs.push(Job {
+                    tts: Some(u),
+                    ..Default::default()
+                });
+            } else if !draft.get().prompt.trim().is_empty() {
+                jobs.push(draft.get());
+            }
         }
         if jobs.is_empty() {
             error.set("nothing to generate: type a prompt".into());
@@ -132,16 +202,26 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
         }
 
         let body = NewRequest {
+            kind: kind.get(),
             provider: provider.get(),
             gpu: gpu.get(),
             ttl: ttl.get(),
             max_hourly_usd: max_hourly.get(),
-            preview: if preview.get().is_empty() {
+            // NOT SENT FOR SPEECH, and that is not tidiness: a preview is a
+            // frame of a sampling pass, piper has no pass and no frames, and
+            // the columns would record a mode no driver on that rental reads.
+            // A figure stored for a run that cannot produce it is the kind of
+            // value that reads like a fact.
+            preview: if speech {
+                String::new()
+            } else if preview.get().is_empty() {
                 config.get().preview
             } else {
                 preview.get()
             },
-            preview_interval: if preview_every.get() > 0 {
+            preview_interval: if speech {
+                0
+            } else if preview_every.get() > 0 {
                 preview_every.get()
             } else {
                 config.get().preview_interval
@@ -242,8 +322,245 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
             </div>
 
             <h2>"what to generate"</h2>
-            <JobForm config=config draft=draft />
 
+            // THE KIND, FIRST, because it decides which of the controls below
+            // it mean anything -- and an operator who has typed a prompt into
+            // a panel that was going to speak it has lost the thing they
+            // typed.
+            //
+            // BUILT FROM `config.kinds` AND NEVER SPELLED HERE, which is the
+            // same rule the voice list follows: `genstore.Kinds()` is the one
+            // list, and a copy in this crate is a place for the kind added
+            // last to be forgotten. It is also what closes the window
+            // `/api/config` leaves open -- the list is empty until the config
+            // answers, so there is no speech option to pick before ember has
+            // said whether it has a voice. `Config::composing`'s unanswered
+            // arm is the second mechanism rather than the first.
+            //
+            // ONE OPTION IS NO CHOICE, so the selector is hidden rather than
+            // shown with a single entry: a `<select>` an operator cannot
+            // change reads as a control that is broken.
+            <Show when=choosable>
+                <div class="row">
+                    <label>
+                        <Help text="kind" title="Which workload to rent for. sd generates images through a resident sd-server; tts speaks text with piper. One rental runs one of them, so changing this empties the batch."/>
+                        <select on:change=move |ev| {
+                            kind.set(event_target_value(&ev));
+                            // THE BATCH GOES WITH IT, because a batch of image
+                            // jobs posted as a speech request is a 400 naming
+                            // an index the operator cannot see, and the reverse
+                            // is a generation billed for saying nothing about
+                            // what they asked for. `kind` is on the request, so
+                            // a mixed batch is not a thing the wire can carry;
+                            // this is the page not building one.
+                            batch.set(Vec::new());
+                            error.set(String::new());
+                        }>
+                            {move || config.get().kinds.into_iter().map(|k| {
+                                let label = k.clone();
+                                view! { <option value=k>{label}</option> }
+                            }).collect::<Vec<_>>()}
+                        </select>
+                    </label>
+                </div>
+            </Show>
+
+            // AND WHERE THERE IS NO SELECTOR, A SENTENCE. One option is no
+            // choice, so a single-kind server shows no `<select>` -- which
+            // left the panel unable to say which of ember's workloads it was,
+            // and an operator looking at it asked whether speech had been
+            // removed from the program. Read inside the closure, like
+            // everything else on this page that depends on the config.
+            {move || match config.get().kind_note() {
+                Some(note) => view! { <p class="hint">{note}</p> }.into_any(),
+                None => ().into_any(),
+            }}
+
+            // WHICH CONTROLS, FROM THE METHOD AND NOT FROM A CHAIN OF `if`
+            // HERE. Read inside the closure, which is the rule four keyed-list
+            // defects on this page were paid for: a kind changed after the
+            // first render has to rebuild these, and a value read outside
+            // would leave the image controls on screen over a speech request.
+            {move || match config.get().composing(&kind.get()) {
+                Composing::Image => view! {
+                    <JobForm config=config draft=draft />
+                    <PreviewForm config=config preview=preview preview_every=preview_every />
+                }.into_any(),
+                Composing::Speech(voices) => view! {
+                    <SpeechForm voices=voices utterance=utterance />
+                }.into_any(),
+                // A SENTENCE AND NOT A BLANK PANEL. Both reasons this fires
+                // are states an operator can be in -- a config with no
+                // `tts.voices`, and a page older than the server -- and a
+                // panel that simply had nothing in it would read as a page
+                // that failed to load.
+                Composing::Refused(why) => view! {
+                    <p class="hint denied">{why}</p>
+                }.into_any(),
+            }}
+
+            <div class="row">
+                <button on:click=move |_| {
+                    // THE SAME TWO DRAFTS, and which one is added is the same
+                    // decision the controls came from. Each row is checked as
+                    // it goes in, because `queue` only checks the draft it
+                    // would push itself.
+                    match config.get().composing(&kind.get()) {
+                        Composing::Image => {
+                            let j = draft.get();
+                            if j.prompt.trim().is_empty() {
+                                error.set("nothing to add: type a prompt".into());
+                            } else {
+                                error.set(String::new());
+                                batch.update(|b| b.push(j));
+                            }
+                        }
+                        Composing::Speech(_) => {
+                            let u = utterance.get();
+                            match u.refusal() {
+                                Some(why) => error.set(why),
+                                None => {
+                                    error.set(String::new());
+                                    batch.update(|b| b.push(Job {
+                                        tts: Some(u),
+                                        ..Default::default()
+                                    }));
+                                }
+                            }
+                        }
+                        Composing::Refused(why) => error.set(why),
+                    }
+                }>"add to batch"</button>
+
+                <button class="primary" on:click=move |_| queue()>
+                    {move || {
+                        let speech = matches!(
+                            config.get().composing(&kind.get()),
+                            Composing::Speech(_)
+                        );
+                        // The verb is the kind's, because "generate 3 job(s)"
+                        // over three sentences of speech is a label describing
+                        // the other workload.
+                        let verb = if speech { "speak" } else { "generate" };
+                        let n = batch.get().len();
+                        if n == 0 { verb.to_string() }
+                        else { format!("{verb} {n} job(s) on one rental") }
+                    }}
+                </button>
+            </div>
+
+            <Show when=move || !batch.get().is_empty()>
+                <ol class="batch">
+                    {move || batch.get().into_iter().enumerate().map(|(i, j)| view! {
+                        <li>
+                            <code>{j.describe()}</code>
+                            <button class="link" on:click=move |_| {
+                                batch.update(|b| { if i < b.len() { b.remove(i); } });
+                            }>"remove"</button>
+                        </li>
+                    }).collect::<Vec<_>>()}
+                </ol>
+                <p class="hint">
+                    "One rental serves the whole batch: provisioning, the image pull, the
+                     asset verify and the model load are paid once rather than once per image."
+                </p>
+            </Show>
+
+            <Show when=move || !error.get().is_empty()>
+                <p class="error">{move || error.get()}</p>
+            </Show>
+        </section>
+    }
+}
+
+/// SpeechForm is one utterance.
+///
+/// WHAT IS NOT HERE IS THE IMAGE HALF, which is the whole of #190's browser
+/// side: the geometry, the sampler, the steps, the seed, the preview mode and
+/// the advanced section are all parameters of a sampling pass, and piper has
+/// no pass. A page that showed them over a speech request would be accepting
+/// values that reach the server and are refused -- `crossKind` compares a
+/// speech job against the zero value -- or, worse, values that are dropped,
+/// which reads as "the model ignored them".
+///
+/// THE VOICES ARE A PARAMETER AND NOT A SIGNAL READ IN HERE, so this component
+/// cannot be rendered without a list: an empty `<select>` posts a blank
+/// `voice_id`, which the server refuses after the operator has typed. The
+/// decision that there IS a list to hand over belongs to `Config::composing`,
+/// where `cargo test` reaches it.
+///
+/// THE FIVE PIPER PARAMETERS ARE ABSENT ON PURPOSE. `speaker`,
+/// `length_scale`, `noise_scale`, `noise_w` and `sentence_silence` are on the
+/// server's wire type and none of them has been measured from this page -- so
+/// a slider whose effect nobody has heard would be the "reads as working"
+/// defect in a control. They stay reachable from `ember.yaml`.
+#[component]
+fn SpeechForm(voices: Vec<Voice>, utterance: RwSignal<Utterance>) -> impl IntoView {
+    view! {
+        <label class="wide">
+            <Help text="text" title="What to say. Arbitrary text: it is sent in the request body and never on a command line, so nothing in it can be read as a flag. piper splits it into sentences and speaks them in one pass."/>
+            <textarea
+                rows="4"
+                prop:value=move || utterance.get().text
+                on:input=move |ev| utterance.update(|u| u.text = event_target_value(&ev))
+            />
+        </label>
+
+        <div class="row">
+            <label>
+                <Help text="voice" title="Which speech model says it. The list is the one your ember.yaml published: a request names a voice by id and has no field for a path, so this is the only way a page could know what to send."/>
+                <select on:change=move |ev| {
+                    let v = event_target_value(&ev);
+                    utterance.update(|u| u.voice_id = v);
+                }>
+                    // NO KEY, AND NO `<For>`. A keyed list re-renders a row
+                    // only when its key changes and hands the item over by
+                    // value, which is how this page once showed one
+                    // provider's first answer for ever. There is no identity
+                    // to retain across two configs here, and the list is
+                    // rebuilt with the block that holds it.
+                    {
+                        let now = utterance.get_untracked().voice_id;
+                        voices.into_iter().map(|v| {
+                            let sel = v.id == now;
+                            let label = v.label().to_string();
+                            view! { <option value=v.id.clone() selected=sel>{label}</option> }
+                        }).collect::<Vec<_>>()
+                    }
+                </select>
+            </label>
+            <label>
+                <Help text="name" title="The filename stem for this utterance's audio, written as name-00.wav. Sanitised rather than refused, and a stem that cleans away to nothing is an error."/>
+                <input placeholder="greeting"
+                    prop:value=move || utterance.get().output
+                    on:input=move |ev| utterance.update(|u| u.output = event_target_value(&ev))
+                />
+            </label>
+        </div>
+
+        <p class="hint">
+            "piper runs on a CPU, so a speech rental needs no card -- pick a provider's
+             cheapest machine. There is no progress inside one utterance: a sentence takes
+             a fraction of a second, so a job either has not started or is done."
+        </p>
+    }
+}
+
+/// PreviewForm is how an in-progress frame is rendered.
+///
+/// EXTRACTED FROM THE PANEL BECAUSE IT IS THE IMAGE KIND'S, and that is the
+/// correction rather than tidiness: it was unconditional, and a preview mode
+/// is a frame of a sampling pass. piper has no pass and no frames, so these
+/// two controls over a speech request would be setting a value no driver on
+/// that rental reads -- and the cost is not nothing, because `preview` is a
+/// stored column that `ember history` prints.
+#[component]
+fn PreviewForm(
+    config: RwSignal<Config>,
+    preview: RwSignal<String>,
+    preview_every: RwSignal<i32>,
+) -> impl IntoView {
+    view! {
             <div class="row">
                 <label>
                     <Help text="preview" title="How the in-progress frame is rendered. proj projects the latent and is nearly free, so a 512x512 generation previews as a 64x64 smear; tae and vae decode a real image every frame, which is a decode billed to the card. none turns previews off."/>
@@ -289,45 +606,6 @@ pub fn Compose(config: RwSignal<Config>, route: RwSignal<Route>) -> impl IntoVie
                  billed to the card: on a rented GPU that is the expensive setting and
                  on this machine it is free."
             </p>
-
-            <div class="row">
-                <button on:click=move |_| {
-                    let j = draft.get();
-                    if !j.prompt.trim().is_empty() {
-                        batch.update(|b| b.push(j));
-                    }
-                }>"add to batch"</button>
-
-                <button class="primary" on:click=move |_| queue()>
-                    {move || {
-                        let n = batch.get().len();
-                        if n == 0 { "generate".to_string() }
-                        else { format!("generate {} job(s) on one rental", n) }
-                    }}
-                </button>
-            </div>
-
-            <Show when=move || !batch.get().is_empty()>
-                <ol class="batch">
-                    {move || batch.get().into_iter().enumerate().map(|(i, j)| view! {
-                        <li>
-                            <code>{j.describe()}</code>
-                            <button class="link" on:click=move |_| {
-                                batch.update(|b| { if i < b.len() { b.remove(i); } });
-                            }>"remove"</button>
-                        </li>
-                    }).collect::<Vec<_>>()}
-                </ol>
-                <p class="hint">
-                    "One rental serves the whole batch: provisioning, the image pull, the
-                     asset verify and the model load are paid once rather than once per image."
-                </p>
-            </Show>
-
-            <Show when=move || !error.get().is_empty()>
-                <p class="error">{move || error.get()}</p>
-            </Show>
-        </section>
     }
 }
 

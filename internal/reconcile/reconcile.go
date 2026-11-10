@@ -273,9 +273,37 @@ func Scan(
 				continue
 			}
 			if rec.Phase.Billable() {
+				// WHAT THE PROVIDER SAID, WHERE IT SAID ANYTHING. The create
+				// error is written to the record at provision.go:271 and was
+				// read by nothing, while the destroy-failure branch sixteen
+				// lines below has always carried its own error into its
+				// reason. Two sibling branches, one field, and the one that
+				// printed it was the one where the operator already knows
+				// something went wrong.
+				//
+				// The cost of the omission is this reason's own last clause.
+				// It tells an operator to go and ask the provider a question
+				// that the record beside it already answers -- and in the
+				// cases that produced it, answers with `status 400: Container
+				// Disk must be less than or equal to 20` and `status 422:
+				// additional properties 'allowedCudaVersions' not allowed`.
+				// Three rows sat red for eleven days saying "ask the
+				// provider", over two refusals ember had written down and one
+				// of which this repository has since fixed by deleting the
+				// key that caused it.
+				//
+				// THE ASK SURVIVES THE ERROR, which is the part worth keeping
+				// deliberate: an error returned AFTER the machine existed
+				// reads identically from here, so the error narrows the
+				// question and does not close it. See KindOrphan.
+				why := "recorded before creating, then never got an id, and no node wears this run's label"
+				if rec.LastErr != "" {
+					why += "; the create failed with: " + rec.LastErr
+				}
+				why += "; ask the provider whether a node labelled " + rec.Label + " exists"
 				out = append(out, Finding{
 					Kind: KindOrphan, Provider: rec.Provider, Record: &records[i],
-					Reason: "recorded before creating, then never got an id, and no node wears this run's label; ask the provider whether a node labelled " + rec.Label + " exists",
+					Reason: why,
 				})
 			}
 			continue

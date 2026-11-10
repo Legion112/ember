@@ -97,6 +97,30 @@ type gatedRental struct {
 	order chan string
 }
 
+// WithSpoken mirrors WithServed through the same gate.
+//
+// A MIRROR AND NOT A REFUSAL, although no test here drives speech through it:
+// a fake stricter than the thing it stands in for grows its callers a branch
+// for an error nothing returns, which AGENTS.md records finding in
+// `genstore.RecordingStore.JobRuns` -- and the gate is what every assertion in
+// this file is about, so a second method that skipped it would be a rental the
+// one-at-a-time property cannot see.
+func (r gatedRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error {
+	r.gate.enter("queued")
+	defer r.gate.leave()
+	if r.order != nil {
+		r.order <- "queued"
+	}
+	sink.Emit(report.Event{Kind: report.KindNodeReady, Node: "local/n1"})
+	return fn(ctx, recordingSpoken{})
+}
+
+// Card is a fixed card, because every request in this file names one provider
+// and the gate is what the tests are about.
+func (r gatedRental) Card() node.GPUModel { return "rtx2080ti" }
+
+func (r gatedRental) Image() string { return "ember:lab" }
+
 func (r gatedRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	r.gate.enter("queued")
 	defer r.gate.leave()
@@ -236,7 +260,7 @@ func TestSubmit_ARunAndAQueuedRequestCannotHoldRentalsAtOnce(t *testing.T) {
 	}
 }
 
-// TestSubmit_TheRunExecutesOnTheDrainLoopsOwnGoroutine is the assertion that
+// TestSubmit_TheRunExecutesOnASlotsOwnGoroutine is the assertion that
 // goes red for a CHECK where a structure would be green.
 //
 // The three above are satisfied by any mechanism that serialises correctly,
@@ -254,7 +278,7 @@ func TestSubmit_ARunAndAQueuedRequestCannotHoldRentalsAtOnce(t *testing.T) {
 // run executed on the loop's and not that nothing else in the program can
 // rent. cmd/check-coverage's TestNothingRentsOutsideInternalApp is the other
 // half, and the two together are what "structural" means here.
-func TestSubmit_TheRunExecutesOnTheDrainLoopsOwnGoroutine(t *testing.T) {
+func TestSubmit_TheRunExecutesOnASlotsOwnGoroutine(t *testing.T) {
 	st := genstore.NewRecordingStore()
 	q := &Queue{Store: st, Planner: &fakePlanner{served: &fakeServed{}}, Outputs: t.TempDir()}
 
@@ -287,11 +311,28 @@ func TestSubmit_TheRunExecutesOnTheDrainLoopsOwnGoroutine(t *testing.T) {
 		t.Fatal("the run never executed")
 	}
 
-	const frame = "internal/queue.(*Queue).Run"
+	// THE SUBJECT IS `slot` AND NOT `Run`, AND THE OLD SPELLING PASSED THE
+	// MOMENT IT STOPPED MEANING ANYTHING. This looked for
+	// `internal/queue.(*Queue).Run`, which was the frame while the loop ran
+	// the rental inline. Under the supervisor the rental is on a slot
+	// goroutine -- and the assertion stayed GREEN, because the closure the
+	// supervisor hands to `spawn` is declared inside `Run` and is therefore
+	// named `internal/queue.(*Queue).Run.func1`: the old substring matched a
+	// closure's NAME rather than a caller's frame. Measured, which is the only
+	// reason this comment exists -- the first run of the supervisor against
+	// the unchanged assertion passed.
+	//
+	// `(*Queue).slot` is the frame that cannot be faked that way. It is a
+	// method the supervisor calls through `spawn`, so it is in the stack of
+	// every rental this process counted and in the stack of nothing else -- a
+	// run on a goroutine somebody started beside the supervisor has no `slot`
+	// frame however correct its locking is, which is the mechanism this
+	// assertion exists to refuse.
+	const frame = "internal/queue.(*Queue).slot"
 	if !strings.Contains(stack, frame) {
-		t.Errorf("the submitted run did not execute on the drain loop's goroutine: %s is not in "+
-			"its stack, so a rental can now start somewhere other than the one place that "+
-			"serialises them.\n%s", frame, stack)
+		t.Errorf("the submitted run did not execute on a rental slot: %s is not in its stack, "+
+			"so a rental can now start somewhere other than the one place that counts "+
+			"them.\n%s", frame, stack)
 	}
 }
 
@@ -476,7 +517,7 @@ func writeRunConfig(t *testing.T, body string) string {
 
 const (
 	runImage       = "ghcr.io/example/wl:v1"
-	localRunConfig = "provider: local\nimage: " + runImage + "\nttl: 10m\ncmd: [echo, hi]\n"
+	localRunConfig = "provider: local\nimage: " + runImage + "\nttl: 10m\n"
 )
 
 // TestDirectRunner_StartAdoptsTheRowAndHandsTheRunToTheLoop.
@@ -662,7 +703,7 @@ func TestDirectRunner_StartRefusesWhatItCannotRun(t *testing.T) {
 		{
 			name:   "an unpinned image",
 			runner: func() DirectRunner { return directRunner(t, q, st) },
-			ask:    app.RunAsk{Config: writeRunConfig(t, "provider: local\nimage: wl:latest\nttl: 10m\ncmd: [echo, hi]\n")},
+			ask:    app.RunAsk{Config: writeRunConfig(t, "provider: local\nimage: wl:latest\nttl: 10m\n")},
 			want:   "latest",
 		},
 	}
@@ -734,7 +775,7 @@ func TestDirectRunner_StartRefusesAPaidProviderWithoutAllowPaid(t *testing.T) {
 }
 
 // paidRunConfig names a provider that costs money.
-const paidRunConfig = "provider: runpod\nimage: " + runImage + "\nttl: 10m\ncmd: [echo, hi]\n"
+const paidRunConfig = "provider: runpod\nimage: " + runImage + "\nttl: 10m\n"
 
 // paidRunner is a runner that can plan against RunPod and reach an OFFER.
 //

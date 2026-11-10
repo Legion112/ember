@@ -2,6 +2,7 @@ package webapi
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Legion112/ember/internal/app"
@@ -9,8 +10,10 @@ import (
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
+	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/reconcile"
 	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 )
 
 // THIS FILE IS THE BROWSER'S WHOLE VIEW OF EMBER, and nothing in it is a
@@ -56,6 +59,87 @@ type configView struct {
 	// where it stops.
 	Ceilings ceilings `json:"ceilings"`
 
+	// Kinds is what THIS CONFIGURATION CAN RUN, and Voices the speech models
+	// it publishes.
+	//
+	// IT WAS `genstore.Kinds()` UNCONDITIONALLY, and this paragraph used to
+	// argue for that at length. The argument was wrong and an operator found
+	// it by using the page: the selector offered `tts` on a server with no
+	// voices, and choosing it answered "this ember serve publishes no voices,
+	// so it serves no speech. Add a tts.voices list to ember.yaml and restart
+	// it." A choice offered in order to be refused is worse than no choice,
+	// because the refusal arrives after the operator has spent attention on
+	// deciding. On a speech-only server the same list offered `sd`, where
+	// nothing refused it at all and the request failed once a node was up --
+	// the same defect with a rental attached. See servableKinds.
+	//
+	// WHAT HAD TO MOVE FIRST, which is why this sat written-down rather than
+	// fixed for as long as it did. The page read an empty `kinds` as "ember
+	// has not answered yet", so narrowing the list would have made a config
+	// that can run NEITHER kind publish `[]` and the page wait for ever over a
+	// server that had already told it everything. That discriminator is now
+	// `providers` -- which `Config::unrunnable` was keyed on from the start,
+	// for this reason, and which cannot be empty in a real answer because the
+	// registry is built from the config. `TestConfig_PublishesAtLeastOneKind`
+	// was the floor under the old reading and now asserts the precondition
+	// that replaces it: a RUNNING ember serve always has a kind, because
+	// `runServe` refuses to start a configuration that can serve nothing.
+	//
+	// AND THE GUARD CAUGHT THE FIRST WORDING OF THE PARAGRAPH THIS REPLACES,
+	// which is worth one line because it is the same rule twice. That wording
+	// named the deleted flag as the precedent, with `ember` and a backticked
+	// `--all` on one line, and `TestComments_CiteNoFlagThatNoFlagSetDeclares`
+	// reported it -- so the comment correcting a claim about an unimplemented
+	// mechanism was itself citing a command nobody can type.
+	//
+	// THE OTHER TWO REFUSALS STAY, because this one is about what is offered
+	// and they are about what is accepted. `Config::composing` still refuses a
+	// speech kind naming `tts.voices`, and `POST /api/requests` still refuses
+	// the request the same way -- reachable now only by a client that did not
+	// get its kind from this field, which is a `?kind=` in a URL or a page
+	// older than the server. Containment twice, by two mechanisms, is the rule
+	// here and narrowing the list is the first of them rather than a
+	// replacement for the second.
+	//
+	// WHY A UI HAS TO BE TOLD RATHER THAN KNOWING. A request names a voice by
+	// **id** and nothing else -- the whole seal is that it cannot name a path
+	// -- so the list of ids is something only ember can produce, out of the
+	// operator's own config. A page that guessed would offer a choice that is
+	// refused after a card is rented.
+	//
+	// Voices is EMPTY when this configuration publishes none, and a UI must
+	// read that as "this process serves no speech" rather than as an empty
+	// dropdown: `POST /api/requests` refuses a speech request against an
+	// empty catalogue, naming `tts.voices`. The alternative -- an implicit
+	// entry pointing at ember's own image -- would offer a voice that cannot
+	// work wherever `image:` is not the speech one.
+	Kinds  []string    `json:"kinds"`
+	Voices []voiceView `json:"voices"`
+
+	// Unoffered is what this build can do that this configuration does not,
+	// which exists because narrowing Kinds took something away.
+	//
+	// THE QUESTION IT ANSWERS WAS ASKED BY AN OPERATOR LOOKING AT THE PAGE:
+	// "have you just removed tts?" Nothing had -- `internal/tts`, the config
+	// key and the speech runner were untouched -- but the selector had gone,
+	// because one option is no choice, and a panel that offers one kind
+	// without saying so is indistinguishable from a build that only has one.
+	// The previous list said what ember could do and lied about what this
+	// process would accept; the narrowed one is honest about the process and
+	// silent about ember. This field is the half that went missing.
+	//
+	// A STATEMENT AND NEVER A CONTROL, which is the whole distinction being
+	// drawn. The defect being fixed was a selector offering a choice in order
+	// to refuse it, so the answer cannot be a disabled option or a greyed row:
+	// those are the same defect with a different cursor. It is a sentence, in
+	// the register of the `ember.yaml` ceiling hints beside it.
+	//
+	// DERIVED FROM THE SAME LOOP as Kinds and not from a second pass over
+	// genstore.Kinds(), so the two cannot disagree about a kind -- a page
+	// saying "this serve runs sd, and not tts" while offering tts is worse
+	// than either half alone.
+	Unoffered []string `json:"unoffered"`
+
 	// AllowPaid says whether this process was started with --allow-paid. A UI
 	// that did not know would offer a card it cannot rent and surface the
 	// refusal as a failure.
@@ -80,6 +164,19 @@ type configView struct {
 	// different answers, and a UI treating the first as the second would grey
 	// out every control.
 	Caps *capsView `json:"caps,omitempty"`
+}
+
+// voiceView is one catalogue entry as a UI reads it.
+//
+// THE PATHS ARE NOT ON IT, which is the projection doing its job rather than
+// an omission: this file's own header says a hand-written projection means
+// adding a field somewhere cannot publish it by default, and
+// `config.TTSVoice` holds two filenames on the node. A UI needs an id to send
+// and a name to show; the operator knows what is behind them and a browser has
+// no use for it.
+type voiceView struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type providerView struct {
@@ -151,14 +248,86 @@ type limitView struct {
 	MaxBatchCount int `json:"max_batch_count"`
 }
 
-func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps *sdserver.Capabilities) configView {
+// voices is a PARAMETER and not re-derived from cfg here, which is the
+// one-derivation rule this feature is wired on.
+//
+// FOUND BY A TEST RATHER THAN BY REVIEW. The first version of this called
+// cfg.TTSCatalogue() itself, and the harness that set Options.Voices saw an
+// empty list -- two readings of one file, which is the thing cmd_serve's own
+// comment argues against four lines from where it wires them. A handler and a
+// drain loop resolving the same id against two derivations is a browser
+// offering ids the loop cannot resolve, and the trigger would be the next
+// --config reload somebody adds rather than anything in today's code.
+// servableKinds is genstore.Kinds() narrowed to what this configuration can
+// actually run.
+//
+// THE DEFECT IT CLOSES, which an operator found by using the thing: the kind
+// selector offered `tts` on a server publishing no voices, and picking it
+// answered "this ember serve publishes no voices, so it serves no speech. Add
+// a tts.voices list to ember.yaml and restart it." A control that is always
+// refused is not a control, and a page that offers a choice in order to deny
+// it has spent the operator's attention to tell them something it knew before
+// they clicked. The same was true of `sd` on a speech-only server, which was
+// worse: nothing refused it, so the request was accepted and failed once a
+// node was up, which is a refusal with a rental attached.
+//
+// A `switch` OVER THE KINDS IS A SECOND SPELLING OF genstore.Kinds(), which
+// that function's own comment warns is where the kind added last gets
+// forgotten. The fallthrough here is therefore deliberate and in the SAFE
+// direction -- an unhandled kind stays offered, which is exactly the behaviour
+// every kind had before this function existed, so adding one cannot make the
+// page worse than it already was. What makes that recoverable rather than
+// permanent is TestConfig_AConfigThatCanRunNothingOffersNoKinds: an empty
+// config must narrow to an empty list, so a kind with no case here is red at
+// once rather than shipped.
+// ONE LOOP AND TWO LISTS, which is why this returns a pair rather than being
+// called twice. A second pass deciding the complement is a second place for a
+// kind to be judged, and the first thing a drift there produces is a page
+// saying "this serve runs sd, and not tts" while offering tts -- worse than
+// either half alone, because the two halves disagreeing is the one state an
+// operator cannot resolve by reading.
+func servableKinds(cfg config.Config, voices tts.Catalogue) (offered, unoffered []string) {
+	offered, unoffered = []string{}, []string{}
+	for _, k := range genstore.Kinds() {
+		switch k {
+		case genstore.KindSD:
+			// The same test `Servable` is built from and `runServe` refuses
+			// on: without a serve argv there is no generation server to start,
+			// so an image request has nowhere to run.
+			if len(cfg.SD.Serve) == 0 {
+				unoffered = append(unoffered, k)
+				continue
+			}
+		case genstore.KindTTS:
+			// An empty catalogue is "this process serves no speech" and is
+			// already what POST /api/requests refuses a speech request
+			// against, naming `tts.voices`. This is the same refusal moved to
+			// the moment before the operator chooses instead of after.
+			if len(voices) == 0 {
+				unoffered = append(unoffered, k)
+				continue
+			}
+		}
+		offered = append(offered, k)
+	}
+	return offered, unoffered
+}
+
+func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps *sdserver.Capabilities,
+	voices tts.Catalogue,
+) configView {
 	hourly, run, _ := cfg.Budgets()
+	offered, unoffered := servableKinds(cfg, voices)
 
 	v := configView{
 		// An empty list and never null, for the reason ws.go gives: a client
 		// whose field is a list gets a type error from `null` and drops the
 		// whole response.
-		Providers:       []providerView{},
+		Providers: []providerView{},
+		// Empty lists and never null, for the same reason.
+		Kinds:           offered,
+		Unoffered:       unoffered,
+		Voices:          []voiceView{},
 		Ceilings:        ceilings{TTL: dur(cfg.TTL), MaxHourly: rate(hourly), MaxRun: usd(run)},
 		AllowPaid:       allowPaid,
 		Servable:        len(cfg.SD.Serve) > 0,
@@ -168,6 +337,9 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 	}
 	if m, err := cfg.StoreMount(); err == nil && cfg.HasStore() {
 		v.Mount = m.String()
+	}
+	for _, e := range voices {
+		v.Voices = append(v.Voices, voiceView{ID: e.ID, Name: e.Name})
 	}
 	for _, p := range reg.All() {
 		c := p.Caps()
@@ -310,6 +482,17 @@ type inputView struct {
 // config never mentioned. The seal is structural: the field does not exist
 // here, and genstore.Job has none either.
 type newRequest struct {
+	// Kind is which workload this request is for: "sd" (or absent) for an
+	// image, "tts" for speech.
+	//
+	// ON THE REQUEST AND NOT ON A JOB, which makes a mixed batch
+	// UNREPRESENTABLE rather than refused: one rental runs one driver, so an
+	// image job and an utterance in one request would need two of them on one
+	// node. ABSENT MEANS "sd" for compatibility -- every body the page has
+	// ever posted omits it -- and `genstore.KindOf` is the one place that
+	// reading lives.
+	Kind string `json:"kind,omitempty"`
+
 	Provider string `json:"provider"`
 	GPU      string `json:"gpu,omitempty"`
 
@@ -381,6 +564,80 @@ type newJob struct {
 	SLG       *slgJob   `json:"slg,omitempty"`
 	Hires     *hiresJob `json:"hires,omitempty"`
 	VAETiling *tileJob  `json:"vae_tiling,omitempty"`
+
+	// TTS is the utterance, for a request whose kind is "tts", and absent for
+	// every image generation.
+	//
+	// A NESTED OBJECT AND NOT MORE FLAT FIELDS, so that "this body set
+	// something belonging to the other kind" is ONE comparison rather than a
+	// hand-maintained list of twenty-three names -- see crossKind, which is
+	// the check, and sdFieldsSet, which is how it is derived from this type
+	// rather than from a list beside it.
+	TTS *ttsJob `json:"tts,omitempty"`
+}
+
+// ttsJob is one utterance as a browser may ask for it.
+//
+// WHAT IT FORBIDS IS THE POINT, and it is shorter to say than what it
+// permits: there is no voice path, no espeak path, no binary, no argv, no
+// image, no store, no mount and no `extra`. The ONLY way a request chooses a
+// model is VoiceID, which names an entry in a list the operator published --
+// so every seal in node, exposure and loopback stays upstream of anything a
+// browser can say, exactly as it does for `sd`.
+//
+// There is no `extra` here and that is an absence rather than a refusal:
+// piper publishes six options in total, so an untyped map would have nothing
+// to carry that a field does not. The sd job has one in the config and refuses
+// it on the wire; this kind has nowhere for one to exist.
+type ttsJob struct {
+	// Text is the operator's content and travels exactly as a prompt does.
+	Text string `json:"text"`
+
+	// VoiceID names a catalogue entry. A UI gets the list from
+	// GET /api/config.
+	VoiceID string `json:"voice_id"`
+
+	// Output is a filename stem, refused unless it is a plain name --
+	// `newJob.Output`'s own precedent one kind over.
+	Output string `json:"output,omitempty"`
+
+	// The five piper publishes. Pointers because piper's defaults are 0,
+	// 1.0, 0.667, 0.8 and 0.2: zero is a value somebody might mean, so
+	// zero-is-unset would make "the first speaker" and "no silence between
+	// sentences" unrequestable while looking exactly like a field that works.
+	Speaker         *int     `json:"speaker,omitempty"`
+	LengthScale     *float64 `json:"length_scale,omitempty"`
+	NoiseScale      *float64 `json:"noise_scale,omitempty"`
+	NoiseW          *float64 `json:"noise_w,omitempty"`
+	SentenceSilence *float64 `json:"sentence_silence,omitempty"`
+}
+
+// ask is this utterance as the store holds it.
+func (j ttsJob) ask() *tts.Ask {
+	return &tts.Ask{
+		Text: j.Text, VoiceID: j.VoiceID, Output: j.Output,
+		Speaker: j.Speaker, LengthScale: j.LengthScale, NoiseScale: j.NoiseScale,
+		NoiseW: j.NoiseW, SentenceSilence: j.SentenceSilence,
+	}
+}
+
+// sdFieldsSet reports whether this job set anything belonging to the image
+// kind.
+//
+// DERIVED FROM THE TYPE AND NEVER FROM A LIST OF NAMES. The obvious version is
+// `if j.Prompt != "" || j.Width != 0 || ...` over twenty-three fields, which is
+// the hand-maintained list this repository refuses by name -- and the field
+// that would be forgotten is whichever one is added next, which is exactly the
+// one a smuggled value would arrive in. Clearing the ONE field that is not the
+// image kind's -- TTS -- and comparing the rest against a zero value cannot be
+// out of date.
+//
+// reflect.DeepEqual and not ==, because newJob holds a slice (slgJob.Layers)
+// and is therefore not comparable. It runs once per job of one enqueue.
+func (j newJob) sdFieldsSet() bool {
+	z := j
+	z.TTS = nil
+	return !reflect.DeepEqual(z, newJob{})
 }
 
 // slgJob, hiresJob and tileJob are the nested blocks.
@@ -458,9 +715,24 @@ func (j newJob) params() sdserver.Params {
 // that is the last thing before a create call and the only place that knows
 // the operator's own numbers.
 func (n newRequest) toRequest() (genstore.Request, error) {
+	if err := n.crossKind(); err != nil {
+		return genstore.Request{}, err
+	}
+
 	r := genstore.Request{
-		Provider:        n.Provider,
-		GPU:             n.GPU,
+		Kind:     n.Kind,
+		Provider: n.Provider,
+		// NORMALISED ON THE WAY IN, so the stored card name is the one
+		// spelling. Three things read this column and all three were
+		// comparing strings a browser chose: Compat matches it against a live
+		// rental's card, the caps cache is keyed on it, and `ember spend --by
+		// gpu` groups by it -- so "RTX 4090" and "rtx4090" were two cards to
+		// the scheduler and two buckets in the ledger. genstore.Filter's
+		// comment has claimed this was already true since the column existed;
+		// it is now. node.NormalizeGPU is idempotent and never rejects a name
+		// it has not heard of, so nothing an operator can type is refused
+		// here.
+		GPU:             string(node.NormalizeGPU(n.GPU)),
 		Preview:         n.Preview,
 		PreviewInterval: n.PreviewInterval,
 	}
@@ -491,6 +763,15 @@ func (n newRequest) toRequest() (genstore.Request, error) {
 	}
 
 	for _, j := range n.Jobs {
+		if genstore.KindOf(n.Kind) == genstore.KindTTS {
+			// ONLY THE UTTERANCE, and nothing from the image half even if the
+			// body carried it -- which crossKind has already refused, so this
+			// is the second mechanism rather than the first. Copying the sd
+			// fields across "just in case" would store a prompt on a speech
+			// row that nothing reads and `ember history` would print.
+			r.Jobs = append(r.Jobs, genstore.Job{TTS: j.TTS.ask()})
+			continue
+		}
 		r.Jobs = append(r.Jobs, genstore.Job{
 			Prompt: j.Prompt, NegativePrompt: j.NegativePrompt,
 			Width: j.Width, Height: j.Height, Steps: j.Steps,
@@ -501,6 +782,39 @@ func (n newRequest) toRequest() (genstore.Request, error) {
 		})
 	}
 	return r, nil
+}
+
+// crossKind refuses a body whose jobs belong to a kind it did not name.
+//
+// BOTH DIRECTIONS, because each is a different defect. A speech request
+// carrying image fields is the one with a smuggling shape to it -- the fields
+// would be stored, read by nothing, and the next reader to widen the speech
+// path would find them already there. An image request carrying an utterance
+// is the quieter half: it would be dropped, and the operator would be billed
+// for a generation that said nothing about the thing they asked for.
+//
+// The refusal names the kind and the index, because a batch of twenty composed
+// by a page is not something an operator can bisect by reading it.
+func (n newRequest) crossKind() error {
+	if !genstore.KindValid(n.Kind) {
+		return fmt.Errorf("kind %q is not one ember runs; it is %q or %q",
+			n.Kind, genstore.KindSD, genstore.KindTTS)
+	}
+	tts := genstore.KindOf(n.Kind) == genstore.KindTTS
+	for i, j := range n.Jobs {
+		switch {
+		case tts && j.TTS == nil:
+			return fmt.Errorf("jobs[%d]: this is a %s request and the job carries no utterance",
+				i, genstore.KindTTS)
+		case tts && j.sdFieldsSet():
+			return fmt.Errorf("jobs[%d]: this is a %s request and the job also sets image "+
+				"parameters; a request names one kind", i, genstore.KindTTS)
+		case !tts && j.TTS != nil:
+			return fmt.Errorf("jobs[%d]: this is a %s request and the job carries an utterance; "+
+				"a request names one kind", i, genstore.KindSD)
+		}
+	}
+	return nil
 }
 
 // requestView is one request as a UI reads it.
@@ -536,6 +850,31 @@ type imageRef struct {
 	Index int    `json:"index"`
 	Bytes int64  `json:"bytes"`
 	Path  string `json:"path"`
+
+	// Media is what `GET` on Path will declare these bytes to be, and it is
+	// here so a page can choose an element rather than guessing one.
+	//
+	// THE SAME `artifactType` THE ROUTE CALLS, over the same key, which is
+	// the whole reason this is a field rather than something the browser
+	// works out. A page cannot read the extension: `Path` deliberately has
+	// none -- the route is `/images/{job}/{index}` and the blob key is this
+	// process's business -- so the alternatives were a second derivation in
+	// Rust from the request's KIND, or this. A kind is the wrong input twice
+	// over: it is a property of the request and not of the file, so a kind
+	// that one day writes two sorts of artifact would render both as
+	// whichever the switch in the page guessed, and the page's answer and
+	// the response's `Content-Type` would be two readings that can disagree.
+	// One derivation, two readers -- which is `queue.Cost`'s rule applied to
+	// a media type.
+	//
+	// EMPTY WHERE THE SWITCH HAS NO ANSWER, and that is not a hole: the same
+	// key makes the route answer 500, because an extension nothing here
+	// writes means a writer and that switch have come apart. So an empty
+	// Media is a defect ember is already refusing to serve, and the page says
+	// so rather than rendering an element over bytes that will not arrive --
+	// which is the one thing an `<img>` and an `<audio>` both do perfectly
+	// over a failed fetch.
+	Media string `json:"media,omitempty"`
 
 	// Preview marks a progress frame rather than a result, so a gallery does
 	// not open on a latent: a `proj` preview of a 64x64 generation is an 8x8
@@ -601,8 +940,17 @@ func viewRequest(r genstore.Request, ims []genstore.Image) requestView {
 		v.Jobs = append(v.Jobs, out)
 	}
 	for _, im := range ims {
+		// The error is DROPPED and the field left empty, which is the one
+		// place this projection may not refuse: a request view that failed
+		// because one of twenty artifacts has an extension the switch does
+		// not know would take the other nineteen, the prompts, the cost and
+		// the reason it ended with it. The route still 500s for that one
+		// file, and the page still says it cannot name the type -- so the
+		// defect is reported twice and costs nothing that is not about it.
+		media, _ := artifactType(im.Key)
 		v.Images = append(v.Images, imageRef{
 			Job: im.Job, Index: im.Index, Bytes: im.Bytes, Preview: im.Preview,
+			Media: media,
 			// The URL a browser fetches, not the blob key. The key is this
 			// process's business and could be an S3 object tomorrow.
 			Path: fmt.Sprintf("/api/requests/%s/images/%d/%d%s",
@@ -664,6 +1012,87 @@ type nodesView struct {
 	// looking at the Go one. Money crosses this wire twice for the same
 	// reason.
 	Attention int `json:"attention"`
+
+	// Workers is the fleet: one row per rental THIS PROCESS is holding, which
+	// is a different list from Findings and is why it is a different field.
+	//
+	// FINDINGS ARE WHAT EXISTS AT THE PROVIDERS AND THIS IS WHAT EMBER IS
+	// DOING WITH IT. They overlap and they are not the same set, in both
+	// directions, and merging them would lose whichever difference the
+	// operator is looking for: an orphan from a crashed run is a finding with
+	// no worker, and a rental in the middle of its create call is a worker
+	// with no finding -- no node exists yet, so no provider listing mentions
+	// it, and it is money already committed. A single table would either drop
+	// the second or invent a finding for it.
+	//
+	// EMPTY AND NEVER NIL, for the three slices above's reason: Go marshals a
+	// nil slice as `null`, serde's `default` covers a MISSING field and not a
+	// present null, and this repository has lost a whole websocket envelope to
+	// exactly that.
+	Workers []workerView `json:"workers"`
+}
+
+// workerView is one rental this process is holding.
+//
+// THE JOIN AND NOT A SECOND SCAN. Everything about what the rental IS comes
+// from the queue, which planned it; everything about what it COSTS comes from
+// reconcile's finding for the same handle, which is the one authority on money
+// in this response. Pricing a rental here from its own rate and a start time
+// would be a second answer to "what am I paying for", and the second answer is
+// the one that is wrong -- it is reconcile that knows about a node the
+// provider has already stopped billing for.
+type workerView struct {
+	// Node is "provider/id", the same string `ember ls` prints and the same
+	// one `requests.node` records. Empty while the rental is being created,
+	// which is a row with a State of "starting".
+	Node string `json:"node,omitempty"`
+
+	Provider string `json:"provider"`
+	Card     string `json:"card,omitempty"`
+	Image    string `json:"image,omitempty"`
+
+	// Opener paid for this rental to exist and is the request its cost is
+	// attributed to; Request is what is generating on it right now, which is
+	// empty in the gap between two batches.
+	//
+	// BOTH, BECAUSE THEY ARE DIFFERENT QUESTIONS AND AT max_nodes>1 THEY ARE
+	// USUALLY DIFFERENT ANSWERS. An operator reading a bill wants the first;
+	// an operator watching a fleet wants the second. One field would have
+	// made `ember spend` and this table disagree about which request a node
+	// belongs to.
+	Opener  string `json:"opener"`
+	Request string `json:"request,omitempty"`
+
+	// State is queue.WorkerState: starting, live, stale or quiet.
+	//
+	// DECIDED IN GO AND NEVER IN THE PAGE, for Attention's reason: the
+	// threshold is control.HeartbeatStale and the classification is one
+	// switch, and a second copy of either in Rust is a copy whose author will
+	// not be looking at this one. A page that compared timestamps itself
+	// would also be comparing them against the BROWSER's clock, which is a
+	// different clock from the one the beat was stamped by.
+	State string `json:"state"`
+
+	// Beat is how long ago ember last heard this rental's worker, formatted
+	// by Go like every other duration on this wire. Empty when there has
+	// never been one, which is not the same as "a moment ago" and must not
+	// render as it.
+	Beat string `json:"beat,omitempty"`
+
+	// Up is how long ember has been holding this rental.
+	Up string `json:"up"`
+
+	// Accrued is what this node has cost so far and Remaining is how long
+	// until its deadline, BOTH FROM THE FINDING and absent when the sweep
+	// found no node for this handle.
+	//
+	// ABSENT RATHER THAN ZERO IS THE WHOLE POINT OF THE POINTERS. A rental
+	// mid-create has no node at any provider, so there is nothing to price
+	// and no deadline to count down; a "$0.00" and a "0s" there would be
+	// ember pricing a card it is about to be billed for at nothing, which is
+	// the one direction a money figure must never be wrong in.
+	Accrued   *money  `json:"accrued,omitempty"`
+	Remaining *string `json:"remaining,omitempty"`
 }
 
 // findingView is one line of `ember ls`, in parts.
@@ -691,6 +1120,32 @@ type findingView struct {
 	ID       string `json:"id,omitempty"`
 	Reason   string `json:"reason"`
 
+	// Created is when ember wrote the intent record this finding is about,
+	// RFC3339 in UTC, and empty where there is no record.
+	//
+	// IT IS THE INSTANT THE MONEY BESIDE IT IS MEASURED FROM. reconcile.accrued
+	// is `node.Estimate(f.Record.Price, f.Record.Created, now, 0)`, so a row
+	// already showed a figure derived from a time it did not show -- an
+	// operator could read "$55.764" and had no way to tell whether that was a
+	// fast rate over an hour or a slow one over a fortnight. The two fields
+	// come from one struct field for that reason: a creation time read from
+	// anywhere else could disagree with the cost standing next to it.
+	//
+	// THE RECORD'S TIME AND NOT THE NODE'S, because node.Node.Created is a
+	// field no provider fills -- runpod parses `createdAt` into
+	// runpod.types and nothing carries it across, and the local provider
+	// never sets it. Projecting it would put a zero time on every row that
+	// has a node, which reads as 1970 rather than as "not known".
+	//
+	// SO IT IS WHEN EMBER DECIDED TO RENT, which is BEFORE the create call by
+	// design -- "the intent record is written before the create call" -- and
+	// is therefore slightly earlier than any machine that resulted. That is
+	// the honest reading for the kind that needs it most: an orphan is a
+	// record that never got an id, so what ember recorded is the only time
+	// there is, and the question it answers is "how long has this been
+	// unaccounted for", which starts exactly here.
+	Created string `json:"created,omitempty"`
+
 	// Accrued is money already spent and it stops when the node is
 	// destroyed. Monthly is money that keeps being spent until somebody
 	// removes the store -- there is no deadline, no reaper and no Ctrl-C that
@@ -710,8 +1165,11 @@ type findingView struct {
 // envelope to that -- so a scan that found nothing has to arrive as `[]`
 // three times over. The client tolerates `null` anyway, because the rule has
 // to hold for a field somebody adds later.
-func viewNodes(sc app.Scanned) nodesView {
-	v := nodesView{Findings: []findingView{}, Leftovers: []findingView{}, Stores: []findingView{}}
+func viewNodes(sc app.Scanned, fleet []queue.Worker, now time.Time) nodesView {
+	v := nodesView{
+		Findings: []findingView{}, Leftovers: []findingView{},
+		Stores: []findingView{}, Workers: []workerView{},
+	}
 	for _, f := range sc.Nodes {
 		v.Findings = append(v.Findings, viewFinding(f))
 	}
@@ -729,6 +1187,70 @@ func viewNodes(sc app.Scanned) nodesView {
 	// reconcile.Attention, which is the one authority.
 	all := append(append(append([]reconcile.Finding(nil), sc.Nodes...), sc.Stores...), sc.Leftovers...)
 	v.Attention = reconcile.Attention(all)
+
+	// THE JOIN IS OVER sc.Nodes ALONE and not over `all`, and the reason is
+	// written down because a reinstatement refused to make it a test.
+	//
+	// A store handle, a leftover and a record's run id all spell themselves
+	// `provider/name`, so a Docker volume named after a run collides with a
+	// live rental's handle exactly -- a collision an operator can produce,
+	// because store names are theirs to choose. Widening the join to every
+	// finding was reinstated and came back GREEN: viewWorker reads `Accrued`
+	// and `Node.Deadline`, and reconcile sets neither on a store or a
+	// leftover, so there is currently nothing for the wrong join to pick up.
+	//
+	// It stays narrow because THAT is the only reason it is harmless. The ids
+	// collide by construction, and the day any of those kinds gains a cost
+	// figure, a join over all of them would attach a per-MONTH charge to a row
+	// whose every other figure is a total already spent -- the wrong kind of
+	// wrong, which is what findingView keeps Accrued and Monthly apart for.
+	// What IS guarded is that each rental is priced from its own node:
+	// TestNodes_PricesEachRentalFromItsOwnNode.
+	billed := map[string]reconcile.Finding{}
+	for _, f := range sc.Nodes {
+		if !f.Node.Handle.IsZero() {
+			billed[f.Node.Handle.String()] = f
+		}
+	}
+	for _, w := range fleet {
+		v.Workers = append(v.Workers, viewWorker(w, billed[w.Node], now))
+	}
+	return v
+}
+
+// viewWorker projects one rental, with whatever the sweep found for its node.
+//
+// A ZERO Finding MEANS THE SWEEP SAW NO SUCH NODE, which is the ordinary state
+// of a rental whose create has not returned and is also what an unreachable
+// provider leaves behind. Both come out as a row with no cost and no deadline
+// rather than as a row with zeroes: see workerView.Accrued.
+func viewWorker(w queue.Worker, f reconcile.Finding, now time.Time) workerView {
+	v := workerView{
+		Node: w.Node, Provider: string(w.Provider), Card: string(w.Card),
+		Image: w.Image, Opener: string(w.Opener), Request: string(w.Request),
+		State: string(w.State(now)), Up: dur(now.Sub(w.Since).Truncate(time.Second)),
+	}
+	if !w.Beat.IsZero() {
+		// TRUNCATED TO THE SECOND, because the figure is read by a person and
+		// "4.0183221s ago" is three digits of precision about a frame that is
+		// sent every five seconds. The classification above is NOT truncated:
+		// it is the raw comparison against control.HeartbeatStale, so a row
+		// cannot read "live" beside a rounded age past the threshold.
+		v.Beat = dur(now.Sub(w.Beat).Truncate(time.Second))
+	}
+	if f.Accrued != nil {
+		m := usd(f.Accrued.Cost)
+		v.Accrued = &m
+	}
+	if d := f.Node.Deadline; !d.IsZero() {
+		// NEGATIVE IS KEPT AND NOT CLAMPED. A node past its deadline and
+		// still running is the `expired` finding beside this row, and a
+		// countdown that stopped at zero would hide the one number that says
+		// how long it has been over -- which is how much of the bill was for
+		// nothing.
+		r := dur(d.Sub(now).Truncate(time.Second))
+		v.Remaining = &r
+	}
 	return v
 }
 
@@ -764,6 +1286,15 @@ func viewFinding(f reconcile.Finding) findingView {
 		v.ID = f.Node.Handle.String()
 	case f.Record != nil:
 		v.ID = string(f.Provider) + "/" + string(f.Record.RunID)
+	}
+	// THE ZERO TIME IS CHECKED AND NOT ONLY THE POINTER. A record written by
+	// an older ember, or one restored from a journal that lost the field,
+	// has a Record and a zero Created -- and `0001-01-01T00:00:00Z` on a row
+	// is not "unknown", it is a confident answer that is wrong by two
+	// millennia. Empty is the one spelling of "ember cannot say", and it is
+	// the same spelling the Accrued below uses for the same records.
+	if f.Record != nil && !f.Record.Created.IsZero() {
+		v.Created = f.Record.Created.UTC().Format(time.RFC3339)
 	}
 	if f.Accrued != nil {
 		m := usd(f.Accrued.Cost)

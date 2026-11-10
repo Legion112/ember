@@ -3,9 +3,6 @@
 package integration
 
 import (
-	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,12 +38,12 @@ import (
 // lands before or after the id is written, exactly one finding comes out.
 func TestOrphan_SigkillLeavesExactlyOneFindableNode(t *testing.T) {
 	l := harness.New(t)
-	port := harness.FreePort(t)
+	// A rental that stays up for the lab to kill, through the key an operator
+	// writes for a card that needs time: the probe is retried until its
+	// timeout, so the process is alive with a node under it the whole way.
+	l.AppendConfig("gpu_probe: [sh, -c, \"exit 1\"]\ngpu_probe_timeout: 10m\n")
 
-	cmd, wait := l.Start(t.Context(), "up",
-		"--hold", "10m",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	cmd, wait := l.Start(t.Context(), "up")
 	l.WaitNode(t.Context(), 90*time.Second)
 	// Waiting for the id to reach the journal makes this lab test one thing
 	// rather than whichever thing the machine's speed picked: this is the
@@ -126,12 +123,12 @@ func countFindings(out string) int {
 // flag at all.
 func TestOrphan_DryRunReapDestroysNothing(t *testing.T) {
 	l := harness.New(t)
-	port := harness.FreePort(t)
+	// A rental that stays up for the lab to kill, through the key an operator
+	// writes for a card that needs time: the probe is retried until its
+	// timeout, so the process is alive with a node under it the whole way.
+	l.AppendConfig("gpu_probe: [sh, -c, \"exit 1\"]\ngpu_probe_timeout: 10m\n")
 
-	cmd, wait := l.Start(t.Context(), "up",
-		"--hold", "10m",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
+	cmd, wait := l.Start(t.Context(), "up")
 	l.WaitNode(t.Context(), 90*time.Second)
 	l.WaitRecorded(30 * time.Second)
 	if err := cmd.Process.Kill(); err != nil {
@@ -177,34 +174,4 @@ func TestUp_DryRunCreatesNothing(t *testing.T) {
 	if recs := l.Records(); len(recs) != 0 {
 		t.Errorf("a dry run wrote %d journal record(s): %+v", len(recs), recs)
 	}
-}
-
-// TestUp_DestroysWhenTheForwardCannotBind is the failure path that matters
-// most after a successful rent: the node exists and is costing money, and the
-// thing that failed is on this side of the connection. Taking the local port
-// first is the honest way to reproduce it -- it is also a real thing that
-// happens, when a previous run's browser tab is still open.
-func TestUp_DestroysWhenTheForwardCannotBind(t *testing.T) {
-	l := harness.New(t)
-	port := harness.FreePort(t)
-
-	// Hold the port for the whole lab, so ember cannot have it.
-	// A test file, so outside the single-listener rule.
-	blocker, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-	if err != nil {
-		t.Fatalf("take the port first: %v", err)
-	}
-	defer func() { _ = blocker.Close() }()
-
-	res := l.Run(t.Context(), "up",
-		"--hold", "10m",
-		"--port", fmt.Sprintf("sshd:22:%d", port),
-	)
-	if res.ExitCode == 0 {
-		t.Fatalf("ember up succeeded with its local port already taken\n%s", res.Combined())
-	}
-
-	// The node must be gone regardless. A rented GPU does not care which side
-	// of the connection broke.
-	l.WaitNoNodes(t.Context(), 2*time.Minute, res.Combined)
 }

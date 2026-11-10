@@ -33,7 +33,6 @@ import (
 func TestImageSelect_TheChosenImageIsTheOneAPodRuns(t *testing.T) {
 	p, f, l := runpodLab(t, runpodfake.Options{})
 	ctx := t.Context()
-	port := harness.FreePort(t)
 
 	// The captured catalogue's only available card is an A100 80GB PCIe,
 	// which normalises to a100-80g and is sm_80. Declared by the fake rather
@@ -47,7 +46,6 @@ func TestImageSelect_TheChosenImageIsTheOneAPodRuns(t *testing.T) {
 	spec, err := node.NewSpec(node.SpecOptions{
 		Image:  want,
 		TTL:    10 * time.Minute,
-		Ports:  []node.PortMap{{Name: "sshd", Remote: 22, Local: uint16(port)}},
 		Filter: node.Filter{GPU: "a100"},
 	})
 	if err != nil {

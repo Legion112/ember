@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
+	"github.com/Legion112/ember/internal/tts"
 )
 
 // fakeServed is a rental whose weights are resident, with no card.
@@ -39,9 +42,34 @@ type fakeServed struct {
 	// frame: a fake tidier than the thing it stands in for tests a program
 	// that does not exist.
 	onStop func(stop <-chan struct{}, n int) error
+
+	// beat is what this rental's worker last said, read under the mutex
+	// because a fleet listing runs on a different goroutine than the drain
+	// loop -- which is the production arrangement exactly: see app.Served.Beat.
+	//
+	// A FAKE THAT ANSWERED A FIXED TIME WOULD BE LESS CAPABLE THAN A WORKER.
+	// The whole question a fleet view asks of this value is how it CHANGES,
+	// so a constant here would make every staleness assertion in this package
+	// a test of the clock.
+	beat time.Time
 }
 
 func (f *fakeServed) Caps() sdserver.Capabilities { return f.caps }
+
+// Beat defaults to NOW rather than to the zero time, for the card field's
+// reason on fakeRental: a worker beats every control.HeartbeatEvery, so a fake
+// stuck at "has never spoken" would put every rental in this package into the
+// state a fleet view paints red -- and the assertions about that state would
+// then be measuring the fake. A test that wants a row to go stale sets the
+// field.
+func (f *fakeServed) Beat() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.beat.IsZero() {
+		return time.Now()
+	}
+	return f.beat
+}
 
 func (f *fakeServed) Generate(_ context.Context, sink report.Sink, jobs sdserver.Run, dir string, stop <-chan struct{}) error {
 	f.mu.Lock()
@@ -76,6 +104,22 @@ func (f *fakeServed) count() int {
 // what should have been one is twice the bill, and the whole shape exists to
 // make that not happen.
 type fakeRental struct {
+	// card is what this rental advertises, which these fakes take from the
+	// request that opened it.
+	//
+	// A FAKE THAT ADVERTISED NOTHING WOULD BE LESS CAPABLE THAN A RENTAL.
+	// Queue.advertise is called one statement after Plan returns in
+	// production, so a live rental with no card is one in the middle of an
+	// offer lookup -- and a fake stuck in that state would leave every
+	// create-side assertion in this package measuring the conservative
+	// exclusion instead of the exact one.
+	card node.GPUModel
+
+	// image is what the fleet view prints for this rental. A field rather
+	// than a constant, because a fake that answered one image for every
+	// rental could not tell a fleet table that printed each row's own image
+	// from one that printed the first row's N times.
+	image     string
 	served    *fakeServed
 	rentals   *int
 	destroyed *int
@@ -100,9 +144,41 @@ type fakeRental struct {
 	// the rental is up, which is exactly what stopping `ember serve` mid
 	// generation does.
 	onRented func()
+
+	// spoken is what a speech rental hands its closure.
+	spoken app.Spoken
+}
+
+// WithSpoken is WithServed for a speech rental.
+//
+// THROUGH THE SAME COUNTER, which is the property it exists to keep testable:
+// `TestSubmit_...` asserts that the maximum number of open rentals across BOTH
+// kinds is one, and two independent counters could each be at one while two
+// nodes were up. So both methods go through `rent` below -- one name for a
+// path, not one per call site -- and the only difference between them is which
+// fake the closure is handed.
+func (r fakeRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error {
+	return r.rent(ctx, sink, func(ctx context.Context) error { return fn(ctx, r.spoken) })
 }
 
 func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
+	return r.rent(ctx, sink, func(ctx context.Context) error { return fn(ctx, r.served) })
+}
+
+func (r fakeRental) Card() node.GPUModel { return r.card }
+
+// Image defaults rather than answering empty, for the card field's reason
+// above: `ember serve` refuses a config with no image, so a rental that named
+// none is a state the program cannot be in and a fake stuck in it would make
+// every assertion about this column vacuous.
+func (r fakeRental) Image() string {
+	if r.image == "" {
+		return "ember:lab"
+	}
+	return r.image
+}
+
+func (r fakeRental) rent(ctx context.Context, sink report.Sink, fn func(context.Context) error) error {
 	r.mu.Lock()
 	*r.rentals++
 	r.mu.Unlock()
@@ -132,7 +208,7 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 		MemTotal: 700 << 30, MemCached: 29 << 30,
 		Bytes: 56 << 30,
 	})
-	err := fn(ctx, r.served)
+	err := fn(ctx)
 	if r.block != nil {
 		// Held open so a test can see the rental alive while it cancels.
 		select {
@@ -149,6 +225,7 @@ func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(co
 
 type fakePlanner struct {
 	served      *fakeServed
+	spoken      recordingSpoken
 	mu          sync.Mutex
 	rentals     int
 	destroyed   int
@@ -169,7 +246,9 @@ func (p *fakePlanner) Plan(_ context.Context, r genstore.Request) (Rental, error
 		return nil, err
 	}
 	return fakeRental{
-		served: p.served, rentals: &p.rentals, destroyed: &p.destroyed,
+		card:   node.GPUModel(r.GPU),
+		served: p.served, spoken: p.spoken,
+		rentals: &p.rentals, destroyed: &p.destroyed,
 		rentErr: p.rentErr, teardownErr: p.teardownErr, mu: &p.mu, block: p.block,
 		onRented: p.onRented,
 	}, nil
@@ -179,6 +258,19 @@ func (p *fakePlanner) counts() (rentals, destroyed int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.rentals, p.destroyed
+}
+
+// newQueueOver is newQueue over a store the caller already filled.
+//
+// The speech tests enqueue before building the queue, because a request's kind
+// is what decides which rental `once` opens -- so the row has to exist first.
+func newQueueOver(t *testing.T, st genstore.Store, pl *fakePlanner) (*Queue, genstore.Store) {
+	t.Helper()
+	return &Queue{
+		Store:   st,
+		Planner: pl,
+		Outputs: filepath.Join(t.TempDir(), "outputs"),
+	}, st
 }
 
 func newQueue(t *testing.T, pl *fakePlanner) (*Queue, genstore.Store) {
@@ -219,7 +311,7 @@ func TestOnce_OneRentalServesEveryCompatibleRequest(t *testing.T) {
 	a := enqueue(t, st, "rtx2080ti", "first")
 	b := enqueue(t, st, "rtx2080ti", "second")
 
-	worked, err := q.once(t.Context())
+	worked, err := q.claimAndRun(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +360,7 @@ func TestOnce_ARequestForAnotherCardWaitsForItsOwnRental(t *testing.T) {
 	enqueue(t, st, "rtx2080ti", "this card")
 	other := enqueue(t, st, "h100-80g", "another card")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if rentals, _ := pl.counts(); rentals != 1 {
@@ -284,7 +376,7 @@ func TestOnce_ARequestForAnotherCardWaitsForItsOwnRental(t *testing.T) {
 	}
 
 	// And now it gets its own.
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if rentals, destroyed := pl.counts(); rentals != 2 || destroyed != 2 {
@@ -302,7 +394,7 @@ func TestOnce_AnEmptyQueueDestroysAtOnce(t *testing.T) {
 	enqueue(t, st, "rtx2080ti", "only one")
 
 	start := time.Now()
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if took := time.Since(start); took > time.Second {
@@ -319,7 +411,7 @@ func TestOnce_NothingToClaimRentsNothing(t *testing.T) {
 	pl := &fakePlanner{served: &fakeServed{}}
 	q, _ := newQueue(t, pl)
 
-	worked, err := q.once(t.Context())
+	worked, err := q.claimAndRun(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +438,7 @@ func TestOnce_AFailedBatchStopsTheRental(t *testing.T) {
 	bad := enqueue(t, st, "rtx2080ti", "fails")
 	good := enqueue(t, st, "rtx2080ti", "never reached on this rental")
 
-	_, err := q.once(t.Context())
+	_, err := q.claimAndRun(t.Context())
 	if err == nil {
 		t.Fatal("a failed batch was reported as success")
 	}
@@ -385,7 +477,7 @@ func TestOnce_APlanThatFailsRentsNothing(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a")
 
-	worked, err := q.once(t.Context())
+	worked, err := q.claimAndRun(t.Context())
 	if err == nil {
 		t.Fatal("a failed plan was reported as success")
 	}
@@ -420,7 +512,7 @@ func TestOnce_CancellationIsNotAFailure(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a")
 
-	if _, err := q.once(t.Context()); err == nil {
+	if _, err := q.claimAndRun(t.Context()); err == nil {
 		t.Fatal("want the cancellation reported")
 	}
 	got, err := st.Get(t.Context(), id)
@@ -447,7 +539,7 @@ func TestOnce_RecordsTheRentalAgainstTheRequestThatOpenedIt(t *testing.T) {
 	opener := enqueue(t, st, "rtx2080ti", "first")
 	rider := enqueue(t, st, "rtx2080ti", "second")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -493,7 +585,7 @@ func TestOnce_PersistsProgressSoAReconnectCanReplayIt(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -562,7 +654,7 @@ func TestOnce_JoinsTheFilesAJobWroteToTheRequest(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a cat")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -642,16 +734,36 @@ func TestRun_ReturnsOnlyAfterTheRentalIsDestroyed(t *testing.T) {
 	}
 }
 
-// TestRun_MarksWhatWasRunningWhenTheProcessDied.
+// TestRun_ReclaimsARowWhoseLeaseRanOutAndLeavesALiveOneAlone.
 //
-// Its rental is gone, so it cannot be resumed -- and re-queueing it would rent
-// a second card for work the operator may no longer want.
-func TestRun_MarksWhatWasRunningWhenTheProcessDied(t *testing.T) {
+// THE SWEEP THIS REPLACED DID NOT ASK. It marked every running row interrupted
+// at startup, on the premise that the row's rental was gone -- which is a
+// claim about a provider's labels that nothing in this package reads. Two
+// `ember serve` processes against one store therefore had the second one write
+// `interrupted` over the first one's live rentals, and the row it orphaned was
+// the only local record of a node that is still billing.
+//
+// TWO ROWS AND ONE RUN, because a sweep that takes both and a sweep that takes
+// neither are each satisfied by one assertion. The live one is the half with
+// the defect in it.
+func TestRun_ReclaimsARowWhoseLeaseRanOutAndLeavesALiveOneAlone(t *testing.T) {
 	pl := &fakePlanner{served: &fakeServed{}}
-	q, st := newQueue(t, pl)
+	st := genstore.NewRecordingStore()
+	at := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	st.Now = func() time.Time { return at }
+	q, _ := newQueueOver(t, st, pl)
 
-	id := enqueue(t, st, "rtx2080ti", "was in flight")
+	stale := enqueue(t, st, "rtx2080ti", "claimed by an ember that is gone")
 	if _, ok, err := st.ClaimNext(t.Context(), "an-older-lease", genstore.Compat{}); err != nil || !ok {
+		t.Fatalf("setup: ok=%v err=%v", ok, err)
+	}
+
+	// Past the term, so that row's lease has run out. Then a second row is
+	// claimed, which gets a fresh one: this is the live rental of the other
+	// ember, and nothing here may touch it.
+	at = at.Add(genstore.LeaseTerm + time.Minute)
+	live := enqueue(t, st, "rtx2080ti", "claimed by an ember that is still running")
+	if _, ok, err := st.ClaimNext(t.Context(), "a-live-lease", genstore.Compat{}); err != nil || !ok {
 		t.Fatalf("setup: ok=%v err=%v", ok, err)
 	}
 
@@ -661,12 +773,20 @@ func TestRun_MarksWhatWasRunningWhenTheProcessDied(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := st.Get(t.Context(), id)
+	got, err := st.Get(t.Context(), stale)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Status != genstore.StatusInterrupted {
 		t.Errorf("status = %q, want interrupted", got.Status)
+	}
+	kept, err := st.Get(t.Context(), live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Status != genstore.StatusRunning {
+		t.Errorf("a request whose lease is still held became %q at another ember's startup; "+
+			"its row is the only local record of a node that may still be billing", kept.Status)
 	}
 	if rentals, _ := pl.counts(); rentals != 0 {
 		t.Errorf("rented %d node(s) for an interrupted request; it must not be resumed", rentals)
@@ -703,14 +823,13 @@ func TestRunning_NamesWhatIsGeneratingNow(t *testing.T) {
 	pl := &fakePlanner{served: served}
 	q, st := newQueue(t, pl)
 	served.progress = func(report.Sink, int) {
-		id, ok := q.Running()
-		if ok {
-			seen <- id
+		if ids := q.Running(); len(ids) == 1 {
+			seen <- ids[0]
 		}
 	}
 	id := enqueue(t, st, "rtx2080ti", "a")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -724,8 +843,8 @@ func TestRunning_NamesWhatIsGeneratingNow(t *testing.T) {
 
 	// And nothing once it is over: a UI showing a request as in progress
 	// after its node is gone is a UI nobody believes.
-	if _, ok := q.Running(); ok {
-		t.Error("Running() still names a request after the rental ended")
+	if ids := q.Running(); len(ids) != 0 {
+		t.Errorf("Running() still names %v after the rental ended", ids)
 	}
 }
 
@@ -739,10 +858,10 @@ func TestOnce_CachesTheServersCapabilities(t *testing.T) {
 	q, st := newQueue(t, pl)
 	enqueue(t, st, "rtx2080ti", "a")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	caps, ok, err := st.Caps(t.Context())
+	caps, ok, err := st.Caps(t.Context(), genstore.NewShape(genstore.KindSD, "local", "rtx2080ti"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,7 +887,7 @@ func TestOnce_SurvivesAStoreThatCannotRecordProgress(t *testing.T) {
 
 	st.(*genstore.RecordingStore).FailOn = "AppendEvents"
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Errorf("a store that could not record progress failed the generation: %v", err)
 	}
 	st.(*genstore.RecordingStore).FailOn = ""
@@ -982,10 +1101,10 @@ func TestOnce_AStoreThatBreaksDoesNotTakeTheNodeWithIt(t *testing.T) {
 				rec.FailOn = c.failOn
 			}
 
-			_, err := q.once(t.Context())
+			_, err := q.claimAndRun(t.Context())
 			if c.failOn == "ClaimNext" {
 				rec.FailOn = "ClaimNext"
-				_, err = q.once(t.Context())
+				_, err = q.claimAndRun(t.Context())
 				if err == nil {
 					t.Fatal("a claim that failed was reported as success")
 				}
@@ -1023,7 +1142,7 @@ func TestDrain_AClaimThatFailsMidRentalStopsThatRental(t *testing.T) {
 		rec.FailOn = "ClaimNext"
 	}
 
-	_, err := q.once(t.Context())
+	_, err := q.claimAndRun(t.Context())
 	rec.FailOn = ""
 	if err == nil {
 		t.Fatal("a claim that failed mid-rental was reported as success")
@@ -1112,7 +1231,7 @@ func TestOnce_RecordsThePreviewFrameAsAPreview(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a cat")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1161,7 +1280,7 @@ func TestOnce_AProgressEventWithNoFrameRecordsNothing(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "a cat")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	ims, err := st.Images(t.Context(), id)
@@ -1191,7 +1310,7 @@ func TestOnce_RecordsWhatTheNodeSaidAboutItsMemory(t *testing.T) {
 	opener := enqueue(t, st, "rtx2080ti", "first")
 	rider := enqueue(t, st, "rtx2080ti", "second")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1245,7 +1364,7 @@ func TestOnce_RecordsWhichModelServedEveryRequestOnTheRental(t *testing.T) {
 	opener := enqueue(t, st, "rtx2080ti", "first")
 	rider := enqueue(t, st, "rtx2080ti", "second")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1272,7 +1391,7 @@ func TestOnce_DoesNotInventAModelTheServerDidNotReport(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "first")
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.Get(t.Context(), id)
@@ -1294,7 +1413,7 @@ func TestOnce_APlanThatFailsRecordsNoModel(t *testing.T) {
 	q, st := newQueue(t, pl)
 	id := enqueue(t, st, "rtx2080ti", "first")
 
-	if _, err := q.once(t.Context()); err == nil {
+	if _, err := q.claimAndRun(t.Context()); err == nil {
 		t.Fatal("a plan that failed was not reported")
 	}
 	got, err := st.Get(t.Context(), id)
@@ -1348,7 +1467,7 @@ func TestCancel_StopsOneRequestAndTheRentalServesTheNext(t *testing.T) {
 		}
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatalf("a cancelled request ended the rental with an error: %v", err)
 	}
 
@@ -1415,7 +1534,7 @@ func TestCancel_ReachesOnlyTheRequestItNames(t *testing.T) {
 		return nil
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if wrong != nil {
@@ -1454,7 +1573,7 @@ func TestCancel_IsSafeToAskTwice(t *testing.T) {
 		return app.ErrCancelled
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if second {
@@ -1518,7 +1637,7 @@ func TestCancel_DoesNotReachTheNextRequestOnTheSameRental(t *testing.T) {
 		return nil
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if leaked != nil {
@@ -1573,13 +1692,13 @@ func TestHolding_IsTrueFromTheClaimAndNotOnlyWhileGenerating(t *testing.T) {
 	var heldDuringPlan, generatingDuringPlan bool
 	q.Planner = observingPlanner{fakePlanner: pl, at: func(r genstore.Request) {
 		heldDuringPlan = q.Holding(r.ID)
-		_, generatingDuringPlan = q.Running()
+		generatingDuringPlan = len(q.Running()) > 0
 	}}
 
 	if q.Holding(id) {
 		t.Error("a request nothing has claimed is held")
 	}
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !heldDuringPlan {
@@ -1630,7 +1749,7 @@ func TestHolding_FollowsTheClaimOntoARiderAndNotTheRequestThatOpenedIt(t *testin
 		return nil
 	}
 
-	if _, err := q.once(t.Context()); err != nil {
+	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 {
@@ -1648,4 +1767,105 @@ func TestHolding_FollowsTheClaimOntoARiderAndNotTheRequestThatOpenedIt(t *testin
 		t.Error("the opener is still held while the rider is the one on the rental; one " +
 			"drain goroutine holds one request, and two would make the value a guess")
 	}
+}
+
+// recordingSpoken is a speech rental that says nothing and remembers what it
+// was asked to say.
+//
+// FIELD NAMES ARE THE Recording* ONES -- Calls, Errors -- which is this
+// repository's convention so that a reader who has met one fake reads this one
+// without learning it.
+type recordingSpoken struct {
+	mu    *sync.Mutex
+	Calls *[]tts.Run
+	Errs  *[]error
+}
+
+func newRecordingSpoken() recordingSpoken {
+	return recordingSpoken{mu: &sync.Mutex{}, Calls: &[]tts.Run{}, Errs: &[]error{}}
+}
+
+func (s recordingSpoken) Say(_ context.Context, sink report.Sink, run tts.Run, dir string, _ <-chan struct{}) error {
+	if s.mu == nil {
+		return nil
+	}
+	s.mu.Lock()
+	*s.Calls = append(*s.Calls, run)
+	var err error
+	if len(*s.Errs) > 0 {
+		err, *s.Errs = (*s.Errs)[0], (*s.Errs)[1:]
+	}
+	s.mu.Unlock()
+
+	// WHAT A REAL SPEECH RENTAL EMITS, and it is here because a fake tidier
+	// than the thing it stands in for tests a program that does not exist --
+	// the defect AGENTS.md has now recorded seven times. runSpoken emits a
+	// started, an artifact and a cost per utterance, and the artifact event
+	// is what the Recorder turns into an images row: a fake that emitted
+	// nothing would let a queue that recorded no artifact pass.
+	for i := range run.Jobs {
+		sink.Emit(report.Event{
+			Kind: report.KindUnitStarted, Unit: report.UnitJob,
+			Index: i + 1, Total: len(run.Jobs),
+		})
+		sink.Emit(report.Event{
+			Kind: report.KindJobImages, Unit: report.UnitJob,
+			Index: i + 1, Total: len(run.Jobs), Files: 1, Bytes: 1024,
+			Wrote: []report.File{{Name: fmt.Sprintf("speech-%02d.wav", i+1), Bytes: 1024}},
+			// The two figures piper prints, so a reader that stopped
+			// carrying them is visible here as well as in the app package.
+			Reported: 1184 * time.Millisecond, Measured: 62 * time.Millisecond,
+		})
+		sink.Emit(report.Event{
+			Kind: report.KindUnitCost, Unit: report.UnitJob,
+			Index: i + 1, Total: len(run.Jobs),
+		})
+	}
+	_ = dir
+	return err
+}
+
+// claimAndRun is the supervisor's two steps in one synchronous call, for the
+// tests that drive one rental and assert on what it did.
+//
+// WHY A HELPER AT ALL. `once` used to claim and then rent, inline in Run's
+// loop, so a test could drive one whole rental with `q.once(ctx)`. At
+// max_nodes>1 the claim has to happen on the supervisor and the compat has to
+// be registered before the next decision -- otherwise two compatible requests
+// provoke two nodes while the first is still provisioning -- so the two halves
+// are `Queue.claim` and `Queue.once`, and a test that wants a rental start to
+// finish has to call them in that order. Forty call sites each spelling it out
+// is forty places for one of them to get the order wrong, which is the "one
+// name for a path, not one per call site" rule.
+//
+// WHAT IT CANNOT SEE, SAID RATHER THAN IMPLIED. It calls two production
+// functions and is therefore not a second production path -- but it is this
+// test file's own opinion about the ORDER the supervisor calls them in, and if
+// that opinion were wrong nothing here would report it: a ceiling check, a
+// terminal status or a batch count is the same whichever order produced it.
+// What covers the order is the set of tests that drive `Run` itself --
+// TestRun_PacksOntoALiveRentalRatherThanCreating,
+// TestRun_HoldsNoMoreRentalsThanMaxNodes and
+// TestRun_RegistersWhatASlotWillServeBeforeTheNextClaim -- and that last one
+// is the one this helper structurally cannot stand in for.
+//
+// IT RESERVES AND FREES A SLOT, so that a test which asserts on `Running` or
+// on `free` sees what production sees. The WaitGroup is local and waited for
+// before returning, which is what makes the call synchronous.
+func (q *Queue) claimAndRun(ctx context.Context) (bool, error) {
+	_, live := q.free()
+	lease := string(genstore.NewReqID())
+	first, ok, err := q.Store.ClaimNext(ctx, lease, genstore.Compat{Live: live})
+	if err != nil {
+		return false, fmt.Errorf("claim a request: %w", err)
+	}
+	if !ok {
+		return false, nil
+	}
+	compat := genstore.Compat{
+		Kind: genstore.KindOf(first.Kind), Provider: first.Provider, GPU: first.GPU,
+	}
+	q.reserve(first.ID, compat)
+	defer q.freeSlot(first.ID)
+	return true, q.once(ctx, lease, first, compat)
 }

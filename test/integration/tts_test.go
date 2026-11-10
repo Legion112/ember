@@ -139,7 +139,7 @@ func TestWorkloadImage_SpeaksOnACPUAndCarriesItsVoice(t *testing.T) {
 // guards is the image's own half of the claim.
 func TestWorkloadImage_SpeechImageListensOnNothingButSSH(t *testing.T) {
 	l := harness.New(t)
-	assertListensOnlyOnSSH(t, ttsImage(t, l))
+	_ = assertListensOnlyOnSSH(t, ttsImage(t, l))
 }
 
 // TestTTS_AnUtteranceComesHomeAsAPlayableWav is the whole feature, end to end,

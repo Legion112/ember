@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/provision"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/session"
 	"github.com/Legion112/ember/internal/sshx"
+	"github.com/Legion112/ember/internal/sshx/sshexec"
 	"github.com/Legion112/ember/internal/transfer"
 	"github.com/Legion112/ember/internal/tts"
 	"github.com/Legion112/ember/internal/tunnel"
@@ -36,17 +39,28 @@ import (
 // the first failure because a batch where job 3 failed and 4 through 10 ran
 // anyway is a batch nobody can trust.
 //
-// WHAT IT DOES NOT BORROW IS THE MARKER. runSteps bounds each fetch by a file
-// it touches on the node, because a `cmds` step's output is a whole directory
-// whose contents ember cannot name in advance. Here ember composed the
-// filename, so each fetch names exactly one file and there is nothing for a
-// marker to bound -- which also means this path cannot re-send what is already
-// home, and does not need the "a marker that cannot be touched is wasteful,
-// not fatal" concession.
+// EACH FETCH NAMES EXACTLY ONE FILE, because ember composed the filename. The
+// `outputs:` fetch is a whole directory whose contents ember cannot name in
+// advance; here there is nothing to bound and nothing to re-send.
 type spokenBatch struct{ run tts.Run }
 
 func (b spokenBatch) Describe() string {
-	return fmt.Sprintf("tts (piper, %d utterance(s), voice %s)", len(b.run.Jobs), b.run.Voice)
+	// THE VOICES RATHER THAN ONE VOICE, because a batch may mix them: a
+	// one-shot invocation names its own model and nothing is held open, so
+	// there is no sense in which a rental has "a" voice. Sorted, so two runs
+	// of one config print the same line -- the reason config.WriteConfig
+	// sorts its keys.
+	seen := map[string]bool{}
+	var voices []string
+	for _, j := range b.run.Jobs {
+		if !seen[j.Voice] {
+			seen[j.Voice] = true
+			voices = append(voices, j.Voice)
+		}
+	}
+	sort.Strings(voices)
+	return fmt.Sprintf("tts (piper, %d utterance(s), %s)",
+		len(b.run.Jobs), strings.Join(voices, ", "))
 }
 
 // RemoteDir is where a spoken artifact is written on the node, before it is
@@ -73,24 +87,98 @@ const RemoteDir = "/workspace/out/speech"
 func (b spokenBatch) Run(ctx context.Context, out io.Writer, sink report.Sink, _ tunnel.Dialer,
 	r sshx.Runner, _ node.Spec, so session.Options, runDir string, rate node.Rate,
 ) error {
-	return runSpoken(ctx, out, sink, r, b.run, so, runDir, rate)
+	// nil: this is `ember up`, which has one batch and no second caller, so
+	// the only way to stop it is Ctrl-C -- which cancels the whole run. There
+	// is nothing a per-request cancel could mean here, which is the sentence
+	// runServed's own nil already carries.
+	return runSpoken(ctx, out, sink, r, b.run, so, runDir, rate, nil)
+}
+
+// Spoken is a rental that can speak, handed to a drain loop.
+//
+// THE MIRROR OF Served AND DELIBERATELY NARROWER. `Served` carries `Caps()` as
+// well, because sd-server publishes what it can do and ember validates every
+// job against it before a card is asked to sample. piper publishes nothing: it
+// is a binary with six flags, and what would be checked against a response is
+// checked against its own `--help` by an image lab instead. So a `Caps()` here
+// would be a method with nothing to answer -- the speculative generality this
+// repository refuses -- and the queue's PutCaps call stays on the sd path.
+type Spoken interface {
+	// Say runs one request's utterances, writing each artifact under dir and
+	// emitting its own progress into sink.
+	//
+	// stop is closed to drop the utterances that have not started. It cannot
+	// stop the one in flight, which is the honest shape rather than a
+	// limitation: an utterance is sub-second on the measurements in
+	// internal/tts, so there is no job-cancel API worth having and nothing to
+	// ask one of.
+	Say(ctx context.Context, sink report.Sink, run tts.Run, dir string, stop <-chan struct{}) error
+}
+
+// spoken is the live Spoken: a node ember has reached, and nothing else.
+//
+// NO SERVER AND NO FORWARD, which is what makes this four fields where
+// `served` is a client plus a process plus a port. The whole of what speaking
+// needs is a runner and somewhere to write.
+type spoken struct {
+	out  io.Writer
+	r    sshx.Runner
+	so   session.Options
+	rate node.Rate
+}
+
+func (s spoken) Say(ctx context.Context, sink report.Sink, run tts.Run, dir string, stop <-chan struct{}) error {
+	return runSpoken(ctx, s.out, sink, s.r, run, s.so, dir, s.rate, stop)
+}
+
+// WithSpoken rents the node and hands a Spoken to fn, which is a drain loop.
+//
+// THE MIRROR OF WithServed MINUS THE SERVER, and the difference is the whole
+// of it: that one starts sd-server, waits for the weights and refuses before
+// anything is generated if the port never opens -- about a minute of a rented
+// card, which is why it exists. There is nothing to start here, so a rental
+// that can speak is a rental ember can reach.
+//
+// No output directory is decided here, for WithServed's reason: fn serves
+// several requests on this one rental and each writes into its own, which is
+// also its key in the blob store.
+func (p Plan) WithSpoken(ctx context.Context, out io.Writer, sink report.Sink,
+	fn func(context.Context, Spoken) error,
+) error {
+	return provision.WithNode(ctx, p.Provider, p.Spec, p.Offer, p.lifecycle(sink),
+		func(ctx context.Context, s provision.Session) error {
+			client, so, err := dialNode(ctx, s, p.Options)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = client.Close() }()
+			if err := p.ready(ctx, out, sink, client, so); err != nil {
+				return err
+			}
+			// The node's own log, for the reason Plan.serve collects it: the
+			// component whose failures are hardest to diagnose is the one
+			// whose evidence a destroy removes. A drain loop has no single
+			// run directory, so this goes beside the first request's -- which
+			// is what `dir` the loop passes to Say is, and is why this is the
+			// caller's business rather than ours. Left to the loop.
+			return fn(ctx, spoken{
+				out: out, r: sshexec.New(client.SSH()), so: so, rate: p.Offer.Price,
+			})
+		})
 }
 
 // runSpoken says each utterance in turn and brings its wav home before the
 // next one starts.
 //
-// IT IGNORES TWO OF THE PARAMETERS THE SEAM CARRIES, and both omissions are
-// decisions rather than oversights.
+// IT IGNORES TWO OF THE NINE PARAMETERS THE SEAM CARRIES, and both omissions
+// are decisions rather than oversights.
 //
-// THE DIALER: no forwards. A `cmds` run holds `ports:` open because a workload
-// may want to reach a service on the node and a ComfyUI run is exactly that;
-// piper reads stdin and writes a file, so a forward here would be a listener
-// opened for nothing -- and the rule that every listener is loopback is a rule
-// about listeners that exist.
+// THE DIALER: nothing on the node is dialled. sd-server is reached on the
+// node's own loopback over the SSH connection; piper reads stdin and writes a
+// file, so there is no port to reach at all.
 //
 // THE SPEC: nothing on it describes a speech run. `Serve` and `ServeTimeout`
-// are sd-server's, `Cmds` is the opaque-argv path, `Ports` is the forward this
-// does not open, and `Outputs` is the `outputs:` fetch -- which this path
+// are sd-server's, and `Outputs` is the `outputs:` fetch -- which this path
 // deliberately does not use, because ember composed each filename and fetches
 // them one at a time. That absence is the same seal `Plan.Spoken` rests on:
 // `node.Spec` has no speech field, so a request can never be consulted about
@@ -106,12 +194,31 @@ func runSpoken(
 	so session.Options,
 	runDir string,
 	rate node.Rate,
+	stop <-chan struct{},
 ) error {
 	total := len(run.Jobs)
 	var errs []error
 	var spent node.MicroUSD
 
 	for i, j := range run.Jobs {
+		// A CANCEL TAKES THE UTTERANCES THAT HAVE NOT STARTED, AND SAYS WHAT
+		// IT COULD NOT TAKE. The money argument is the sd path's: stopping
+		// only the one in flight would leave the next starting a second
+		// later on the same card, so the button would look like it worked and
+		// the bill would not change. What differs is that the one in flight
+		// is sub-second here rather than ~141s, so there is nothing worth a
+		// job-cancel API and nothing to ask one of -- and the line says so
+		// rather than implying ember stopped something it did not.
+		if asked(stop) {
+			sink.Emit(report.Event{
+				Kind: report.KindJobCancelled, Unit: report.UnitJob,
+				Index: i + 1, Total: total,
+				Desc: fmt.Sprintf("%d utterance(s) after it were dropped", total-i),
+			})
+			outf(out, "cancelled: %d of %d utterance(s) were not started\n", total-i, total)
+			break
+		}
+
 		stem := SpokenStem(j, i)
 		remote := path.Join(RemoteDir, stem+tts.Ext)
 
@@ -133,7 +240,7 @@ func runSpoken(
 		// figures below. A second invocation to ask the same question would be
 		// a second utterance on a rented card.
 		var said bytes.Buffer
-		runErr := sayOne(ctx, io.MultiWriter(out, &said), r, run, j, remote)
+		runErr := sayOne(ctx, io.MultiWriter(out, &said), r, j, remote)
 
 		var res transfer.Result
 		var ferr error
@@ -152,7 +259,7 @@ func runSpoken(
 			// that was never going to exist, stacked on the real one.
 			fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputTimeout)
 			res, ferr = transfer.Fetch(fetchCtx, r,
-				[]node.OutputPath{{Remote: remote}}, runDir, "")
+				[]node.OutputPath{{Remote: remote}}, runDir)
 			cancel()
 		}
 
@@ -228,8 +335,8 @@ func runSpoken(
 }
 
 // sayOne runs one piper invocation on the node.
-func sayOne(ctx context.Context, out io.Writer, r sshx.Runner, run tts.Run, j tts.Job, remote string) error {
-	cmd := run.Command(j, remote)
+func sayOne(ctx context.Context, out io.Writer, r sshx.Runner, j tts.Job, remote string) error {
+	cmd := j.Command(remote)
 	outf(out, "speaking: %s\n", j.Describe())
 	// workload.Run reports a non-zero exit as an error as well as a code, so
 	// the error is the whole answer -- the distinction gpucheck.Wait draws
@@ -271,4 +378,20 @@ func spokenReport(said string) (tts.Report, bool) {
 		}
 	}
 	return got, ok
+}
+
+// asked reports whether a cancel has been signalled.
+//
+// A NON-BLOCKING READ OF A CHANNEL THAT IS CLOSED RATHER THAN SENT TO, which
+// is the shape internal/app's cancelSignal already uses for the sd path: a
+// closed channel is permanently ready, so this answers true for every
+// utterance after the ask without anybody having to send one per job. A nil
+// channel is never ready, which is what `ember up` hands it.
+func asked(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
 }

@@ -19,15 +19,11 @@ func TestSSHPortIsTheOnlyPublicOne(t *testing.T) {
 		t.Fatalf("SSHPort() = %v", s)
 	}
 
-	i, err := Internal(8188)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if i.IsPublic() {
-		t.Fatal("Internal returned a public request")
-	}
-	if i.Port() != 8188 || i.Proto() != node.ProtoTCP {
-		t.Fatalf("Internal(8188) = %v", i)
+	// The only other value of this type there is, asserted beside it: a
+	// struct literal cannot name a port at all, so a request ember did not
+	// build is zero and a provider refuses it.
+	if (PortRequest{}).IsPublic() {
+		t.Fatal("the zero request reports itself as public")
 	}
 }
 
@@ -52,12 +48,6 @@ func TestPortRequestCannotBeSpelledPublic(t *testing.T) {
 	}
 }
 
-func TestInternalRefusesPortZero(t *testing.T) {
-	if _, err := Internal(0); err == nil {
-		t.Fatal("port 0 was accepted")
-	}
-}
-
 func TestZeroRequestIsRecognisable(t *testing.T) {
 	if !(PortRequest{}).IsZero() {
 		t.Error("the zero request does not report itself as one")
@@ -71,58 +61,31 @@ func TestPortRequestString(t *testing.T) {
 	if got := SSHPort().String(); got != "22/tcp public" {
 		t.Errorf("got %q", got)
 	}
-	i, _ := Internal(8188)
-	if got := i.String(); got != "8188/tcp internal" {
+	// The "internal" arm is reachable only through the zero value now, and it
+	// is asserted rather than deleted: the word is what an AssertSSHOnly
+	// failure prints, so a String that said "public" for everything would
+	// make that message agree with any provider at all.
+	if got := (PortRequest{}).String(); got != "0/unknown internal" {
 		t.Errorf("got %q", got)
 	}
 }
 
-// TestRequestsPublishesOnlySSH: the set is built in one place so that
-// "workload ports are never published" does not depend on three providers
-// each remembering it.
-func TestRequestsPublishesOnlySSH(t *testing.T) {
-	rs, err := Requests([]node.PortMap{
-		{Name: "comfyui", Remote: 8188, Local: 8188},
-		{Name: "metrics", Remote: 9090, Local: 19090},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rs) != 3 {
+// TestRequestsIsSSHAndNothingElse: the set is built in one place so that
+// "nothing but sshd is published" does not depend on each provider
+// remembering it.
+//
+// THE COUNT IS THE ASSERTION AND NOT THE VISIBILITY. A set with a second
+// member whose IsPublic is false would still satisfy "exactly one public
+// port" -- and a provider that mapped it would be declaring a port to the
+// API, which on RunPod is one field away from a proxy URL. So the length is
+// checked first.
+func TestRequestsIsSSHAndNothingElse(t *testing.T) {
+	rs := Requests()
+	if len(rs) != 1 {
 		t.Fatalf("got %d requests: %v", len(rs), rs)
 	}
-
-	public := 0
-	for _, r := range rs {
-		if r.IsPublic() {
-			public++
-			if r.Port() != 22 {
-				t.Errorf("port %d is public", r.Port())
-			}
-		}
-	}
-	if public != 1 {
-		t.Errorf("%d public requests, want exactly 1 (sshd)", public)
-	}
-}
-
-func TestRequestsWithNoWorkloadPortsStillAsksForSSH(t *testing.T) {
-	rs, err := Requests(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rs) != 1 || !rs[0].IsPublic() || rs[0].Port() != 22 {
-		t.Fatalf("got %v", rs)
-	}
-}
-
-func TestRequestsNamesTheOffendingPort(t *testing.T) {
-	_, err := Requests([]node.PortMap{{Name: "broken", Remote: 0}})
-	if err == nil {
-		t.Fatal("a zero workload port was accepted")
-	}
-	if !strings.Contains(err.Error(), "broken") {
-		t.Errorf("the error does not name the port: %v", err)
+	if !rs[0].IsPublic() || rs[0].Port() != 22 || rs[0].Proto() != node.ProtoTCP {
+		t.Fatalf("got %v", rs[0])
 	}
 }
 

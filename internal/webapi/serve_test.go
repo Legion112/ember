@@ -252,12 +252,18 @@ func TestListRequests_NamesWhatIsGeneratingNow(t *testing.T) {
 	h := newHarness(t)
 	id := decode[map[string]string](t, h.do(t, "POST", "/api/requests", oneJob))["id"]
 
-	// No queue is wired, so nothing is generating and the field is absent --
-	// which is the honest answer rather than a guess.
+	// No queue is wired, so nothing is generating -- and the honest answer is
+	// an EMPTY LIST rather than a missing field. Since max_nodes this is a
+	// list, and `null` is the one shape a client whose field is a list cannot
+	// decode: it drops the whole envelope, which is how a browser came to show
+	// an empty queue over a table full of requests.
 	got := decode[struct {
-		Running string `json:"running"`
+		Running []string `json:"running"`
 	}](t, h.do(t, "GET", "/api/requests", ""))
-	if got.Running != "" {
+	if got.Running == nil {
+		t.Error("running was null rather than [] with no queue wired")
+	}
+	if len(got.Running) != 0 {
 		t.Errorf("running = %q with no queue wired", got.Running)
 	}
 	if _, err := h.store.Get(t.Context(), genstore.ReqID(id)); err != nil {

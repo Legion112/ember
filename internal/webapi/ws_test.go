@@ -335,9 +335,18 @@ func TestWS_ReportsWhichRequestIsGenerating(t *testing.T) {
 	_, wsURL := wsServer(t, h)
 	c := dialWS(t, wsURL+"/ws?id="+mine)
 	env := readEnvelope(t, c)
-	// No queue is wired in this harness, so nothing is generating. The
-	// field's absence is the honest answer rather than a guess.
-	if env.Running != "" {
+	// No queue is wired in this harness, so nothing is generating -- and the
+	// honest answer is an EMPTY LIST rather than a missing field. Since
+	// max_nodes the field is a list, and Go marshals a nil slice as `null`,
+	// which a client whose field is a list drops the whole envelope over: the
+	// defect that cost this program its queue table once. So the assertion is
+	// that it is present and empty, which is a stronger claim than "not set"
+	// and is what Server.running guarantees.
+	if env.Running == nil {
+		t.Error("running was null rather than [] with no queue wired, which is the shape a " +
+			"client whose field is a list cannot decode")
+	}
+	if len(env.Running) != 0 {
 		t.Errorf("running = %q with no queue wired", env.Running)
 	}
 	if env.Request == nil {

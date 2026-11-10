@@ -12,6 +12,7 @@ import (
 	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/logx"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 )
 
@@ -27,9 +28,9 @@ import (
 //     `up` that enqueued would be served by whichever drain loop got there
 //     first, and would serve the web UI's backlog on the way -- billing a
 //     measurement run for somebody else's batch.
-//  2. Enqueue refuses a request with no jobs, and TWO of `up`'s three shapes
-//     have none: a plain forwarded session, and a `cmds` run. `up` cannot be
-//     expressed as an enqueue at all for those.
+//  2. Enqueue refuses a request with no jobs, and a configuration that
+//     describes none is a shape `up` has. It cannot be expressed as an
+//     enqueue at all.
 //  3. Run marks everything it finds running as interrupted, which is right
 //     for a restarting server and wrong for a second process.
 //  4. `up`'s overrides REPLACE where Narrow narrows, so --max-hourly-usd 999
@@ -206,16 +207,21 @@ func (q *Queue) dropPending(d *Direct) {
 		"request", d.Req)
 }
 
-// direct runs a submitted run, in this iteration of the drain loop.
+// direct runs a submitted run, on the slot the supervisor took for it.
 //
 // It records `held` for the same reason once does: the row has read `running`
 // since Adopt wrote it, and a cancel arriving now must be answered by a queue
-// that knows this process holds the request. Cleared when the run returns,
+// that knows this process holds the request. Given back when the run returns,
 // which is after the deferred destroy.
+//
+// THROUGH A holder FOR THE REASON once USES ONE: `held` is a set across slots
+// now, so "give it back" has to name which entry, and a bare `unhold` at each
+// site is one site away from giving back somebody else's.
 func (q *Queue) direct(ctx context.Context, d Direct) error {
-	q.hold(d.Req)
-	defer q.hold("")
-	q.log().Info("running a submitted run on the rental loop", "request", d.Req)
+	held := &holder{q: q}
+	held.take(d.Req)
+	defer held.done()
+	q.log().Info("running a submitted run on a rental slot", "request", d.Req)
 	if err := d.Run(ctx); err != nil {
 		return fmt.Errorf("run %s: %w", d.Req, err)
 	}
@@ -374,7 +380,7 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 	ask.Overrides.Apply(&cfg)
 
 	plan, err := app.NewPlan(ctx, app.Request{
-		Config: cfg, Deps: r.Deps, Hold: ask.Hold, Log: r.Log,
+		Config: cfg, Deps: r.Deps, Log: r.Log,
 	}, r.out())
 	if err != nil {
 		return "", err
@@ -461,7 +467,15 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 		// NOT A THIRD READ ANYWHERE ELSE: the shell paths cannot do this,
 		// because there is no loop of this process's to be complete on. That
 		// limit is written down in AGENTS.md rather than papered over.
-		runErr := r.refuseOverPeriod(ctx, cfg, plan)
+		// AND IT ADMITS RATHER THAN MERELY READING (#204): at max_nodes>1
+		// another slot can be inside its own ceiling check right now, so this
+		// one records what this run will cost under the same lock that read
+		// the total, and a second create cannot also see a half-spent day.
+		// Released below whatever happens -- see commit.go, where the handover
+		// from "committed here" to "recorded in requests.cost" is the whole
+		// contract.
+		defer r.commitments().Release(id)
+		runErr := r.admitOverPeriod(ctx, cfg, plan, id)
 		if runErr == nil {
 			runErr = plan.Do(ctx, w, sink)
 		}
@@ -502,15 +516,63 @@ func (r DirectRunner) Start(ctx context.Context, ask app.RunAsk) (genstore.ReqID
 // the spec, which is the deadline the node will actually get, after
 // Overrides.Apply has had its say.
 func (r DirectRunner) refuseOverPeriod(ctx context.Context, runCfg config.Config, plan app.Plan) error {
+	cs, err := r.ceilings(runCfg)
+	if err != nil {
+		return err
+	}
+	return RefuseOverPeriod(ctx, cs, r.Store, r.now(), plan.Spec.TTL, plan.Offer.Price,
+		r.commitments().Committed())
+}
+
+// admitOverPeriod is the same gate on the loop, recording what this run will
+// cost so that a concurrent create can see it.
+//
+// THE PRE-FLIGHT ABOVE READS AND THIS ONE RECORDS, which is the split
+// max_nodes forced (#204). `Start` runs on the CLIENT's goroutine and may then
+// park on the rendezvous for as long as every slot is busy, so a commitment
+// taken there would be held for a run that has not started -- and the
+// re-check on the loop would then see its own entry and refuse the run for
+// money it had itself reserved. So the client's check is advisory and the
+// loop's is the one with the lock: by the time this runs the supervisor has
+// given this run a slot, and it is about to create.
+func (r DirectRunner) admitOverPeriod(ctx context.Context, runCfg config.Config, plan app.Plan, id genstore.ReqID) error {
+	cs, err := r.ceilings(runCfg)
+	if err != nil {
+		return err
+	}
+	return r.commitments().Admit(id, plan.Offer.Price.Cost(plan.Spec.TTL),
+		func(committed node.MicroUSD) error {
+			return RefuseOverPeriod(ctx, cs, r.Store, r.now(), plan.Spec.TTL, plan.Offer.Price, committed)
+		})
+}
+
+// ceilings is the two parses, kept apart so a ceiling that will not parse
+// names WHICH file it is in.
+func (r DirectRunner) ceilings(runCfg config.Config) (Ceilings, error) {
 	mine, err := CeilingsOf(r.Config)
 	if err != nil {
-		return fmt.Errorf("in the config ember serve was started with, %w", err)
+		return Ceilings{}, fmt.Errorf("in the config ember serve was started with, %w", err)
 	}
 	theirs, err := CeilingsOf(runCfg)
 	if err != nil {
-		return fmt.Errorf("in the config this run named, %w", err)
+		return Ceilings{}, fmt.Errorf("in the config this run named, %w", err)
 	}
-	return RefuseOverPeriod(ctx, mine.Tightest(theirs), r.Store, r.now(), plan.Spec.TTL, plan.Offer.Price)
+	return mine.Tightest(theirs), nil
+}
+
+// commitments is the shared record, which is the queue's.
+//
+// THROUGH THE QUEUE AND NOT A FIELD OF ITS OWN, so that a submitted run and a
+// queued create cannot be handed two different maps: the whole point of the
+// type is that the two see each other, and two instances would agree with
+// themselves and with nothing else -- which is the closed loop this repository
+// keeps recording. A nil Queue is refused by Start before this is reached, and
+// a nil *Commitments is today's arithmetic.
+func (r DirectRunner) commitments() *Commitments {
+	if r.Queue == nil {
+		return nil
+	}
+	return r.Queue.Commit
 }
 
 // AdoptRun writes the row for a run nobody queued and hands back the stream it
@@ -615,11 +677,10 @@ func RunGPU(plan app.Plan) string {
 
 // RunJobs is the batch as the history records it.
 //
-// Only the served shape has any. A `cmds` run's steps and a plain forwarded
-// session are recorded as the request row and its events and as no job rows at
-// all -- see record.go, which argues it: a step is not a job, and the figures
-// the jobs table exists for (images, passes, steps per second) are not things
-// an `ffmpeg` invocation has.
+// Only a typed batch has any. A configuration that describes no jobs is
+// recorded as the request row and its events and as no job rows at all -- see
+// record.go, which argues it: the figures the jobs table exists for (images,
+// passes, steps per second) are not things that rental produced.
 func RunJobs(plan app.Plan) []genstore.Job {
 	jobs := make([]genstore.Job, 0, len(plan.Jobs.Jobs))
 	for _, j := range plan.Jobs.Jobs {

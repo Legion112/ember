@@ -178,6 +178,15 @@ func (c Ceilings) Tightest(o Ceilings) Ceilings {
 // never gets asked. That is the defect this file's own comment four lines up
 // names, written one line below it, and it shipped in #165's first form on the
 // shell path where the branch is reachable. Review found it.
+// AND IT TAKES WHAT THIS PROCESS HAS COMMITTED AND NOT YET RECORDED (#204).
+// `requests.cost` is written from a deferred teardown, so at max_nodes>1 a
+// rental in flight is worth zero to this read -- the ledger race, which
+// commit.go holds the measurement and the residue for. The figure is a
+// PARAMETER for the reason the price and the ttl are: #157 measured a literal
+// zero in either of those as a gate that cannot fail, and a third fact read
+// from a field inside here would be a third one nobody could see was missing.
+// Zero is every caller that has no concurrency to account for, which is the
+// three shell paths.
 func RefuseOverPeriod(
 	ctx context.Context,
 	cs Ceilings,
@@ -185,6 +194,7 @@ func RefuseOverPeriod(
 	now time.Time,
 	ttl time.Duration,
 	price node.Rate,
+	committed node.MicroUSD,
 ) error {
 	if !cs.Binds(ttl, price) {
 		return nil
@@ -192,7 +202,7 @@ func RefuseOverPeriod(
 	if led == nil {
 		return cs.UnreadableLedger(nil)
 	}
-	return cs.Allow(ctx, led, now, price.Cost(ttl))
+	return cs.Allow(ctx, led, now, price.Cost(ttl), committed)
 }
 
 // Binds reports whether these ceilings could refuse a rental projected at this
@@ -285,14 +295,36 @@ type CeilingError struct {
 	Spent     node.MicroUSD
 	Projected node.MicroUSD
 	Ceiling   node.MicroUSD
+
+	// Committed is what other rentals this process holds are projected at and
+	// have not yet been recorded for.
+	//
+	// NAMED IN THE MESSAGE ONLY WHEN NON-ZERO, which is both halves of one
+	// decision. An operator reading a refusal over a half-spent day has to be
+	// told why the figures do not add up to what `ember spend` says -- a
+	// clause they cannot reconcile is a clause that sends them to look for a
+	// bug in the ledger. And at max_nodes: 1, or on any of the three shell
+	// paths, it is always zero and the sentence has to stay exactly what it
+	// was, because README.md quotes it and a worked example that drifts is a
+	// document nobody trusts.
+	Committed node.MicroUSD
 }
 
 func (e *CeilingError) Error() string {
-	return fmt.Sprintf("the %s beginning %s has spent %v of its %s ceiling of %v, and this rental "+
-		"is projected at %v -- which would take it to %v. Nothing was rented. Raise %s in "+
+	committed := ""
+	if e.Committed > 0 {
+		// THE FIGURE AND NOT A COUNT OF RENTALS. How many other slots are
+		// holding it is not something this error is handed, and inventing one
+		// from the figure would be a number with the authority of a
+		// measurement -- the load_elapsed_seconds mistake in a money message.
+		committed = fmt.Sprintf(", plus %v committed by rentals this ember serve is already "+
+			"holding and has not yet recorded", e.Committed)
+	}
+	return fmt.Sprintf("the %s beginning %s has spent %v of its %s ceiling of %v%s, and this "+
+		"rental is projected at %v -- which would take it to %v. Nothing was rented. Raise %s in "+
 		"ember.yaml, or wait for the %s to turn over",
-		e.Period, e.Period.Key(e.Since), e.Spent, e.key(), e.Ceiling,
-		e.Projected, e.Spent+e.Projected, e.key(), e.Period)
+		e.Period, e.Period.Key(e.Since), e.Spent, e.key(), e.Ceiling, committed,
+		e.Projected, e.Spent+e.Committed+e.Projected, e.key(), e.Period)
 }
 
 // key is the config key that set this ceiling, so the remediation names the
@@ -332,7 +364,20 @@ func (e *CeilingError) key() string { return "max_" + string(e.Period) + "_usd" 
 //
 // The periods are checked tightest first, because a day is the one an operator
 // hits before a month and is the more useful thing to be told about.
-func (c Ceilings) Allow(ctx context.Context, s Spender, now time.Time, projected node.MicroUSD) error {
+// AND `committed` IS ADDED TO `spent`, NOT TO `projected`. The two are
+// different kinds of fact and the message has to be able to tell them apart:
+// spent is in the ledger, committed is in this process's memory, and projected
+// is what the operator is about to be charged. Folding the first two together
+// in the arithmetic and apart in the sentence is what lets `CeilingError` name
+// the committed figure only when there is one -- see its comment, and
+// README.md, which quotes the zero-committed wording verbatim.
+func (c Ceilings) Allow(
+	ctx context.Context,
+	s Spender,
+	now time.Time,
+	projected node.MicroUSD,
+	committed node.MicroUSD,
+) error {
 	if projected <= 0 {
 		return nil
 	}
@@ -353,10 +398,10 @@ func (c Ceilings) Allow(ctx context.Context, s Spender, now time.Time, projected
 			// non-zero over a provider it could not ask.
 			return err
 		}
-		if spent+projected > p.ceiling {
+		if spent+committed+projected > p.ceiling {
 			return &CeilingError{
 				Period: p.period, Since: now, Spent: spent,
-				Projected: projected, Ceiling: p.ceiling,
+				Projected: projected, Ceiling: p.ceiling, Committed: committed,
 			}
 		}
 	}

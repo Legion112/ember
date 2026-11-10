@@ -1,27 +1,24 @@
 // Package sdserver drives a resident sd-server over the SSH connection ember
 // already has to the node.
 //
-// WHY EMBER KNOWS THIS API AT ALL. Every other workload in ember is opaque
-// argv, deliberately: `cmd` and `cmds` are handed to the remote shell and
-// ember does not know what a flag means. That position does not survive
-// contact with progress streaming. A program that refuses to understand its
-// payload cannot report that job two is fourteen steps into its first pass,
-// and a `curl` in a config file is not an integration -- it is a way of
-// pretending the knowledge lives somewhere else while the operator maintains
-// it by hand. So this package is the one place in ember that knows what a
-// sampler is.
+// WHY EMBER KNOWS THIS API AT ALL. Progress streaming is the reason: a
+// program that refuses to understand its payload cannot report that job two
+// is fourteen steps into its first pass, and a `curl` in a config file is not
+// an integration -- it is a way of pretending the knowledge lives somewhere
+// else while the operator maintains it by hand. So this package is the one
+// place in ember that knows what a sampler is.
 //
-// WHAT IT BUYS. `cmds` puts several results on one rental, which pays the
-// per-rental costs once: provisioning, the image pull, reading and verifying
-// the weights. What it cannot pay once is the model load, because each step is
-// a fresh sd-cli process that reads the weights into VRAM again. On a rented
-// RTX PRO 6000 running FLUX.2 at 2048x2048 that is 4.5s against 140.8s of
+// WHAT IT BUYS. A batch on one rental pays the per-rental costs once:
+// provisioning, the image pull, reading and verifying the weights. One
+// resident server pays the model load once too, which a process per image
+// cannot: it reads the weights into VRAM again every time. On a rented RTX
+// PRO 6000 running FLUX.2 at 2048x2048 that read is 4.5s against 140.8s of
 // sampling when the node keeps the weights in page cache, and 86s when it
 // does not -- a difference ember cannot predict, which is the real argument
 // for this shape rather than the mean. It is worth much more the other way
-// round: on short generations the reload is most of the step, which is
-// exactly what prompt iteration looks like, and sd15 at 256x256 measured
-// 0.44s per job against 1.91s.
+// round: on short generations the read is most of the job, which is exactly
+// what prompt iteration looks like, and sd15 at 256x256 measured 0.44s per
+// job against 1.91s.
 //
 // THE WIRE TYPES ARE NOT PROVEN. They were written from examples/server/api.md
 // at stable-diffusion.cpp 77b72a2, which is the revision both workload images

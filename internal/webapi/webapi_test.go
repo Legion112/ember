@@ -22,6 +22,7 @@ import (
 	"github.com/Legion112/ember/internal/provider"
 	"github.com/Legion112/ember/internal/provider/local"
 	"github.com/Legion112/ember/internal/provider/providertest"
+	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 )
@@ -78,22 +79,53 @@ type harness struct {
 // a rental claimed and provisioning is held and not generating. A fake that
 // computed one from the other could not produce it.
 type RecordingDrain struct {
-	Calls   []string
-	running genstore.ReqID
+	Calls []string
+
+	// running is every request this fake says is generating.
+	//
+	// A SLICE SINCE max_nodes (#204), because the thing the wire now carries
+	// is a list and a fake that could only hold one id could not produce the
+	// state the change is about: two requests generating on two rentals, both
+	// of which the queue table has to mark. A fake tidier than the thing it
+	// stands in for tests a program that does not exist, and "one at a time"
+	// is exactly the tidiness that stopped being true.
+	running []genstore.ReqID
 	holding genstore.ReqID
 	reached bool
+
+	// fleet is what this fake says it is renting.
+	//
+	// SEPARATE FROM `running` AND NOT DERIVED FROM IT, for the reason the
+	// Drain interface keeps the two methods apart: a rental with nothing
+	// generating on it is a node billing for nothing, and a fake that built
+	// its fleet out of its running list could not produce that row -- which
+	// is the one row this whole table exists for.
+	fleet []queue.Worker
 }
 
 func (d *RecordingDrain) Kick() { d.Calls = append(d.Calls, "Kick") }
 
-func (d *RecordingDrain) Running() (genstore.ReqID, bool) {
+func (d *RecordingDrain) Running() []genstore.ReqID {
 	d.Calls = append(d.Calls, "Running")
-	return d.running, d.running != ""
+	return d.running
 }
 
 func (d *RecordingDrain) Cancel(id genstore.ReqID) bool {
 	d.Calls = append(d.Calls, "Cancel "+string(id))
-	return d.reached && id == d.running
+	if !d.reached {
+		return false
+	}
+	for _, r := range d.running {
+		if r == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *RecordingDrain) Fleet() []queue.Worker {
+	d.Calls = append(d.Calls, "Fleet")
+	return d.fleet
 }
 
 func (d *RecordingDrain) Holding(id genstore.ReqID) bool {
@@ -150,6 +182,16 @@ func newHarness(t *testing.T, mut ...func(*Options)) *harness {
 	}
 	return &harness{Server: s, store: store, blobs: blobs, inputs: o.Inputs, reg: reg}
 }
+
+// harnessShape is the rental shape every request in this suite names: an
+// image generation on the harness's own provider, with no card chosen.
+//
+// A NAMED VALUE BECAUSE THE CACHE IS KEYED NOW. A test that cached
+// capabilities under one shape and posted a request naming another would get
+// the pre-rental path -- the static half of the validation and nothing else --
+// and would pass for the wrong reason, which is the one failure the caps half
+// of validateJobs cannot report for itself.
+var harnessShape = genstore.NewShape(genstore.KindSD, "local", "")
 
 // upload posts raw bytes to the one route that takes them.
 //
@@ -354,7 +396,7 @@ func TestConfig_SaysWhatAUICanOffer(t *testing.T) {
 
 func TestConfig_ReportsTheCapabilitiesOnceSomethingHasLearnedThem(t *testing.T) {
 	h := newHarness(t)
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Model: "sd15.gguf", Samplers: []string{"euler"},
 		Limits: sdserver.Limits{MaxWidth: 2048},
 	}); err != nil {
@@ -381,7 +423,7 @@ func TestConfig_ReportsTheCapabilitiesOnceSomethingHasLearnedThem(t *testing.T) 
 func TestConfig_ReportsTheFeatureFlagsAndLeavesTheSilencesOut(t *testing.T) {
 	h := newHarness(t)
 	no, yes := false, true
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Model:     "sd15.gguf",
 		Supported: sdserver.Supported{ClipSkip: &no, SLG: &yes},
 	}); err != nil {
@@ -576,7 +618,7 @@ func TestPostRequest_RefusesWhenThereIsNoServerToRunOn(t *testing.T) {
 // still looking at the form.
 func TestPostRequest_RefusesASamplerTheServerDoesNotHave(t *testing.T) {
 	h := newHarness(t)
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Samplers: []string{"euler", "heun"},
 	}); err != nil {
 		t.Fatal(err)
@@ -622,7 +664,7 @@ func TestRequests_ListAndFetch(t *testing.T) {
 
 	list := decode[struct {
 		Requests []requestView `json:"requests"`
-		Running  string        `json:"running"`
+		Running  []string      `json:"running"`
 	}](t, h.do(t, "GET", "/api/requests", ""))
 	if len(list.Requests) != 1 || list.Requests[0].ID != id {
 		t.Fatalf("listing = %+v", list.Requests)
@@ -714,7 +756,7 @@ func TestCancel_StopsARunningRequestWithoutEndingTheRental(t *testing.T) {
 	if _, ok, err := h.store.ClaimNext(t.Context(), "lease", genstore.Compat{}); err != nil || !ok {
 		t.Fatalf("setup: ok=%v err=%v", ok, err)
 	}
-	drain.running = genstore.ReqID(id)
+	drain.running = []genstore.ReqID{genstore.ReqID(id)}
 
 	w := h.do(t, "POST", "/api/requests/"+id+"/cancel", "")
 	if w.Code != http.StatusOK {
@@ -1383,7 +1425,7 @@ func TestRequestView_OmitsTheBlocksAJobDidNotSet(t *testing.T) {
 // harness seeds them.
 func TestPostRequest_RefusesAParameterOutsideItsRange(t *testing.T) {
 	h := newHarness(t)
-	if err := h.store.PutCaps(t.Context(), sdserver.Capabilities{
+	if err := h.store.PutCaps(t.Context(), harnessShape, sdserver.Capabilities{
 		Samplers: []string{"euler"}, OutputFormats: []string{"png"},
 		Upscalers: []string{"Latent"},
 	}); err != nil {
@@ -1590,5 +1632,79 @@ func TestRequests_AListingWithARowTheBrowserCannotRead(t *testing.T) {
 		t.Errorf("width = %d; the fixture has to carry the value Rust cannot hold, or the "+
 			"test over there passes against a listing with nothing wrong with it",
 			list.Requests[1].Jobs[0].Width)
+	}
+}
+
+// TestPostRequest_ChecksTheCapabilitiesOfTheShapeItNamed.
+//
+// THE DEFECT WAS THE CACHE HAVING NO KEY. One `caps` row per process, written
+// by whichever rental came up last, was read to refuse a job for whatever
+// shape asked next -- so a sampler that one card's build has and another's
+// does not was accepted or refused depending on which node had answered most
+// recently, with nothing anywhere reporting which. "`sd.serve` is fixed by the
+// config" was the defence, and the request seal refutes it: a request names a
+// provider AND a card.
+//
+// BOTH DIRECTIONS IN ONE BODY, because each alone passes against the bug. The
+// request for the card whose build has `dpm++2m` must be accepted, and the
+// request for the card whose build does not must be refused -- and with one
+// unkeyed row exactly one of those is wrong whichever document is cached.
+func TestPostRequest_ChecksTheCapabilitiesOfTheShapeItNamed(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.AllowPaid = true })
+
+	rich := genstore.NewShape(genstore.KindSD, "local", "rtx-pro-6000")
+	poor := genstore.NewShape(genstore.KindSD, "local", "rtx2080ti")
+	if err := h.store.PutCaps(t.Context(), rich, sdserver.Capabilities{
+		Model: "flux2.gguf", Samplers: []string{"euler", "dpm++2m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutCaps(t.Context(), poor, sdserver.Capabilities{
+		Model: "sd15.gguf", Samplers: []string{"euler"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ok := h.do(t, "POST", "/api/requests",
+		`{"provider":"local","gpu":"rtx-pro-6000","jobs":[{"prompt":"a","sampler":"dpm++2m"}]}`)
+	if ok.Code != http.StatusAccepted {
+		t.Errorf("a sampler the named card's build HAS was refused with %d: %s; the check read "+
+			"another node's capability list", ok.Code, ok.Body.String())
+	}
+
+	no := h.do(t, "POST", "/api/requests",
+		`{"provider":"local","gpu":"rtx2080ti","jobs":[{"prompt":"a","sampler":"dpm++2m"}]}`)
+	if no.Code != http.StatusBadRequest {
+		t.Errorf("a sampler the named card's build does NOT have was accepted with %d: %s; "+
+			"the refusal it should have got costs a whole rental to discover on the node",
+			no.Code, no.Body.String())
+	}
+}
+
+// TestPostRequest_NormalisesTheCardNameItStores.
+//
+// THREE READERS OF requests.gpu AND ALL THREE WERE COMPARING A BROWSER'S
+// SPELLING. genstore.Compat matches the column against a live rental's card,
+// the capability cache is keyed on it, and `ember spend --by gpu` groups by it
+// -- so "NVIDIA GeForce RTX 4090" and "rtx4090" were two cards to the
+// scheduler and two buckets in the ledger. node.NormalizeGPU is what
+// config.Filter already runs an operator's typed string through, and
+// genstore.Filter's own comment has claimed since the column existed that this
+// was already true.
+func TestPostRequest_NormalisesTheCardNameItStores(t *testing.T) {
+	h := newHarness(t)
+	w := h.do(t, "POST", "/api/requests",
+		`{"provider":"local","gpu":"NVIDIA GeForce RTX 4090","jobs":[{"prompt":"a"}]}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	id := genstore.ReqID(decode[map[string]string](t, w)["id"])
+	got, err := h.store.Get(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GPU != "rtx4090" {
+		t.Errorf("stored gpu = %q, want the one spelling rtx4090: a card a browser spelled its "+
+			"own way is a card the scheduler cannot match and the ledger counts twice", got.GPU)
 	}
 }
