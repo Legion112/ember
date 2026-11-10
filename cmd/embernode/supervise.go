@@ -187,11 +187,21 @@ func supervise(log *slog.Logger, g *group, sigs <-chan os.Signal) (int, error) {
 // still reachable and can no longer be given work, which is a state ember
 // discovers on its next push and an operator can otherwise only infer from a
 // rental that did nothing.
+//
+// THE CLEAN LINE SAYS WHAT THE SUPERVISOR KNOWS AND NOT WHY. It used to read
+// "the worker's queue is empty and it has exited", and a run of the real node
+// image with a five-second TTL is what showed that up: the deadline SIGTERMs
+// both children, so the log said the queue was empty one line under the
+// worker's own "stopped before its queue was empty". A supervisor sees an exit
+// status and nothing else; the worker is the only thing that knows which of
+// the two it was, and it says so immediately above. A line that asserts the
+// reason is a line that is wrong on the path that matters most -- the one
+// where the deadline ended a rental nobody was watching.
 func logChild(log *slog.Logger, ex exited) {
 	var exitErr *exec.ExitError
 	switch {
 	case ex.err == nil:
-		log.Info("the worker's queue is empty and it has exited; ember is expected to destroy this node now",
+		log.Info("a child exited cleanly; its own lines above say whether it drained or was stopped",
 			"child", ex.name)
 	case errors.As(ex.err, &exitErr):
 		log.Error("a child exited on its own; this node can no longer be given work",

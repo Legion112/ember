@@ -175,8 +175,17 @@ func TestSupervise_TheWorkerExitingDoesNotEndTheNode(t *testing.T) {
 			"still using to fetch results and the node's own log", code)
 	case <-time.After(200 * time.Millisecond):
 	}
-	if !strings.Contains(b.String(), "queue is empty and it has exited") {
+	if !strings.Contains(b.String(), "a child exited cleanly") {
 		t.Errorf("the worker's exit was not reported, so a rental that did nothing has no record:\n%s", b.String())
+	}
+	// AND IT DOES NOT SAY WHY. A run of the real node image with a
+	// five-second TTL put "the worker's queue is empty and it has exited" one
+	// line under the worker's own "stopped before its queue was empty": a
+	// supervisor sees a status and nothing else, so a line that asserts the
+	// reason is wrong on exactly the path that matters -- a deadline ending a
+	// rental nobody is watching.
+	if strings.Contains(b.String(), "queue is empty") {
+		t.Errorf("the supervisor claims to know why the worker exited, which it cannot:\n%s", b.String())
 	}
 
 	// And sshd going still ends it.

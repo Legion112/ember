@@ -47,7 +47,7 @@ import (
 // it.
 func TestWorkloadImage_ListensOnNothingButSSH(t *testing.T) {
 	image, _ := sdCUDAUnderTest(t)
-	assertListensOnlyOnSSH(t, image)
+	_ = assertListensOnlyOnSSH(t, image)
 }
 
 // TestWorkloadImage_SupportsVideoGeneration.
