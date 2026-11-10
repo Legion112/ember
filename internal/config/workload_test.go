@@ -589,3 +589,40 @@ workloads:
 		t.Errorf("the probe timeout is %v, want the entry's 2m", flux.GPUProbeTimeout)
 	}
 }
+
+// TestSelect_AnEntryMayLengthenASharedProbeWithoutReplacingIt.
+//
+// THE REASON THE TIMEOUT IS ITS OWN FIELD. A file may share one probe -- the
+// same two questions about the same card -- and an entry still need longer to
+// answer it: the rented path waits on a network volume where the local one
+// waits on a disk. So a `gpu_probe_timeout:` with no `gpu_probe:` beside it is
+// the entry lengthening the file's command rather than replacing it, which is
+// the one combination the pair exists to express.
+func TestSelect_AnEntryMayLengthenASharedProbeWithoutReplacingIt(t *testing.T) {
+	cfg, err := load(t, `provider: local
+ttl: 30m
+gpu_probe: ["sh", "-c", "the file's"]
+gpu_probe_timeout: 1m
+workloads:
+  - id: patient
+    driver: sd
+    image: `+ref+`
+    gpu_probe_timeout: 9m
+    sd:
+      serve: ["sd-server", "--model", "/m.gguf"]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel, _, err := cfg.Select("patient")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sel.GPUProbe) == 0 || sel.GPUProbe[2] != "the file's" {
+		t.Errorf("the entry got probe %v, want the file's unchanged", sel.GPUProbe)
+	}
+	if sel.GPUProbeTimeout != 9*time.Minute {
+		t.Errorf("the probe timeout is %v, want the entry's 9m over the file's 1m",
+			sel.GPUProbeTimeout)
+	}
+}
