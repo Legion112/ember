@@ -126,9 +126,32 @@ pub fn Billing() -> impl IntoView {
                             </p>
                         </Show>
                         {fleet_table(n.workers.clone())}
-                        {findings_table(n.findings.clone())}
-                        {findings_table(n.leftovers.clone())}
-                        {findings_table(n.stores.clone())}
+                        // ONE TABLE OVER THREE SLICES, and not three tables.
+                        //
+                        // FOUND BY THE REINSTATEMENT PASS'S NEGATIVE CONTROL,
+                        // which is the only thing that could have found it: the
+                        // three defects on either side of it were red as
+                        // wanted, and the case that changed a comment and
+                        // nothing else came back red too, reading `kind // what
+                        // // why // recorded // cost` twice over. `findings_table`
+                        // is called once per slice, so the moment it grew a
+                        // header the panel grew one header per slice -- stacked,
+                        // identical, above groups whose columns are the same
+                        // columns. A daemon holding a leftover and a store
+                        // printed it three times; the orphans-only screenshot
+                        // that the header was built against showed one table
+                        // and looked right.
+                        //
+                        // `<table>` takes several `<tbody>` elements by spec and
+                        // this is what they are for -- queue.rs says the same
+                        // sentence over the same problem, and its lab reads
+                        // through the grouping unchanged. The slices stay apart,
+                        // which is the thing worth keeping: a store is not a
+                        // finding and the panel must never merge them into one
+                        // count.
+                        {findings_table([
+                            n.findings.clone(), n.leftovers.clone(), n.stores.clone(),
+                        ])}
                         <Show when=move || charged>
                             <p class="hint">
                                 "storage: " <span class="price">{total.clone()}</span>
@@ -142,7 +165,15 @@ pub fn Billing() -> impl IntoView {
     }
 }
 
-/// findings_table lays out one of the three slices.
+/// findings_table lays out the sweep's three slices as one table.
+///
+/// ONE TABLE AND ONE HEADER OVER THREE `<tbody>`, because the columns are the
+/// same columns: a header per slice is the same five words printed up to three
+/// times down one panel. The slices stay separate elements rather than one
+/// concatenated list, which is the part that matters -- a store is not a
+/// finding, `reconcile.Kind.NeedsAttention` counts them differently, and a
+/// flattening here would be the place someone later re-derives a count from
+/// the DOM and gets the store wrong.
 ///
 /// NO KEY AND NO `<For>`, which is the rule the offers panel was repaired to
 /// and the queue row after it: a key is stable identity, and there is none to
@@ -154,8 +185,13 @@ pub fn Billing() -> impl IntoView {
 /// own names -- expired, orphan, untracked, destroy-failed, unreachable,
 /// leftover, store -- are the words `ember ls` prints and an operator
 /// comparing the two should read the same vocabulary in each.
-fn findings_table(fs: Vec<crate::model::Finding>) -> AnyView {
-    if fs.is_empty() {
+fn findings_table(slices: [Vec<crate::model::Finding>; 3]) -> AnyView {
+    // NOTHING AT ALL WHEN EVERY SLICE IS EMPTY, and not an empty table. A
+    // header with no rows under it says ember looked and is still looking;
+    // the panel's rule is that an empty answer and an answer nobody asked for
+    // must not render the same, and a bare header would be a third thing that
+    // looks like both.
+    if slices.iter().all(|s| s.is_empty()) {
         return ().into_any();
     }
     view! {
@@ -183,6 +219,16 @@ fn findings_table(fs: Vec<crate::model::Finding>) -> AnyView {
                     <th class="price">"cost"</th>
                 </tr>
             </thead>
+            // ONE `<tbody>` PER SLICE, and an empty slice contributes none
+            // rather than an empty one. The lab reads `tbody tr`, so the
+            // grouping is invisible to it -- which is the point: this is how
+            // the rows stay in their three sets without the page acquiring a
+            // fourth thing that can disagree about which set a row is in.
+            {slices.into_iter().map(|fs| {
+                if fs.is_empty() {
+                    return ().into_any();
+                }
+                view! {
             <tbody>
                 {fs.into_iter().map(|f| {
                     // The accrued cost where ember knows enough to say it.
@@ -215,6 +261,8 @@ fn findings_table(fs: Vec<crate::model::Finding>) -> AnyView {
                     }
                 }).collect::<Vec<_>>()}
             </tbody>
+                }.into_any()
+            }).collect::<Vec<_>>()}
         </table>
     }
     .into_any()
