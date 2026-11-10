@@ -2130,6 +2130,16 @@ about how long a card has been billing. A finding ember has no record of — an
 both cells are blank together: the same absence, said once in two columns
 rather than half-said in one.
 
+The `why` on an **orphan** carries **what the provider said**, where it said
+anything. ember writes the create's error into the record it had already
+written before calling, so a row that used to read *ask the provider whether a
+node labelled `ember-…` exists* now reads that and then
+`status 422: additional properties 'allowedCudaVersions' not allowed` — the
+answer to the question it is telling you to go and ask. The instruction
+survives the error on purpose: an error returned *after* the machine existed
+looks identical from here, so what the provider said narrows the question and
+does not close it.
+
 ### What the fleet rows show
 
 Above the sweep's own tables, the same press lists **what this `ember serve` is
