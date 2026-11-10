@@ -2542,7 +2542,7 @@ least. Every field in the form explains itself on hover.
 
 **A request that names no `ttl` gets the workload entry's, not the file's.**
 An entry sets `ttl:` when its own work needs longer than the file's default --
-weights that take two hours to fetch are the case this exists for -- and a form
+weights that take two and a half hours to fetch are the case this exists for -- and a form
 that sent no deadline meant that entry's, which is why the file's `ttl:` is
 reached only for an entry declaring none. A `ttl` a request *does* send still
 has to be smaller: the entry is the ceiling, the request narrows it.

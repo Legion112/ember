@@ -785,11 +785,13 @@ func (n newRequest) toRequest(wl config.Workload) (genstore.Request, error) {
 		// entry that declares a longer ttl -- and declares it because it
 		// needs one -- silently got the file's.
 		//
-		// MEASURED, on the entry that motivated this: `flux2-local` sets
-		// `ttl: 4h` because its weights are a 59 GB fetch that runs at
-		// 8.5 MB/s, which is 1.9 hours. A browser sending no ttl got the
-		// file's `30m`; `Narrow` then correctly took the smaller of the two,
-		// and the node self-destructed 13.3 GB in. Thirty minutes of a card
+		// MEASURED END TO END, on the entry that motivated this. `flux2-local`
+		// sets `ttl: 4h` because its weights are three assets totalling
+		// 60.31 GB -- a 35.00 GB transformer, a 25.05 GB text encoder and a
+		// 0.25 GB autoencoder -- which took 2h26m to fetch and verify, an
+		// average of 6.9 MB/s. A browser sending no ttl got the file's `30m`;
+		// `Narrow` then correctly took the smaller of the two, and the node
+		// self-destructed 13.3 GB into the first of the three. Thirty minutes of a card
 		// paid for, nothing generated, and the partial thrown away, because
 		// assets.Fetch writes to a fresh `.partial-*` per attempt and resumes
 		// nothing -- so a retry does not get further, it starts again.

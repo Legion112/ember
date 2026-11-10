@@ -165,11 +165,11 @@ func TestPostRequest_RefusesAnIdThisServerDoesNotDeclare(t *testing.T) {
 // THE DEFECT THIS WAS WRITTEN AGAINST COST A REAL RUN. `toRequest` took the
 // entry for everything except its deadline, so a body with no `ttl` fell
 // through to the file's `ttl:` -- and `flux2-local` declares `ttl: 4h`
-// precisely because its weights are a 59 GB fetch that takes about two hours.
-// A browser sending no ttl got the file's 30m, `Narrow` correctly took the
-// smaller of the two, and the node self-destructed 13.3 GB into the download:
-// half an hour of a card paid for, nothing generated, and nothing resumable
-// left behind.
+// precisely because its weights are three assets totalling 60.31 GB, measured
+// at 2h26m to fetch and verify. A browser sending no ttl got the file's 30m,
+// `Narrow` correctly took the smaller of the two, and the node self-destructed
+// 13.3 GB into the first of the three: half an hour of a card paid for,
+// nothing generated, and nothing resumable left behind.
 //
 // BOTH ARMS, because the fallback is a chain and either link can rot. An entry
 // that declares a ttl decides it; an entry that declares none inherits the
