@@ -640,9 +640,19 @@ func (n newRequest) toRequest() (genstore.Request, error) {
 	}
 
 	r := genstore.Request{
-		Kind:            n.Kind,
-		Provider:        n.Provider,
-		GPU:             n.GPU,
+		Kind:     n.Kind,
+		Provider: n.Provider,
+		// NORMALISED ON THE WAY IN, so the stored card name is the one
+		// spelling. Three things read this column and all three were
+		// comparing strings a browser chose: Compat matches it against a live
+		// rental's card, the caps cache is keyed on it, and `ember spend --by
+		// gpu` groups by it -- so "RTX 4090" and "rtx4090" were two cards to
+		// the scheduler and two buckets in the ledger. genstore.Filter's
+		// comment has claimed this was already true since the column existed;
+		// it is now. node.NormalizeGPU is idempotent and never rejects a name
+		// it has not heard of, so nothing an operator can type is refused
+		// here.
+		GPU:             string(node.NormalizeGPU(n.GPU)),
 		Preview:         n.Preview,
 		PreviewInterval: n.PreviewInterval,
 	}

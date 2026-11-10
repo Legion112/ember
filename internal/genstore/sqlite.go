@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // the pure-Go driver, registered as "sqlite"
@@ -34,7 +35,7 @@ const FileName = "generations.db"
 // internal/statestore's reason: reading a newer layout as an older one drops
 // columns, and the column it would drop is the one that says a request is
 // still running.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // migrations takes an existing file forward, one version per entry:
 // migrations[0] moves a version-1 file to version 2.
@@ -210,6 +211,37 @@ var migrations = [][]string{
 		`ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE jobs ADD COLUMN tts TEXT NOT NULL DEFAULT ''`,
 	},
+
+	// 6 -> 7: the claim becomes a lease, and the capability cache stops being
+	// one row per process.
+	//
+	// THE LEASE COLUMN DEFAULTS TO ZERO AND ZERO IS EXPIRED, which is what
+	// makes this migration behave for an existing file exactly as the blanket
+	// startup sweep it replaces did: every row that was running when an older
+	// ember stopped has no lease, so the first Reclaim takes it. The
+	// dangerous default -- a row nothing will ever reclaim -- is therefore
+	// unrepresentable rather than avoided by remembering to backfill.
+	//
+	// AND THE CACHED CAPABILITIES GO, for the reason version 2 already
+	// deleted them once: the row is a shape believed rather than observed.
+	// That one was incomplete; this one answers the wrong question. It is a
+	// single `caps` key in `meta` written by whichever rental came up last,
+	// and it was read to validate a request against the capabilities of a
+	// card the request may not have asked for. There is no key to migrate it
+	// to, because nothing recorded which shape produced it -- inventing one
+	// would be asserting that last week's rental was this week's card, which
+	// is the mistake requests.model exists because of. It costs one rental's
+	// worth of a sampler typo going uncaught, once, per shape, which is what
+	// a fresh file already does and which PutCaps repairs on the next rental.
+	//
+	// The `caps` TABLE is not created here. `schema` runs before the version
+	// check on every open and its CREATE TABLE is IF NOT EXISTS, so a new
+	// table arrives in an old file without a migration -- which is exactly
+	// the property that makes a new COLUMN need one.
+	{
+		`ALTER TABLE requests ADD COLUMN lease_until_unix INTEGER NOT NULL DEFAULT 0`,
+		`DELETE FROM meta WHERE key = 'caps'`,
+	},
 }
 
 // defaultLimit bounds a listing that did not ask for one.
@@ -362,6 +394,29 @@ CREATE TABLE IF NOT EXISTS requests (
 	-- model and which the next rental overwrites.
 	model         TEXT    NOT NULL DEFAULT '',
 
+	-- When the claim on this row stops being held, in milliseconds.
+	--
+	-- THE run_id COLUMN IS A LEASE AND THIS IS ITS EXPIRY. ClaimNext writes
+	-- both, Renew pushes this forward while the process that claimed the row
+	-- is still responsible for it, and Reclaim marks interrupted whatever has
+	-- run out. Before it existed a claimed row read "running" for ever if the
+	-- process that claimed it died, and the only thing that cleared one was a
+	-- sweep of EVERY running row at the next startup -- which orphaned the
+	-- row of a node that was still alive and billing, because a node carries
+	-- its run id in the provider's own label and that label is the source of
+	-- truth about what is live.
+	--
+	-- ZERO IS EXPIRED, never "no expiry": every row written before schema
+	-- version 7 holds zero, and a row nothing can reclaim is the one state
+	-- this column exists to remove.
+	--
+	-- NOT ON genstore.Request, and that is deliberate. Update takes a
+	-- callback over a Request and writes back every column it names, so a
+	-- lease reachable from there is a lease any caller could extend to
+	-- whenever it liked -- which is the same as not having one. The only
+	-- writers are the three statements above.
+	lease_until_unix INTEGER NOT NULL DEFAULT 0,
+
 	err           TEXT    NOT NULL DEFAULT ''
 );
 
@@ -449,6 +504,39 @@ CREATE TABLE IF NOT EXISTS images (
 	bytes    INTEGER NOT NULL DEFAULT 0,
 	at_unix  INTEGER NOT NULL,
 	PRIMARY KEY (req, job, idx, preview)
+);
+
+-- What a generation server reported it can do, one row per rental shape.
+--
+-- A TABLE AND NOT A KEY IN meta, because the thing that was wrong with the
+-- meta row was that it had no key: it was one row per PROCESS, written by
+-- whichever rental came up last, and read to refuse a job for a request that
+-- may have asked for a different card entirely. A composite key spells the
+-- shape a request can name -- a kind, a provider and a card -- and a primary
+-- key over the three is what makes "two shapes, two answers" a property of
+-- the schema rather than of a string somebody builds.
+--
+-- THE CARD HERE IS THE ASK AND NOT THE SILICON. The only reader is enqueue
+-- validation, which runs before any node exists, so the ask is all it can
+-- look up by; a request that named no card reads the row left by the last
+-- rental that also named none. Keying on the card ember actually rented would
+-- make every row unreadable by the one caller that needs them.
+--
+-- kind is stored through KindOf, so '' and 'sd' cannot become two rows for
+-- one shape -- which would be the empty-means-sd defect with a cache in front
+-- of it.
+--
+-- at_unix is what the row was learned at. Nothing reads it to expire a row:
+-- a capability document is about a server build and a card, and both are the
+-- same next time that shape is rented. It is there because a cache nobody can
+-- date is a cache nobody can debug.
+CREATE TABLE IF NOT EXISTS caps (
+	kind     TEXT    NOT NULL,
+	provider TEXT    NOT NULL,
+	gpu      TEXT    NOT NULL,
+	body     TEXT    NOT NULL,
+	at_unix  INTEGER NOT NULL,
+	PRIMARY KEY (kind, provider, gpu)
 );
 `
 
@@ -548,7 +636,7 @@ func (s *SQLite) Enqueue(ctx context.Context, r Request) (ReqID, error) {
 	// a row in the history that never happened.
 	r.Status = StatusQueued
 
-	if err := s.insert(ctx, r, time.Time{}); err != nil {
+	if err := s.insert(ctx, r, time.Time{}, time.Time{}); err != nil {
 		return "", err
 	}
 	return r.ID, nil
@@ -577,7 +665,10 @@ func (s *SQLite) Adopt(ctx context.Context, r Request) (ReqID, error) {
 		started = r.Created
 	}
 
-	if err := s.insert(ctx, r, started); err != nil {
+	// THE LEASE IS THE RUN'S OWN DEADLINE, because this process has no
+	// renewal loop: see Store.Adopt for why `adopted + TTL` is the honest
+	// bound and what the width of the create call costs it.
+	if err := s.insert(ctx, r, started, r.Created.Add(r.TTL)); err != nil {
 		return "", err
 	}
 	return r.ID, nil
@@ -593,7 +684,12 @@ func (s *SQLite) Adopt(ctx context.Context, r Request) (ReqID, error) {
 // written by whatever watched the run, so a caller that set them on the way in
 // would have them dropped. That is the same structural refusal that keeps
 // Extra off Job, applied to the columns an operator is billed against.
-func (s *SQLite) insert(ctx context.Context, r Request, started time.Time) error {
+// leaseUntil IS A PARAMETER AND NOT A COLUMN OF r, for the reason the lease is
+// absent from genstore.Request: a caller that could name its own expiry could
+// name one in the far future, which is the same as having no lease at all.
+// Enqueue passes the zero time, because a QUEUED row is held by nobody -- the
+// lease begins at the claim.
+func (s *SQLite) insert(ctx context.Context, r Request, started, leaseUntil time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
@@ -603,11 +699,11 @@ func (s *SQLite) insert(ctx context.Context, r Request, started time.Time) error
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO requests
 			(id, created_unix, status, kind, provider, gpu, offer, ttl_ns, max_hourly, max_run,
-			 preview, preview_every, started_unix)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 preview, preview_every, started_unix, lease_until_unix)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		string(r.ID), r.Created.UnixMilli(), string(r.Status), r.Kind, r.Provider, r.GPU, r.Offer,
 		int64(r.TTL), int64(r.MaxHourly), int64(r.MaxRun), r.Preview, r.PreviewInterval,
-		unixOrZero(started))
+		unixOrZero(started), unixOrZero(leaseUntil))
 	if err != nil {
 		return fmt.Errorf("record request %s: %w", r.ID, err)
 	}
@@ -847,6 +943,125 @@ func (s *SQLite) List(ctx context.Context, f Filter) ([]Request, error) {
 	return out, nil
 }
 
+// servesClause is the claim relation as SQL predicates over the requests
+// table, and the args that go with it: could the rental c describes run this
+// row.
+//
+// ONE BUILDER, TWO CALLERS, WHICH IS THE POINT. ClaimNext reads it for the
+// ride side and reads its negation once per live rental for the create side,
+// so the relation a rental claims by and the relation the supervisor excludes
+// by cannot drift. They used to be two copies of one condition in one
+// function, and the two ways that drifts are both expensive: an exclusion
+// WIDER than the ride relation starves a request for the length of a rental,
+// and one NARROWER hands it a second card. It is also what makes the
+// uncertainty about a live rental's card harmless -- an unadvertised card
+// narrows both sides together. See genstore.Compat.Card.
+//
+// THREE ADMISSIONS FOR THE CARD, and only the third needs the advertised fact:
+//
+//   - the request named no card, so any card this provider has satisfies it;
+//   - the request named exactly what this rental asked for, which is the whole
+//     of the rule before Compat.Card existed;
+//   - the request named something this rental's actual card Accepts, which is
+//     the capacity-suffix rule node.GPUModel owns -- "a100" is satisfied by
+//     "a100-80g" -- and is also how a rental that asked for nothing serves a
+//     request that asked for the card it happens to have got.
+//
+// THE FIRST ADMISSION DOES NOT CHECK THE REQUEST'S OWN PRICE CEILING, said
+// rather than left to be found. A request naming max_hourly_usd below the rate
+// of the rental it rides is served anyway, because riding spends nothing of
+// its own: the rental exists, its cost is the opener's, and the period
+// ceilings were projected against the opener's whole TTL before the node was
+// created. Refusing the ride would mean renting a second card, which is the
+// one outcome that does cost money.
+//
+// THE ASK IS COMPARED AS STORED, which bounds the card admission. webapi
+// normalises a card name on the way in, so new rows hold what
+// node.NormalizeGPU produces and cardAdmits speaks the same spelling -- but a
+// row written before that does not, and for one of those only the first two
+// admissions can fire. That is exactly the packing it had before this field,
+// and the alternative is rewriting rows, which is the thing this schema never
+// does.
+//
+// THE KIND IS COMPARED THROUGH A CASE AND NOT AS A COLUMN, which is the one
+// place the empty-means-sd rule has to reach into SQL. A plain `kind = ?`
+// would refuse every row written before schema version 6 to an sd rental --
+// they hold ” and the compat holds 'sd' -- so a restart after an upgrade
+// would leave an operator's queue permanently unclaimable. Getting it wrong
+// on the exclusion side is the expensive direction: a migrated row would read
+// as incompatible with the node already serving its siblings and would be
+// given a SECOND card. Rewriting the rows was the alternative and is the
+// thing this schema never does.
+//
+// THE CARD IS AN IN-LIST AND NOT A LIKE, because node.GPUModel.Accepts is not
+// a string operation this dialect has: it admits the exact name and the name
+// with its capacity suffix cut off at a '-', which is a SET of at most a
+// handful of spellings and is computed in Go by cardAdmits. A `LIKE gpu ||
+// '-%'` would push the rule into SQL, where `_` is a wildcard and a card name
+// containing one would quietly match more than it should -- parse, don't
+// grep, and never build a pattern out of stored text.
+func servesClause(c Compat) (string, []any) {
+	args := []any{KindSD, KindOf(c.Kind), c.Provider, c.GPU}
+	cards := cardAdmits(c)
+	in := ""
+	for _, name := range cards {
+		in += " OR gpu = ?"
+		args = append(args, name)
+	}
+	return `((CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ?` +
+		` AND (gpu = '' OR gpu = ?` + in + `))`, args
+}
+
+// servesPendingClause is servesClause widened by what is not known yet, which
+// is the create side's question: MIGHT this rental absorb that row.
+//
+// A SECOND CLAUSE AND NOT A FLAG, because the two are read in opposite
+// directions and a reader has to see which one they have. For a rental whose
+// offer has not come back the answer is yes for everything of its kind and
+// provider, and the money-safe reading of "might" on the side that spends
+// money is "does". See genstore.Compat.Card for the measurement that made this
+// mandatory rather than a refinement, and for what the stall costs.
+//
+// IT CANNOT STARVE A ROW. The widening ends when the card arrives or when the
+// slot exits, and both of those kick the supervisor -- Queue.advertise and
+// Queue.freeSlot -- so a row this excluded is reconsidered within one offer
+// lookup rather than at the next poll.
+func servesPendingClause(c Compat) (string, []any) {
+	if !c.CardKnown {
+		return `((CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ?)`,
+			[]any{KindSD, KindOf(c.Kind), c.Provider}
+	}
+	return servesClause(c)
+}
+
+// cardAdmits is every ask this rental's actual card satisfies beyond the
+// rental's own, which is node.GPUModel.Accepts enumerated.
+//
+// Accepts admits `want` when it equals the card or when it is the card with a
+// capacity suffix cut off at a '-': "a100" is satisfied by "a100-80g". So the
+// set is the card itself plus each of its '-'-separated prefixes, which is at
+// most two spellings for every card ember has seen and is bounded by the name.
+// Enumerating rather than pattern-matching is what keeps the one definition of
+// Accepts in internal/node.
+func cardAdmits(c Compat) []string {
+	if c.Card == "" {
+		return nil
+	}
+	name := string(c.Card)
+	out := []string{name}
+	for i := len(name) - 1; i > 0; i-- {
+		if name[i] != '-' {
+			continue
+		}
+		// Through Accepts itself rather than trusted, so a change to that
+		// rule cannot leave this enumerating spellings it no longer admits.
+		if c.Card.Accepts(node.GPUModel(name[:i])) {
+			out = append(out, name[:i])
+		}
+	}
+	return out
+}
+
 // ClaimNext takes the oldest queued request c can serve.
 //
 // ONE STATEMENT, which is the entire reason this is a method and not two reads
@@ -861,7 +1076,7 @@ func (s *SQLite) ClaimNext(ctx context.Context, runID string, c Compat) (Request
 	// the same row -- and there is only one connection anyway, by
 	// SetMaxOpenConns above.
 	const pick = `
-		UPDATE requests SET status = ?, run_id = ?, started_unix = ?
+		UPDATE requests SET status = ?, run_id = ?, started_unix = ?, lease_until_unix = ?
 		WHERE id = (
 			SELECT id FROM requests
 			WHERE status = ?%s
@@ -869,17 +1084,21 @@ func (s *SQLite) ClaimNext(ctx context.Context, runID string, c Compat) (Request
 		)
 		RETURNING ` + requestColumns
 
-	where, args := "", []any{string(StatusRunning), runID, s.at().UnixMilli(), string(StatusQueued)}
+	now := s.at()
+	where, args := "", []any{
+		string(StatusRunning), runID, now.UnixMilli(),
+		// THE LEASE, WRITTEN IN THE SAME STATEMENT AS THE CLAIM. A row
+		// claimed in one statement and stamped with its expiry in a second
+		// would have a window in which it reads `running` with a zero lease,
+		// and a zero lease is an expired one -- so a Reclaim landing there
+		// would take the row back from a rental that had just got it.
+		now.Add(LeaseTerm).UnixMilli(),
+		string(StatusQueued),
+	}
 	if !c.IsZero() {
-		// THE KIND IS COMPARED THROUGH KindOf AND NOT AS A COLUMN, which is
-		// the one place the empty-means-sd rule has to reach into SQL. A
-		// plain `AND kind = ?` would refuse every row written before schema
-		// version 6 to an sd rental -- they hold '' and the compat holds
-		// 'sd' -- so a restart after an upgrade would leave an operator's
-		// queue permanently unclaimable. Rewriting the rows was the
-		// alternative and is the thing this schema never does.
-		where = ` AND (CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ? AND gpu = ?`
-		args = append(args, KindSD, KindOf(c.Kind), c.Provider, c.GPU)
+		clause, cargs := servesClause(c)
+		where = " AND " + clause
+		args = append(args, cargs...)
 	}
 	// AND ONE EXCLUSION PER LIVE RENTAL, which is the create side of
 	// fit-or-create and is still this one statement. See Compat.Live: the
@@ -887,16 +1106,15 @@ func (s *SQLite) ClaimNext(ctx context.Context, runID string, c Compat) (Request
 	// already up can serve, so a request a busy rental could take waits for it
 	// instead of being given a card of its own.
 	//
-	// THE SAME KindOf NORMALISATION, and getting it wrong HERE is the
-	// expensive direction. On the ride side a raw `kind = ?` refuses a
-	// pre-schema-6 row to the rental serving its siblings; on the exclusion
-	// side it would fail to exclude one, so a migrated row would be treated as
-	// incompatible with the node already serving its siblings and would be
-	// given a SECOND card. Both stores spell the one rule, which is what the
-	// conformance table is for.
+	// THE NEGATION OF THE SAME BUILDER, which is what keeps the two sides one
+	// relation. They used to be two copies of one condition, and the
+	// expensive direction is this one: a ride predicate that is narrower than
+	// the exclusion starves a request for the length of a rental, and an
+	// exclusion narrower than the ride hands a request a SECOND card.
 	for _, l := range c.Live {
-		where += ` AND NOT ((CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ? AND gpu = ?)`
-		args = append(args, KindSD, KindOf(l.Kind), l.Provider, l.GPU)
+		clause, cargs := servesPendingClause(l)
+		where += " AND NOT " + clause
+		args = append(args, cargs...)
 	}
 
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(pick, where), args...)
@@ -1085,26 +1303,29 @@ func (s *SQLite) Images(ctx context.Context, id ReqID) ([]Image, error) {
 	return out, rows.Err()
 }
 
-// PutCaps caches what the generation server said it can do.
-func (s *SQLite) PutCaps(ctx context.Context, c sdserver.Capabilities) error {
+// PutCaps caches what the generation server said it can do, for one shape.
+func (s *SQLite) PutCaps(ctx context.Context, sh Shape, c sdserver.Capabilities) error {
 	body, err := json.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("encode the capabilities: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO meta (key, value) VALUES ('caps', ?)`, string(body))
+		`INSERT OR REPLACE INTO caps (kind, provider, gpu, body, at_unix) VALUES (?, ?, ?, ?, ?)`,
+		KindOf(sh.Kind), sh.Provider, sh.GPU, string(body), s.at().UnixMilli())
 	if err != nil {
 		return fmt.Errorf("record the capabilities: %w", err)
 	}
 	return nil
 }
 
-// Caps reads the cached capabilities back. The second return is false when
-// nothing has learned them yet, which is every process before its first
-// rental.
-func (s *SQLite) Caps(ctx context.Context) (sdserver.Capabilities, bool, error) {
+// Caps reads the cached capabilities for one shape back. The second return is
+// false when nothing has learned them yet, which is every shape before its
+// first rental.
+func (s *SQLite) Caps(ctx context.Context, sh Shape) (sdserver.Capabilities, bool, error) {
 	var body string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'caps'`).Scan(&body)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT body FROM caps WHERE kind = ? AND provider = ? AND gpu = ?`,
+		KindOf(sh.Kind), sh.Provider, sh.GPU).Scan(&body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sdserver.Capabilities{}, false, nil
 	}
@@ -1118,23 +1339,63 @@ func (s *SQLite) Caps(ctx context.Context) (sdserver.Capabilities, bool, error) 
 	return c, true, nil
 }
 
-// Interrupt marks everything running as interrupted, and returns how many.
-//
-// Called once at startup. A request that was in flight when the process died
-// cannot be resumed, because its rental is gone -- so it is not re-queued
-// either: renting a second card for work the operator may no longer want is
-// the kind of help nobody asked for. Whatever images it produced stay listed,
-// because they were paid for.
-func (s *SQLite) Interrupt(ctx context.Context) (int, error) {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE requests SET status = ?, ended_unix = ? WHERE status = ?`,
-		string(StatusInterrupted), s.at().UnixMilli(), string(StatusRunning))
+// Renew extends the lease on the rows this caller is still responsible for.
+func (s *SQLite) Renew(ctx context.Context, ids []ReqID) (int, error) {
+	if len(ids) == 0 {
+		// No statement at all, rather than one with an empty IN list. An
+		// `IN ()` is a syntax error in this dialect, and the caller with
+		// nothing held is the ordinary case: an idle `ember serve` runs this
+		// every fifteen seconds.
+		return 0, nil
+	}
+	// IT CAN SHORTEN A LEASE AS WELL AS EXTEND ONE, which is right even
+	// though the name says otherwise: an Adopt row starts with the run's own
+	// deadline, up to a whole TTL away, and once this process is renewing it
+	// the honest expiry is "this process is alive" rather than "the node has
+	// not timed out". A `ember up` over the socket killed with SIGKILL is
+	// therefore reclaimed in LeaseTerm instead of in an hour.
+	//
+	// AND status = 'running' IS NOT DECORATION. A renewal races a request's
+	// own ending -- the supervisor renews at the top of its loop while a slot
+	// is writing `done` from its own goroutine -- and pushing a lease forward
+	// on a row that has finished would leave a terminal row carrying a live
+	// lease. Nothing reads it there, which is exactly why it would never be
+	// noticed.
+	//nolint:gosec // G202: the only interpolation is a fixed-text placeholder list sized by len(ids)
+	q := `UPDATE requests SET lease_until_unix = ? WHERE status = ? AND id IN (?` +
+		strings.Repeat(`, ?`, len(ids)-1) + `)`
+	args := []any{s.at().Add(LeaseTerm).UnixMilli(), string(StatusRunning)}
+	for _, id := range ids {
+		args = append(args, string(id))
+	}
+	res, err := s.db.ExecContext(ctx, q, args...)
 	if err != nil {
-		return 0, fmt.Errorf("mark interrupted requests in %s: %w", s.path, err)
+		return 0, fmt.Errorf("renew the lease on %d request(s) in %s: %w", len(ids), s.path, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, fmt.Errorf("count interrupted requests: %w", err)
+		return 0, fmt.Errorf("count renewed requests: %w", err)
+	}
+	return int(n), nil
+}
+
+// Reclaim marks interrupted every running request whose lease has expired, and
+// returns how many.
+//
+// See Store.Reclaim for why this is keyed on the lease rather than sweeping
+// every running row, and why a reclaimed request is not re-queued.
+func (s *SQLite) Reclaim(ctx context.Context) (int, error) {
+	now := s.at().UnixMilli()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE requests SET status = ?, ended_unix = ?
+			WHERE status = ? AND lease_until_unix <= ?`,
+		string(StatusInterrupted), now, string(StatusRunning), now)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim expired requests in %s: %w", s.path, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count reclaimed requests: %w", err)
 	}
 	return int(n), nil
 }

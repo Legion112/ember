@@ -68,6 +68,28 @@ func each(t *testing.T, fn func(t *testing.T, s Store)) {
 	}
 }
 
+// setClock points whichever store this is at an injected clock.
+//
+// A TYPE SWITCH BECAUSE THE SEAM IS NOT ON THE INTERFACE, and it should not be:
+// a Store's clock is how its own rows are stamped, not something a caller
+// chooses per call. Every lease assertion needs it, because what a lease is
+// about is the passage of time and a test that could not move time could only
+// assert that the column exists.
+func setClock(t *testing.T, s Store, now func() time.Time) {
+	t.Helper()
+	switch v := s.(type) {
+	case *SQLite:
+		v.now = now
+	case *RecordingStore:
+		v.Now = now
+	default:
+		// Named rather than ignored: a third implementation arriving here
+		// would otherwise make every lease test below pass by measuring
+		// nothing at all.
+		t.Fatalf("no clock seam for %T, so a lease test would assert against the wall clock", s)
+	}
+}
+
 func TestEnqueue_RoundTripsEverythingAsked(t *testing.T) {
 	each(t, func(t *testing.T, s Store) {
 		in := req("a cat", "a dog")
@@ -639,7 +661,8 @@ func TestAddImage_RefusesARowNothingCouldRead(t *testing.T) {
 // the process before the first rental.
 func TestCaps_AbsentUntilSomethingHasLearnedThem(t *testing.T) {
 	each(t, func(t *testing.T, s Store) {
-		_, ok, err := s.Caps(t.Context())
+		sh := Shape{Kind: KindSD, Provider: "runpod", GPU: "rtx4090"}
+		_, ok, err := s.Caps(t.Context(), sh)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -654,11 +677,11 @@ func TestCaps_AbsentUntilSomethingHasLearnedThem(t *testing.T) {
 			PreviewModes: []string{"none", "proj"},
 			Limits:       sdserver.Limits{MinWidth: 64, MaxWidth: 2048},
 		}
-		if err := s.PutCaps(t.Context(), want); err != nil {
+		if err := s.PutCaps(t.Context(), sh, want); err != nil {
 			t.Fatal(err)
 		}
 
-		got, ok, err := s.Caps(t.Context())
+		got, ok, err := s.Caps(t.Context(), sh)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -671,44 +694,90 @@ func TestCaps_AbsentUntilSomethingHasLearnedThem(t *testing.T) {
 	})
 }
 
-// TestInterrupt_ARentalThatIsGoneIsNotResumed.
+// TestReclaim_TakesAnExpiredLeaseAndLeavesALiveOne.
 //
-// A request in flight when the process died cannot be resumed: its node is
-// gone. It is marked interrupted rather than re-queued, because renting a
-// second card for work the operator may no longer want is the kind of help
-// nobody asked for -- and rather than failed, because it was not the
-// generation that broke.
-func TestInterrupt_ARentalThatIsGoneIsNotResumed(t *testing.T) {
+// THE SWEEP THIS REPLACED COULD NOT TELL THE TWO APART. It marked every
+// running row interrupted at startup on the premise that its rental was gone,
+// and that premise is not ember's to make: a node carries its run id and its
+// deadline in the provider's own label, so a node can be alive and billing
+// while ember restarts -- and two `ember serve` processes against one store
+// made it worse, because the second one's startup swept the first one's live
+// rentals. What is measured instead is the one thing the store can know: is
+// anybody still renewing this row.
+func TestReclaim_TakesAnExpiredLeaseAndLeavesALiveOne(t *testing.T) {
 	each(t, func(t *testing.T, s Store) {
-		running, err := s.Enqueue(t.Context(), req("in flight"))
+		at := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+		setClock(t, s, func() time.Time { return at })
+
+		// EXPLICIT CREATED TIMES, because the clock above is frozen: three
+		// rows stamped the same instant are ordered by id, which is random
+		// for one of the two stores -- so the two claims below would take an
+		// arbitrary pair and the "still queued" assertion would be a coin
+		// toss.
+		first, second, third := req("in flight"), req("also in flight"), req("still queued")
+		first.Created = at.Add(-3 * time.Minute)
+		second.Created = at.Add(-2 * time.Minute)
+		third.Created = at.Add(-1 * time.Minute)
+		if _, err := s.Enqueue(t.Context(), first); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Enqueue(t.Context(), second); err != nil {
+			t.Fatal(err)
+		}
+		waiting, err := s.Enqueue(t.Context(), third)
 		if err != nil {
 			t.Fatal(err)
 		}
-		waiting, err := s.Enqueue(t.Context(), req("still queued"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, ok, err := s.ClaimNext(t.Context(), "run-1", Compat{}); err != nil || !ok {
+		live, ok, err := s.ClaimNext(t.Context(), "run-1", Compat{})
+		if err != nil || !ok {
 			t.Fatalf("could not set up a running request: ok=%v err=%v", ok, err)
 		}
+		dead, ok, err := s.ClaimNext(t.Context(), "run-2", Compat{})
+		if err != nil || !ok {
+			t.Fatalf("could not set up a second running request: ok=%v err=%v", ok, err)
+		}
 
-		n, err := s.Interrupt(t.Context())
+		// Nothing has expired yet, so nothing is reclaimable: a claim that was
+		// immediately reclaimable would take a row back from the rental that
+		// had just got it.
+		if n, err := s.Reclaim(t.Context()); err != nil || n != 0 {
+			t.Fatalf("Reclaim right after two claims = %d, %v; want 0", n, err)
+		}
+
+		// Past the term, with one of the two still being renewed.
+		at = at.Add(LeaseTerm + time.Second)
+		if n, err := s.Renew(t.Context(), []ReqID{live.ID}); err != nil || n != 1 {
+			t.Fatalf("Renew = %d, %v; want 1", n, err)
+		}
+
+		n, err := s.Reclaim(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
 		if n != 1 {
-			t.Errorf("interrupted %d request(s), want 1", n)
+			t.Errorf("reclaimed %d request(s), want 1: the renewed one must survive", n)
 		}
 
-		got, err := s.Get(t.Context(), running)
+		got, err := s.Get(t.Context(), dead.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Status != StatusInterrupted {
-			t.Errorf("status = %q, want interrupted", got.Status)
+			t.Errorf("the expired request is %q, want interrupted", got.Status)
 		}
 		if got.Ended.IsZero() {
 			t.Error("an interrupted request has no end time, so nothing can say how long it ran")
+		}
+
+		// AND THE RENEWED ONE IS UNTOUCHED, which is the whole of the fix: a
+		// second ember starting beside a live one used to write `interrupted`
+		// over exactly this row.
+		kept, err := s.Get(t.Context(), live.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kept.Status != StatusRunning {
+			t.Errorf("a request whose lease is being renewed became %q", kept.Status)
 		}
 
 		// The queue is untouched: a request that never started is still
@@ -719,6 +788,118 @@ func TestInterrupt_ARentalThatIsGoneIsNotResumed(t *testing.T) {
 		}
 		if q.Status != StatusQueued {
 			t.Errorf("a queued request became %q on restart", q.Status)
+		}
+	})
+}
+
+// TestReclaim_AReclaimedRequestIsNotRequeued.
+//
+// The half of the old sweep's argument that survives: a request whose process
+// is gone cannot be resumed, and renting a second card for work the operator
+// may no longer want is the kind of help nobody asked for. `interrupted` is
+// terminal and no claim takes it, which is also what stops two embers on one
+// store from generating a batch twice.
+func TestReclaim_AReclaimedRequestIsNotRequeued(t *testing.T) {
+	each(t, func(t *testing.T, s Store) {
+		at := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+		setClock(t, s, func() time.Time { return at })
+
+		if _, err := s.Enqueue(t.Context(), req("in flight")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.ClaimNext(t.Context(), "run-1", Compat{}); err != nil {
+			t.Fatal(err)
+		}
+		at = at.Add(LeaseTerm + time.Second)
+		if n, err := s.Reclaim(t.Context()); err != nil || n != 1 {
+			t.Fatalf("Reclaim = %d, %v; want 1", n, err)
+		}
+		if _, ok, err := s.ClaimNext(t.Context(), "run-2", Compat{}); err != nil {
+			t.Fatal(err)
+		} else if ok {
+			t.Error("a reclaimed request was claimed again; that is a second card for a batch " +
+				"the operator may no longer want")
+		}
+	})
+}
+
+// TestRenew_WillNotPushALeaseOnToAFinishedRequest.
+//
+// The supervisor renews from its own goroutine while a slot writes `done` from
+// another, so this race is the ordinary case rather than an exotic one. A
+// terminal row carrying a live lease is a state nothing reads -- which is
+// exactly why it would never be noticed, and why both stores spell the
+// `status = running` half of the statement.
+func TestRenew_WillNotPushALeaseOnToAFinishedRequest(t *testing.T) {
+	each(t, func(t *testing.T, s Store) {
+		at := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+		setClock(t, s, func() time.Time { return at })
+
+		if _, err := s.Enqueue(t.Context(), req("one")); err != nil {
+			t.Fatal(err)
+		}
+		r, ok, err := s.ClaimNext(t.Context(), "run-1", Compat{})
+		if err != nil || !ok {
+			t.Fatalf("setup claim: ok=%v err=%v", ok, err)
+		}
+		if err := s.Update(t.Context(), r.ID, func(q *Request) { q.Status = StatusDone }); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := s.Renew(t.Context(), []ReqID{r.ID}); err != nil || n != 0 {
+			t.Errorf("Renew over a finished request = %d, %v; want 0", n, err)
+		}
+	})
+}
+
+// TestRenew_WithNothingHeldIsNotAStatement.
+//
+// An idle `ember serve` calls this every fifteen seconds with an empty set, and
+// the SQL half builds an `IN (...)` list sized by the slice -- so a zero-length
+// one is `IN ()`, which this dialect refuses. The fake has no such list, which
+// is the asymmetry a conformance test is for.
+func TestRenew_WithNothingHeldIsNotAStatement(t *testing.T) {
+	each(t, func(t *testing.T, s Store) {
+		if n, err := s.Renew(t.Context(), nil); err != nil || n != 0 {
+			t.Errorf("Renew(nil) = %d, %v; want 0, nil", n, err)
+		}
+	})
+}
+
+// TestAdopt_LeasesTheRunItRecords.
+//
+// `ember up` is one process with no renewal loop, so its row's lease is the
+// run's own deadline: `adopted + ttl`. Without one the row would read as
+// expired the instant anything looked, and the periodic sweep would mark a
+// live interactive run interrupted over and over.
+func TestAdopt_LeasesTheRunItRecords(t *testing.T) {
+	each(t, func(t *testing.T, s Store) {
+		at := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+		setClock(t, s, func() time.Time { return at })
+
+		r := req()
+		r.TTL = time.Hour
+		id, err := s.Adopt(t.Context(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Well inside the TTL and well past the claim term, which is the
+		// interval a lease of LeaseTerm would already have lost.
+		at = at.Add(30 * time.Minute)
+		if n, err := s.Reclaim(t.Context()); err != nil || n != 0 {
+			t.Fatalf("Reclaim half an hour into a one-hour `ember up` = %d, %v; want 0", n, err)
+		}
+		if got, err := s.Get(t.Context(), id); err != nil {
+			t.Fatal(err)
+		} else if got.Status != StatusRunning {
+			t.Errorf("a live `ember up` became %q", got.Status)
+		}
+
+		// And past the deadline it is reclaimable, which is what catches an
+		// `ember up` killed with SIGKILL.
+		at = at.Add(31 * time.Minute)
+		if n, err := s.Reclaim(t.Context()); err != nil || n != 1 {
+			t.Errorf("Reclaim past the run's deadline = %d, %v; want 1", n, err)
 		}
 	})
 }
@@ -1004,7 +1185,7 @@ func TestOpen_MigratesAVersionOneFile(t *testing.T) {
 	// does not report formats" and refuse a correct one, blaming the server
 	// for a field ember never asked about -- so "nothing has asked yet",
 	// which is true, is the better answer. The next rental re-caches it.
-	if _, ok, err := s.Caps(context.Background()); err != nil {
+	if _, ok, err := s.Caps(context.Background(), Shape{Kind: KindSD}); err != nil {
 		t.Fatal(err)
 	} else if ok {
 		t.Error("a capability cache from before the new lists survived the migration")

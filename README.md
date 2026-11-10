@@ -2275,6 +2275,23 @@ least. Every field in the form explains itself on hover.
 | preview mode and interval | piper's `speaker`, `length_scale`, `noise_scale`, `noise_w` and `sentence_silence` |
 | the `kind`, and for speech the text and a **voice id** from `tts.voices` | |
 
+**A bad sampler is refused before a card is rented, per card.** ember caches
+what each generation server reported it can do and checks a queued batch
+against it, so a typo is refused while you are still looking at the form rather
+than a minute into a rented node. The cache is keyed by the rental a request
+names — its kind, its provider and its card — and it used to be a single row
+per process, written by whichever rental came up last. That defence was
+"`sd.serve` is fixed by the config, so every rental reports the same
+capabilities", and a request names a provider *and* a card: two live rentals of
+one `ember serve` can differ in both, and what a build can do legitimately
+differs with the card, which is the whole reason `images:` maps an architecture
+to an image. With one row a sampler one card's build has and another's does not
+was accepted or refused depending on which node had answered most recently. A
+shape nothing has rented yet is a **miss** and not the nearest answer, so that
+batch is checked on the node as it always was — one rental's worth of a typo,
+once per shape. Upgrading an existing database **drops** the old unkeyed row,
+because nothing recorded which card produced it.
+
 **A request that failed says why, in the row and in the watcher.** The reason
 is already a column — `requests.err`, written whether the refusal came before
 anything was rented (a money ceiling, no capacity, a sampler the cached
@@ -2501,6 +2518,8 @@ So `max_nodes: 2` parallelises **incompatible** work only:
 | two queued requests | nodes |
 |---|---|
 | two images, same provider and card | **1** — the second rides the first's rental |
+| one image naming no card, one naming the card the first landed on | **1** — see below |
+| one image naming `a100`, a rental holding an `a100-80g` | **1** |
 | an image and an utterance (`sd` beside `tts`) | **2** |
 | two images, different cards | **2** |
 | two images, different providers | **2** |
@@ -2508,6 +2527,32 @@ So `max_nodes: 2` parallelises **incompatible** work only:
 A homogeneous queue therefore behaves exactly as it did at one node. If you
 queue two images for one card and expect two cards, nothing is broken —
 `ember serve` says so at startup under `--allow-paid`.
+
+**The match is against the card a rental actually got, not the card its opener
+asked for.** `gpu` on a request is a *selection* and an empty one means "any
+card this provider has", so the two can differ while the silicon agrees: a
+request that named nothing lands on whatever was available, and a later
+request naming exactly that card can ride it. Comparing the two asks instead
+rented a second node for a card ember already had warm. The capacity suffix
+follows the same rule the offer filter uses — `a100` is satisfied by an
+`a100-80g`, and not the other way round, because the suffix makes the ask more
+specific.
+
+**While a rental is choosing its offer it does not yet know its card, and for
+that moment the scheduler will not create a second node for the same provider
+and kind.** It cannot know whether the rental coming up will fit, and the
+money-safe reading of "might" is "does". A request of a *different* kind is
+never held up by it, and the wait ends the moment the offer comes back — which
+is before anything is rented. The long case is an empty store, where a machine
+with no card fetches the weights first (measured at 14 m 47 s): a second
+rental of that kind would want the same store and would wait for the same
+fetch anyway, holding a node slot instead of waiting in the queue.
+
+**A card name a client spells its own way is normalised when the request is
+stored.** `NVIDIA GeForce RTX 4090`, `RTX_4090` and `rtx4090` are one card, so
+they are one thing to the scheduler, one key in the capability cache and one
+row in `ember spend --by gpu`. Rows written before this are matched as they
+were stored; nothing rewrites them.
 
 **A rental in flight is worth nothing to the ledger until it is torn down**,
 because `requests.cost` is written from the deferred destroy. With two creates
@@ -2893,10 +2938,27 @@ a dropped websocket are the same code path: a client says which sequence number
 it last saw and is told everything since.
 
 A request that was generating when the process died is marked **interrupted**
-rather than failed or re-queued. Its rental is gone so it cannot be resumed,
-and renting a second card for work the operator may no longer want is not a
-decision ember makes on their behalf. Whatever images it produced stay listed,
-because they were paid for.
+rather than failed or re-queued. It cannot be resumed, and renting a second
+card for work the operator may no longer want is not a decision ember makes on
+their behalf. Whatever images it produced stay listed, because they were paid
+for.
+
+**It is the lease that decides, not the restart.** A claim writes `run_id` and
+an expiry, the process that holds the request pushes that expiry forward while
+it is responsible for it, and a row is marked interrupted when nobody is
+renewing it — at startup *and* while ember runs, because "the process that held
+this is gone" becomes true at both. The sweep used to take **every** row that
+read `running`, on the stated grounds that the rental behind it was gone, and
+that is not a claim ember can make from this side: a node carries its run id
+and its deadline in the provider's own label, the label is the source of truth,
+and `ember ls` is what reads it. So a node could be alive and billing while
+ember wrote `interrupted` over the one local record of what it was for, and a
+second `ember serve` against the same database swept the first one's live
+rentals on startup. Two embers on one database are now each other's business
+only through the lease. An `ember up` row carries the run's own deadline as its
+lease, since that command has no renewal loop; the warning the sweep prints
+says the lease ran out and sends you to `ember ls`, because whether the machine
+is gone is a question only the provider can answer.
 
 A request whose **rental** failed is marked **failed**, with the reason, as
 soon as the rental unwinds. That covers everything between the machine being
@@ -3045,8 +3107,8 @@ from running. That answer says the rental is coming up, to ask again, and
 explicitly **not** to restart `ember serve`, which would destroy the rental
 the request is waiting for. The other case is a row left `running` by an ember
 that is gone, which nothing here holds and which a restart really does
-reconcile (`queue.Run` marks what it finds in flight as `interrupted`); that
-one keeps the restart advice. ember can tell them apart without a counter
+reconcile (`queue.Run` marks whatever lease has run out as `interrupted`);
+that one keeps the restart advice. ember can tell them apart without a counter
 because every claim is made on one goroutine, and a slot holds its request from
 that claim until the destroy has run.
 

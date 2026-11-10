@@ -13,6 +13,7 @@ import (
 
 	"github.com/Legion112/ember/internal/app"
 	"github.com/Legion112/ember/internal/genstore"
+	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/internal/tts"
@@ -78,6 +79,16 @@ func (f *fakeServed) count() int {
 // what should have been one is twice the bill, and the whole shape exists to
 // make that not happen.
 type fakeRental struct {
+	// card is what this rental advertises, which these fakes take from the
+	// request that opened it.
+	//
+	// A FAKE THAT ADVERTISED NOTHING WOULD BE LESS CAPABLE THAN A RENTAL.
+	// Queue.advertise is called one statement after Plan returns in
+	// production, so a live rental with no card is one in the middle of an
+	// offer lookup -- and a fake stuck in that state would leave every
+	// create-side assertion in this package measuring the conservative
+	// exclusion instead of the exact one.
+	card      node.GPUModel
 	served    *fakeServed
 	rentals   *int
 	destroyed *int
@@ -122,6 +133,8 @@ func (r fakeRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(co
 func (r fakeRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	return r.rent(ctx, sink, func(ctx context.Context) error { return fn(ctx, r.served) })
 }
+
+func (r fakeRental) Card() node.GPUModel { return r.card }
 
 func (r fakeRental) rent(ctx context.Context, sink report.Sink, fn func(context.Context) error) error {
 	r.mu.Lock()
@@ -191,6 +204,7 @@ func (p *fakePlanner) Plan(_ context.Context, r genstore.Request) (Rental, error
 		return nil, err
 	}
 	return fakeRental{
+		card:   node.GPUModel(r.GPU),
 		served: p.served, spoken: p.spoken,
 		rentals: &p.rentals, destroyed: &p.destroyed,
 		rentErr: p.rentErr, teardownErr: p.teardownErr, mu: &p.mu, block: p.block,
@@ -678,16 +692,36 @@ func TestRun_ReturnsOnlyAfterTheRentalIsDestroyed(t *testing.T) {
 	}
 }
 
-// TestRun_MarksWhatWasRunningWhenTheProcessDied.
+// TestRun_ReclaimsARowWhoseLeaseRanOutAndLeavesALiveOneAlone.
 //
-// Its rental is gone, so it cannot be resumed -- and re-queueing it would rent
-// a second card for work the operator may no longer want.
-func TestRun_MarksWhatWasRunningWhenTheProcessDied(t *testing.T) {
+// THE SWEEP THIS REPLACED DID NOT ASK. It marked every running row interrupted
+// at startup, on the premise that the row's rental was gone -- which is a
+// claim about a provider's labels that nothing in this package reads. Two
+// `ember serve` processes against one store therefore had the second one write
+// `interrupted` over the first one's live rentals, and the row it orphaned was
+// the only local record of a node that is still billing.
+//
+// TWO ROWS AND ONE RUN, because a sweep that takes both and a sweep that takes
+// neither are each satisfied by one assertion. The live one is the half with
+// the defect in it.
+func TestRun_ReclaimsARowWhoseLeaseRanOutAndLeavesALiveOneAlone(t *testing.T) {
 	pl := &fakePlanner{served: &fakeServed{}}
-	q, st := newQueue(t, pl)
+	st := genstore.NewRecordingStore()
+	at := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	st.Now = func() time.Time { return at }
+	q, _ := newQueueOver(t, st, pl)
 
-	id := enqueue(t, st, "rtx2080ti", "was in flight")
+	stale := enqueue(t, st, "rtx2080ti", "claimed by an ember that is gone")
 	if _, ok, err := st.ClaimNext(t.Context(), "an-older-lease", genstore.Compat{}); err != nil || !ok {
+		t.Fatalf("setup: ok=%v err=%v", ok, err)
+	}
+
+	// Past the term, so that row's lease has run out. Then a second row is
+	// claimed, which gets a fresh one: this is the live rental of the other
+	// ember, and nothing here may touch it.
+	at = at.Add(genstore.LeaseTerm + time.Minute)
+	live := enqueue(t, st, "rtx2080ti", "claimed by an ember that is still running")
+	if _, ok, err := st.ClaimNext(t.Context(), "a-live-lease", genstore.Compat{}); err != nil || !ok {
 		t.Fatalf("setup: ok=%v err=%v", ok, err)
 	}
 
@@ -697,12 +731,20 @@ func TestRun_MarksWhatWasRunningWhenTheProcessDied(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := st.Get(t.Context(), id)
+	got, err := st.Get(t.Context(), stale)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Status != genstore.StatusInterrupted {
 		t.Errorf("status = %q, want interrupted", got.Status)
+	}
+	kept, err := st.Get(t.Context(), live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Status != genstore.StatusRunning {
+		t.Errorf("a request whose lease is still held became %q at another ember's startup; "+
+			"its row is the only local record of a node that may still be billing", kept.Status)
 	}
 	if rentals, _ := pl.counts(); rentals != 0 {
 		t.Errorf("rented %d node(s) for an interrupted request; it must not be resumed", rentals)
@@ -777,7 +819,7 @@ func TestOnce_CachesTheServersCapabilities(t *testing.T) {
 	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	caps, ok, err := st.Caps(t.Context())
+	caps, ok, err := st.Caps(t.Context(), genstore.NewShape(genstore.KindSD, "local", "rtx2080ti"))
 	if err != nil {
 		t.Fatal(err)
 	}

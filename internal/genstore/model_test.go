@@ -378,14 +378,38 @@ func TestOpen_MigratesAVersionFourFile(t *testing.T) {
 	if got.Model != "" {
 		t.Errorf("a version-4 row invented a model: %q", got.Model)
 	}
-	// And the cache is still there and still the current model, which is the
-	// thing that must not have been copied onto a historical row.
-	caps, ok, err := s.Caps(t.Context())
-	if err != nil || !ok {
-		t.Fatalf("Caps after the migration = %+v, %v, %v", caps, ok, err)
+	// AND THE CACHE IS GONE, which is what schema 7 changed about this file.
+	// The seeded row is an un-keyed `caps` key in `meta`: one document per
+	// PROCESS, written by whichever rental came up last, with nothing
+	// recording which provider or card produced it. There is no shape to
+	// migrate it to, and inventing one would assert that last week's rental
+	// was this week's card -- the same claim this test's own model assertion
+	// above refuses. So the 6 -> 7 migration deletes it, exactly as 1 -> 2
+	// already deleted an incomplete one, and the next rental of each shape
+	// learns its own.
+	for _, sh := range []Shape{
+		{Kind: KindSD},
+		{Kind: KindSD, Provider: "runpod", GPU: "rtx-pro-6000"},
+	} {
+		caps, ok, err := s.Caps(t.Context(), sh)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			t.Errorf("the un-keyed caps row survived the migration under %+v as %q; "+
+				"nothing recorded which card it came from, so any shape it answers is a guess",
+				sh, caps.Model)
+		}
 	}
-	if caps.Model == got.Model {
-		t.Errorf("the migration copied the cached model %q onto a request that ran before it", caps.Model)
+	// And the row itself is gone from meta rather than merely unreachable: a
+	// key left behind is a document a later reader can find and believe.
+	var leftover int
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM meta WHERE key = 'caps'`).Scan(&leftover); err != nil {
+		t.Fatal(err)
+	}
+	if leftover != 0 {
+		t.Errorf("meta still holds %d un-keyed caps row(s)", leftover)
 	}
 
 	// Writing works, which is the thing the missing-column failure broke: Open

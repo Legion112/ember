@@ -115,6 +115,10 @@ func (r gatedRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(c
 	return fn(ctx, recordingSpoken{})
 }
 
+// Card is a fixed card, because every request in this file names one provider
+// and the gate is what the tests are about.
+func (r gatedRental) Card() node.GPUModel { return "rtx2080ti" }
+
 func (r gatedRental) WithServed(ctx context.Context, sink report.Sink, fn func(context.Context, app.Served) error) error {
 	r.gate.enter("queued")
 	defer r.gate.leave()

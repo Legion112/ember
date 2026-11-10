@@ -613,3 +613,16 @@ func (a appRental) WithServed(ctx context.Context, sink report.Sink, fn func(con
 func (a appRental) WithSpoken(ctx context.Context, sink report.Sink, fn func(context.Context, app.Spoken) error) error {
 	return a.plan.WithSpoken(ctx, a.out, sink, fn)
 }
+
+// Card is the card this plan's offer carries.
+//
+// THROUGH HasGPU, so a CPU-only plan answers "" rather than whatever a
+// provider happened to put in a field it does not fill. The same reading
+// RunGPU already uses for the stored column, which is what keeps the card a
+// rental advertises and the card its row records one fact.
+func (a appRental) Card() node.GPUModel {
+	if !a.plan.Offer.HasGPU() {
+		return ""
+	}
+	return a.plan.Offer.GPU
+}

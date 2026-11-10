@@ -513,7 +513,14 @@ func serveOn(ctx context.Context, srv *http.Server, lns ...net.Listener) error {
 
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	var caps *sdserver.Capabilities
-	if c, ok, err := s.opts.Store.Caps(r.Context()); err != nil {
+	// THE CONFIG'S OWN SHAPE, because that is what this endpoint describes:
+	// the page asks "what can this server offer me" before it has chosen
+	// anything, and the answer it should be given is the one for the rental
+	// the operator's file would start. A page that then asks for a different
+	// card gets its own shape's answer from the refusal at POST time --
+	// validateJobs reads the request's shape, not this one.
+	shape := genstore.NewShape(genstore.KindSD, s.opts.Config.Provider, s.opts.Config.GPU)
+	if c, ok, err := s.opts.Store.Caps(r.Context(), shape); err != nil {
 		// Reported and not fatal: a UI without the capability list offers
 		// free-text controls instead of menus, which is worse than ideal and
 		// better than a blank page.
@@ -719,7 +726,15 @@ func (s *Server) validateJobs(ctx context.Context, req genstore.Request) error {
 		return fmt.Errorf("preview_interval: %w", err)
 	}
 
-	caps, haveCaps, cerr := s.opts.Store.Caps(ctx)
+	// AGAINST THIS REQUEST'S OWN SHAPE AND NOT AGAINST WHATEVER CAME UP LAST.
+	// The cache used to be one row per process, so a request naming a
+	// provider and a card was checked against the capability list of
+	// whichever rental had most recently reported one -- a different card,
+	// possibly a different provider, and a sampler list that is legitimately
+	// allowed to differ between them. A miss here is the pre-rental case and
+	// is handled exactly as it always was: the static half still runs, and
+	// the capability half is caught on the node.
+	caps, haveCaps, cerr := s.opts.Store.Caps(ctx, req.Shape())
 	if cerr != nil {
 		s.log().Warn("could not read the cached capabilities; a bad sampler will be caught "+
 			"after the node is up instead of now", "err", cerr)
