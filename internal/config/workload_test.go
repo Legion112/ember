@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // load puts a config on disk and reads it back, which is the only path that
@@ -487,5 +488,104 @@ func TestSelect_ReportsACatalogueItCannotBuild(t *testing.T) {
 		t.Fatal("a catalogue with an invalid id was selected from")
 	} else if !strings.Contains(err.Error(), "lowercase") {
 		t.Errorf("the refusal is not the catalogue's: %v", err)
+	}
+}
+
+// TestSelect_AnEntryReplacesTheKeysThatMakeItAWorkload.
+//
+// THE DEFECT THIS CLOSES WAS A LIMIT RATHER THAN A BUG, and it was found by
+// trying to write the single committed configuration this repository is
+// collapsing to. An entry carried `image`, `images`, `sd` and `tts` -- what a
+// DRIVER reads -- and `Select` left everything else shared. The four example
+// files differed in exactly what it left shared: a free sd15 entry needs no
+// store and no assets where a FLUX.2 one needs 56 GiB of both, 11 GiB and
+// 80 GiB cards cannot share a VRAM floor, `verify: always` re-hashes a volume
+// the local path has no cross-run writer for, and a CPU image fails a probe
+// that asks nvidia-smi which architecture it is. So one file could hold two
+// entries and only one of them could work, which is the variety the entry
+// exists to remove.
+func TestSelect_AnEntryReplacesTheKeysThatMakeItAWorkload(t *testing.T) {
+	cfg, err := load(t, `provider: local
+ttl: 30m
+min_vram_gib: 8
+verify: present
+store:
+  name: shared
+  size_gib: 1
+  mount: /shared
+gpu_probe: ["sh", "-c", "the file's"]
+gpu_probe_timeout: 1m
+workloads:
+  - id: free
+    driver: sd
+    image: `+ref+`
+    sd:
+      serve: ["sd-server", "--model", "/opt/models/sd15.gguf"]
+  - id: flux2
+    driver: sd
+    image: `+ref+`
+    ttl: 2h
+    min_vram_gib: 80
+    verify: always
+    store:
+      name: flux2
+      size_gib: 70
+      mount: /models
+    assets:
+      - url: https://example.invalid/w.gguf
+        sha256: `+strings.Repeat("b", 64)+`
+        as: w.gguf
+    gpu_probe: ["sh", "-c", "the entry's"]
+    gpu_probe_timeout: 2m
+    sd:
+      serve: ["sd-server", "--diffusion-model", "/models/w.gguf"]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// THE ENTRY THAT NAMES NOTHING INHERITS, which is the half that is easy to
+	// get wrong: the zero value of every one of these is a dangerous answer --
+	// no store, no assets, no floor, no probe, no deadline -- so "the entry
+	// did not say" has to mean "the file's" and never "none".
+	free, _, err := cfg.Select("free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if free.TTL != 30*time.Minute || free.MinVRAMGiB != 8 || free.Verify != "present" {
+		t.Errorf("the inheriting entry got ttl=%v vram=%d verify=%q, want the file's",
+			free.TTL, free.MinVRAMGiB, free.Verify)
+	}
+	if free.Store.Name != "shared" {
+		t.Errorf("the inheriting entry got store %q, want the file's", free.Store.Name)
+	}
+	if len(free.GPUProbe) == 0 || free.GPUProbe[2] != "the file's" {
+		t.Errorf("the inheriting entry got probe %v, want the file's", free.GPUProbe)
+	}
+
+	// AND THE ENTRY THAT NAMES THEM REPLACES EVERY ONE.
+	flux, _, err := cfg.Select("flux2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flux.TTL != 2*time.Hour || flux.MinVRAMGiB != 80 || flux.Verify != "always" {
+		t.Errorf("the replacing entry got ttl=%v vram=%d verify=%q, want its own",
+			flux.TTL, flux.MinVRAMGiB, flux.Verify)
+	}
+	if flux.Store.Name != "flux2" || flux.Store.SizeGiB != 70 {
+		t.Errorf("the replacing entry got store %+v, want its own", flux.Store)
+	}
+	if len(flux.Assets) != 1 || flux.Assets[0].As != "w.gguf" {
+		t.Errorf("the replacing entry got assets %+v, want its own", flux.Assets)
+	}
+	// THE TIMEOUT TRAVELS WITH THE PROBE IT BOUNDS. An entry that replaced the
+	// argv and inherited the file's bound would be timing a different command,
+	// which is how a local path's one minute comes to be read against a 56 GiB
+	// network volume.
+	if len(flux.GPUProbe) == 0 || flux.GPUProbe[2] != "the entry's" {
+		t.Errorf("the replacing entry got probe %v, want its own", flux.GPUProbe)
+	}
+	if flux.GPUProbeTimeout != 2*time.Minute {
+		t.Errorf("the probe timeout is %v, want the entry's 2m", flux.GPUProbeTimeout)
 	}
 }

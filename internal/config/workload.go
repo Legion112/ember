@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/tts"
@@ -88,6 +89,44 @@ type Workload struct {
 	// are the fields these replace and the functions that read them.
 	Image  string            `yaml:"image"`
 	Images map[string]string `yaml:"images"`
+
+	// WHAT AN ENTRY MAY ALSO REPLACE, and why these six and not every key.
+	//
+	// IT WAS image/images/sd/tts ALONE, and that was not enough to hold one
+	// file. Those four are what a DRIVER reads; these six are what a WORKLOAD
+	// is, and the four committed example configs differed in exactly them: a
+	// free sd15 entry needs no store and no assets where a FLUX.2 one needs
+	// 56 GiB of both, an 11 GiB card and an 80 GiB card cannot share a VRAM
+	// floor, `verify: always` re-hashes a volume the local path has no
+	// cross-run writer for, and a CPU image fails a probe that asks nvidia-smi
+	// what architecture it is. Shared, they force one file per workload --
+	// which is the variety this is for removing.
+	//
+	// ABSENT MEANS THE FILE'S, NEVER ZERO. A `ttl:` an entry does not name is
+	// the file's `ttl:`, not no deadline: the zero value of every one of these
+	// is a dangerous reading (no store, no assets, no floor, no probe, and a
+	// TTL of nothing at all), so `Select` replaces only what an entry actually
+	// set. The one key with no useful absent value is `ttl`, which `Load`
+	// already refuses at the top level, so an entry that names none inherits a
+	// value that was checked.
+	//
+	// THE TOP-LEVEL KEYS ARE NOT REFUSED BESIDE THESE, unlike image and the
+	// driver blocks. Those four ARE the unnamed workload a file describes, so
+	// declaring both is declaring a workload no request can name; these six
+	// are defaults an entry narrows, which is the same relation `Overrides`
+	// has to the file one level up.
+	Store    StoreConfig   `yaml:"store"`
+	Assets   []AssetConfig `yaml:"assets"`
+	Verify   string        `yaml:"verify"`
+	TTL      time.Duration `yaml:"ttl"`
+	MinVRAM  int           `yaml:"min_vram_gib"`
+	GPUProbe []string      `yaml:"gpu_probe"`
+
+	// GPUProbeTimeout is the entry's own bound on that probe. Separate from
+	// the probe itself because a file may share one probe and an entry still
+	// need longer: the rented path waits on a network volume where the local
+	// one waits on a disk.
+	GPUProbeTimeout time.Duration `yaml:"gpu_probe_timeout"`
 
 	// SD and TTS are the driver's own block, read by the driver named above
 	// and by nothing else. A `sd:` on a `tts` entry is refused rather than
@@ -322,6 +361,34 @@ func (c Config) Select(id string) (Config, Workload, error) {
 	out.Images = w.Images
 	out.SD = w.SD
 	out.TTS = w.TTS
+	// REPLACED ONLY WHERE THE ENTRY SET ONE, for the reason on the fields: the
+	// zero value of each of these is a dangerous answer rather than an empty
+	// one, so "the entry did not say" has to mean "the file's" and not "none".
+	if w.Store.Name != "" {
+		out.Store = w.Store
+	}
+	if len(w.Assets) > 0 {
+		out.Assets = w.Assets
+	}
+	if w.Verify != "" {
+		out.Verify = w.Verify
+	}
+	if w.TTL != 0 {
+		out.TTL = w.TTL
+	}
+	if w.MinVRAM != 0 {
+		out.MinVRAMGiB = w.MinVRAM
+	}
+	if len(w.GPUProbe) > 0 {
+		out.GPUProbe = w.GPUProbe
+		// THE TIMEOUT GOES WITH THE PROBE IT BOUNDS. An entry that replaced
+		// the argv and inherited the file's bound would be timing a different
+		// command, which is how the local path's one minute came to be read
+		// against a 56 GiB network volume.
+		out.GPUProbeTimeout = w.GPUProbeTimeout
+	} else if w.GPUProbeTimeout != 0 {
+		out.GPUProbeTimeout = w.GPUProbeTimeout
+	}
 	// Cleared, so the value handed to app.NewPlan describes exactly one
 	// workload and nothing downstream can read the list again and reach a
 	// different answer -- the `queue.Cost` rule applied to a selection.

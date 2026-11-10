@@ -101,7 +101,7 @@ func runServe(args []string, out io.Writer, d deps) error {
 	if why := unservableAll(workloads); why != "" {
 		return usageError{fmt.Errorf("%s declares nothing this server could offer, so a queued "+
 			"request would have nowhere to run: %s.\nSee the sd: and tts: sections of README.md, "+
-			"or ember.local.sd-server.example.yaml for a configuration that costs nothing",
+			"or ember.example.yaml, whose `free` workload costs nothing",
 			*cfgPath, why)}
 	}
 

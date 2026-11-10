@@ -2075,7 +2075,7 @@ func (t *teeSink) Emit(e report.Event) {
 // machine on purpose. A CPU box has no compute capability, so the map cannot
 // answer for it and is deliberately not consulted; with no scalar to fall
 // back to, the command refuses. The effect was that ember.flux2.yaml,
-// ember.video.example.yaml and ember.sd-server.example.yaml could not
+// ember.video.example.yaml and the rented sd-server configuration could not
 // populate the stores they depend on, and the only way to find out was to
 // run the command.
 //
@@ -2099,8 +2099,11 @@ func TestExampleConfigs_CanSyncTheirOwnStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) < 3 {
-		t.Fatalf("found %d example config(s), want at least 3; the glob is checking nothing", len(paths))
+	// ONE, AND IT WAS THREE. Same reason as committedConfigs': the floor is
+	// against a glob that matched nothing, and the four committed
+	// configurations are one file with an entry each now.
+	if len(paths) < 1 {
+		t.Fatalf("found %d example config(s), want at least 1; the glob is checking nothing", len(paths))
 	}
 
 	// What `ember store sync` rents: no GPU, so no architecture.
@@ -2113,31 +2116,50 @@ func TestExampleConfigs_CanSyncTheirOwnStore(t *testing.T) {
 	// the unit log for "--- SKIP" and fails on a hit, because a test that
 	// skips itself reports success for something that never ran. A config
 	// with no assets has nothing to sync and is simply not a case here.
-	var withAssets []string
+	// PER WORKLOAD AND NOT PER FILE, which is what the declared entry changed
+	// about this test. Assets used to be a top-level key, so a file either had
+	// them or did not; they are an entry's now -- the free sd15 entry has none
+	// because its weights are baked into the image, and the FLUX.2 one has
+	// 56 GiB of them. Reading `cfg.Assets` off the loaded file finds the
+	// top-level default, which the one committed configuration does not set,
+	// and the whole case would have filtered itself away to nothing.
+	type syncable struct {
+		path string
+		id   string
+		cfg  config.Config
+		n    int
+	}
+	var withAssets []syncable
 	for _, p := range paths {
 		cfg, err := config.Load(p)
 		if err != nil {
 			t.Fatalf("%s does not load: %v", filepath.Base(p), err)
 		}
-		if len(cfg.Assets) > 0 {
-			withAssets = append(withAssets, p)
+		ws, err := cfg.WorkloadCatalogue()
+		if err != nil {
+			t.Fatalf("%s declares workloads that do not resolve: %v", filepath.Base(p), err)
+		}
+		for _, w := range ws {
+			sel, _, err := cfg.Select(w.ID)
+			if err != nil {
+				t.Fatalf("%s: selecting %q: %v", filepath.Base(p), w.ID, err)
+			}
+			if len(sel.Assets) > 0 {
+				withAssets = append(withAssets, syncable{p, w.ID, sel, len(sel.Assets)})
+			}
 		}
 	}
 	if len(withAssets) == 0 {
-		t.Fatal("no committed config lists assets, so this test is checking nothing")
+		t.Fatal("no committed workload lists assets, so this test is checking nothing")
 	}
 
-	for _, p := range withAssets {
-		t.Run(filepath.Base(p), func(t *testing.T) {
-			cfg, err := config.Load(p)
+	for _, c := range withAssets {
+		t.Run(filepath.Base(c.path)+"/"+c.id, func(t *testing.T) {
+			ref, from, err := ResolveImage(c.cfg, cpu)
 			if err != nil {
-				t.Fatal(err)
-			}
-			ref, from, err := ResolveImage(cfg, cpu)
-			if err != nil {
-				t.Fatalf("this config lists %d asset(s) but cannot resolve an image for the CPU "+
-					"machine `ember store sync` rents, so it cannot populate its own store: %v",
-					len(cfg.Assets), err)
+				t.Fatalf("this workload lists %d asset(s) but cannot resolve an image for the "+
+					"CPU machine `ember store sync` rents, so it cannot populate its own "+
+					"store: %v", c.n, err)
 			}
 			if from != "image:" {
 				t.Errorf("resolved from %q, want the scalar image:", from)

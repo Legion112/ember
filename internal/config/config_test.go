@@ -746,9 +746,17 @@ func committedConfigs(t *testing.T, root string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) < 3 {
+	// THE FLOOR IS ONE AND IT WAS THREE, and the number is not the point: this
+	// guard exists so a glob that matched NOTHING cannot make the test vacuous,
+	// not to mandate how many files there are. There is one committed
+	// configuration now -- the four collapsed into one file with a `workloads:`
+	// entry each, because they differed in what a workload is rather than in
+	// what an operator wants -- so three would fail over the thing that was
+	// done on purpose while still not catching a broken glob any better than
+	// one does.
+	if len(all) < 1 {
 		t.Fatalf("%d configuration(s) matched ember*.yaml at the repository root, "+
-			"want at least 3; this test is checking nothing if that glob is wrong "+
+			"want at least 1; this test is checking nothing if that glob is wrong "+
 			"or its result is not read", len(all))
 	}
 	return all

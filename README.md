@@ -69,7 +69,7 @@ the node — including after Ctrl-C.
 
 ```
 make docker-build
-ember up --config ember.local.sd-server.example.yaml
+ember up --workload free
 ```
 
 ember runs **one container that is both the node and the workload**, so the
@@ -652,17 +652,21 @@ entry's own reason.
 
 ### The committed configurations
 
-Every command reads `ember.yaml` in the working directory by default, so
-`--config` is for naming one of the others rather than for ordinary use. Four
-are committed: the starter, and FLUX.2 on a rented card, on the card in this
-machine, and sd15 on this machine for nothing.
+Every command reads `ember.yaml` in the working directory by default. **One
+configuration is committed**, and it declares three workloads: `--workload` on a
+command, or a tab in the browser.
 
-| file | runs on | job shape |
+There were four files, and they differed in what a workload is rather than in
+what an operator wants — so three of them were wrong about any given machine,
+and the choice had to be made before the question was known. A declared entry
+carries its own image, driver block, store, assets, `verify`, VRAM floor, TTL
+and probe, which is exactly where the four differed.
+
+| `--workload` | runs on | what it is |
 |---|---|---|
-| `ember.example.yaml` | a rented 4090 | none — rent, prove the card, fetch `outputs:`, destroy |
-| `ember.sd-server.example.yaml` | a rented 80 GiB card, on a store | `sd:` — one `sd-server`, a list of jobs |
-| `ember.local.example.yaml` | the GPU in this machine | `sd:` — the same weights, streamed off this disk |
-| `ember.local.sd-server.example.yaml` | this machine, free | `sd:` — what `ember serve` needs |
+| `free` | this machine, for nothing | sd15 baked into `ember:sd` — no store, no assets, what `ember serve` needs |
+| `flux2-local` | the GPU in this machine | the same FLUX.2 weights and digests as below, streamed off this disk |
+| `flux2` | a rented 80 GiB card, on a store | one `sd-server` holding FLUX.2 for a list of jobs |
 
 A configuration holds configuration: a comment in one says what a wrong value
 costs, in a line or two. Every measurement that chose a value — the store's
@@ -1368,12 +1372,11 @@ A100.
 
 ```bash
 make workload-sd-cuda-local          # builds for the card in this machine
-ember up --config ember.local.example.yaml   # same assets, same digests, free
+ember up --workload flux2-local      # same assets, same digests, free
 ```
 
-[`ember.local.example.yaml`](ember.local.example.yaml) is the same
-configuration as the rented one with the provider changed and
-`--offload-to-cpu` added. The store is a Docker named volume — the same code
+The `flux2-local` entry in [`ember.example.yaml`](ember.example.yaml) is the
+same workload as `flux2` with the image changed and `--offload-to-cpu` added. The store is a Docker named volume — the same code
 path a rented network volume uses, costing nothing and surviving between runs.
 
 `make workload-sd-cuda-local` reads this machine's compute capability from

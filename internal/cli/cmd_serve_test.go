@@ -86,8 +86,9 @@ func TestServe_RefusesAConfigWithNoGenerationServer(t *testing.T) {
 		t.Errorf("exit = %d, want %d", ExitCode(err), ExitUsage)
 	}
 	// It names the example that costs nothing, because the operator's next
-	// move is to copy one.
-	if !strings.Contains(err.Error(), "sd-server.example.yaml") {
+	// move is to copy one. One file is committed now and the free path is a
+	// `--workload` inside it, so the name to look for is the file's.
+	if !strings.Contains(err.Error(), "ember.example.yaml") {
 		t.Errorf("err = %v, want it to name a configuration to copy", err)
 	}
 }
