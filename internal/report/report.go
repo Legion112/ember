@@ -411,6 +411,26 @@ func NewStream(now func() time.Time, outs ...Sink) *Stream {
 	return &Stream{now: now, outs: outs}
 }
 
+// NewStreamFrom is NewStream continuing somebody else's numbering.
+//
+// WHY A REQUEST CAN ALREADY HAVE EVENTS. A retry reuses the row rather than
+// queueing a copy, so a second attempt writes into a stream a first attempt
+// already filled -- and `AppendEvents` REPLACES on seq, which is correct for a
+// re-delivered event and ruinous for a restarted counter. Measured on a real
+// retry: the second attempt emitted the same eight kinds at seqs 1 to 8 and
+// overwrote the first attempt's eight exactly, and on a request whose only
+// event was the `requeued` marker at seq 1, the retried run's first event
+// replaced the marker. The history the event stream exists to keep was being
+// deleted by the thing that was supposed to preserve it.
+//
+// SO THE COUNTER IS SEEDED, and the caller reads the seed from the store. A
+// first attempt seeds from zero and numbers from 1 exactly as before, which is
+// why this is a second constructor rather than a changed one: every existing
+// caller means "there is nothing before this".
+func NewStreamFrom(seq int64, now func() time.Time, outs ...Sink) *Stream {
+	return &Stream{now: now, outs: outs, seq: seq}
+}
+
 // Emit numbers e, timestamps it and passes it to every sink.
 //
 // Sequence numbers start at 1, so the zero value of Event.Seq means "this

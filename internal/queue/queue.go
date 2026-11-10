@@ -1570,7 +1570,36 @@ func (q *Queue) sinkFor(id genstore.ReqID) *sink {
 		// dirOf, which names the same path on disk.
 		Key: func(name string) string { return BlobKey(id, name) },
 	}
-	s := &sink{Stream: report.NewStream(q.at, rec), buf: rec}
+	// SEEDED FROM WHAT THIS REQUEST ALREADY HAS, because a retry reuses the
+	// row: a second attempt numbering from 1 writes over the first attempt's
+	// events one for one, since AppendEvents replaces on seq. Measured on a
+	// real retry before this line existed -- eight events overwritten by eight,
+	// and on a request whose only event was the `requeued` marker, the marker
+	// itself. A first attempt reads zero here and numbers from 1 exactly as it
+	// always did.
+	//
+	// READ ONCE PER REQUEST AND NOT PER EVENT. This runs when the sink is
+	// made, which is once for the life of a claimed request, so the cost is one
+	// query per rental rather than one per frame -- and a progress stream
+	// several times a second is the thing that would make the other reading
+	// expensive.
+	//
+	// A FAILED READ SEEDS ZERO AND SAYS SO. The alternative, refusing to make
+	// a sink, would fail a request over its own history; numbering from 1 is
+	// the behaviour that shipped for the life of the queue, so this degrades to
+	// it rather than to nothing.
+	var last int64
+	if evs, err := q.Store.Events(context.Background(), id, 0); err != nil {
+		q.log().Warn("could not read a request's events, so a retry's own events may overwrite "+
+			"the attempt before them", "request", id, "err", err)
+	} else {
+		for _, e := range evs {
+			if e.Seq > last {
+				last = e.Seq
+			}
+		}
+	}
+	s := &sink{Stream: report.NewStreamFrom(last, q.at, rec), buf: rec}
 	q.sinks[id] = s
 	return s
 }
