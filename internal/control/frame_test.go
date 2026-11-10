@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"path"
@@ -169,6 +170,48 @@ func TestClosed_OnlyATidyHangUpIsErrClosed(t *testing.T) {
 		if errors.Is(closed(err), ErrClosed) {
 			t.Errorf("%v reads as a tidy hang-up, which would make a dropped channel look like a finished rental", err)
 		}
+	}
+}
+
+// TestAnswer_ANodeThatWasStoppedSaysSoAndNotWhatItsSessionSaid.
+//
+// WHAT THE NODE'S OWN LOG READS AFTER A DEADLINE, which is the only record a
+// destroyed machine leaves. Cancelling the session's context is how a stopped
+// node ends a read, and the library reports that as either the context's error
+// or `use of closed network connection` depending on where in the read it
+// landed -- so reporting the session's answer made a node that reached its
+// deadline log its worker as having CRASHED, at ERROR, every single time:
+// "this node can no longer be given work" about a node that was told to stop.
+//
+// IT IS TESTED HERE AND NOT END TO END because the end-to-end arrangement
+// cannot reach it: Serve's select has both arms ready the moment a node is
+// stopped, and the session in that test takes 300ms to return on purpose, so
+// `ctx.Done()` always wins and the decision below never runs. Reinstating the
+// defect inline measured GREEN over four runs. That is the
+// `subtle.ConstantTimeCompare` answer to "which of these has no exit code",
+// answered by extracting the decision rather than by leaving the line
+// unguarded.
+func TestAnswer_ANodeThatWasStoppedSaysSoAndNotWhatItsSessionSaid(t *testing.T) {
+	transport := errors.New("failed to get reader: use of closed network connection")
+
+	// The case this exists for: the node was stopped, and the session's error
+	// is a consequence of that.
+	if got := answer(context.Canceled, transport); !errors.Is(got, context.Canceled) {
+		t.Errorf("answer = %v, want context.Canceled: a deadline must not read as a crashed worker", got)
+	}
+	// A deadline exceeded is the same fact arriving differently.
+	if got := answer(context.DeadlineExceeded, transport); !errors.Is(got, context.DeadlineExceeded) {
+		t.Errorf("answer = %v, want DeadlineExceeded", got)
+	}
+	// And the negative control, without which "always report the stop" would
+	// satisfy every case above and would swallow every real failure a worker
+	// has: a session that failed on a node nobody stopped is the session's
+	// failure, and it is the only thing that can explain the rental.
+	if got := answer(nil, transport); !errors.Is(got, transport) {
+		t.Errorf("answer = %v, want the session's own error on a node nobody stopped", got)
+	}
+	if got := answer(nil, nil); got != nil {
+		t.Errorf("answer = %v, want nil for a worker that drained and went", got)
 	}
 }
 

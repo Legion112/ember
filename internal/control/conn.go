@@ -291,20 +291,7 @@ func Serve(ctx context.Context, ln net.Listener, log *slog.Logger, fn func(conte
 		// Close and not Shutdown: Shutdown waits for handlers, and the handler
 		// this is answering is the one that just sent on done.
 		_ = srv.Close()
-		// THE NODE BEING STOPPED WINS OVER WHATEVER THE SESSION SAID ABOUT
-		// IT, which is the inverse of orExited's rule one package over and is
-		// right for the inverse reason. Cancelling the session's context is
-		// how a stopped node ends a read, and the library reports that as
-		// either the context's error or `use of closed network connection`
-		// depending on where in a read it landed -- so the session's answer
-		// here is a consequence of the stop and not a fact about the worker.
-		// Without this, a node that reached its deadline logged its worker as
-		// having crashed, at ERROR, on every single deadline: "this node can
-		// no longer be given work" about a node that was told to stop.
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return err
+		return answer(ctx.Err(), err)
 	case err := <-serveErr:
 		return fmt.Errorf("the worker's control listener stopped: %w", err)
 	case <-ctx.Done():
@@ -331,6 +318,33 @@ func Serve(ctx context.Context, ln net.Listener, log *slog.Logger, fn func(conte
 		}
 		return ctx.Err()
 	}
+}
+
+// answer decides what Serve reports when a session has ended.
+//
+// THE NODE BEING STOPPED WINS OVER WHATEVER THE SESSION SAID ABOUT IT, which
+// is the inverse of orExited's rule one package over and is right for the
+// inverse reason. Cancelling the session's context is HOW a stopped node ends
+// a read, and the library reports that as either the context's error or
+// `use of closed network connection` depending on where in a read it landed --
+// so the session's answer is a consequence of the stop and not a fact about
+// the worker. Without this, a node that reached its deadline logged its worker
+// as having crashed, at ERROR, on every single deadline: "this node can no
+// longer be given work" about a node that was told to stop.
+//
+// A FUNCTION SO THAT IT HAS AN EXIT CODE, which is the whole reason it is not
+// two lines inline. Serve's select has both arms ready the moment a node is
+// stopped, so which one runs is up to the scheduler -- and the end-to-end test
+// above cannot reach the arm this decides, because its session deliberately
+// takes 300ms to return and `ctx.Done()` therefore always wins. Reinstating
+// the defect inline was GREEN over four runs, measured, which is how this came
+// to be extracted rather than argued: the same move findListens made in
+// internal/loopback for the same reason.
+func answer(stopped, session error) error {
+	if stopped != nil {
+		return stopped
+	}
+	return session
 }
 
 // sessionStopTimeout bounds how long a stopped node waits for its session.
