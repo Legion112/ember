@@ -156,6 +156,58 @@ dependency is fine when it saves writing something that already exists". The
 websocket also carries ping/pong, which is the heartbeat Phase 5's wedged-worker
 state needs, for no further bytes.
 
+## What CI found that no local run did
+
+Three defects, all of them races, and the pattern is the same in all three:
+**the worker holding the queue moved a decision from a place ember could not
+lose to a place where a scheduler decides.** None reproduced on a laptop
+running one test; all three reproduce under parallel instances, which is what
+a CI runner is.
+
+- **A job that did not complete did not stop the batch, and that is the money
+  one.** ember used to hold the batch and returned on the first job the server
+  refused, so job two was never submitted: *"a batch whose first job the server
+  refused is not a batch to keep paying for"*. With the queue on the node,
+  ember returning an error stops EMBER -- and the worker, one frame later, took
+  the next job off its own queue and put it on the card. **Nothing in the
+  accounting would have shown it**: the request's row ends at the failure, and
+  whatever job two produced lands in a directory the fetch for that request
+  never looks at. A card paid for work whose premise an operator is at that
+  moment re-examining.
+  Seen twice, both under contention and neither deterministic: on CI as
+  *"submitted 2 job(s) after a failure, want 1"*, and locally in 1 of 24
+  stressed instances as a results directory being created while the test's own
+  cleanup was removing it -- the worker starting job two, caught by the
+  filesystem rather than by the counter. The worker drops the rest of the batch
+  itself now, and the assertion that says so asks the generation server how
+  many jobs reached it, **after** the worker has exited: by then it has made
+  every submission it is ever going to make, which is the difference between a
+  test about this and a test about the scheduler.
+- **A session given the request's context could not be interrupted.** A
+  websocket handler has hijacked its connection, and `net/http` neither cancels
+  a hijacked request's context nor closes the connection on `Server.Close` --
+  its own documentation says Close *"does not attempt to close (and does not
+  even know about) any hijacked connections"*. So `Serve` returned on a SIGTERM
+  while the worker carried on polling a card, and what ended it was the process
+  exiting underneath it. That is the wrong mechanism to leave the thing that
+  ends a bill resting on. The session's context is derived from `Serve`'s now,
+  and `Serve` waits for the session to return, bounded.
+- **And the fix to that one changed what a deadline says in the node's log.**
+  Cancelling the session's context is *how* a stopped node ends a read, and the
+  library reports it as either the context's error or `use of closed network
+  connection` depending on where in the read it landed. Reported as-is, a node
+  that reached its deadline logged its worker as having **crashed**, at ERROR,
+  on every single deadline: "this node can no longer be given work" about a
+  node that was told to stop. So the node being stopped wins over whatever its
+  session said about it -- the inverse of `orExited`'s rule one package over,
+  and right for the inverse reason.
+  **That decision is a function so that it has an exit code.** `Serve`'s select
+  has both arms ready the moment a node is stopped, so which one runs is up to
+  the scheduler, and the end-to-end test cannot reach the arm it decides --
+  reinstating the defect inline measured **GREEN over four runs**. Extracted,
+  it goes red at a named assertion, which is the move `findListens` made in
+  `internal/loopback` for the same reason.
+
 ## Supervision, and what the deadline stops
 
 - **`cmd/embernode`'s run loop was a two-case select over one child**, and a

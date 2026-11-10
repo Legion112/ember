@@ -488,8 +488,8 @@ func TestSession_AJobThatDidNotCompleteStopsTheBatch(t *testing.T) {
 				submitted int
 			)
 			gen := fakeGen(t, func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.URL.Path == "/sdcpp/v1/img_gen":
+				switch r.URL.Path {
+				case "/sdcpp/v1/img_gen":
 					mu.Lock()
 					submitted++
 					mu.Unlock()
@@ -580,7 +580,10 @@ func TestSession_ACompletedJobDoesNotStopTheBatch(t *testing.T) {
 		t.Errorf("%d job(s) of 3 ended, want all of them: a batch nothing went wrong in runs to the end", ended)
 	}
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Errorf("a worker that drained a whole batch exited with %v", err)
+		}
 	case <-afterLong():
 		t.Fatal("the worker did not exit")
 	}

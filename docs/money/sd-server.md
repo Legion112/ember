@@ -372,7 +372,7 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
 - **A cancelled job carries an error object, and testing it before the status
   destroyed the rental.** A real `GET /jobs/{id}` for a cancelled job answers
   `{"code":"cancelled","message":"job cancelled by client"}` beside
-  `"status": "cancelled"`, with `result` null. `runJobs` checked `State.Err`
+  `"status": "cancelled"`, with `result` null. The job loop checked `State.Err`
   first, so every live cancel came back as `sd-server refused it: cancelled:
   job cancelled by client` -- a plain failure, which is what the drain loop
   destroys a rental for. Pressing the new cancel button would have taken down
@@ -401,10 +401,31 @@ Back to [the money index](../money.md) · [AGENTS.md](../../AGENTS.md)
   than it was, which is the one direction a money figure must never be wrong
   in.
 - **`cancel_queued` is read by nothing, on purpose.** sd-server's queue is one
-  job deep by construction -- `runJobs` submits one at a time so a finished
+  job deep by construction -- the worker submits one at a time so a finished
   result cannot be purged by `async_jobs`' 600-second TTL -- so there is never
   a queued job on the server for ember to cancel. Reading the flag would be
   reading a capability for a state ember cannot produce.
+- **A job that did not complete ends the batch, and the WORKER is what has to
+  say so now that it holds the queue.** This was a money defect and CI found it
+  before a card did. ember used to hold the batch and returned on the first job
+  the server refused, so job two was never submitted: a batch whose first job
+  the server refused is not a batch to keep paying for. With the queue on the
+  node, ember returning an error stops *ember* -- and the worker, one frame
+  later, took the next job off its own queue and put it on the card. Nothing in
+  the accounting would have shown it: the request's row ends at the failure,
+  and whatever job two produced lands in a directory the fetch for that request
+  never looks at.
+  **Reproduced rather than argued, twice and both under contention**: on CI as
+  "submitted 2 job(s) after a failure, want 1", and locally in 1 of 24 stressed
+  instances as a results directory being created while the test's own cleanup
+  was removing it -- the worker starting job two, caught by the filesystem
+  instead of by the counter. The assertion that holds it now asks the
+  generation server how many jobs reached it, **after** the worker has exited,
+  because every question put to ember about this is a race by construction:
+  ember is returning while the worker is still running. A job the server
+  cancelled with nobody asking goes the same way, through a different branch,
+  because ember reads that as a plain failure too. See
+  [the control channel](../threat-model/control-channel.md).
 - **The cancel signal is forgotten as each batch ends, not only when it is
   closed.** The drain loop claims the next request onto the same rental, so
   the gap between one batch returning and the next starting is real, and a
