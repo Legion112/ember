@@ -162,6 +162,32 @@ type Options struct {
 	// refuses with a sentence naming the keys rather than with a 501.
 	Workloads []config.Workload
 
+	// Cards is every GPU model the providers hold, collected once when this
+	// process started.
+	//
+	// WIRED IN RATHER THAN FETCHED HERE, which is the same rule Workloads
+	// above is wired in under: a handler that asked a provider would make
+	// every page load a catalogue call, and the set of card MODELS does not
+	// change during an `ember serve`. What does change is availability and
+	// price, which is what `what is available` asks on the press -- so this
+	// list says which cards exist and that button says which can be had.
+	//
+	// Empty for a provider means either that it keeps no catalogue (the local
+	// one, which has exactly one card and reports it through `offers`) or
+	// that it could not be asked at startup. CardErrors is what tells those
+	// apart, because a list that is empty because nobody asked must not read
+	// as a provider that has nothing.
+	Cards []app.Card
+
+	// CardErrors is why a provider contributed no cards, by provider.
+	//
+	// A PROVIDER THAT COULD NOT BE REACHED IS A FINDING, and this is the
+	// field that keeps it one all the way to the page: `ember serve` starts
+	// anyway, because the local provider needs no credential and a queue
+	// draining onto it is unaffected, so without this the only symptom would
+	// be a card field that quietly offered nothing.
+	CardErrors map[node.ProviderID]string
+
 	// Registry is what this process can reach. A provider with no credential
 	// is deliberately absent, so the UI does not offer a button that cannot
 	// work.
@@ -557,7 +583,8 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	} else if ok {
 		caps = &c
 	}
-	s.ok(w, viewConfig(s.opts.Config, s.registry(), s.opts.AllowPaid, caps, s.opts.Workloads))
+	s.ok(w, viewConfig(s.opts.Config, s.registry(), s.opts.AllowPaid, caps, s.opts.Workloads,
+		s.opts.Cards, s.opts.CardErrors))
 }
 
 func (s *Server) getOffers(w http.ResponseWriter, r *http.Request) {

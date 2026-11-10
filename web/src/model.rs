@@ -72,6 +72,35 @@ pub struct Provider {
     pub stores: bool,
 }
 
+/// One GPU model a request may name.
+///
+/// THREE FIELDS AND NOT THE CATALOGUE ROW, which is the division this type
+/// draws: a catalogue sample carries availability, two tiers, a datacentre and
+/// a global summary, and none of those is something a request can name. Which
+/// cards EXIST is this list; which of them can be had right now, and for how
+/// much, is what `what is available` asks of the provider on the press.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Card {
+    #[serde(default)]
+    pub provider: String,
+
+    /// What goes in the request's `gpu` field. Normalised by the server,
+    /// because that is what gets stored and what `Compat` compares -- a list
+    /// offering RunPod's own "NVIDIA GeForce RTX 4090" would offer a value
+    /// that does not match the row it produces.
+    #[serde(default)]
+    pub id: String,
+
+    /// The provider's own spelling, for a person to recognise.
+    #[serde(default)]
+    pub name: String,
+
+    /// Per card, where the provider said. Zero means it did not say, which is
+    /// not a card with no memory, so nothing is printed for it.
+    #[serde(default)]
+    pub vram_gib: i32,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Ceilings {
     #[serde(default)]
@@ -315,6 +344,27 @@ pub enum Composing {
 pub struct Config {
     #[serde(default, deserialize_with = "nullable")]
     pub providers: Vec<Provider>,
+
+    /// Every GPU model the providers hold, collected once when `ember serve`
+    /// started.
+    ///
+    /// THE FIELD IT REPLACES WAS A PLACEHOLDER. The card input said `any` and
+    /// nothing else: an operator who wanted a particular card pressed `what is
+    /// available`, read a table and typed back what it said, and one who typed
+    /// a card RunPod does not sell was refused after the request had been
+    /// accepted. The correct values were knowable and were not shown.
+    #[serde(default, deserialize_with = "nullable")]
+    pub cards: Vec<Card>,
+
+    /// Why a provider contributed no cards, by provider name.
+    ///
+    /// AN EMPTY LIST IS NOT AN EMPTY PROVIDER, and this is what tells the two
+    /// apart. A provider with no catalogue (the local one, which has one card
+    /// and reports it through `offers`) and a provider that could not be
+    /// asked both contribute nothing -- so without this the page would offer a
+    /// quietly truncated list as though it were the whole catalogue.
+    #[serde(default)]
+    pub card_errors: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub ceilings: Ceilings,
     #[serde(default)]
@@ -427,6 +477,31 @@ impl Config {
     /// SILENT UNTIL `/api/config` HAS ANSWERED, keyed on `answered`: a default
     /// `Config` declares nothing, so an unguarded version shouts "this server
     /// runs nothing" at every page load for the moment before the fetch lands.
+    /// The cards this provider holds, for the picker.
+    ///
+    /// FILTERED HERE AND NOT ON THE WIRE, because the provider is a signal the
+    /// page owns: an operator changing the provider must see the other
+    /// provider's cards without another fetch, and the list is small enough
+    /// that sending it whole costs less than a round trip would.
+    pub fn cards_for(&self, provider: &str) -> Vec<Card> {
+        self.cards
+            .iter()
+            .filter(|c| c.provider == provider)
+            .cloned()
+            .collect()
+    }
+
+    /// Why this provider's card list is short, where it is.
+    ///
+    /// A PROVIDER THAT COULD NOT BE ASKED IS SAID OUT LOUD. Without this the
+    /// page would render a free-text field and look exactly as it did before
+    /// the list existed -- which is the failure this whole change is about:
+    /// the values were knowable and were not shown. Here they are not knowable
+    /// and the page says which provider would not answer.
+    pub fn card_note(&self, provider: &str) -> Option<&str> {
+        self.card_errors.get(provider).map(String::as_str)
+    }
+
     pub fn unrunnable(&self) -> Option<&'static str> {
         if !self.answered() || !self.workloads.is_empty() {
             return None;
@@ -4887,5 +4962,58 @@ mod tests {
         ] {
             assert_eq!(dated(raw).created_text(), raw, "{raw:?} was reshaped");
         }
+    }
+
+    /// THE PICKER IS PER PROVIDER, because the provider is a signal the page
+    /// owns: changing it has to change the options without another fetch.
+    #[test]
+    fn the_card_list_is_filtered_by_the_chosen_provider() {
+        let c: Config = serde_json::from_str(
+            r#"{"providers":[{"name":"local"},{"name":"runpod"}],
+                "cards":[{"provider":"runpod","id":"rtx4090","name":"RTX 4090","vram_gib":24},
+                         {"provider":"runpod","id":"a100-80g","name":"A100 80GB","vram_gib":80},
+                         {"provider":"other","id":"l40s","name":"L40S"}]}"#,
+        )
+        .expect("a config with cards decodes");
+        let runpod = c.cards_for("runpod");
+        assert_eq!(runpod.len(), 2, "got {runpod:?}");
+        assert_eq!(runpod[0].id, "rtx4090");
+        assert!(
+            c.cards_for("local").is_empty(),
+            "another provider's cards leaked in"
+        );
+    }
+
+    /// A PROVIDER THAT COULD NOT BE ASKED IS SAID OUT LOUD. Without the note
+    /// the page renders the free-text field and looks exactly as it did before
+    /// the list existed -- which is the defect this change is about: the
+    /// values were knowable and were not shown. Here they are not knowable,
+    /// and the page has to say which provider would not answer rather than
+    /// offering a truncated catalogue as though it were whole.
+    #[test]
+    fn a_provider_that_could_not_be_asked_says_which_one() {
+        let c: Config = serde_json::from_str(
+            r#"{"providers":[{"name":"runpod"}],"cards":[],
+                "card_errors":{"runpod":"dial tcp: no such host"}}"#,
+        )
+        .expect("a config with a card error decodes");
+        assert!(c.cards_for("runpod").is_empty());
+        assert_eq!(c.card_note("runpod"), Some("dial tcp: no such host"));
+        // AND A PROVIDER THAT SIMPLY HAS NO CATALOGUE SAYS NOTHING. The local
+        // one has exactly one card and reports it through `offers`, which is
+        // an absence rather than a failure.
+        assert_eq!(c.card_note("local"), None);
+    }
+
+    /// `null` over an absent field is what serde's `default` does NOT cover,
+    /// and this repository has lost a whole websocket envelope to the
+    /// distinction. The server sends `[]`; this is the client tolerating the
+    /// other spelling anyway, because the rule has to hold for a field
+    /// somebody adds later.
+    #[test]
+    fn a_null_card_list_decodes_as_empty() {
+        let c: Config = serde_json::from_str(r#"{"providers":[{"name":"x"}],"cards":null}"#)
+            .expect("a null card list decodes");
+        assert!(c.cards.is_empty());
     }
 }

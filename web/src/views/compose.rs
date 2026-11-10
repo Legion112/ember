@@ -308,14 +308,89 @@ pub fn Compose(
                     </select>
                 </label>
 
-                <label>
-                    <Help text="card" title="GPU model to rent, e.g. h100 or a100-80g. A prefix matches at the capacity boundary: a100 accepts a100-40g and a100-80g but not a1000. Empty means any card the provider has."/>
-                    <input
-                        placeholder="any"
-                        prop:value=move || gpu.get()
-                        on:input=move |ev| gpu.set(event_target_value(&ev))
-                    />
-                </label>
+                // A LIST WHERE IT USED TO BE A PLACEHOLDER. This was an
+                // `<input placeholder="any">`: the cards a provider actually
+                // sells were knowable and were not shown, so finding one meant
+                // pressing `what is available`, reading a table and typing
+                // back what it said -- and typing a card RunPod does not sell
+                // was accepted here and refused after. `ember serve` asks each
+                // provider once at startup, because the set of card MODELS
+                // does not change for the life of a process.
+                //
+                // READ INSIDE THE CLOSURE, and from the provider signal, which
+                // is the rule five defects on this page have been paid for:
+                // changing the provider has to rebuild these options, and a
+                // value read outside would leave RunPod's cards on screen over
+                // a local rental.
+                //
+                // THE FREE-TEXT FIELD IS THE FALLBACK AND NOT THE DEFAULT. It
+                // is what a provider with no catalogue gets -- the local one,
+                // which has exactly one card -- and what a provider that could
+                // not be asked gets, with `card_note` saying which. Keeping it
+                // also keeps the prefix match usable: `a100` accepts
+                // `a100-40g` and `a100-80g`, which a list of exact ids cannot
+                // express.
+                {move || {
+                    let cfg = config.get();
+                    let prov = provider.get();
+                    let cards = cfg.cards_for(&prov);
+                    if cards.is_empty() {
+                        let note = cfg.card_note(&prov).map(str::to_string);
+                        view! {
+                            <label>
+                                <Help text="card" title="GPU model to rent, e.g. h100 or a100-80g. A prefix matches at the capacity boundary: a100 accepts a100-40g and a100-80g but not a1000. Empty means any card the provider has."/>
+                                <input
+                                    placeholder="any"
+                                    prop:value=move || gpu.get()
+                                    on:input=move |ev| gpu.set(event_target_value(&ev))
+                                />
+                                {move || match note.clone() {
+                                    Some(why) => view! {
+                                        <p class="hint denied">
+                                            {format!("ember could not ask this provider which cards it has, so there is no list: {why}")}
+                                        </p>
+                                    }.into_any(),
+                                    None => ().into_any(),
+                                }}
+                            </label>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <label>
+                                <Help text="card" title="GPU model to rent. The list is what this provider holds, asked once when ember serve started; what each one costs and whether it is free right now is what `what is available` answers. Any card means any the provider has."/>
+                                <select on:change=move |ev| gpu.set(event_target_value(&ev))>
+                                    <option value="" selected=move || gpu.get().is_empty()>
+                                        "any card"
+                                    </option>
+                                    {cards.into_iter().map(|c| {
+                                        // THE ID IS THE VALUE AND THE NAME IS
+                                        // THE LABEL. A request carries the id,
+                                        // which the server normalised so it
+                                        // matches the row it produces; the
+                                        // provider's own spelling is what a
+                                        // person recognises, and the memory is
+                                        // what decides whether a model fits.
+                                        let id = c.id.clone();
+                                        let chosen = id.clone();
+                                        let label = if c.vram_gib > 0 {
+                                            format!("{} ({} GiB)", c.name, c.vram_gib)
+                                        } else {
+                                            c.name.clone()
+                                        };
+                                        view! {
+                                            <option
+                                                value=id
+                                                selected=move || gpu.get() == chosen
+                                            >
+                                                {label}
+                                            </option>
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                </select>
+                            </label>
+                        }.into_any()
+                    }
+                }}
 
                 <button on:click=move |_| load_offers()>"what is available"</button>
             </div>

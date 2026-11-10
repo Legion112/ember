@@ -98,6 +98,28 @@ type configView struct {
 	// is refused after a card is rented.
 	Workloads []workloadView `json:"workloads"`
 
+	// Cards is every GPU model the providers hold, and CardErrors is why one
+	// of them holds none.
+	//
+	// THE FIELD IT REPLACES WAS A PLACEHOLDER. The card input said `any` and
+	// nothing else: an operator who wanted a specific card had to press
+	// `what is available`, read a table and type back what it said, and an
+	// operator who typed a card RunPod does not sell got a refusal after
+	// `POST /api/requests` had been accepted. The correct values were
+	// knowable and were not shown, which is the same shape as a selector
+	// offering a workload this server cannot run.
+	//
+	// NORMALISED IDS, because that is what a request's `gpu` field carries
+	// and what `Compat` compares: offering the provider's own spelling would
+	// offer values that do not match what gets stored. See app.Card.
+	//
+	// AN EMPTY LIST IS NOT AN EMPTY PROVIDER. A provider with no catalogue
+	// (the local one) and a provider that could not be asked both contribute
+	// nothing here, and only CardErrors tells them apart -- so the page says
+	// "could not ask RunPod" rather than silently offering a shorter list.
+	Cards      []cardView        `json:"cards"`
+	CardErrors map[string]string `json:"card_errors"`
+
 	// AllowPaid says whether this process was started with --allow-paid. A UI
 	// that did not know would offer a card it cannot rent and surface the
 	// refusal as a failure.
@@ -245,8 +267,25 @@ type limitView struct {
 // drain loop resolving the same id against two derivations is a browser
 // offering ids the loop cannot resolve, and the trigger would be the next
 // --config reload somebody adds rather than anything in today's code.
+// cardView is one GPU model a request may name.
+//
+// THREE FIELDS AND NOT THE CATALOGUE ROW. A sample carries availability, two
+// tiers, a datacentre and a global summary; none of those is something a
+// request can name, and a picker that showed them would be `ember offers`
+// badly. What a request names is the id; what a person recognises is the
+// name; what decides whether a model fits is the memory.
+type cardView struct {
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+
+	// VRAMGiB is omitted when the provider did not say, which is not a card
+	// with no memory -- so a page prints nothing rather than "0 GiB".
+	VRAMGiB int `json:"vram_gib,omitempty"`
+}
+
 func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps *sdserver.Capabilities,
-	workloads []config.Workload,
+	workloads []config.Workload, cards []app.Card, cardErrs map[node.ProviderID]string,
 ) configView {
 	hourly, run, _ := cfg.Budgets()
 
@@ -257,12 +296,26 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 		Providers: []providerView{},
 		// Empty lists and never null, for the same reason.
 		Workloads: []workloadView{},
-		Ceilings:  ceilings{TTL: dur(cfg.TTL), MaxHourly: rate(hourly), MaxRun: usd(run)},
-		AllowPaid: allowPaid,
-		Store:     cfg.Store.Name,
+		// EMPTY AND NEVER NULL, the rule every slice and map on this wire
+		// follows: serde's `default` covers a field that is MISSING rather
+		// than one that is present and null, and this repository has already
+		// lost a whole websocket envelope to that distinction.
+		Cards:      []cardView{},
+		CardErrors: map[string]string{},
+		Ceilings:   ceilings{TTL: dur(cfg.TTL), MaxHourly: rate(hourly), MaxRun: usd(run)},
+		AllowPaid:  allowPaid,
+		Store:      cfg.Store.Name,
 	}
 	if m, err := cfg.StoreMount(); err == nil && cfg.HasStore() {
 		v.Mount = m.String()
+	}
+	for _, c := range cards {
+		v.Cards = append(v.Cards, cardView{
+			Provider: string(c.Provider), ID: string(c.ID), Name: c.Name, VRAMGiB: c.VRAMGiB,
+		})
+	}
+	for prov, why := range cardErrs {
+		v.CardErrors[string(prov)] = why
 	}
 	for _, wl := range workloads {
 		// AN ENTRY THAT CANNOT BE SERVED IS LEFT OUT, which is the whole of

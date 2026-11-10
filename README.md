@@ -2036,10 +2036,34 @@ make web                 # builds the Rust/WASM frontend
 ember serve              # http://127.0.0.1:7777/
 ```
 
+### The card list, and what the offers panel adds to it
+
+**The card field is a list of what the provider actually holds.** It was a
+free-text box with the placeholder `any`: the cards RunPod sells were knowable
+and were not shown, so finding one meant pressing **what is available**, reading
+a table and typing back what it said — and typing a card RunPod does not sell
+was accepted by `POST /api/requests` and refused after. `ember serve` asks each
+provider once at startup, because the set of card *models* does not change for
+the life of a process, and a catalogue read runs no machine and spends nothing.
+
+The ids are **normalised** — `a100-80g`, not `NVIDIA A100-SXM4-80GB` — because
+that is what a request's `gpu` field carries and what the scheduler compares. A
+list offering the provider's own spelling would offer values that do not match
+the row posting them produces.
+
+A provider ember could not ask falls back to the free-text field **and says
+which provider and why**, because a list that is short because nobody asked must
+not read as a provider that has nothing. So does a provider that keeps no
+catalogue: the local one has exactly one card, this machine's, which `ember
+offers` reports from `nvidia-smi`. The free-text field is also what keeps the
+prefix match usable — `a100` accepts `a100-40g` and `a100-80g`, which a list of
+exact ids cannot express.
+
 ### What the offers panel shows
 
-Pressing **what is available** shows what each provider answered to *that*
-press. Narrowing the card filter and pressing again replaces the table with
+Which cards *exist* is the list above; which of them can be had right now, and
+for how much, is this. Pressing **what is available** shows what each provider
+answered to *that* press. Narrowing the card filter and pressing again replaces the table with
 the new answer — `local has nothing matching` when the filter excludes
 everything it has, and `runpod could not be asked: <why>` when the provider
 could not be reached at all.

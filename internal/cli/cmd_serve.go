@@ -377,10 +377,35 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		return app.ScanWith(ctx, reg, journal, cfg)
 	}
 
+	// ASKED ONCE, HERE, AND NEVER FROM A HANDLER. The set of card models a
+	// provider sells does not change during an `ember serve`, so a list
+	// collected at startup is as good as one fetched per page load and costs
+	// one call per provider instead of one per visit. What changes -- which
+	// cards can be had, and for how much -- is what `what is available` asks
+	// on the press, and that stays a press.
+	//
+	// BOUNDED, because this is on the path to a URL an operator is waiting
+	// for. A provider that hangs must not hold the server down: the list is a
+	// convenience and the field falls back to free text without it.
+	cardCtx, cancelCards := context.WithTimeout(ctx, 30*time.Second)
+	cards, cardErrs := app.CollectCards(cardCtx, reg, time.Now())
+	cancelCards()
+	// A PROVIDER THAT COULD NOT BE ASKED IS SAID OUT LOUD, twice: in the log
+	// here, where an operator reading startup output sees it, and on the wire
+	// below, where the page can say the field is short rather than offering a
+	// quietly truncated list as if it were the whole catalogue.
+	cardErrText := map[node.ProviderID]string{}
+	for prov, cerr := range cardErrs {
+		cardErrText[prov] = cerr.Error()
+		logger.Warn("could not ask a provider which cards it has, so the card list is short",
+			"provider", prov, "err", cerr)
+	}
+
 	srv, err := webapi.New(webapi.Options{
 		Config: cfg, Registry: reg, Store: store, Blobs: blobs, Inputs: inputs, Queue: q,
 		AllowPaid: o.AllowPaid, Port: o.Port, Dist: o.Dist, Log: logger,
 		Token: token, Socket: sock, Runs: runs, Scan: scan, Workloads: workloads,
+		Cards: cards, CardErrors: cardErrText,
 	})
 	if err != nil {
 		return err
