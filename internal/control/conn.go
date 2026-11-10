@@ -310,11 +310,26 @@ func Serve(ctx context.Context, ln net.Listener, log *slog.Logger, fn func(conte
 		// waited out for ever -- the node's log is the only record of a worker
 		// that had to be abandoned.
 		endSession()
-		select {
-		case <-finished:
-		case <-time.After(sessionStopTimeout):
-			log.Error("the session did not stop when the node was told to; abandoning it",
-				"after", sessionStopTimeout)
+		// ONLY WHEN THERE IS A SESSION TO WAIT FOR, which `taken` is the one
+		// thing that knows. A node whose ember never connected -- the
+		// ordinary shape of a rental that failed before its first push, and
+		// of every node whose deadline arrives early -- has no handler to
+		// finish, so `finished` is closed by this function's own defer and
+		// the wait below would spend its whole bound and then log a session
+		// that does not exist as one that would not stop.
+		//
+		// Caught by running the node image rather than by a test: a container
+		// with a five-second TTL and no ember stopped saying "the worker was
+		// stopped before its queue was empty" and sat for ten seconds
+		// instead. Every test here opens a channel first, which is exactly
+		// the case this arm is not about.
+		if taken.Load() {
+			select {
+			case <-finished:
+			case <-time.After(sessionStopTimeout):
+				log.Error("the session did not stop when the node was told to; abandoning it",
+					"after", sessionStopTimeout)
+			}
 		}
 		return ctx.Err()
 	}

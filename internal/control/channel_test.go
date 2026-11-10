@@ -274,6 +274,43 @@ func TestServe_WaitsForTheSessionWhenTheNodeIsStopped(t *testing.T) {
 	}
 }
 
+// TestServe_ReturnsAtOnceWhenNoChannelWasEverOpened.
+//
+// THE ORDINARY SHAPE OF A STOPPED NODE, and the one every other test here
+// cannot be: they all open a channel first. A rental that failed before its
+// first push, and every node whose deadline arrives early, has a worker that
+// never had a session -- so there is nothing to wait for, and waiting anyway
+// spent the whole bound and then logged a session that does not exist as one
+// that would not stop.
+//
+// Caught by running the node image: a container with a five-second TTL and no
+// ember stopped saying "the worker was stopped before its queue was empty" and
+// sat for ten seconds instead. The bound is the assertion, because what went
+// wrong was a wait and not an answer.
+func TestServe_ReturnsAtOnceWhenNoChannelWasEverOpened(t *testing.T) {
+	ctx, stopNode := context.WithCancel(context.Background())
+	ln := controltest.NewPipe()
+
+	served := make(chan error, 1)
+	go func() {
+		served <- control.Serve(ctx, ln, controltest.Log(t), func(context.Context, *control.Conn) error {
+			t.Error("a session ran on a node nothing connected to")
+			return nil
+		})
+	}()
+
+	stopNode()
+	select {
+	case err := <-served:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Serve answered %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve spent its session bound waiting for a session that never existed, which is " +
+			"every node whose deadline arrives before ember's first push")
+	}
+}
+
 // TestRecv_ATidyCloseIsErrClosed, over the real socket.
 //
 // ember's event loop and the worker's reader both act on this, and they act
