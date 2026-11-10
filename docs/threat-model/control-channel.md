@@ -208,6 +208,29 @@ a CI runner is.
   it goes red at a named assertion, which is the move `findListens` made in
   `internal/loopback` for the same reason.
 
+- **ember telling the worker it gave up is a `cancel`, and the push loop is
+  inside that defer's reach.** A job that failed, the worker polled -- it drops
+  the rest of the batch itself. But ember abandons a batch for reasons only
+  ember has: a landed file whose fetch failed, a frame it refuses as untrusted,
+  a frame that does not belong in a batch, and `Job.Body` refusing an `extra:`
+  key the body owns -- which is operator input, refused *per job*, so job three
+  of a batch can be refused with jobs one and two already on the worker's queue
+  and the channel perfectly healthy. Returning from the middle of the push loop
+  left a card working through those two for a request that had ended. The frame
+  is `cancel` rather than a new kind, because "stop the batch" is exactly what
+  it means and the operator's button is one caller of it; it is guarded on
+  something having been pushed, because a cancel for an empty queue is a
+  cancellation event ember could later read as the operator's.
+- **A write that expires mid-frame leaves the websocket unusable, so there is
+  nothing to say after a failed push and nothing to say it to.** Measured, by
+  writing that test the other way first and watching the abandon frame never
+  arrive even after the far end resumed reading. It needs no closing: a dead
+  channel is dead at both ends, the worker's own reads fail, and that is what
+  ends it. Worth writing down because the obvious reading of "tell the worker
+  whenever ember gives up" includes a case where telling is impossible, and a
+  test written for it fails on its own impossibility rather than on the
+  program.
+
 ## Supervision, and what the deadline stops
 
 - **`cmd/embernode`'s run loop was a two-case select over one child**, and a
