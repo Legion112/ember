@@ -39,22 +39,38 @@ use crate::model::Nodes;
 /// memoised, and the fix was not to cache, so the only remaining lever is how
 /// often it is asked.
 ///
-/// NOTHING IS RENDERED UNTIL SOMEBODY ASKS, and that is the sharpest thing
-/// here. `Nodes::default()` has three empty slices, so its `verdict` is
-/// "nothing is running and nothing was left behind" -- a clean bill of health
-/// over a scan that never happened, which is the one answer this panel must
-/// not give wrongly. The signal is an `Option`: `None` is "not asked" and is
-/// spelled differently from "asked and found nothing", the same distinction
-/// `AssetCheck.Asked` and `node.Exposure`'s second result exist for.
+/// NOTHING IS RENDERED UNTIL THE ANSWER ARRIVES. `Nodes::default()` has three
+/// empty slices, so its `verdict` is "nothing is running and nothing was left
+/// behind" -- a clean bill of health over a scan that never happened, which is
+/// the one answer this panel must not give wrongly. The signal is an `Option`
+/// so that "no answer yet" is spelled differently from "asked and found
+/// nothing", the same distinction `AssetCheck.Asked` and `node.Exposure`'s
+/// second result exist for.
+///
+/// IT ASKS WHEN THE PAGE OPENS, which it did not, and the reason it did not
+/// was an argument about a different thing. "A button and never a poll" is
+/// sound and is kept: a two-second timer would be an API call per second per
+/// open tab, for ever, whether or not anybody is looking. Answering ONCE when
+/// an operator navigates here is not that. It is one sweep per visit -- which
+/// is precisely what the operator did by hand, immediately, every single time,
+/// because a page whose whole subject is what is billing has nothing else on
+/// it to read. A gate everybody walks through on arrival is not a gate, it is
+/// a step, and the thing it was costing was the panel's own purpose: a rented
+/// card leaking at $2/hour was invisible here until somebody thought to ask.
+///
+/// The `Option` is still load-bearing and is why this is safe: during the
+/// moment before the first answer lands, `None` renders nothing rather than
+/// `Nodes::default()`'s reassuring sentence. What changed is that an operator
+/// can no longer SIT in that state and read it as an answer.
 #[component]
 pub fn Billing() -> impl IntoView {
-    // None until the first press. See the paragraph above: an empty answer and
-    // an answer nobody asked for must not render the same.
+    // None until the first answer. See the paragraph above: an empty answer
+    // and no answer at all must not render the same.
     let sweep = RwSignal::new(Option::<Nodes>::None);
     let error = RwSignal::new(String::new());
     let asking = RwSignal::new(false);
 
-    let ask = move |_| {
+    let fetch = move || {
         // The previous answer is left on screen while the next is fetched,
         // and the error is cleared: a stale listing is better than a blank
         // panel, and a stale error beside a fresh listing would be a refusal
@@ -74,6 +90,15 @@ pub fn Billing() -> impl IntoView {
         });
     };
 
+    // ON MOUNT, AND IN THE COMPONENT BODY RATHER THAN IN AN EFFECT. This page
+    // is a route, so it is built once per navigation to it and this runs once
+    // per visit -- which is the budget being spent, stated plainly. An effect
+    // would re-run on every signal it read and is the shape a timer grows out
+    // of by accident.
+    fetch();
+
+    let ask = move |_| fetch();
+
     view! {
         <section class="panel">
             <h2>"what is billing"</h2>
@@ -81,8 +106,8 @@ pub fn Billing() -> impl IntoView {
                 "Asks every configured provider what is wearing ember's label, and
                  prices the stores. This is what "
                 <code>"ember ls"</code>
-                " prints; it is not asked on a timer, because it reaches the
-                 providers."
+                " prints; asked once when this page opens and again whenever you
+                 press, and never on a timer, because it reaches the providers."
             </p>
 
             <button on:click=ask disabled=move || asking.get()>

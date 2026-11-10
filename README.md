@@ -1908,7 +1908,7 @@ There are **four pages**, linked from the header in the order the flow runs:
 | generate | `/` | what can be rented and what to generate |
 | the queue | `/queue` | what is waiting, running and finished |
 | one request | `/requests/{id}` | its progress, what it ran with, and its images |
-| [what is billing](#what-the-billing-panel-shows) | `/nodes` | `ember ls` in a browser, asked when pressed rather than on a timer |
+| [what is billing](#what-the-billing-panel-shows) | `/nodes` | `ember ls` in a browser, asked when you open it and again on a press, never on a timer |
 
 They used to be four panels in one page sharing a two-column grid, which put
 the queue's six-column table in the narrow half — 407px of a 1088px body,
@@ -2080,19 +2080,29 @@ classifier, the same words — `expired`, `orphan`, `untracked`,
 `destroy-failed`, `unreachable`, `leftover`, `store` — so an operator
 comparing the page and the command reads one vocabulary rather than two.
 
-It answers on a **press and never on a timer**, which is the one thing worth
-knowing before using it. The queue table beside it polls SQLite four times a
-minute; this reaches the providers — three sweeps per press, one for nodes, one
-for stores and one for what a destroyed node left behind — so a poll here would
-be an API call a second for every open tab. It also caches nothing: a cached
-listing of what is billing is a stale bill, and a cached "RunPod said nothing"
-is exactly `I could not check RunPod` rendering as a clean bill of health.
+**It asks when you open it, and then never on a timer.** The queue table beside
+it polls SQLite four times a minute; this reaches the providers — three sweeps,
+one for nodes, one for stores and one for what a destroyed node left behind — so
+a two-second poll would be an API call a second for every open tab, for ever,
+whether or not anybody is looking. One sweep per visit is not that. It also
+caches nothing: a cached listing of what is billing is a stale bill, and a
+cached "RunPod said nothing" is exactly `I could not check RunPod` rendering as
+a clean bill of health.
 
-Nothing is shown until that press. An empty panel means nobody has asked; the
-sentence `nothing is running and nothing was left behind` means ember asked and
-got that answer. A provider it could not reach is named, and the verdict then
-says *so this is not the whole picture* — the same distinction `ember ls` makes
-by exiting non-zero rather than printing a clean bill.
+The button is a **refresh**, and it used to be the only way to see anything at
+all. That was wrong, and the argument that produced it was about a different
+thing: "never on a timer" is sound and is kept, but it was never an argument
+for a page about what is billing being blank when you open it. The one press
+an operator made immediately, every single time, bought nothing and hid a
+leaking card behind a click.
+
+Until the first answer lands the panel shows nothing, which is deliberate and
+is not the same as showing that nothing is running: `nothing is running and
+nothing was left behind` is an answer ember got, and a clean bill of health
+over a sweep that has not happened is the one thing this panel must never say.
+A provider it could not reach is named, and the verdict then says *so this is
+not the whole picture* — the same distinction `ember ls` makes by exiting
+non-zero rather than printing a clean bill.
 
 Two of the rows are the point of the panel. A **store** bills by the
 gibibyte-month whether or not anything is attached to it: there is no deadline,
@@ -2142,7 +2152,7 @@ does not close it.
 
 ### What the fleet rows show
 
-Above the sweep's own tables, the same press lists **what this `ember serve` is
+Above the sweep's own tables, the same answer lists **what this `ember serve` is
 renting**: one row per rental, with the card and image it is, the request
 generating on it, what it has cost so far, how long until its deadline, and
 when ember last heard from its worker.

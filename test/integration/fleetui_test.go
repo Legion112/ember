@@ -209,12 +209,24 @@ func TestServe_UIShowsAWorkerOnTheJobAndThenOneThatStopsAnswering(t *testing.T) 
 	recordPageErrors(t, ctx)
 	navTo(t, ctx, "what is billing", billingPanel)
 
-	// NOTHING BEFORE THE PRESS, which is this panel's own rule and the
-	// negative control for everything below: an assertion that merely found a
-	// row would pass against a table that is always there.
-	if before := fleetRows(t, ctx); len(before) != 0 {
-		t.Fatalf("the fleet table was on screen before anybody pressed anything: %q", before)
-	}
+	// THE EMPTY-BEFORE-THE-PRESS CHECK IS GONE, AND ITS JOB IS NOT.
+	//
+	// It asserted that the fleet table was absent until somebody pressed, as
+	// the negative control for everything below -- an assertion that merely
+	// found a row would otherwise pass against a table that is always there.
+	// The panel now answers when it is opened, so that check would be timing
+	// and not behaviour: the two requests above are queued BEFORE the browser
+	// navigates, a rental is enlisted in the fleet from the moment it is
+	// planned, and whether a row exists at this instant depends on how fast
+	// the create call is. A flaky control is worse than none, because a
+	// control is the thing you trust when the cases around it disagree.
+	//
+	// What carries its job instead is the sequence below, which is a stronger
+	// control than an empty start ever was: the same row has to name the
+	// opener, then the RIDER on the same node, then go stale with that node id
+	// intact. A table that was always there, or always the same, fails all
+	// three -- and unlike an absence, a transition cannot be satisfied by
+	// nothing having happened yet.
 
 	// THE OPENER ON THE CARD.
 	first := pressUntil(t, ctx, console, l, 10*time.Minute,

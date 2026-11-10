@@ -3515,28 +3515,36 @@ func TestServe_UIReportsWhatIsBilling(t *testing.T) {
 	// measured it.
 	navTo(t, ctx, "what is billing", billingPanel)
 
-	// NOTHING UNTIL SOMEBODY ASKS. See the header: the empty answer and the
-	// answer nobody asked for must not render the same, and the empty one is
-	// the reassuring sentence.
+	// IT ANSWERS ON ARRIVAL, AND NOBODY PRESSES ANYTHING HERE. This assertion
+	// was the opposite of itself until this change: it required the panel to
+	// be silent until pressed, which is the rule the page was built to and the
+	// rule an operator kept walking into -- a leaking card was invisible on
+	// the one page whose subject is leaking cards until somebody thought to
+	// ask. "A button and never a poll" survives and is still the reason there
+	// is no timer; answering once per visit is not a timer.
+	//
+	// THE PRESS BELOW IS THEREFORE A REFRESH AND NOT A FIRST ASK, which is why
+	// it stays in this lab rather than coming out: the button has a job still,
+	// and a page that answered on arrival and then ignored the button would
+	// pass an assertion about findings while being useless to look at twice.
+	//
+	// What is NOT asserted here, and cannot honestly be: that the brief moment
+	// before the first answer renders nothing rather than `Nodes::default()`'s
+	// "nothing is running and nothing was left behind". That window is one
+	// fetch wide and racing it from here would be a flake rather than a check.
+	// It is the `Option` in `Billing` that holds it, and the comment there
+	// carries the argument.
 	before := billingSays(t, ctx)
 	if before["panel"] != "present" {
 		t.Fatalf("the billing panel is not on the page at all: %+v", before)
-	}
-	if before["verdict"] != "" || before["rows"] != "" {
-		t.Errorf("the panel answered before anything was asked: verdict=%q rows=%q",
-			before["verdict"], before["rows"])
 	}
 
 	// A CLEAN DAEMON FIRST, so the finding below is a change and not the only
 	// thing this lab has ever seen. Reversed, an assertion that merely found
 	// the word "leftover" would pass against a panel that printed it always.
-	if err := chromedp.Do(ctx,
-		chromedp.Click(`//button[contains(text(), "check what is running")]`)); err != nil {
-		t.Fatalf("pressing the button: %v\n%s", err, console.text())
-	}
 	clean := waitForBilling(t, ctx, func(s map[string]string) bool {
 		return s["verdict"] != ""
-	}, 60*time.Second, "answered at all")
+	}, 60*time.Second, "answered on arrival with nobody pressing anything")
 	if !strings.Contains(clean["verdict"], "nothing is running") {
 		t.Errorf("a clean daemon did not read as clean: %q", clean["verdict"])
 	}
