@@ -46,6 +46,13 @@ type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 // the one reading events, because the operator presses the button while a card
 // is sampling, so the mutex is load-bearing on exactly that path.
 //
+// AND IT IS LOAD-BEARING AT THE WORKER'S END TOO SINCE THE HEARTBEAT, which is
+// a second writer there for the first time: the beat ticks on a goroutine of
+// its own while the runner may be sending a preview. That is not merely
+// tolerated -- it is what makes a stale beat mean something, because a worker
+// whose writes are stuck cannot beat around them. Each end still has at most
+// one other writer, so the worst case below is unchanged.
+//
 // Reads are left alone because there is one reader at each end by
 // construction: the worker's reader goroutine, and ember's own event loop. A
 // second reader would be two halves of one batch's events arriving in two
@@ -77,13 +84,22 @@ func (c *Conn) Send(ctx context.Context, f Frame) error {
 	// case is twice the figure and not an unbounded pile-up.
 	c.send.Lock()
 	defer c.send.Unlock()
-	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	wctx, cancel := context.WithTimeout(ctx, SendTimeout)
 	defer cancel()
 	if err := c.ws.Write(wctx, websocket.MessageText, body); err != nil {
 		return fmt.Errorf("send a %s frame: %w", f.Kind, closed(err))
 	}
 	return nil
 }
+
+// SendTimeout bounds one write on this channel.
+//
+// NAMED RATHER THAN INLINE BECAUSE SOMETHING ELSE NOW DEPENDS ON IT.
+// HeartbeatStale has to exceed the longest a beat can legitimately be late,
+// and a beat queued behind a stalled write is late by exactly this -- so the
+// two numbers are a relationship and not two independent choices.
+// TestHeartbeat_StaleOutlastsAStalledWrite is the exit code behind that.
+const SendTimeout = 10 * time.Second
 
 // Recv reads one frame.
 //

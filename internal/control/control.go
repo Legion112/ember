@@ -74,7 +74,16 @@ const Path = "/control"
 // refuses one it does not know, with a remediation naming the rebuild. A
 // handshake is the only point at which this is cheap: afterwards the node is
 // up, the card is allocated and the bill is running.
-const Version = 1
+// VERSION 2 IS THE HEARTBEAT, and the bump is what the paragraph above is for.
+// KindHeartbeat is a frame ember's own loops refuse as a protocol
+// disagreement when they do not know it -- correctly, because a frame nobody
+// handles is a job ember would wait for forever -- so a node image carrying
+// beats, driven by an ember that predates them, would fail its first batch
+// after the card was allocated and the weights were resident. Bumping here
+// moves that refusal to the handshake, which is the only moment it is cheap:
+// the version is stated before any work is pushed. An older image against this
+// ember is refused by the same line and with the same remediation.
+const Version = 2
 
 // ResultsDir is where a worker writes what it produced, on the node's own
 // disk.
@@ -139,3 +148,59 @@ const EventLimit int64 = 4 << 20
 // output: ember has a card allocated and is waiting on a connection that is
 // never going to be made.
 const HandshakeTimeout = 30 * time.Second
+
+// HeartbeatEvery is how often the worker says it is still there.
+//
+// WHY A HEARTBEAT AND NOT A HEALTH CHECK ON THE WORKER. A /healthz on the node
+// means the worker listens somewhere a prober can reach, which means a public
+// port, which means a second minter beside exposure.SSHPort -- the one seal
+// the whole exposure posture rests on ("a create request can only ask for
+// 22/tcp"). It would also double a node's reachable surface to tell ember
+// something it is in a position to know already: ember holds this channel for
+// the whole rental.
+//
+// AND IT IS STRICTLY MORE INFORMATIVE THAN A REACHABILITY PROBE, which is the
+// reason it is worth the frames rather than merely cheaper. A port check has
+// two answers; this has three, and the middle one is the expensive one:
+//
+//	channel open, beat current  -- the worker is there
+//	channel open, beat STALE    -- the worker is not answering, and ember is
+//	                               paying for the card it is holding
+//	channel closed              -- gone; reconcile and the deadline take over
+//
+// WHAT IT CANNOT SEE, said plainly rather than left to be assumed. This is the
+// CHANNEL's liveness and not the generation server's. The beat is sent by a
+// goroutine of its own, so a worker whose sd-server has stopped answering polls
+// keeps beating -- what that looks like is a rental whose job never ends, which
+// is the request's own row rather than this. What it does see is a node that
+// froze or was partitioned while the TCP connection stayed open, a worker
+// process that died without the SSH channel closing, and a worker whose sends
+// are blocked -- that last one because the beat takes Conn's send mutex, which
+// is the same lock the runner needs, so a worker that cannot write cannot beat
+// either.
+//
+// FIVE SECONDS, against the two numbers on either side of it. The worker's own
+// poll of the generation server settles at jobPollMax (2s), so a beat is never
+// the busiest thing on this channel; and `ember serve`'s fleet view is a button
+// press rather than a poll (see docs/threat-model/the-page.md), so an operator
+// who presses it wants an answer about the last few seconds and not about the
+// last minute. The traffic is one ~20-byte text frame per interval per rental:
+// 720 of them in an hour, against a single preview PNG that is up to 4 MiB.
+const HeartbeatEvery = 5 * time.Second
+
+// HeartbeatStale is how old the last beat may get before a worker is reported
+// as not answering.
+//
+// FOUR INTERVALS, AND THE FLOOR IS Conn.Send's OWN BOUND rather than taste.
+// Sends on this channel are serialised and each one is bounded at ten seconds,
+// so a beat queued behind a stalled write -- a 4 MiB preview frame up a slow
+// uplink, which is the largest thing a worker sends -- can legitimately be ten
+// seconds late through no fault of the node. A threshold at two intervals would
+// sit inside that window and report a working rental as wedged, which is the
+// direction this must not be wrong in: an operator who learns that "not
+// answering" sometimes means "busy" stops acting on it, exactly as `ember ls`
+// would stop being acted on if every store exited 2.
+//
+// So: ten seconds of worst-case lateness, plus one interval for the beat that
+// was due in it, rounded up to a whole number of intervals. Twenty seconds.
+const HeartbeatStale = 4 * HeartbeatEvery

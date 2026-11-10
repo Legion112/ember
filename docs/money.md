@@ -18,7 +18,7 @@ measurement and the refused alternative behind each of them.
 | [sd-server.md](money/sd-server.md) | wire types captured from responses rather than guessed, previews, progress, cancelling a job without destroying the rental |
 | [speech-and-kinds.md](money/speech-and-kinds.md) | piper, the one-method seam a second kind needed, the artifact type, the voice catalogue that keeps the request seal intact |
 | [ledger.md](money/ledger.md) | what every run records, what `ember history` and `ember spend` read, the nodes route, measurements that live nowhere else |
-| [scheduler.md](money/scheduler.md) | the claim lease and what reclaims it, capabilities keyed by rental shape, fit-or-create's one relation, and why the worker advertises nothing |
+| [scheduler.md](money/scheduler.md) | the claim lease and what reclaims it, capabilities keyed by rental shape, fit-or-create's one relation, why the worker advertises nothing, and the fleet view -- a rider's node without a rider's bill |
 
 ## If you are looking for a figure
 

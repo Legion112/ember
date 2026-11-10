@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Legion112/ember/internal/provision"
@@ -69,6 +70,53 @@ type Served interface {
 
 	// Caps is what this server build reported it can do.
 	Caps() sdserver.Capabilities
+
+	// Beat is when ember last heard this rental's worker, in ember's own
+	// clock. Zero means the channel has been open and nothing has arrived on
+	// it yet.
+	//
+	// EMBER'S CLOCK AND NOT THE NODE'S, which is the whole reason the frame
+	// carries no timestamp. What is being measured is "how long since I heard
+	// from that machine", and a rented machine's clock is untrusted input:
+	// one that is an hour fast would report every beat as fresh for an hour
+	// after it stopped sending them, which is the one direction this must not
+	// be wrong in.
+	//
+	// READ FROM A POINTER BEHIND AN INTERFACE, and that is deliberate rather
+	// than a leak: the value changes under the reader, because the frame loop
+	// that updates it is this rental's and the reader is the fleet view's.
+	// Every other method here is a question with a fixed answer; this one is
+	// a question about now.
+	Beat() time.Time
+}
+
+// pulse is when ember last heard a worker, shared between the frame loops that
+// observe beats and the fleet view that reads them.
+//
+// AN ATOMIC AND NOT A MUTEX because there is exactly one writer -- ember has
+// one reader per channel by construction, see control.Conn -- and the readers
+// are a web handler on a different goroutine. A time.Time is three words and
+// cannot be stored atomically, so this keeps nanoseconds and rebuilds the
+// instant; a zero stays a zero, which is what "nothing has arrived yet" has to
+// be spelled as.
+type pulse struct{ ns atomic.Int64 }
+
+// felt is nil-safe, because `served` is a struct literal and the frame loops
+// that call this are reachable from a test that built one without a pulse. A
+// panic there would be a rental lost to a field nobody needed.
+func (p *pulse) felt(t time.Time) {
+	if p == nil {
+		return
+	}
+	p.ns.Store(t.UnixNano())
+}
+
+func (p *pulse) last() time.Time {
+	ns := p.ns.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // served is the real Served: the control channel to this rental's worker.
@@ -96,9 +144,28 @@ type served struct {
 	// inputs is where a job's image inputs are staged, empty when this
 	// rental's jobs cannot name one. See resolveInputs.
 	inputs string
+
+	// beat is when ember last heard this rental's worker. A pointer because
+	// `served` is passed by value and the thing being shared is one counter
+	// per channel, not one per copy.
+	beat *pulse
 }
 
 func (s served) Caps() sdserver.Capabilities { return s.caps }
+
+// Beat is when ember last heard this rental's worker.
+//
+// NEVER nil ON ANY PATH THAT CAN REACH A FLEET VIEW, because withServer is the
+// only constructor and it allocates one. The guard is here anyway: `served` is
+// a struct literal and a future caller that built one without it would
+// otherwise panic inside a `GET /api/nodes` handler, which is a 500 over a
+// listing an operator opened to find out what is billing.
+func (s served) Beat() time.Time {
+	if s.beat == nil {
+		return time.Time{}
+	}
+	return s.beat.last()
+}
 
 func (s served) Generate(ctx context.Context, sink report.Sink, jobs sdserver.Run, dir string, stop <-chan struct{}) error {
 	// BEFORE Validate AND BEFORE THE FIRST SUBMISSION, which is as early as
@@ -165,6 +232,41 @@ func (s served) resolveInputs(jobs []sdserver.Job) ([]sdserver.Job, error) {
 		out = append(out, j)
 	}
 	return out, nil
+}
+
+// dialWorker opens the control channel and starts this rental's pulse.
+//
+// THE HANDSHAKE IS THE FIRST BEAT, and this function exists so that it cannot
+// be forgotten. control.Open returns only after it has READ the worker's hello
+// and checked its version, so the instant a caller holds a *Conn is an instant
+// at which the worker spoke -- and seeding the pulse with it is what makes
+// "ember has never heard this worker" unrepresentable on a channel that is
+// open.
+//
+// FOUND BY THE BROWSER LAB AND BY NOTHING ELSE, which is the whole argument
+// for that lab. Without the seed, every rental read as NOT ANSWERING for the
+// first five seconds of its channel -- the gap before the worker's first tick
+// -- and `TestServe_UIShowsAWorkerOnTheJobAndThenOneThatStopsAnswering`
+// caught a row that said "not answering, and still billing" about a node that
+// was eight seconds old with its weights loading. Every unit test around it
+// was green, because each of them was about a beat that had already arrived.
+// The comment that let it through claimed "a worker that is going to beat has
+// had the chance by then"; it has not, and the first thing a reader of a fleet
+// view would have learned is that the red word means nothing.
+//
+// A PULSE ALLOCATED HERE AND NOT BESIDE THE `served` BELOW for a second
+// reason: the model load is the longest window in a rental -- 80-96 s for an
+// ordinary image, four minutes for FLUX.2 -- and it is the window an operator
+// is most likely to be looking at the fleet view during. A pulse that started
+// at the first batch would be blind for the whole of it.
+func dialWorker(ctx context.Context, dial control.DialFunc) (*control.Conn, *pulse, error) {
+	ch, err := control.Open(ctx, dial)
+	if err != nil {
+		return nil, nil, err
+	}
+	beat := &pulse{}
+	beat.felt(time.Now())
+	return ch, beat, nil
 }
 
 // WithServed rents this plan's node, makes the weights resident, and calls fn.
@@ -303,7 +405,7 @@ func withServer(
 	if err := tunnel.WaitReady(wctx, client, remote, time.Second); err != nil {
 		return fmt.Errorf("this node's worker is not listening on %v: %w; the node's own log says why", remote, err)
 	}
-	ch, err := control.Open(ctx, client.DialContext)
+	ch, beat, err := dialWorker(ctx, client.DialContext)
 	if err != nil {
 		return err
 	}
@@ -321,7 +423,7 @@ func withServer(
 	var rawCaps json.RawMessage
 	if err := orExited(ctx, proc, "the weights finished loading", func() error {
 		var perr error
-		load, rawCaps, perr = prepareWorker(ctx, out, ch, spec.ServeTimeout)
+		load, rawCaps, perr = prepareWorker(ctx, out, ch, beat, spec.ServeTimeout)
 		return perr
 	}); err != nil {
 		return err
@@ -373,7 +475,7 @@ func withServer(
 		Model: caps.Model,
 	})
 
-	err = fn(ctx, served{ch: ch, caps: caps, rate: rate, runner: r, inputs: inputsDir})
+	err = fn(ctx, served{ch: ch, caps: caps, rate: rate, runner: r, inputs: inputsDir, beat: beat})
 
 	// THE WORKER IS TOLD THERE IS NO MORE WORK, which is the frame that lets
 	// it exit rather than being cut off.
@@ -453,7 +555,7 @@ const workerDrainTimeout = 3 * time.Second
 // four-minute model load visible. That line used to be printed by ember's own
 // poll loop, on the operator's machine; the loop is on the node now, so the
 // line travels back or an operator watches nothing happen.
-func prepareWorker(ctx context.Context, out io.Writer, ch *control.Conn, timeout time.Duration) (time.Duration, json.RawMessage, error) {
+func prepareWorker(ctx context.Context, out io.Writer, ch *control.Conn, beat *pulse, timeout time.Duration) (time.Duration, json.RawMessage, error) {
 	if err := ch.Send(ctx, control.Frame{Kind: control.KindPrepare, Timeout: timeout}); err != nil {
 		return 0, nil, err
 	}
@@ -463,6 +565,13 @@ func prepareWorker(ctx context.Context, out io.Writer, ch *control.Conn, timeout
 			return 0, nil, err
 		}
 		switch f.Kind {
+		case control.KindHeartbeat:
+			// Observed here as well as in the batch loop, because this is the
+			// wait the beat is most useful during: the weights take minutes,
+			// nothing else arrives on the channel while they load, and a
+			// fleet view consulted in that window would otherwise have
+			// nothing to say about the node it is about to bill for.
+			beat.felt(time.Now())
 		case control.KindLog:
 			outf(out, "%s", f.Text)
 		case control.KindPrepared:
@@ -755,6 +864,15 @@ func pushBatch(ctx context.Context, sink report.Sink, s served, run sdserver.Run
 			return fmt.Errorf("read the worker's events: %w", err)
 		}
 		switch f.Kind {
+		case control.KindHeartbeat:
+			// NOT COUNTED TOWARDS `ended` AND NOT REPORTED ANYWHERE. A beat
+			// is not something that happened to a request: it is the instant
+			// ember last heard the machine, which is read by the fleet view
+			// and by nothing in this request's history. Emitting it as an
+			// event would write a row per five seconds per rental into the
+			// stream that is the truth about what the run did.
+			s.beat.felt(time.Now())
+
 		case control.KindStarted:
 			i, err := jobIndex(f, total)
 			if err != nil {

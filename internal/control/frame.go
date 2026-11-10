@@ -102,6 +102,34 @@ const (
 	// KindDone is the worker's last frame: the queue is empty, nothing more is
 	// coming, and this process is exiting.
 	KindDone Kind = "done"
+
+	// KindHeartbeat is the worker saying it is still there.
+	//
+	// IT CARRIES NOTHING, AND THAT IS THE DECISION RATHER THAN AN OMISSION.
+	// The obvious payload is the job the worker has on the card, which is
+	// free -- Index and Total are already on this struct -- and it would be a
+	// second answer to a question ember already answers from its own
+	// bookkeeping: ember pushed the batch, so it knows which job is on which
+	// node, and a page that preferred the node's number would be believing a
+	// rented machine about ember's own accounting. Worse, a beat with a
+	// payload invites the payload to be read as current when what is being
+	// reported is its AGE: the whole content of this frame is the instant
+	// ember received it, and a field beside that instant is a field somebody
+	// renders without asking how old it is.
+	//
+	// IT IS SENT FOR THE WHOLE SESSION AND NOT ONLY WHILE A JOB RUNS, because
+	// the gap this exists to make visible is exactly the one where no job is
+	// progressing. A beat that stopped when the card went idle would be
+	// indistinguishable from the state it is for.
+	//
+	// EVERY READER ON EMBER'S SIDE MUST KNOW IT, which is why this is a
+	// handshake-version matter and not an additive one: both of ember's frame
+	// loops treat an unknown kind as a protocol disagreement and fail the
+	// rental, so a worker from a newer image beating at an older ember would
+	// end its batch with "the worker sent a %q frame in the middle of a
+	// batch". That is what Version is for, and it is why this kind arrived
+	// with a bump of it.
+	KindHeartbeat Kind = "heartbeat"
 )
 
 // Frame is one message on the channel.

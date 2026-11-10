@@ -144,6 +144,18 @@ type Rental interface {
 	// genstore.Compat.Card for what the window costs and why ember holds this
 	// fact rather than asking the node for it.
 	Card() node.GPUModel
+
+	// Image is the workload image this plan will run, for the fleet view and
+	// for nothing else.
+	//
+	// A ROW IN A TABLE AND NOT AN INPUT TO ANY DECISION, which is why it is
+	// safe for it to be here: nothing in the scheduler reads it, it is not
+	// part of genstore.Compat, and two rentals differing only in image are
+	// still compatible. What it answers is the question an operator asks of a
+	// fleet they did not watch start -- "which of these is the FLUX node" --
+	// and the config that named it may have been edited since, so reading it
+	// off the plan is reading it from the only authority there is.
+	Image() string
 }
 
 // Queue is the drain loop.
@@ -323,6 +335,16 @@ type Queue struct {
 	// batch's progress go to the same request, so they have to come from the
 	// same counter.
 	sinks map[genstore.ReqID]*sink
+
+	// fleet is one entry per rental this process is holding, keyed by the
+	// request that opened it. See fleet.go.
+	//
+	// KEYED BY THE OPENER AND NOT BY THE NODE, although the node is what an
+	// operator reads. The opener exists from the moment the rental is planned
+	// and the node does not: a create call is seconds to minutes of money
+	// already committed, and a map keyed on the handle would have no row for
+	// the whole of it.
+	fleet map[genstore.ReqID]*berth
 }
 
 func (q *Queue) log() *slog.Logger {
@@ -998,6 +1020,19 @@ func (q *Queue) once(ctx context.Context, lease string, first genstore.Request, 
 	compat.Card, compat.CardKnown = rental.Card(), true
 	q.advertise(first.ID, compat.Card)
 
+	// AND THE FLEET ROW, BESIDE THE ADVERTISEMENT AND FOR ITS REASON: this is
+	// the earliest moment the card is known, and the money is committed from
+	// here whether or not the create succeeds. A table that only listed
+	// rentals whose node had come up would be silent for the whole of a
+	// create -- which on RunPod is minutes, and is exactly when an operator
+	// who pressed the button wants to know what ember is doing.
+	//
+	// Given back by the defer below rather than at each return, because there
+	// is no path out of this function that may leave ember claiming to hold a
+	// node it has destroyed.
+	q.enlist(first.ID, node.ProviderID(first.Provider), compat.Card, rental.Image())
+	defer q.delist(first.ID)
+
 	// Released after the rental returns and not inside it: the rental's cost
 	// and a destroy that failed arrive from the deferred teardown, which runs
 	// after the closure below has finished.
@@ -1014,7 +1049,14 @@ func (q *Queue) once(ctx context.Context, lease string, first genstore.Request, 
 	var rentErr error
 	switch genstore.KindOf(first.Kind) {
 	case genstore.KindTTS:
-		rentErr = rental.WithSpoken(ctx, q.lifecycle(first.ID), func(ctx context.Context, sp app.Spoken) error {
+		rentErr = rental.WithSpoken(ctx, q.watchNode(first.ID), func(ctx context.Context, sp app.Spoken) error {
+			// NIL, AND THE NIL IS THE STATEMENT. A speech rental runs piper
+			// over `ssh exec` and opens no control channel, so there is no
+			// worker on the node to beat -- which is WorkerQuiet rather than
+			// WorkerStale. Written here in the same place the sd arm
+			// registers its pulse, so a kind added later cannot acquire
+			// "there is nobody to answer" by forgetting to say anything.
+			q.onChannel(first.ID, nil)
 			// NO PutCaps, and that is the absence rather than an omission:
 			// piper publishes no capabilities, so there is nothing to cache
 			// and nothing a request could be validated against that
@@ -1024,7 +1066,13 @@ func (q *Queue) once(ctx context.Context, lease string, first genstore.Request, 
 			return q.drain(ctx, ttsRunner{sp: sp, cat: q.Voices}, lease, compat, first, &served, held)
 		})
 	default:
-		rentErr = rental.WithServed(ctx, q.lifecycle(first.ID), func(ctx context.Context, s app.Served) error {
+		rentErr = rental.WithServed(ctx, q.watchNode(first.ID), func(ctx context.Context, s app.Served) error {
+			// The channel is open by the time this closure runs -- withServer
+			// opens it, completes the handshake and waits for the weights
+			// before calling fn -- so this is the first moment there is a
+			// pulse to read, and every moment after it is one the fleet view
+			// can ask about.
+			q.onChannel(first.ID, s.Beat)
 			// Learned once per RENTAL SHAPE and cached, so a mistyped sampler
 			// is refused at the moment it is typed rather than a minute into
 			// a rented card.
@@ -1132,9 +1180,53 @@ func (q *Queue) drain(ctx context.Context, s runner, lease string, compat gensto
 		// queue holds the app.Served and `ember up` holds nothing but a
 		// sink. A rider is why this write cannot be dropped in favour of the
 		// event: the rental's own events reach the opener's sink alone.
-		q.set(req.ID, func(r *genstore.Request) { r.Model = s.Model() })
+		//
+		// AND THE NODE, FOR THE SAME REASON AND NOT FOR THE COST'S. This is
+		// the hole max_nodes>1 opened in the queue table: `requests.node` is
+		// written through from the `node_ready` EVENT, and that event reaches
+		// the opener's sink and no other -- so every rider's node column was
+		// empty, which is precisely where a fleet view is meant to look.
+		//
+		// IT IS FIXED HERE AND NOT BY ROUTING THE EVENT, and the difference
+		// is the whole of Queue.lifecycle's rule. node_ready and run_cost
+		// travel together to the opener because the opener is the request
+		// that paid for the rental to exist; splitting them so that riders
+		// saw node_ready would mean a second sink's worth of lifecycle
+		// routing, one field away from a rider being credited with the
+		// rental's bill -- "attributing the whole rental to every request
+		// would multiply it". So the EVENT routing is untouched and this is
+		// an ordinary row write off the event path, exactly like the model
+		// above it, and for the identical reason: the node is a LABEL. Every
+		// request this rental served ran on that machine, so writing it to
+		// each says one true thing N times. Writing the cost to each would
+		// say one bill N times, which is the thing being refused.
+		//
+		// THE VALUE IS THE ONE THE EVENT CARRIED, read back from the fleet
+		// entry the lifecycle tap filled in -- see watchNode. Not a second
+		// spelling of the handle built here from an offer or a record: two
+		// spellings of one node id is a fleet view and a queue table naming
+		// one machine two ways, which is the defect class viewFinding's own
+		// comment records.
+		//
+		// EMPTY IS LEFT ALONE rather than written, because an empty column
+		// and a column written with nothing are the same dash to every
+		// reader -- and the one way to be here with no node is the rental
+		// having reached a drain loop before its own node_ready landed, which
+		// is a window, not a fact about the request.
+		node := q.nodeOf(first.ID)
+		q.onRequest(first.ID, req.ID)
+		q.set(req.ID, func(r *genstore.Request) {
+			r.Model = s.Model()
+			if node != "" {
+				r.Node = node
+			}
+		})
 		err := q.generate(ctx, s, req)
 		q.finish(req.ID, err)
+		// THE RENTAL STAYS AND THE REQUEST GOES, which is the gap between two
+		// batches: the node is up and billing while this loop claims the next
+		// one, so the fleet row must stay and say it is generating nothing.
+		q.onRequest(first.ID, "")
 		switch {
 		case errors.Is(err, app.ErrCancelled):
 			// A CANCELLED REQUEST DOES NOT STOP THE RENTAL, and that is the

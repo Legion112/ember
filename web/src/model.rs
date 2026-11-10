@@ -545,6 +545,134 @@ impl Finding {
     }
 }
 
+/// The four states `queue.WorkerState` can be in, as Go spells them.
+///
+/// CONSTANTS AND NOT AN ENUM WITH A `Deserialize`, which is the same decision
+/// [`Finding::kind`] takes one type up and for the same two reasons: a state
+/// Go adds later must reach the page as a word an operator can read rather
+/// than as a deserialisation failure that drops the whole envelope, and the
+/// words themselves are the vocabulary the Go side prints. What these names
+/// are for is the one thing the page genuinely decides -- which row is
+/// painted as wrong -- and that is `Worker::needs_attention` below.
+const STATE_STALE: &str = "stale";
+const STATE_STARTING: &str = "starting";
+
+/// One rental `ember serve` is holding right now.
+///
+/// THE FLEET IS THIS PROCESS'S BOOKKEEPING AND THE FINDINGS ARE THE
+/// PROVIDERS', joined on the server by the node's handle. They overlap and
+/// they are not the same set, in both directions: an orphan from a crashed run
+/// is a finding with no worker, and a rental in the middle of its create call
+/// is a worker with no finding -- no node exists yet, so no listing mentions
+/// it, and it is money already committed.
+///
+/// EVERY DERIVED FIGURE ARRIVES DERIVED. `state` is `queue.Worker.State`,
+/// `beat` and `up` and `remaining` are Go-formatted durations, and `accrued`
+/// is a [`Money`] that carries its own rendering. Nothing here is computed
+/// from a timestamp, because the only clock this page has is the BROWSER's --
+/// a different clock from the one a beat was stamped by, and one an operator
+/// can have set wrong.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Worker {
+    /// `provider/id`, the same string `ember ls` prints and `requests.node`
+    /// records. Empty while the rental is being created.
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub card: String,
+    #[serde(default)]
+    pub image: String,
+
+    /// The request that paid for this rental to exist, and the one generating
+    /// on it now. At `max_nodes` > 1 they are usually different, and the
+    /// second is empty in the gap between two batches.
+    #[serde(default)]
+    pub opener: String,
+    #[serde(default)]
+    pub request: String,
+
+    /// `starting`, `live`, `stale` or `quiet`.
+    #[serde(default)]
+    pub state: String,
+
+    /// How long ago ember last heard this rental's worker. Empty when it never
+    /// has, which is NOT "a moment ago" and must not render as it.
+    #[serde(default)]
+    pub beat: String,
+
+    /// How long ember has been holding this rental.
+    #[serde(default)]
+    pub up: String,
+
+    /// What the node has cost so far and how long until its deadline, both
+    /// from the sweep. Absent together when the sweep found no node for this
+    /// handle -- a rental mid-create -- rather than zero, because a `$0.00`
+    /// against a card about to be billed for is ember pricing a rental at
+    /// nothing.
+    #[serde(default)]
+    pub accrued: Option<Money>,
+    #[serde(default)]
+    pub remaining: Option<String>,
+}
+
+impl Worker {
+    /// What names this rental on screen: the machine where there is one, and
+    /// what it is becoming where there is not.
+    ///
+    /// A ROW WITH A BLANK NAME COLUMN IS A ROW AN OPERATOR CANNOT SCAN, which
+    /// is [`Finding::names`]'s own reason for falling back to the provider.
+    /// Here the fallback says what is happening instead, because "the create
+    /// call has not returned" is the whole content of that row.
+    pub fn names(&self) -> String {
+        if self.node.is_empty() {
+            format!("{} (being created)", self.provider)
+        } else {
+            self.node.clone()
+        }
+    }
+
+    /// Whether this row is one a person has to look at.
+    ///
+    /// ONLY `stale`, and the three exclusions are each a decision. `live` is
+    /// working. `starting` is a create call in flight, which is money
+    /// committed and nothing wrong -- a red row there would be red on every
+    /// rental this server ever opens, for its first minute. `quiet` is a
+    /// speech rental, which has no worker to beat because piper is run over
+    /// `ssh exec`: there being nobody to answer is a different fact from not
+    /// answering, and painting it red would teach an operator to ignore the
+    /// colour -- which is `reconcile.KindStore`'s argument about exit 2,
+    /// reached through a stylesheet.
+    ///
+    /// NOT FOLDED INTO `Nodes::attention`, which is `reconcile`'s count of
+    /// what `ember ls` exits 2 for and must stay exactly that: a wedged
+    /// worker is this process's own observation and `ember ls` has never seen
+    /// one. Two numbers for two questions, rather than one number that means
+    /// something different depending on who is running.
+    pub fn needs_attention(&self) -> bool {
+        self.state == STATE_STALE
+    }
+
+    /// What this row says is wrong with it, or nothing.
+    ///
+    /// THE SENTENCE IS HERE AND NOT IN THE VIEW, for [`Nodes::verdict`]'s
+    /// reason: prose chosen by a branch inside a view macro can only be
+    /// checked by a browser. And it is a SENTENCE rather than the word
+    /// `stale`, because the word alone is read as a cache that needs
+    /// refreshing -- the opposite of what it means here, which is that the
+    /// card is billing and nobody on it is answering.
+    pub fn note(&self) -> String {
+        if self.state == STATE_STALE {
+            return "not answering, and still billing".into();
+        }
+        if self.state == STATE_STARTING {
+            return "the create call has not returned".into();
+        }
+        String::new()
+    }
+}
+
 /// What one sweep of every provider found: `GET /api/nodes`.
 ///
 /// THE SAME ANSWER `ember ls` PRINTS, projected from `internal/reconcile` --
@@ -593,6 +721,16 @@ pub struct Nodes {
     /// why `Money` crosses this wire twice as well.
     #[serde(default)]
     pub attention: i64,
+
+    /// The rentals `ember serve` is holding, sorted by the request that
+    /// opened each.
+    ///
+    /// A FOURTH SLICE AND NOT A FLAG ON A FINDING. The three above are what
+    /// EXISTS at the providers; this is what THIS PROCESS is doing with it,
+    /// and the rows that differ are the ones worth seeing -- a rental whose
+    /// create has not returned has no finding at all.
+    #[serde(default, deserialize_with = "nullable")]
+    pub workers: Vec<Worker>,
 }
 
 impl Nodes {
@@ -643,6 +781,17 @@ impl Nodes {
     /// operator needs both -- so this is not an enum: a `Partial` arm would
     /// have hidden the count, and a count alone would have read as the whole
     /// picture.
+    /// How many rentals this process is holding that a person has to look at.
+    ///
+    /// SEPARATE FROM `attention`, which is reconcile's count of what
+    /// `ember ls` exits 2 for. A worker that has stopped answering is this
+    /// process's own observation and no `ember ls` has ever seen one, so
+    /// adding it in would change what that number means depending on whether
+    /// an `ember serve` happened to be running.
+    pub fn wedged(&self) -> usize {
+        self.workers.iter().filter(|w| w.needs_attention()).count()
+    }
+
     pub fn verdict(&self) -> String {
         let blind = self.unreachable();
         if self.attention == 0 && self.nothing_running() {
@@ -4416,5 +4565,129 @@ mod tests {
         .expect("a wav artifact decodes");
         assert_eq!(r.results().count(), 1);
         assert_eq!(r.images[0].artifact(), Artifact::Audio);
+    }
+
+    /// THE FOURTH SLICE DECODES, which is this envelope's own history: for
+    /// the life of `GET /api/nodes` there was no Rust type for the answer at
+    /// all, and the route answered 501 in every shipped `ember serve`.
+    #[test]
+    fn a_fleet_decodes_what_the_queue_reported() {
+        let n: Nodes = serde_json::from_str(
+            r#"{"findings":[],"leftovers":[],"stores":[],"monthly_storage":{"micro_usd":0,
+                "display":"$0.00"},"attention":0,"workers":[
+                {"node":"local/n1","provider":"local","card":"rtx2080ti","image":"ember:sd",
+                 "opener":"req-a","request":"req-b","state":"live","beat":"2s","up":"9m0s",
+                 "accrued":{"micro_usd":11333,"display":"$0.01"},"remaining":"42m0s"}]}"#,
+        )
+        .expect("a fleet decodes");
+        assert_eq!(n.workers.len(), 1);
+        let w = &n.workers[0];
+        assert_eq!(w.node, "local/n1");
+        assert_eq!(w.opener, "req-a");
+        assert_eq!(w.request, "req-b");
+        assert_eq!(w.beat, "2s");
+        assert_eq!(w.remaining.as_deref(), Some("42m0s"));
+        assert_eq!(w.accrued.as_ref().map(|m| m.text()), Some("$0.01"));
+        assert!(!w.needs_attention());
+    }
+
+    /// A NULL IS A `null` AND NOT A MISSING FIELD, which is the defect this
+    /// repository has already paid for once: Go marshals a nil slice as
+    /// `null`, serde's `default` covers a field that is ABSENT, and a whole
+    /// websocket envelope -- with it a request's state -- was dropped on a
+    /// type error nobody could see. Go sends `[]` now; this is the belt.
+    #[test]
+    fn a_null_fleet_is_an_empty_fleet_and_not_a_dropped_envelope() {
+        let n: Nodes = serde_json::from_str(r#"{"workers":null,"attention":3}"#)
+            .expect("a null workers list must not drop the whole answer");
+        assert!(n.workers.is_empty());
+        assert_eq!(n.attention, 3, "the rest of the envelope survived");
+    }
+
+    fn worker(state: &str) -> Worker {
+        Worker {
+            node: "local/n1".into(),
+            provider: "local".into(),
+            state: state.into(),
+            ..Default::default()
+        }
+    }
+
+    /// ONLY `stale` IS RED, and the three exclusions are each a decision.
+    ///
+    /// `starting` is a create call in flight -- money committed and nothing
+    /// wrong -- so a red row there would be red on every rental this server
+    /// ever opens, for its first minute. `quiet` is a speech rental, which
+    /// has no worker to beat at all: there being nobody to answer is a
+    /// different fact from not answering, and painting it red would teach an
+    /// operator to ignore the colour, which is `reconcile.KindStore`'s
+    /// argument about exit 2 reached through a stylesheet.
+    ///
+    /// THE NEGATIVE CONTROL IS `stale` ITSELF: without it these assertions
+    /// are all satisfied by a method that answers false for everything.
+    #[test]
+    fn only_a_worker_that_stopped_answering_is_painted_as_wrong() {
+        assert!(worker("stale").needs_attention());
+        for ok in ["live", "starting", "quiet", "something-go-added-later"] {
+            assert!(
+                !worker(ok).needs_attention(),
+                "a {ok} rental was painted as needing a person"
+            );
+        }
+    }
+
+    /// The sentence and not the word.
+    ///
+    /// "stale" alone reads as a cache that needs refreshing, which is the
+    /// opposite of what it means here: the card is billing and nobody on it
+    /// is answering.
+    #[test]
+    fn a_wedged_row_says_what_is_wrong_with_it() {
+        assert_eq!(worker("stale").note(), "not answering, and still billing");
+        assert_eq!(
+            worker("starting").note(),
+            "the create call has not returned"
+        );
+        assert_eq!(worker("live").note(), "");
+        assert_eq!(worker("quiet").note(), "");
+    }
+
+    /// A ROW WITH A BLANK NAME COLUMN IS A ROW AN OPERATOR CANNOT SCAN, which
+    /// is `Finding::names`'s own reason. A rental being created has no node,
+    /// and what that row is about is precisely that.
+    #[test]
+    fn a_rental_being_created_still_names_itself() {
+        let mut w = worker("starting");
+        w.node = String::new();
+        w.provider = "runpod".into();
+        assert_eq!(w.names(), "runpod (being created)");
+        assert_eq!(worker("live").names(), "local/n1");
+    }
+
+    /// THE FLEET'S COUNT IS NOT `attention`, and that is the whole point of
+    /// it being a separate method.
+    ///
+    /// `attention` is `reconcile`'s count of what `ember ls` exits 2 for, and
+    /// no `ember ls` has ever seen a wedged worker -- it is this process's own
+    /// observation. Adding it in would change what that number means depending
+    /// on whether an `ember serve` happened to be running when it was taken.
+    #[test]
+    fn a_wedged_worker_is_counted_apart_from_the_sweeps_own_findings() {
+        let n = Nodes {
+            workers: vec![
+                worker("stale"),
+                worker("live"),
+                worker("stale"),
+                worker("quiet"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(n.wedged(), 2);
+        assert_eq!(n.attention, 0, "the sweep found nothing, and still has not");
+        assert!(
+            n.verdict().contains("nothing is running"),
+            "a wedged worker changed reconcile's own sentence: {}",
+            n.verdict()
+        );
     }
 }

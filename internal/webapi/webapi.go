@@ -63,6 +63,7 @@ import (
 	"github.com/Legion112/ember/internal/loopback"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
+	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/report"
 	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/internal/tts"
@@ -108,6 +109,26 @@ type Drain interface {
 	// NOT A SECOND SPELLING OF Running, and the difference is a rental the
 	// operator is paying for: see cancelRequest's two 409s.
 	Holding(genstore.ReqID) bool
+
+	// Fleet is every rental this process is holding, sorted: what each one
+	// is, which request is generating on it, and when its worker last beat.
+	//
+	// A FOURTH METHOD RATHER THAN A FIELD ON Running's ANSWER, because the
+	// two lists answer different questions and have different lifetimes. A
+	// request is `running` from the claim; a rental exists from the plan and
+	// outlives every request that rode it. Folding one into the other would
+	// have made "which requests are generating" and "what am I paying for"
+	// one list, and the row that disagrees is the rental with nothing on it
+	// -- which is a node billing for nothing and the one row an operator most
+	// needs to see.
+	//
+	// IT RETURNS queue.Worker AND NOT A LOCAL TYPE, which is the one import
+	// this package takes from the loop. The alternative is a second struct
+	// with the same fields, converted in `cmd_serve`, and a second place for
+	// a field added to one and not the other -- and this package already
+	// takes genstore.ReqID from the same direction. Nothing here can reach a
+	// plan, a provider or a rental through it: Worker is data.
+	Fleet() []queue.Worker
 }
 
 // Options are what a server needs.
@@ -592,7 +613,12 @@ func (s *Server) getNodes(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadGateway, err)
 		return
 	}
-	s.ok(w, viewNodes(sc))
+	// THE FLEET IS THIS PROCESS'S OWN BOOKKEEPING AND THE SWEEP IS THE
+	// PROVIDERS', joined below by the node's handle. Read AFTER the sweep so
+	// the two are as close together as they can be: a rental that ended
+	// during those three provider calls is better left out of the fleet than
+	// listed against a finding that no longer mentions it.
+	s.ok(w, viewNodes(sc, s.fleet(), time.Now()))
 }
 
 // postRequest queues a batch.
@@ -927,6 +953,22 @@ func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 	// this is a no-op.
 	s.cancelRunning(id)
 	s.ok(w, map[string]any{"id": string(id), "status": string(genstore.StatusCancelled)})
+}
+
+// fleet is what this process is renting, tolerating no queue the way
+// cancelRunning and running() do.
+//
+// NIL IS AN EMPTY FLEET AND NOT A MISSING ONE. A server with no drain loop is
+// renting nothing, so "no rows" is the true answer rather than an absence --
+// the opposite of the `sweep` signal in the page, where "not asked" and "asked
+// and found nothing" must never render the same. The difference is that this
+// process KNOWS what it is holding, and a handler test holding nothing is
+// correct about it.
+func (s *Server) fleet() []queue.Worker {
+	if s.opts.Queue == nil {
+		return nil
+	}
+	return s.opts.Queue.Fleet()
 }
 
 // cancelRunning asks the drain loop to stop one request, tolerating no queue.

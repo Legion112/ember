@@ -110,6 +110,13 @@ func queueJobs(t *testing.T, srv served, body string) string {
 type requestState struct {
 	Status string `json:"status"`
 	Node   string `json:"node"`
+
+	// Cost is the RENTAL's, charged to the request that opened it. Read here
+	// so that "a rider gets the node and not the cost" can be asserted as
+	// one statement rather than as two labs.
+	Cost struct {
+		Micro int64 `json:"micro_usd"`
+	} `json:"cost"`
 	Images []struct {
 		Path    string `json:"path"`
 		Preview bool   `json:"preview"`
@@ -208,16 +215,41 @@ func TestServe_DrainsTheQueueOntoOneRental(t *testing.T) {
 		}
 	}
 
-	// The rental's node and cost go to the request that opened it; the rider
-	// gets its own per-job card time. Summing the per-request figures would
-	// understate the bill and attributing the rental to each would multiply
-	// it, so the two differ on purpose.
+	// THE RIDER NAMES THE MACHINE AND IS NOT CHARGED FOR IT, which is a
+	// CHANGE to this assertion and the sharp edge of the fleet view.
+	//
+	// It read "the rider names a node (%s); the rental belongs to the one that
+	// opened it" -- true of the mechanism and wrong as a rule. `requests.node`
+	// is written through from the node_ready EVENT, and Queue.lifecycle routes
+	// that event to the opener alone because run_cost travels the same road:
+	// "attributing the whole rental to every request would multiply it." So
+	// the rider's node column was empty, and at max_nodes>1 that is a hole
+	// exactly where a fleet view looks -- a request that generated on a real
+	// machine whose row cannot say which.
+	//
+	// The node is a LABEL: every request this rental served ran on that
+	// machine, so writing it to each says one true thing N times. The cost is
+	// a QUANTITY: writing it to each says one bill N times.
+	//
+	// THE COST HALF IS NOT ASSERTED HERE AND CANNOT BE, which is said rather
+	// than left as an absence: this lab rents from the local provider, whose
+	// offer is free, so BOTH rows carry zero and the figure cannot tell "the
+	// rider was not charged" from "nothing cost anything". It is held by
+	// TestFleet_ARiderGetsTheNodeAndNotTheCost in internal/queue, whose fake
+	// rental emits a run_cost -- which is the one thing a free provider makes
+	// a lab unable to see.
 	if firstDone.Node == "" {
 		t.Error("the request that opened the rental does not name its node")
 	}
-	if secondDone.Node != "" {
-		t.Errorf("the rider names a node (%s); the rental belongs to the one that opened it",
-			secondDone.Node)
+	if secondDone.Node != firstDone.Node {
+		t.Errorf("the rider says it ran on %q and the opener says %q; this is one rental and "+
+			"one machine", secondDone.Node, firstDone.Node)
+	}
+	if secondDone.Cost.Micro != firstDone.Cost.Micro {
+		// Both are zero on a free provider. Compared rather than asserted
+		// against a constant, so that this line becomes meaningful rather
+		// than wrong if the lab ever rents from something that charges.
+		t.Logf("opener cost %d, rider cost %d", firstDone.Cost.Micro, secondDone.Cost.Micro)
 	}
 
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
@@ -3288,12 +3320,26 @@ const billingProbe = `(function () {
 		var e = panel.querySelector(sel);
 		return e ? e.textContent.replace(/\s+/g, " ").trim() : "";
 	}
-	var rows = Array.from(panel.querySelectorAll("table.ledger tr"))
+	// NOT .fleet, WHICH IS THE OTHER TABLE IN THIS PANEL. The sweep's three
+	// tables are what exists at the providers; the fleet is what this process
+	// is renting, and it has a probe of its own in fleetui_test.go. One
+	// selector matching both would make every assertion here about "rows"
+	// pass or fail on whether an ember serve happened to be renting.
+	var rows = Array.from(panel.querySelectorAll("table.ledger:not(.fleet) tr"))
 		.map(function (r) { return r.innerText.replace(/\s+/g, " ").trim(); })
 		.join(" // ");
 	return [
 		"panel|present",
-		"verdict|" + text("p.verdict"),
+		// EVERY VERDICT AND NOT THE FIRST, because there are two now and
+		// they answer different questions: reconcile's count of what
+		// ember ls exits 2 for, and the rentals THIS process is holding
+		// that have stopped answering. The old text(p.verdict) took whichever
+		// came first in the DOM, so an assertion about the second one was
+		// silently an assertion about the first -- which is how the fleet
+		// lab's wedged-verdict check read "nothing needs attention".
+		"verdict|" + Array.from(panel.querySelectorAll("p.verdict"))
+			.map(function (e) { return e.textContent.replace(/\s+/g, " ").trim(); })
+			.join(" // "),
 		"rows|" + rows,
 		"storage|" + Array.from(panel.querySelectorAll("p.hint"))
 			.map(function (e) { return e.textContent.replace(/\s+/g, " ").trim(); })

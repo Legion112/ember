@@ -320,13 +320,17 @@ func (n *fakeNode) served(t *testing.T, rate node.Rate) served {
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	return served{ch: ch, caps: caps, rate: rate, runner: &nodeShell{t: t}}
+	// WITH A PULSE, because withServer always builds one: a `served` without
+	// it would make every test on this path blind to the beats the worker
+	// behind it is really sending, which is a fake less capable than the thing
+	// it stands in for in the direction that hides a defect.
+	return served{ch: ch, caps: caps, rate: rate, runner: &nodeShell{t: t}, beat: &pulse{}}
 }
 
 // prepare is what withServer does before handing a Served to anybody.
 func (n *fakeNode) prepare(t *testing.T, ch *control.Conn) (sdserver.Capabilities, error) {
 	t.Helper()
-	_, raw, err := prepareWorker(t.Context(), io.Discard, ch, time.Minute)
+	_, raw, err := prepareWorker(t.Context(), io.Discard, ch, &pulse{}, time.Minute)
 	if err != nil {
 		return sdserver.Capabilities{}, err
 	}
@@ -1711,7 +1715,7 @@ func TestPrepareWorker_RefusesAPreparedFrameWithNoCapabilities(t *testing.T) {
 				}
 				return c.Send(ctx, frame)
 			})
-			_, _, err := prepareWorker(t.Context(), io.Discard, ch, time.Minute)
+			_, _, err := prepareWorker(t.Context(), io.Discard, ch, &pulse{}, time.Minute)
 			if err == nil {
 				t.Fatalf("%+v was accepted", frame)
 			}
@@ -1740,7 +1744,7 @@ func TestPrepareWorker_WritesTheWeightWaitToTheOperatorsTerminal(t *testing.T) {
 		})
 	})
 	var out strings.Builder
-	load, raw, err := prepareWorker(t.Context(), &out, ch, time.Minute)
+	load, raw, err := prepareWorker(t.Context(), &out, ch, &pulse{}, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

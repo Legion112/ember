@@ -10,6 +10,7 @@ import (
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/provider"
+	"github.com/Legion112/ember/internal/queue"
 	"github.com/Legion112/ember/internal/reconcile"
 	"github.com/Legion112/ember/internal/sdserver"
 	"github.com/Legion112/ember/internal/tts"
@@ -932,6 +933,87 @@ type nodesView struct {
 	// looking at the Go one. Money crosses this wire twice for the same
 	// reason.
 	Attention int `json:"attention"`
+
+	// Workers is the fleet: one row per rental THIS PROCESS is holding, which
+	// is a different list from Findings and is why it is a different field.
+	//
+	// FINDINGS ARE WHAT EXISTS AT THE PROVIDERS AND THIS IS WHAT EMBER IS
+	// DOING WITH IT. They overlap and they are not the same set, in both
+	// directions, and merging them would lose whichever difference the
+	// operator is looking for: an orphan from a crashed run is a finding with
+	// no worker, and a rental in the middle of its create call is a worker
+	// with no finding -- no node exists yet, so no provider listing mentions
+	// it, and it is money already committed. A single table would either drop
+	// the second or invent a finding for it.
+	//
+	// EMPTY AND NEVER NIL, for the three slices above's reason: Go marshals a
+	// nil slice as `null`, serde's `default` covers a MISSING field and not a
+	// present null, and this repository has lost a whole websocket envelope to
+	// exactly that.
+	Workers []workerView `json:"workers"`
+}
+
+// workerView is one rental this process is holding.
+//
+// THE JOIN AND NOT A SECOND SCAN. Everything about what the rental IS comes
+// from the queue, which planned it; everything about what it COSTS comes from
+// reconcile's finding for the same handle, which is the one authority on money
+// in this response. Pricing a rental here from its own rate and a start time
+// would be a second answer to "what am I paying for", and the second answer is
+// the one that is wrong -- it is reconcile that knows about a node the
+// provider has already stopped billing for.
+type workerView struct {
+	// Node is "provider/id", the same string `ember ls` prints and the same
+	// one `requests.node` records. Empty while the rental is being created,
+	// which is a row with a State of "starting".
+	Node string `json:"node,omitempty"`
+
+	Provider string `json:"provider"`
+	Card     string `json:"card,omitempty"`
+	Image    string `json:"image,omitempty"`
+
+	// Opener paid for this rental to exist and is the request its cost is
+	// attributed to; Request is what is generating on it right now, which is
+	// empty in the gap between two batches.
+	//
+	// BOTH, BECAUSE THEY ARE DIFFERENT QUESTIONS AND AT max_nodes>1 THEY ARE
+	// USUALLY DIFFERENT ANSWERS. An operator reading a bill wants the first;
+	// an operator watching a fleet wants the second. One field would have
+	// made `ember spend` and this table disagree about which request a node
+	// belongs to.
+	Opener  string `json:"opener"`
+	Request string `json:"request,omitempty"`
+
+	// State is queue.WorkerState: starting, live, stale or quiet.
+	//
+	// DECIDED IN GO AND NEVER IN THE PAGE, for Attention's reason: the
+	// threshold is control.HeartbeatStale and the classification is one
+	// switch, and a second copy of either in Rust is a copy whose author will
+	// not be looking at this one. A page that compared timestamps itself
+	// would also be comparing them against the BROWSER's clock, which is a
+	// different clock from the one the beat was stamped by.
+	State string `json:"state"`
+
+	// Beat is how long ago ember last heard this rental's worker, formatted
+	// by Go like every other duration on this wire. Empty when there has
+	// never been one, which is not the same as "a moment ago" and must not
+	// render as it.
+	Beat string `json:"beat,omitempty"`
+
+	// Up is how long ember has been holding this rental.
+	Up string `json:"up"`
+
+	// Accrued is what this node has cost so far and Remaining is how long
+	// until its deadline, BOTH FROM THE FINDING and absent when the sweep
+	// found no node for this handle.
+	//
+	// ABSENT RATHER THAN ZERO IS THE WHOLE POINT OF THE POINTERS. A rental
+	// mid-create has no node at any provider, so there is nothing to price
+	// and no deadline to count down; a "$0.00" and a "0s" there would be
+	// ember pricing a card it is about to be billed for at nothing, which is
+	// the one direction a money figure must never be wrong in.
+	Accrued   *money  `json:"accrued,omitempty"`
+	Remaining *string `json:"remaining,omitempty"`
 }
 
 // findingView is one line of `ember ls`, in parts.
@@ -978,8 +1060,11 @@ type findingView struct {
 // envelope to that -- so a scan that found nothing has to arrive as `[]`
 // three times over. The client tolerates `null` anyway, because the rule has
 // to hold for a field somebody adds later.
-func viewNodes(sc app.Scanned) nodesView {
-	v := nodesView{Findings: []findingView{}, Leftovers: []findingView{}, Stores: []findingView{}}
+func viewNodes(sc app.Scanned, fleet []queue.Worker, now time.Time) nodesView {
+	v := nodesView{
+		Findings: []findingView{}, Leftovers: []findingView{},
+		Stores: []findingView{}, Workers: []workerView{},
+	}
 	for _, f := range sc.Nodes {
 		v.Findings = append(v.Findings, viewFinding(f))
 	}
@@ -997,6 +1082,70 @@ func viewNodes(sc app.Scanned) nodesView {
 	// reconcile.Attention, which is the one authority.
 	all := append(append(append([]reconcile.Finding(nil), sc.Nodes...), sc.Stores...), sc.Leftovers...)
 	v.Attention = reconcile.Attention(all)
+
+	// THE JOIN IS OVER sc.Nodes ALONE and not over `all`, and the reason is
+	// written down because a reinstatement refused to make it a test.
+	//
+	// A store handle, a leftover and a record's run id all spell themselves
+	// `provider/name`, so a Docker volume named after a run collides with a
+	// live rental's handle exactly -- a collision an operator can produce,
+	// because store names are theirs to choose. Widening the join to every
+	// finding was reinstated and came back GREEN: viewWorker reads `Accrued`
+	// and `Node.Deadline`, and reconcile sets neither on a store or a
+	// leftover, so there is currently nothing for the wrong join to pick up.
+	//
+	// It stays narrow because THAT is the only reason it is harmless. The ids
+	// collide by construction, and the day any of those kinds gains a cost
+	// figure, a join over all of them would attach a per-MONTH charge to a row
+	// whose every other figure is a total already spent -- the wrong kind of
+	// wrong, which is what findingView keeps Accrued and Monthly apart for.
+	// What IS guarded is that each rental is priced from its own node:
+	// TestNodes_PricesEachRentalFromItsOwnNode.
+	billed := map[string]reconcile.Finding{}
+	for _, f := range sc.Nodes {
+		if !f.Node.Handle.IsZero() {
+			billed[f.Node.Handle.String()] = f
+		}
+	}
+	for _, w := range fleet {
+		v.Workers = append(v.Workers, viewWorker(w, billed[w.Node], now))
+	}
+	return v
+}
+
+// viewWorker projects one rental, with whatever the sweep found for its node.
+//
+// A ZERO Finding MEANS THE SWEEP SAW NO SUCH NODE, which is the ordinary state
+// of a rental whose create has not returned and is also what an unreachable
+// provider leaves behind. Both come out as a row with no cost and no deadline
+// rather than as a row with zeroes: see workerView.Accrued.
+func viewWorker(w queue.Worker, f reconcile.Finding, now time.Time) workerView {
+	v := workerView{
+		Node: w.Node, Provider: string(w.Provider), Card: string(w.Card),
+		Image: w.Image, Opener: string(w.Opener), Request: string(w.Request),
+		State: string(w.State(now)), Up: dur(now.Sub(w.Since).Truncate(time.Second)),
+	}
+	if !w.Beat.IsZero() {
+		// TRUNCATED TO THE SECOND, because the figure is read by a person and
+		// "4.0183221s ago" is three digits of precision about a frame that is
+		// sent every five seconds. The classification above is NOT truncated:
+		// it is the raw comparison against control.HeartbeatStale, so a row
+		// cannot read "live" beside a rounded age past the threshold.
+		v.Beat = dur(now.Sub(w.Beat).Truncate(time.Second))
+	}
+	if f.Accrued != nil {
+		m := usd(f.Accrued.Cost)
+		v.Accrued = &m
+	}
+	if d := f.Node.Deadline; !d.IsZero() {
+		// NEGATIVE IS KEPT AND NOT CLAMPED. A node past its deadline and
+		// still running is the `expired` finding beside this row, and a
+		// countdown that stopped at zero would hide the one number that says
+		// how long it has been over -- which is how much of the bill was for
+		// nothing.
+		r := dur(d.Sub(now).Truncate(time.Second))
+		v.Remaining = &r
+	}
 	return v
 }
 

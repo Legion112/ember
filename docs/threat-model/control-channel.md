@@ -308,3 +308,87 @@ used to arrive inside the poll response ember was already reading. For a
 the card spent producing it, and it buys a node that writes its results down
 before anything fetches them — so a dropped connection loses the fetch rather
 than the picture.
+
+## The heartbeat, and the endpoint that was refused
+
+**Liveness is a frame on the channel ember already holds, and not a health
+check the worker serves.** It is the one question about a rented node that has
+an obvious answer and a wrong one.
+
+**What a `/healthz` on the worker would have cost.** The worker would have to
+listen somewhere a prober can reach. ember's prober is on the operator's
+machine, so "reachable" means a **public** port — and a public port means a
+second minter beside the single one in this program that can mint one. That is
+the seal the whole posture sentence rests on: *a create request can only ask
+for 22/tcp, and the post-create check destroys a node whose provider published
+anything else.* It is also the seal that is cheap to keep and expensive to get
+back: the refusal is a property of the request builder, not a check somebody
+remembers. Adding a second port would also double every node's reachable
+surface in order to tell ember something it is in a position to know already,
+because it holds this channel for the whole rental.
+
+**And the beat is strictly more informative than a reachability probe**, which
+is why this is a better answer rather than merely a cheaper one. A port check
+has two answers. This has three, and the middle one is the expensive one:
+
+| | meaning |
+|---|---|
+| channel open, beat current | the worker is there |
+| channel open, beat **stale** | **the card is billing and nobody on it is answering** |
+| channel closed | gone; the rental's slot has returned, and the deadline and `ember ls` take over |
+
+A port that answers tells the first from the third. Only something the worker
+has to *keep doing* tells the second from the first, and the second is the one
+that costs money: an unreachable node is a failure ember already handles, and a
+reachable node that has stopped working is an hour of an H100 nobody notices.
+
+**It is also the honest replacement for `statestore.Holder.Abandoned()` at
+`max_nodes` > 1.** That check is a pid test on the ember PROCESS, so it answers
+one question for every rental the process holds — it cannot say which rental's
+owner died, because there is one owner. It is still right about the case it is
+for (a run killed with SIGKILL leaves a node inside its deadline with nobody
+watching) and it is now the coarse half of a pair.
+
+**The frame carries nothing.** Index and Total are already on `Frame`, so a
+beat naming the job on the card would have cost nothing — and it would be a
+second answer to a question ember answers from its own bookkeeping, since ember
+pushed the batch. A page preferring the node's number would be believing a
+rented machine about ember's own accounting. Worse, a payload beside a
+timestamp is a payload somebody renders without asking how old it is: the whole
+content of this frame is the instant ember received it.
+
+**It is a version bump and not an additive change.** Both of ember's frame
+loops refuse a kind they do not know, correctly — a frame nobody handles is a
+job ember would wait for forever. So a node image that beats, driven by an
+ember that predates beats, would fail its first batch *after* the card was
+allocated and the weights were resident. The protocol version is what moves
+that refusal to the handshake, which is the only moment it is cheap.
+
+**Five seconds between beats, and twenty before one is stale.** The floor on
+the threshold is the channel's own per-write bound rather than taste: sends are
+serialised and each is bounded at ten seconds, so a beat queued behind the
+largest thing a worker sends — a 4 MiB preview frame — is legitimately ten
+seconds late through no fault of the node. Ten, plus the interval that fell
+inside it, rounded to whole intervals. A threshold inside that window reports a
+*busy* rental as wedged, and an operator who learns that the word sometimes
+means "busy" stops acting on it — `reconcile.KindStore`'s argument about
+teaching people to ignore exit 2, reached through a different number. The
+ceiling is a minute, because a wedged rental bills for the whole time it is
+wedged.
+
+**What the beat cannot see, said rather than assumed.** This is the
+**channel's** liveness and not the generation server's. The beat ticks on a
+goroutine of its own, so a worker whose sd-server has stopped answering polls
+keeps beating; what that looks like is a request whose job never ends, which is
+that request's own row. What the beat does see is a node that froze or was
+partitioned while the TCP connection stayed open, a worker process that died
+without the SSH channel closing, and a worker whose writes are blocked — that
+last one because the beat takes the same send mutex the runner needs, which is
+the first time that mutex is load-bearing at the worker's end.
+
+**The beat ends with the SESSION and not with the node's context.** The session
+ends one statement before the worker sends `done`; the context is cancelled
+later, when the node is stopped. A beat racing that last frame is a worker that
+said goodbye and then spoke again, which ember reads as *the worker did not say
+goodbye* — the line that distinguishes a tidy rental from one that was cut off,
+read afterwards on a machine that no longer exists.

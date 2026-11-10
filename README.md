@@ -2048,6 +2048,29 @@ the row would not take it. A rider's zero is blank by design, so the opener's
 cell is the only place in that table a paid rental appears — which made an
 hour of an H100 show up as a queue of finished requests with no money in it.
 
+### Which machine a request ran on
+
+`requests.node` names the machine, and since `max_nodes` it is written for
+**every** request on a rental rather than only for the one that opened it.
+
+The rental's own facts — the node it got, what it cost, how long it ran —
+travel as events to the request that **opened** the rental and to no other,
+because that is the request that paid for it to exist. Summing the per-request
+figures and calling it the bill would understate it; attributing the whole
+rental to every request would multiply it. The consequence nobody had looked
+at is that at `max_nodes` > 1 every **rider's** node column was empty: a second
+request generated on a real machine and its row could not say which one — a
+hole exactly where the fleet view looks.
+
+The node is written for riders and the **cost is not**, and the difference is
+the whole rule. A node is a *label*: every request this rental served ran on
+that machine, so writing it to each of them says one true thing N times. A
+cost is a *quantity*: writing it to each would say one bill N times. So the
+event routing is untouched and the node is an ordinary row write beside the
+model, which has been written to every request on a rental for the same reason
+since the column existed. The value is the one the event carried, read once,
+so a fleet row and a queue row cannot spell one machine two ways.
+
 ### What the billing panel shows
 
 Pressing **check what is running** asks every configured provider what is
@@ -2082,8 +2105,75 @@ subnetted`. Every remedy is a command — `ember reap`, `ember down`,
 `ember store rm` — and there are deliberately no buttons here: a destroy from a
 browser is a side effect this server's threat model has never argued for.
 
-`GET /api/nodes` is the route behind it, and until now it answered **501** in
-every `ember serve` there has ever been. The handler, the projection, the
+### What the fleet rows show
+
+Above the sweep's own tables, the same press lists **what this `ember serve` is
+renting**: one row per rental, with the card and image it is, the request
+generating on it, what it has cost so far, how long until its deadline, and
+when ember last heard from its worker.
+
+The two lists overlap and they are not the same set, in both directions, which
+is why they are two tables. A finding is what exists **at a provider** — an
+orphan from a crashed run is a finding with no worker. A fleet row is what
+**this process** is doing — a rental whose create call has not returned exists
+at no provider yet, so no listing mentions it, and it is money already
+committed. Merging them would lose whichever difference the operator came to
+look for.
+
+A row's state is one of four:
+
+| state | what it means |
+|---|---|
+| `starting` | the create call has not returned; the card is chosen and committed |
+| `live` | the worker beat within the last 20s |
+| `stale` | the channel is open, the card is billing, and the worker has stopped answering |
+| `quiet` | this rental has no worker to beat — speech runs `piper` over `ssh exec` |
+
+Only `stale` is painted as wrong, and it is counted separately from the
+sweep's own attention count: a wedged worker is this process's observation and
+`ember ls` has never seen one.
+
+**Liveness is a heartbeat on the control channel, and not a health-check
+endpoint on the node.** A `/healthz` on the worker would mean the worker
+listens on a port, which means a **public** port, which means a second minter
+beside the one place in the program that can mint one — the seal the whole
+exposure posture rests on. It would also double a node's reachable surface to
+tell ember something it is in a position to know already: ember holds this
+channel for the whole rental.
+
+It is also strictly more informative than a reachability probe, which is the
+reason it is worth the frames rather than merely cheaper. A port check has two
+answers; this has three, and the middle one is the expensive one: *beating*,
+*open and silent*, and *gone*. Gone is not a row at all — a rental whose
+channel closed has returned its slot, and the deadline and `ember ls` take
+over.
+
+The worker beats every **5 s** and a beat older than **20 s** is stale. The
+floor on that threshold is not taste: sends on the channel are serialised and
+bounded at ten seconds, so a beat queued behind a 4 MiB preview frame is
+legitimately that late through no fault of the node. A threshold inside that
+window would report a *busy* rental as wedged, and an operator who learns the
+word sometimes means "busy" stops acting on it.
+
+What the beat cannot see is said here rather than left to be assumed: it is the
+**channel's** liveness and not the generation server's. A worker whose
+sd-server has stopped answering polls keeps beating; what that looks like is a
+request whose job never ends, which is that request's own row in the queue
+table. What the beat does see is a node that froze or was partitioned while the
+connection stayed open, a worker process that died without the channel closing,
+and a worker whose writes are stuck — that last one because the beat takes the
+same send lock the rest of the worker needs.
+
+One rental is deliberately absent from these rows: an `ember up` **submitted**
+over the unix socket. It occupies a rental slot and rents inside a closure the
+queue cannot see into — by design, because a request handler must never be able
+to reach a plan — so this process knows a slot is taken and nothing else about
+it. Its node is not invisible: it is at the provider wearing ember's label, so
+it is a finding in the same response, with its cost and its deadline. What it
+has no row for is the worker, because nothing here saw one.
+
+`GET /api/nodes` is the route behind both tables, and until the panel landed it
+answered **501** in every `ember serve` there had ever been. The handler, the projection, the
 monthly storage total and the attention count were all written and all
 correct; nothing assigned the scanner they needed, no Rust type existed for
 the answer, so nobody had ever seen the refusal. An operator who only opened
