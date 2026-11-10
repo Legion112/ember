@@ -3325,7 +3325,16 @@ const billingProbe = `(function () {
 	// is renting, and it has a probe of its own in fleetui_test.go. One
 	// selector matching both would make every assertion here about "rows"
 	// pass or fail on whether an ember serve happened to be renting.
-	var rows = Array.from(panel.querySelectorAll("table.ledger:not(.fleet) tr"))
+	// tbody tr, AND NOT tr. The tables grew a header row, and a bare "tr"
+	// takes it as data. No assertion collides with a column name TODAY --
+	// kind, what, why, recorded, cost -- and that is exactly why it is worth
+	// a line: every check here is a substring match over the joined rows, so
+	// the day a column is named after anything this file looks for, the
+	// assertion passes on the header and the defect it guards walks through.
+	// Nothing would report it, because a header is present on every run that
+	// has rows at all. The fleet probe in fleetui_test.go was already written
+	// this way; this one was not.
+	var rows = Array.from(panel.querySelectorAll("table.ledger:not(.fleet) tbody tr"))
 		.map(function (r) { return r.innerText.replace(/\s+/g, " ").trim(); })
 		.join(" // ");
 	return [
@@ -3341,6 +3350,17 @@ const billingProbe = `(function () {
 			.map(function (e) { return e.textContent.replace(/\s+/g, " ").trim(); })
 			.join(" // "),
 		"rows|" + rows,
+		// THE COLUMN NAMES, separately from the rows, because a header is the
+		// one part of a table that an assertion about rows cannot see. Both
+		// tables, kept apart for the reason rows are: this panel holds the
+		// sweep's findings and the fleet, and one selector matching both
+		// would make a check about either pass on the other.
+		"header|" + Array.from(panel.querySelectorAll("table.ledger:not(.fleet) thead th"))
+			.map(function (e) { return e.textContent.trim(); })
+			.join(" // "),
+		"fleetheader|" + Array.from(panel.querySelectorAll("table.fleet thead th"))
+			.map(function (e) { return e.textContent.trim(); })
+			.join(" // "),
 		"storage|" + Array.from(panel.querySelectorAll("p.hint"))
 			.map(function (e) { return e.textContent.replace(/\s+/g, " ").trim(); })
 			.filter(function (s) { return s.indexOf("storage:") === 0; })
@@ -3495,28 +3515,36 @@ func TestServe_UIReportsWhatIsBilling(t *testing.T) {
 	// measured it.
 	navTo(t, ctx, "what is billing", billingPanel)
 
-	// NOTHING UNTIL SOMEBODY ASKS. See the header: the empty answer and the
-	// answer nobody asked for must not render the same, and the empty one is
-	// the reassuring sentence.
+	// IT ANSWERS ON ARRIVAL, AND NOBODY PRESSES ANYTHING HERE. This assertion
+	// was the opposite of itself until this change: it required the panel to
+	// be silent until pressed, which is the rule the page was built to and the
+	// rule an operator kept walking into -- a leaking card was invisible on
+	// the one page whose subject is leaking cards until somebody thought to
+	// ask. "A button and never a poll" survives and is still the reason there
+	// is no timer; answering once per visit is not a timer.
+	//
+	// THE PRESS BELOW IS THEREFORE A REFRESH AND NOT A FIRST ASK, which is why
+	// it stays in this lab rather than coming out: the button has a job still,
+	// and a page that answered on arrival and then ignored the button would
+	// pass an assertion about findings while being useless to look at twice.
+	//
+	// What is NOT asserted here, and cannot honestly be: that the brief moment
+	// before the first answer renders nothing rather than `Nodes::default()`'s
+	// "nothing is running and nothing was left behind". That window is one
+	// fetch wide and racing it from here would be a flake rather than a check.
+	// It is the `Option` in `Billing` that holds it, and the comment there
+	// carries the argument.
 	before := billingSays(t, ctx)
 	if before["panel"] != "present" {
 		t.Fatalf("the billing panel is not on the page at all: %+v", before)
-	}
-	if before["verdict"] != "" || before["rows"] != "" {
-		t.Errorf("the panel answered before anything was asked: verdict=%q rows=%q",
-			before["verdict"], before["rows"])
 	}
 
 	// A CLEAN DAEMON FIRST, so the finding below is a change and not the only
 	// thing this lab has ever seen. Reversed, an assertion that merely found
 	// the word "leftover" would pass against a panel that printed it always.
-	if err := chromedp.Do(ctx,
-		chromedp.Click(`//button[contains(text(), "check what is running")]`)); err != nil {
-		t.Fatalf("pressing the button: %v\n%s", err, console.text())
-	}
 	clean := waitForBilling(t, ctx, func(s map[string]string) bool {
 		return s["verdict"] != ""
-	}, 60*time.Second, "answered at all")
+	}, 60*time.Second, "answered on arrival with nobody pressing anything")
 	if !strings.Contains(clean["verdict"], "nothing is running") {
 		t.Errorf("a clean daemon did not read as clean: %q", clean["verdict"])
 	}
@@ -3547,6 +3575,37 @@ func TestServe_UIReportsWhatIsBilling(t *testing.T) {
 		if !strings.Contains(found["rows"], want) {
 			t.Errorf("the rows do not mention %q: %q", want, found["rows"])
 		}
+	}
+	// NEITHER OF THESE TWO HAS A CREATION TIME, and a browser is where that
+	// is worth checking. A store and a leftover are the two kinds ember holds
+	// no record for -- node.Store carries no creation time at all and
+	// node.Leftover carries only the run's deadline -- so the cell is blank,
+	// and it is blank beside a cost that is blank for the same reason. The
+	// page appends the zone to every time it prints and Go's zero time
+	// formats as `0001-01-01T00:00:00Z`, so those two strings are what a
+	// projection that started answering here anyway would put on screen.
+	for _, never := range []string{" UTC", "0001-01-01"} {
+		if strings.Contains(found["rows"], never) {
+			t.Errorf("a store or a leftover dated itself with %q, and ember has no "+
+				"record of either: %q", never, found["rows"])
+		}
+	}
+
+	// EVERY COLUMN IS NAMED. Four of these cells say what they are -- a kind
+	// is a word, an id is plainly an id, a reason is a sentence and a cost
+	// carries its own `$` -- and the timestamp is the one that does not: bare,
+	// it reads equally as created, started, last seen, destroyed or deadline,
+	// and on this panel those are not close together.
+	if got := found["header"]; got != "kind // what // why // recorded // cost" {
+		t.Errorf("the findings table's columns are named %q", got)
+	}
+	// `recorded` AND NOT `created`, which is the distinction the column is
+	// for: ember writes the intent record BEFORE the create call, so for an
+	// orphan -- a record that never got an id -- `created` would name a
+	// machine that in the common case was refused and never existed.
+	if strings.Contains(found["header"], "created") {
+		t.Error("the time column is headed `created`; it is when ember RECORDED the " +
+			"intent, which is before any machine and often before none at all")
 	}
 	// The verdict counts the leftover and not the store, which is
 	// `reconcile.Kind.NeedsAttention`'s own decision carried across the wire

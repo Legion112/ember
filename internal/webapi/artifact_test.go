@@ -160,21 +160,31 @@ func TestArtifact_AnUntypedOneIsNamedAndNotRenderedAsAnImage(t *testing.T) {
 	}
 }
 
-// TestConfig_PublishesAtLeastOneKind is the invariant the PAGE's "has the
-// config answered yet" discriminator rests on.
+// TestConfig_PublishesOnlyTheKindsThisServeCanRun.
 //
-// `model::Config::composing` reads an empty `kinds` as "ember has not said
-// yet" and NOT as "this process runs nothing" -- the `caps` distinction one
-// field over, where "nothing has asked a server" and "the server reported no
-// samplers" are different answers. That reading is only sound while no real
-// response can carry an empty list, which `genstore.Kinds()` guarantees by
-// construction and nothing asserted. A projection that one day filtered the
-// kinds by what this config can run -- a plausible change, and the page has no
-// way to see it coming -- would make a configuration with no `sd:` and no
-// `tts:` publish `[]`, and the page would sit saying it was still waiting.
-func TestConfig_PublishesAtLeastOneKind(t *testing.T) {
-	// The bare harness: no voices, which is the configuration most likely to
-	// tempt somebody into filtering this list.
+// THE DEFECT AN OPERATOR FOUND BY USING IT: the kind selector offered `tts` on
+// a server publishing no voices, and choosing it answered "this ember serve
+// publishes no voices, so it serves no speech. Add a tts.voices list to
+// ember.yaml and restart it." A choice offered in order to be refused is worse
+// than no choice at all -- the refusal arrives after the deciding is done.
+//
+// THIS TEST WAS ITS OWN OPPOSITE, and the swap is the point. It asserted that
+// the list could never be empty, because `model::Config::composing` read an
+// empty `kinds` as "ember has not said yet" and a narrowed list would have made
+// a configuration that runs neither kind publish `[]` and the page wait for
+// ever. That reading moved to `providers` -- which `Config::unrunnable` was
+// keyed on from the start, for this reason -- so `[]` is now an answer and the
+// floor is no longer needed. What replaces it is the assertion below, which is
+// the regression test for the operator's own report: the bare harness has no
+// voices, so `tts` must be absent rather than offered-and-refused.
+//
+// The precondition the old test was really standing in for survives elsewhere
+// and is not this route's to keep: `runServe` refuses to start a configuration
+// with no `sd.serve` and no `tts.voices`, naming both keys, so a RUNNING ember
+// serve always has at least one kind to publish.
+func TestConfig_PublishesOnlyTheKindsThisServeCanRun(t *testing.T) {
+	// The bare harness: an sd serve argv and no voices, which is the shape the
+	// operator was looking at.
 	h := newHarness(t)
 	srv := live(t, h)
 
@@ -183,13 +193,43 @@ func TestConfig_PublishesAtLeastOneKind(t *testing.T) {
 		t.Fatalf("status = %d: %s", res.Status, res.Body)
 	}
 	var v struct {
-		Kinds []string `json:"kinds"`
+		Kinds     []string `json:"kinds"`
+		Unoffered []string `json:"unoffered"`
+		Voices    []struct {
+			ID string `json:"id"`
+		} `json:"voices"`
 	}
 	if err := json.Unmarshal(res.Body, &v); err != nil {
 		t.Fatalf("decode: %v\n%s", err, res.Body)
 	}
-	if len(v.Kinds) == 0 {
-		t.Fatalf("kinds is empty, which the page reads as \"/api/config has not answered\" "+
-			"-- so it would wait for ever:\n%s", res.Body)
+	// The premise of the case, asserted rather than assumed: a harness that
+	// grew a voices list would make the next line pass for the wrong reason.
+	if len(v.Voices) != 0 {
+		t.Fatalf("this harness publishes %d voice(s), so it is no longer the "+
+			"configuration this test is about", len(v.Voices))
+	}
+	for _, k := range v.Kinds {
+		if k == "tts" {
+			t.Errorf("a server publishing no voices offers `tts`, which it then refuses "+
+				"once an operator picks it: kinds=%v", v.Kinds)
+		}
+	}
+	// AND IT STILL OFFERS THE ONE IT CAN RUN. Narrowing a list is only half
+	// the change; narrowing it to nothing would be a panel with no selector
+	// and no way to queue anything, which the page reads as a server that runs
+	// nothing.
+	if len(v.Kinds) != 1 || v.Kinds[0] != "sd" {
+		t.Errorf("kinds = %v, want exactly [sd] for a config with a serve argv and no voices",
+			v.Kinds)
+	}
+	// AND IT SAYS WHAT IT IS NOT OFFERING, which is the half that narrowing
+	// the list took away. With one kind there is no selector -- one option is
+	// no choice -- so a panel showing image controls and nothing else is
+	// indistinguishable from an ember that only generates images. An operator
+	// looking at exactly that asked whether speech had been removed from the
+	// program; it had not, and the page had no way to tell them so.
+	if len(v.Unoffered) != 1 || v.Unoffered[0] != "tts" {
+		t.Errorf("unoffered = %v, want [tts]: the page cannot say what this serve is not "+
+			"doing, so a narrowed selector reads as a build with one workload", v.Unoffered)
 	}
 }

@@ -132,6 +132,60 @@ func TestScan_AnIntentWithNoIDIsAnOrphan(t *testing.T) {
 	}
 }
 
+// TestScan_AnOrphanCarriesWhatTheProviderSaid.
+//
+// THE DEFECT: the create error was written to the record and read by nothing.
+// provision.go writes it on a failed create; the destroy-failure branch of
+// this function has always put its own error in its reason, and this branch --
+// sixteen lines above it, on the same field -- did not. So a row said "ask the
+// provider whether a node labelled ember-… exists" over a record holding that
+// provider's own `status 422: additional properties 'allowedCudaVersions' not
+// allowed`, which is not only the answer but names a bug this repository has
+// since fixed. Three such rows sat red for eleven days.
+func TestScan_AnOrphanCarriesWhatTheProviderSaid(t *testing.T) {
+	id := node.NewRunID()
+	rec := record(id, "", statestore.PhaseIntent, now.Add(time.Hour))
+	rec.LastErr = "create runpod pod: POST https://api.runpod.io/v2/pods: status 422 " +
+		"Unprocessable Entity: additional properties 'allowedCudaVersions' not allowed"
+
+	fs := Scan(nil, nil, []statestore.Record{rec}, now)
+	if len(fs) != 1 || fs[0].Kind != KindOrphan {
+		t.Fatalf("got %v", fs)
+	}
+	if !strings.Contains(fs[0].Reason, rec.LastErr) {
+		t.Errorf("the reason does not carry what the provider said: %q", fs[0].Reason)
+	}
+	// AND IT STILL SAYS TO GO AND ASK, which is deliberate rather than
+	// leftover: an error returned AFTER the machine existed reads identically
+	// from here, so the error narrows the question and does not close it.
+	if !strings.Contains(fs[0].Reason, rec.Label) {
+		t.Errorf("an error replaced the label to search for rather than joining it: %q",
+			fs[0].Reason)
+	}
+}
+
+// TestScan_AnOrphanWithNothingSaidInventsNothing.
+//
+// A record can reach this branch with no error at all -- killed between the
+// record and the create call, so nothing ever answered. The reason must then
+// read exactly as it did before this field was consulted, and in particular
+// must not offer an empty quotation: "the create failed with: " followed by
+// nothing is a row claiming ember has evidence it does not have.
+func TestScan_AnOrphanWithNothingSaidInventsNothing(t *testing.T) {
+	rec := record(node.NewRunID(), "", statestore.PhaseIntent, now.Add(time.Hour))
+
+	fs := Scan(nil, nil, []statestore.Record{rec}, now)
+	if len(fs) != 1 || fs[0].Kind != KindOrphan {
+		t.Fatalf("got %v", fs)
+	}
+	if strings.Contains(fs[0].Reason, "the create failed with") {
+		t.Errorf("the reason quotes an error nobody returned: %q", fs[0].Reason)
+	}
+	if !strings.Contains(fs[0].Reason, rec.Label) {
+		t.Errorf("the reason should carry the label to search for: %q", fs[0].Reason)
+	}
+}
+
 func TestScan_ADestroyedIntentIsNotAnOrphan(t *testing.T) {
 	rec := record(node.NewRunID(), "", statestore.PhaseDestroyed, now)
 	if fs := Scan(nil, nil, []statestore.Record{rec}, now); len(fs) != 0 {

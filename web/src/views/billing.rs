@@ -39,22 +39,38 @@ use crate::model::Nodes;
 /// memoised, and the fix was not to cache, so the only remaining lever is how
 /// often it is asked.
 ///
-/// NOTHING IS RENDERED UNTIL SOMEBODY ASKS, and that is the sharpest thing
-/// here. `Nodes::default()` has three empty slices, so its `verdict` is
-/// "nothing is running and nothing was left behind" -- a clean bill of health
-/// over a scan that never happened, which is the one answer this panel must
-/// not give wrongly. The signal is an `Option`: `None` is "not asked" and is
-/// spelled differently from "asked and found nothing", the same distinction
-/// `AssetCheck.Asked` and `node.Exposure`'s second result exist for.
+/// NOTHING IS RENDERED UNTIL THE ANSWER ARRIVES. `Nodes::default()` has three
+/// empty slices, so its `verdict` is "nothing is running and nothing was left
+/// behind" -- a clean bill of health over a scan that never happened, which is
+/// the one answer this panel must not give wrongly. The signal is an `Option`
+/// so that "no answer yet" is spelled differently from "asked and found
+/// nothing", the same distinction `AssetCheck.Asked` and `node.Exposure`'s
+/// second result exist for.
+///
+/// IT ASKS WHEN THE PAGE OPENS, which it did not, and the reason it did not
+/// was an argument about a different thing. "A button and never a poll" is
+/// sound and is kept: a two-second timer would be an API call per second per
+/// open tab, for ever, whether or not anybody is looking. Answering ONCE when
+/// an operator navigates here is not that. It is one sweep per visit -- which
+/// is precisely what the operator did by hand, immediately, every single time,
+/// because a page whose whole subject is what is billing has nothing else on
+/// it to read. A gate everybody walks through on arrival is not a gate, it is
+/// a step, and the thing it was costing was the panel's own purpose: a rented
+/// card leaking at $2/hour was invisible here until somebody thought to ask.
+///
+/// The `Option` is still load-bearing and is why this is safe: during the
+/// moment before the first answer lands, `None` renders nothing rather than
+/// `Nodes::default()`'s reassuring sentence. What changed is that an operator
+/// can no longer SIT in that state and read it as an answer.
 #[component]
 pub fn Billing() -> impl IntoView {
-    // None until the first press. See the paragraph above: an empty answer and
-    // an answer nobody asked for must not render the same.
+    // None until the first answer. See the paragraph above: an empty answer
+    // and no answer at all must not render the same.
     let sweep = RwSignal::new(Option::<Nodes>::None);
     let error = RwSignal::new(String::new());
     let asking = RwSignal::new(false);
 
-    let ask = move |_| {
+    let fetch = move || {
         // The previous answer is left on screen while the next is fetched,
         // and the error is cleared: a stale listing is better than a blank
         // panel, and a stale error beside a fresh listing would be a refusal
@@ -74,6 +90,15 @@ pub fn Billing() -> impl IntoView {
         });
     };
 
+    // ON MOUNT, AND IN THE COMPONENT BODY RATHER THAN IN AN EFFECT. This page
+    // is a route, so it is built once per navigation to it and this runs once
+    // per visit -- which is the budget being spent, stated plainly. An effect
+    // would re-run on every signal it read and is the shape a timer grows out
+    // of by accident.
+    fetch();
+
+    let ask = move |_| fetch();
+
     view! {
         <section class="panel">
             <h2>"what is billing"</h2>
@@ -81,8 +106,8 @@ pub fn Billing() -> impl IntoView {
                 "Asks every configured provider what is wearing ember's label, and
                  prices the stores. This is what "
                 <code>"ember ls"</code>
-                " prints; it is not asked on a timer, because it reaches the
-                 providers."
+                " prints; asked once when this page opens and again whenever you
+                 press, and never on a timer, because it reaches the providers."
             </p>
 
             <button on:click=ask disabled=move || asking.get()>
@@ -126,9 +151,32 @@ pub fn Billing() -> impl IntoView {
                             </p>
                         </Show>
                         {fleet_table(n.workers.clone())}
-                        {findings_table(n.findings.clone())}
-                        {findings_table(n.leftovers.clone())}
-                        {findings_table(n.stores.clone())}
+                        // ONE TABLE OVER THREE SLICES, and not three tables.
+                        //
+                        // FOUND BY THE REINSTATEMENT PASS'S NEGATIVE CONTROL,
+                        // which is the only thing that could have found it: the
+                        // three defects on either side of it were red as
+                        // wanted, and the case that changed a comment and
+                        // nothing else came back red too, reading `kind // what
+                        // // why // recorded // cost` twice over. `findings_table`
+                        // is called once per slice, so the moment it grew a
+                        // header the panel grew one header per slice -- stacked,
+                        // identical, above groups whose columns are the same
+                        // columns. A daemon holding a leftover and a store
+                        // printed it three times; the orphans-only screenshot
+                        // that the header was built against showed one table
+                        // and looked right.
+                        //
+                        // `<table>` takes several `<tbody>` elements by spec and
+                        // this is what they are for -- queue.rs says the same
+                        // sentence over the same problem, and its lab reads
+                        // through the grouping unchanged. The slices stay apart,
+                        // which is the thing worth keeping: a store is not a
+                        // finding and the panel must never merge them into one
+                        // count.
+                        {findings_table([
+                            n.findings.clone(), n.leftovers.clone(), n.stores.clone(),
+                        ])}
                         <Show when=move || charged>
                             <p class="hint">
                                 "storage: " <span class="price">{total.clone()}</span>
@@ -142,7 +190,15 @@ pub fn Billing() -> impl IntoView {
     }
 }
 
-/// findings_table lays out one of the three slices.
+/// findings_table lays out the sweep's three slices as one table.
+///
+/// ONE TABLE AND ONE HEADER OVER THREE `<tbody>`, because the columns are the
+/// same columns: a header per slice is the same five words printed up to three
+/// times down one panel. The slices stay separate elements rather than one
+/// concatenated list, which is the part that matters -- a store is not a
+/// finding, `reconcile.Kind.NeedsAttention` counts them differently, and a
+/// flattening here would be the place someone later re-derives a count from
+/// the DOM and gets the store wrong.
 ///
 /// NO KEY AND NO `<For>`, which is the rule the offers panel was repaired to
 /// and the queue row after it: a key is stable identity, and there is none to
@@ -154,12 +210,50 @@ pub fn Billing() -> impl IntoView {
 /// own names -- expired, orphan, untracked, destroy-failed, unreachable,
 /// leftover, store -- are the words `ember ls` prints and an operator
 /// comparing the two should read the same vocabulary in each.
-fn findings_table(fs: Vec<crate::model::Finding>) -> AnyView {
-    if fs.is_empty() {
+fn findings_table(slices: [Vec<crate::model::Finding>; 3]) -> AnyView {
+    // NOTHING AT ALL WHEN EVERY SLICE IS EMPTY, and not an empty table. A
+    // header with no rows under it says ember looked and is still looking;
+    // the panel's rule is that an empty answer and an answer nobody asked for
+    // must not render the same, and a bare header would be a third thing that
+    // looks like both.
+    if slices.iter().all(|s| s.is_empty()) {
         return ().into_any();
     }
     view! {
         <table class="ledger">
+            // A HEADER BECAUSE ONE COLUMN CANNOT NAME ITSELF, which is what
+            // the creation time changed about this table. `orphan` is a word,
+            // `runpod/a646…` is plainly an id, the reason is a sentence and
+            // `$16.0088` is labelled by its own `$` -- four columns that
+            // needed nothing. `2026-10-30 09:29 UTC` is none of those: it
+            // reads equally as created, started, last seen, destroyed or
+            // deadline, and on a panel about leaking money those are not
+            // close together. Under `deadline` that row expired eleven days
+            // ago; under `recorded` it has been accruing for eleven days.
+            //
+            // `recorded` AND NOT `created`, because the instant is when ember
+            // wrote the intent record -- before the create call, by design --
+            // and `created` would claim a machine that, for an orphan,
+            // frequently never existed.
+            <thead>
+                <tr>
+                    <th>"kind"</th>
+                    <th>"what"</th>
+                    <th>"why"</th>
+                    <th>"recorded"</th>
+                    <th class="price">"cost"</th>
+                </tr>
+            </thead>
+            // ONE `<tbody>` PER SLICE, and an empty slice contributes none
+            // rather than an empty one. The lab reads `tbody tr`, so the
+            // grouping is invisible to it -- which is the point: this is how
+            // the rows stay in their three sets without the page acquiring a
+            // fourth thing that can disagree about which set a row is in.
+            {slices.into_iter().map(|fs| {
+                if fs.is_empty() {
+                    return ().into_any();
+                }
+                view! {
             <tbody>
                 {fs.into_iter().map(|f| {
                     // The accrued cost where ember knows enough to say it.
@@ -172,16 +266,28 @@ fn findings_table(fs: Vec<crate::model::Finding>) -> AnyView {
                     // skimmed "$2.80" off a store row and off an orphan row
                     // would have read two very different numbers the same way.
                     let monthly = f.monthly.as_ref().map(|m| format!("{}/month", m.text()));
+                    // IMMEDIATELY BEFORE THE MONEY, because it is what the
+                    // money is measured from: Go accrues a finding's cost as
+                    // `Estimate(price, record.Created, now)`, so these two
+                    // cells are one claim split in half and a column between
+                    // them would be a reader having to hold the first in mind
+                    // to read the second. Empty where ember has no record,
+                    // which is the same absence that leaves the cost blank --
+                    // an untracked node is untracked in both columns at once.
+                    let when = f.created_text();
                     view! {
                         <tr>
                             <td class="status">{f.kind.clone()}</td>
                             <td><code>{f.names()}</code></td>
                             <td>{f.reason.clone()}</td>
+                            <td class="when">{when}</td>
                             <td class="price">{spent.or(monthly).unwrap_or_default()}</td>
                         </tr>
                     }
                 }).collect::<Vec<_>>()}
             </tbody>
+                }.into_any()
+            }).collect::<Vec<_>>()}
         </table>
     }
     .into_any()
@@ -217,6 +323,23 @@ fn fleet_table(ws: Vec<crate::model::Worker>) -> AnyView {
              not returned is here with no node, because the money is committed from the plan."
         </p>
         <table class="ledger fleet">
+            // SEVEN COLUMNS, and three of them are bare durations or a word
+            // out of `queue.WorkerState` -- `starting`, `2s`, `30m left` --
+            // so this table had the findings table's problem over again and
+            // worse. `heartbeat` covers both of what that cell can hold: the
+            // age of the last beat, or, when the row is wrong, the sentence
+            // saying what is wrong with it.
+            <thead>
+                <tr>
+                    <th>"state"</th>
+                    <th>"node"</th>
+                    <th>"card \u{b7} image"</th>
+                    <th>"generating"</th>
+                    <th>"heartbeat"</th>
+                    <th>"deadline"</th>
+                    <th class="price">"cost"</th>
+                </tr>
+            </thead>
             <tbody>
                 {ws.into_iter().map(|w| {
                     // READ HERE, INSIDE THE CLOSURE THAT BUILDS THIS ROW, and
