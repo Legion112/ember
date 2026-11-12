@@ -260,6 +260,32 @@ pub struct Workload {
     pub preview: String,
     #[serde(default)]
     pub preview_interval: i32,
+
+    /// The providers this workload may be rented on, EMPTY MEANING EVERY
+    /// PROVIDER.
+    ///
+    /// THE SAME SENTENCE THE CONFIG KEY CARRIES, which is why it is empty
+    /// rather than an `Option<Vec<_>>`: `providers:` on a declared entry is
+    /// an allow-list whose absence means every provider, `workloadView`
+    /// publishes the operator's own list unchanged, and this reads it the same
+    /// way -- one meaning across the file, the wire and the page instead of
+    /// three.
+    ///
+    /// WHAT IT IS FOR: an entry whose image is a tag in the server's own
+    /// Docker daemon (`ember:sd`) cannot run on a rented card, where Docker
+    /// resolves the name against Docker Hub. The page offered `runpod (paid)`
+    /// on that entry's tab under `--allow-paid` and the refusal arrived after
+    /// the pod was billing.
+    ///
+    /// EMPTY IS ALSO WHAT AN OLDER SERVER SENDS, and that reading is
+    /// deliberate: a server that publishes no such field offers every
+    /// provider here, which is exactly the behaviour before the key existed.
+    /// The gate that spends no money is `UnservableOn` at
+    /// `POST /api/requests`; this is the half that stops the operator being
+    /// offered the button, which is containment twice by two mechanisms --
+    /// the same division `composing`'s speech refusal records below.
+    #[serde(default, deserialize_with = "nullable")]
+    pub providers: Vec<String>,
 }
 
 impl Workload {
@@ -275,6 +301,16 @@ impl Workload {
         } else {
             &self.label
         }
+    }
+
+    /// Whether this workload may be rented on the named provider.
+    ///
+    /// AN EMPTY LIST IS EVERY PROVIDER, which is the field's own contract --
+    /// see `providers`. The server answers the same question with
+    /// `config.Workload.AllowsProvider`, and this one decides only which
+    /// options the select offers: the money is stopped by the server's.
+    pub fn allows(&self, provider: &str) -> bool {
+        self.providers.is_empty() || self.providers.iter().any(|p| p == provider)
     }
 
     /// Which set of controls this workload shows, and the refusal where it
@@ -406,12 +442,84 @@ pub struct Config {
     pub caps: Option<Caps>,
 }
 
+/// One entry of the provider select: what to post, what to print beside it,
+/// and whether it may be chosen.
+///
+/// A TYPE AND A METHOD RATHER THAN A CHAIN OF `if` INSIDE THE VIEW, which is
+/// this page's settled pattern -- `Rows::note`, `Request::reason`,
+/// `Listing::answer`, `Stream::note`, `Progress::rental` -- and the reason
+/// #183 asks for it: the precedence below is a decision, and a decision
+/// written as nested `if` inside a `view!` macro can be checked only by
+/// driving a browser.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderOption {
+    /// What the request's `provider` field carries.
+    pub name: String,
+
+    /// What is printed after the name, including the leading space. Empty for
+    /// no note at all, which no current arm produces.
+    pub note: &'static str,
+
+    /// Whether the option may be chosen. A disabled option is still SHOWN,
+    /// because an operator who cannot find RunPod in the list reads it as
+    /// ember not knowing about RunPod -- where a greyed-out one with
+    /// `(needs --allow-paid)` beside it says what to do.
+    pub usable: bool,
+}
+
 impl Config {
+    /// The provider select's options for one workload, in the order the
+    /// server published them.
+    ///
+    /// THE PRECEDENCE IS THE POINT, and it is workload before money. A
+    /// provider that this entry does not run on is refused whatever
+    /// `--allow-paid` says, so saying `(needs --allow-paid)` about it would
+    /// send the operator to restart their server for nothing: `ember:sd` is a
+    /// tag in the server's own Docker daemon and no flag makes a rented node
+    /// able to pull it. The other direction -- `(this workload does not run
+    /// there)` on a free provider the entry excludes -- is the same sentence
+    /// and equally true.
+    ///
+    /// EVERY PROVIDER IS STILL IN THE LIST. Dropping the ones this workload
+    /// excludes was the first shape of this and is worse: a provider that is
+    /// absent reads as a provider ember does not know about, and the operator
+    /// whose `providers: [local]` is the reason has no way to see that from
+    /// the page. `disabled` plus a reason is what the `--allow-paid` arm
+    /// already does.
+    pub fn provider_options(&self, wl: &Workload) -> Vec<ProviderOption> {
+        self.providers
+            .iter()
+            .map(|p| {
+                let (note, usable) = if !wl.allows(&p.name) {
+                    (" (this workload does not run there)", false)
+                } else if p.free {
+                    (" (free)", true)
+                } else if self.can_rent(&p.name) {
+                    (" (paid)", true)
+                } else {
+                    (" (needs --allow-paid)", false)
+                };
+                ProviderOption {
+                    name: p.name.clone(),
+                    note,
+                    usable,
+                }
+            })
+            .collect()
+    }
+
     /// Whether a provider can be rented from at all.
     ///
     /// A UI that offered a paid card on a server started without
     /// `--allow-paid` would be offering a button that cannot work, and the
     /// refusal would arrive after the operator chose.
+    ///
+    /// AT ALL, AND NOT FOR A GIVEN WORKLOAD, which is the whole of what it
+    /// was missing: this is the money question, and `providers:` on a
+    /// declared entry is a second and independent one. Asking only this is
+    /// how the page came to offer `runpod (paid)` for an image that exists in
+    /// no registry. `provider_options` is both, in the order that produces the
+    /// sentence worth printing.
     pub fn can_rent(&self, name: &str) -> bool {
         self.providers
             .iter()
@@ -3570,6 +3678,83 @@ mod tests {
             ..cfg.clone()
         };
         assert!(paid.can_rent("runpod"));
+    }
+
+    /// THE DEFECT THIS IS THE GUARD FOR: `ember serve --allow-paid` offered
+    /// `runpod (paid)` on the `sd15 (this machine)` tab and accepted it, for
+    /// an entry whose image is `ember:sd` -- a tag in that machine's own
+    /// Docker daemon, which a rented node resolves against Docker Hub.
+    /// Nothing refused the combination until a pod existed and was billing.
+    ///
+    /// ON THE METHOD AND NOT IN THE VIEW, which is what makes a `cargo test`
+    /// able to reach it at all: a precedence written as a chain of `if`
+    /// inside a `view!` macro can be checked only by driving a browser, and
+    /// this page has four keyed-list defects found by reading rather than by
+    /// a test.
+    #[test]
+    fn a_workloads_providers_decide_which_options_it_offers() {
+        let cfg = Config {
+            providers: vec![
+                Provider {
+                    name: "local".into(),
+                    free: true,
+                    stores: true,
+                },
+                Provider {
+                    name: "runpod".into(),
+                    free: false,
+                    stores: true,
+                },
+            ],
+            allow_paid: true,
+            ..Default::default()
+        };
+
+        // An entry that names no providers runs on every one of them, which
+        // is what keeps every committed configuration unchanged.
+        let anywhere = Workload::default();
+        let opts = cfg.provider_options(&anywhere);
+        assert_eq!(opts.len(), 2);
+        assert!(opts.iter().all(|o| o.usable));
+        assert_eq!(opts[1].note, " (paid)");
+
+        // And `providers: [local]` disables the paid one even with
+        // --allow-paid, which is the arm the page was missing.
+        let here = Workload {
+            providers: vec!["local".into()],
+            ..Default::default()
+        };
+        let opts = cfg.provider_options(&here);
+        assert_eq!(opts.len(), 2, "a refused provider is shown and not dropped");
+        assert_eq!(opts[0].name, "local");
+        assert!(opts[0].usable);
+        assert_eq!(opts[1].name, "runpod");
+        assert!(
+            !opts[1].usable,
+            "a workload that does not run on runpod still offered it: {:?}",
+            opts[1]
+        );
+
+        // THE PRECEDENCE, which is the half a count cannot check: the note
+        // says the workload and not the flag, because no flag makes a rented
+        // node able to pull an image that exists in no registry.
+        let unpaid = Config {
+            allow_paid: false,
+            ..cfg.clone()
+        };
+        let opts = unpaid.provider_options(&here);
+        assert_eq!(opts[1].note, " (this workload does not run there)");
+
+        // And a free provider the entry excludes gets the same sentence
+        // rather than `(free)`.
+        let rented_only = Workload {
+            providers: vec!["runpod".into()],
+            ..Default::default()
+        };
+        let opts = cfg.provider_options(&rented_only);
+        assert!(!opts[0].usable);
+        assert_eq!(opts[0].note, " (this workload does not run there)");
+        assert!(opts[1].usable);
     }
 
     #[test]

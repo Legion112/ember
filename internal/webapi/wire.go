@@ -173,6 +173,29 @@ type workloadView struct {
 	// control" because it draws no such control.
 	Preview         string `json:"preview"`
 	PreviewInterval int    `json:"preview_interval"`
+
+	// Providers is this entry's `providers:` allow-list, EMPTY MEANING EVERY
+	// PROVIDER -- the config key's own contract, carried unchanged so that
+	// the file, the wire and the page hold one sentence rather than three.
+	//
+	// IT IS THE OPERATOR'S LIST AND NOT THE INTERSECTION WITH THE REGISTRY,
+	// which would be two filters for one answer: the page already draws only
+	// the providers this list of `providers` holds, so narrowing here as well
+	// would mean an entry whose allowed providers all went missing published
+	// an empty list that means "every provider". The entry is left out
+	// entirely in that case -- see viewConfig.
+	//
+	// PUBLISHED AT ALL BECAUSE A REFUSAL ON POST IS TOO LATE. This is the
+	// field that lets the page disable `runpod (paid)` on an entry whose
+	// image is a tag in this machine's own Docker daemon; without it the page
+	// discovers the allow-list from a 409, which is this file's own
+	// "offering a button that fails after a card is rented" one axis over.
+	// The projection publishes a list of provider NAMES and still no image:
+	// where it can run is a fact a browser needs, and what runs there is not.
+	//
+	// Never null, for the reason ws.go gives: a client whose field is a list
+	// gets a type error from `null` and drops the whole response.
+	Providers []string `json:"providers"`
 }
 
 // voiceView is one catalogue entry as a UI reads it.
@@ -284,6 +307,22 @@ type cardView struct {
 	VRAMGiB int `json:"vram_gib,omitempty"`
 }
 
+// anyProviderAllows reports whether any provider this process can reach may
+// rent wl.
+//
+// TRUE FOR AN ENTRY THAT NAMES NO PROVIDERS, through AllowsProvider: absent
+// means every provider, and the registry always holds the local one -- so the
+// answer for every committed configuration is the one it was before the key
+// existed.
+func anyProviderAllows(reg *provider.Registry, wl config.Workload) bool {
+	for _, p := range reg.All() {
+		if wl.AllowsProvider(p.Name()) {
+			return true
+		}
+	}
+	return false
+}
+
 func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps *sdserver.Capabilities,
 	workloads []config.Workload, cards []app.Card, cardErrs map[node.ProviderID]string,
 ) configView {
@@ -326,11 +365,27 @@ func viewConfig(cfg config.Config, reg *provider.Registry, allowPaid bool, caps 
 		if wl.Unservable() != "" {
 			continue
 		}
+		// AND AN ENTRY NO REACHABLE PROVIDER MAY RENT IS LEFT OUT TOO, which
+		// is the same argument on the key that made "can this be served" two
+		// questions. An entry with `providers: [runpod]` on a process that
+		// found no RunPod credential has a tab whose every provider option is
+		// disabled and whose every POST is a 409 -- a button that fails after
+		// nothing, which is worse than the tab not being there. The registry
+		// is what "reachable" means: a provider with no credential is
+		// deliberately absent from it, so this is the same fact `Providers`
+		// below is published against.
+		if !anyProviderAllows(reg, wl) {
+			continue
+		}
 		e := workloadView{
 			ID: wl.ID, Label: wl.LabelOrID(), Driver: wl.Driver,
 			Voices:          []voiceView{},
 			Preview:         wl.SD.Preview,
 			PreviewInterval: wl.SD.PreviewInterval,
+			// Empty and never null, for the reason the lists above are. Empty
+			// is also the key's own "every provider", which is why it needs
+			// no second spelling here.
+			Providers: append([]string{}, wl.Providers...),
 		}
 		// The error is dropped and the voices go empty, which is the one
 		// place this projection may not refuse: a catalogue that will not

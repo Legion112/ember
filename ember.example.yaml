@@ -81,6 +81,16 @@ workloads:
     driver: sd
     image: ember:sd
 
+    # THE IMAGE IS WHY, and the label is not: `ember:sd` is a tag in THIS
+    # machine's Docker daemon and in no registry, so a rented node would
+    # resolve it against Docker Hub and fail after the pod was created and
+    # billing. `(this machine)` above says the same thing to a human and
+    # nothing to ember.
+    #
+    # Absent would mean every provider, which is what the entry below it
+    # relies on: `flux2` names pinned ghcr.io digests that any node can pull.
+    providers: [local]
+
     # No gpu_probe either. The baked image is the CPU build, so asking
     # nvidia-smi which architecture it is would fail a card that was never
     # claimed -- `make workload-sd MODEL=/path/to/v1-5-pruned_bf16.gguf` builds
@@ -142,6 +152,10 @@ workloads:
     # capability from nvidia-smi and builds for exactly that under the ordinary
     # per-architecture tag -- so change the number if this machine is not sm_75.
     image: ember:sd-cuda-sm75
+
+    # Local for the reason `free` is, twice over: the tag exists only in this
+    # machine's daemon, and it is built for THIS card's compute capability.
+    providers: [local]
 
     ttl: 4h
 
