@@ -3,15 +3,24 @@
 package integration
 
 import (
+	"bytes"
+	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/volume"
 
+	"github.com/Legion112/ember/internal/app"
+	"github.com/Legion112/ember/internal/config"
+	"github.com/Legion112/ember/internal/node"
+	"github.com/Legion112/ember/internal/provider/local"
 	"github.com/Legion112/ember/test/integration/harness"
+	"github.com/Legion112/ember/test/integration/runpodfake"
 )
 
 // TestStore_LsReportsAStandingChargeWithNoNodeRunning.
@@ -176,32 +185,195 @@ func TestStore_CreateMountRunDestroyRemove(t *testing.T) {
 	}
 }
 
-// TestStore_UpRefusesAStoreThatDoesNotExist.
+// missingStoreYAML names a store no lab seeds, which is the input all three
+// labs below share and the only thing they share: the same configuration
+// is created, refused or refused again depending on the provider it is
+// pointed at and the permission the caller granted.
+const missingStoreYAML = "\n  name: notyet\n  size_gib: 40\n  region: EU-RO-1"
+
+// TestStore_UpMakesAStoreNothingBillsFor.
 //
-// Creating it here would mean a config that mentions a name brings a standing
-// monthly charge into existence. The refusal has to come before anything is
-// rented, too: a run that discovers this after creating a node is already
-// paying for the discovery.
-func TestStore_UpRefusesAStoreThatDoesNotExist(t *testing.T) {
+// The lab that stood here asserted the opposite sentence, and it was right
+// until `AttachStore` split the money argument in two: a store that BILLS is
+// still a refusal, and a store NOTHING BILLS FOR is made. This is the free
+// half, and it is the one an operator actually met -- the refusal's own
+// reason was "a store bills by the month and nothing destroys it on a
+// deadline", which is true of a RunPod network volume and false of a Docker
+// named volume, so the reason given was about a different provider and what
+// remained was friction protecting them from a charge that does not exist.
+// The paid half is the lab two below, which is where that sentence is true.
+//
+// THROUGH THE BINARY, which is what this adds to `internal/app`'s own test of
+// the same arm. There the assertion is the arguments AttachStore handed a
+// hand-built fake; here it is what landed on a Docker daemon -- the volume's
+// name, and the operator's own size and site on its labels. A provider that
+// dropped either between `StoreCreate` and `VolumeCreate` passes there and
+// fails here.
+func TestStore_UpMakesAStoreNothingBillsFor(t *testing.T) {
 	l := harness.New(t)
 	ctx := t.Context()
 
-	l.WriteConfig(map[string]string{
-		"store": "\n  name: absent\n  size_gib: 40\n  region: EU-RO-1",
-	})
+	// Owned before the run rather than removed after it. The volume is one
+	// this lab means to exist, and the harness's surviving-volume check is
+	// there to catch a leak -- so the lab cleans up after itself instead of
+	// the check being taught to tolerate a volume. Registered first because a
+	// lab that fails half-way has still made it.
+	l.OwnStore("notyet")
+	l.WriteConfig(map[string]string{"store": missingStoreYAML})
 
 	out := l.Run(ctx, "up")
+	if out.ExitCode != 0 {
+		t.Fatalf("up refused a store nothing bills for, exit %d: %s", out.ExitCode, out.Combined())
+	}
+
+	vols := l.Volumes(ctx)
+	if len(vols) != 1 {
+		t.Fatalf("after the run the store is %v, want the one the config named", names(vols))
+	}
+	v := vols[0]
+	if v.Name != "ember-store-notyet" {
+		t.Errorf("created volume is %q, want ember-store-notyet -- a store ember cannot recognise is "+
+			"one `ember ls` will not report and `ember store rm` will not remove", v.Name)
+	}
+
+	// THE SIZE AND THE SITE ARE STILL THE OPERATOR'S. Read off the labels
+	// because a Docker volume has neither: the local provider records what it
+	// was asked for so `ember ls` can report it, and a create that invented
+	// its own shape would be ember deciding how big somebody else's store is.
+	if got := v.Labels[local.LabelSize]; got != "40" {
+		t.Errorf("created store records size %q, want the file's 40", got)
+	}
+	if got := v.Labels[local.LabelRegion]; got != "EU-RO-1" {
+		t.Errorf("created store records region %q, want the file's EU-RO-1", got)
+	}
+
+	// And ember removes it when told to, which is the only thing that ever
+	// will. This is the cleanup as well as an assertion; OwnStore is the net
+	// under it rather than the plan.
+	if rm := l.RunSub(ctx, "store", "rm", "notyet"); rm.ExitCode != 0 {
+		t.Fatalf("store rm exited %d: %s", rm.ExitCode, rm.Combined())
+	}
+	if vs := l.Volumes(ctx); len(vs) != 0 {
+		t.Errorf("the store survived its own removal: %v", names(vs))
+	}
+}
+
+// TestStore_ADryRunMakesNoStoreWhereUpWouldMakeOne.
+//
+// FREE IS NOT NOTHING. `--dry-run` says in its own flag help that it will
+// "say what would be rented and create nothing", and a `docker volume
+// create` is a side effect in a command that promised none -- an operator who
+// ran a dry run to find out what a config would do would be left holding a
+// volume they never asked for. So the refusal survives on the very provider
+// where `up` creates one, which is what makes the permission a SECOND
+// condition rather than a restatement of `Caps.StoresFree`: either one alone
+// says no.
+//
+// The same provider and the same configuration as the lab above, differing in
+// one flag, because that is the whole claim. A lab that used a paid provider
+// here would pass on the capability and prove nothing about the permission.
+func TestStore_ADryRunMakesNoStoreWhereUpWouldMakeOne(t *testing.T) {
+	l := harness.New(t)
+	ctx := t.Context()
+
+	l.WriteConfig(map[string]string{"store": missingStoreYAML})
+
+	out := l.Run(ctx, "up", "--dry-run")
 	if out.ExitCode == 0 {
-		t.Fatalf("up ran against a store that does not exist:\n%s", out.Combined())
+		t.Fatalf("a dry run against a store that does not exist succeeded:\n%s", out.Combined())
 	}
 	if !strings.Contains(out.Combined(), "ember store create") {
 		t.Errorf("the refusal does not name the command that makes one:\n%s", out.Combined())
 	}
-	if n := len(l.Nodes(ctx)); n != 0 {
-		t.Errorf("%d node(s) were created before the store was resolved", n)
-	}
 	if vs := l.Volumes(ctx); len(vs) != 0 {
-		t.Errorf("up created a store rather than refusing: %v", names(vs))
+		t.Errorf("a dry run created %v, having promised to create nothing", names(vs))
+	}
+	if n := len(l.Nodes(ctx)); n != 0 {
+		t.Errorf("%d node(s) were created by a dry run", n)
+	}
+}
+
+// TestStore_APaidProviderStillRefusesAStoreThatDoesNotExist.
+//
+// THE HALF OF THE MONEY ARGUMENT THAT DID NOT MOVE, and the reason the first
+// lab above is safe. A RunPod network volume bills by the gibibyte-month, has
+// no deadline, is not reaped and is not ended by Ctrl-C: it is the one charge
+// in this system that outlives every mechanism ember has for stopping one. So
+// a config that merely MENTIONS a name must not bring one into existence, and
+// the refusal has to keep naming the command that does -- which is the
+// sentence the deleted lab asserted, kept here and pointed at a provider it
+// is true of.
+//
+// BEFORE ANYTHING IS RENTED is the other half of it. `NewPlan` resolves the
+// store before it picks an offer, so this returns with the fake holding no
+// pod: a run that discovered a missing store after creating a node would
+// already be paying for the discovery.
+//
+// IN PROCESS, because `app.Deps.CloudBaseURL` is a Go field and not an
+// environment variable, so the compiled binary cannot be pointed at a fake
+// provider -- the same reason store_preflight_test.go drives the queue here
+// rather than a subprocess. What that buys over `internal/app`'s own test of
+// this arm is the provider itself: there the capability comes from a fake
+// built with it unset, and here it is `runpod.Provider.Caps()`, reached
+// through a real listing over a real HTTP client against the API's own
+// volume route.
+func TestStore_APaidProviderStillRefusesAStoreThatDoesNotExist(t *testing.T) {
+	l := harness.New(t)
+	ctx := t.Context()
+
+	// No data plane, in the shape the fake's own checks use: a regression that
+	// let this create a store must not also start a container from a lab that
+	// is already failing.
+	f := runpodfake.New(t, nil, runpodfake.Options{})
+
+	var printed bytes.Buffer
+	_, err := app.NewPlan(ctx, app.Request{
+		Config: config.Config{
+			Provider: "runpod",
+			Image:    harness.LabImage,
+			TTL:      10 * time.Minute,
+			Store: config.StoreConfig{
+				Name: "notyet", SizeGiB: 40, Region: runpodfake.VolumeDataCenter,
+			},
+		},
+		Deps: app.Deps{
+			HomeDir: l.Dir,
+			// Both halves of the no-credential seam: the token is a literal
+			// and the base URL is the fake, so this cannot read the
+			// operator's credentials file and cannot reach api.runpod.io.
+			CloudBaseURL: f.URL,
+			Creds:        &config.Credentials{RunPod: node.NewSecret([]byte("fake-token"))},
+			// Injected, or the local provider -- registered beside RunPod
+			// whatever this run names -- reads the developer's own card and
+			// the lab behaves differently on a workstation.
+			DetectGPU: func(context.Context) (local.GPU, bool) { return local.GPU{}, true },
+		},
+		// THE RENTING CALLER'S PERMISSION, granted, so what refuses below is
+		// the capability and not the dry run. Planning with this false would
+		// pass whatever `Caps.StoresFree` said, which is the lab above.
+		MayCreateStore: true,
+	}, &printed)
+
+	if err == nil {
+		t.Fatal("a config that named a store brought a standing monthly charge into existence")
+	}
+	if !strings.Contains(err.Error(), "ember store create") {
+		t.Errorf("the refusal does not name the command that makes one: %v", err)
+	}
+	if vols := f.Volumes(); len(vols) != 0 {
+		t.Errorf("created %v at a provider that bills by the gibibyte-month", vols)
+	}
+	if live := f.Live(); len(live) != 0 {
+		t.Errorf("%d pod(s) were rented before the store was resolved: %v", len(live), live)
+	}
+
+	// Nothing even ASKED the API for a volume, which is the stronger
+	// statement: a create that ember sent and the service refused would leave
+	// the assertion above satisfied by RunPod's caution rather than ember's.
+	for _, r := range f.Requests() {
+		if r.Method == http.MethodPost && strings.Contains(r.Path, "network-volumes") {
+			t.Errorf("ember asked the API to create a volume: %s %s", r.Method, r.Path)
+		}
 	}
 }
 

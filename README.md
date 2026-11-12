@@ -1638,6 +1638,14 @@ storage rather than about renting, because a provider could charge for one and
 not the other. The name, the size and the region still come from your file:
 ember makes the store the configuration described, not one it guessed at.
 
+**A dry run still makes nothing, free or not.** `ember up --dry-run` says what
+would be rented and creates nothing, and so does a web request asking what a
+run would cost — free is not the same as nothing, and a `docker volume create`
+would be a side effect in a command that promised none. So on the local
+provider `up` makes a missing store and `up --dry-run` refuses, naming `ember
+store create`: creating one takes both a provider nothing bills at and a caller
+that is about to rent.
+
 `ember ls` prints every store ember owns and what it costs per month, on every
 run, including the run where there are no nodes at all — the clean-bill-of-
 health case is exactly the one a charge with nothing attached would otherwise
