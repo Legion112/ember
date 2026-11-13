@@ -50,11 +50,25 @@ func FindStore(ctx context.Context, sp provider.StoreAPI, name string) (node.Sto
 // rather than as provider state is what lets two runs want different stores
 // without rebuilding anything.
 //
-// A missing store is a refusal naming the command that makes one. Creating it
-// here would be ember bringing a standing monthly charge into existence
-// because a config mentioned a name, which is the one thing `ember store
-// create` exists to prevent.
-func AttachStore(ctx context.Context, p provider.Provider, cfg config.Config) (Attached, error) {
+// A missing store is a refusal naming the command that makes one, WHERE ONE
+// COSTS MONEY. Creating it there would be ember bringing a standing monthly
+// charge into existence because a config mentioned a name, which is the one
+// thing `ember store create` exists to prevent -- a store bills by the
+// gibibyte-month and no deadline, reaper or Ctrl-C ends it.
+//
+// WHERE NOTHING BILLS FOR ONE, IT IS MADE. The refusal's own sentence was "a
+// store bills by the month and nothing destroys it on a deadline", and an
+// operator met it on the LOCAL provider, where a store is a Docker named
+// volume that costs nothing -- so the reason given was false for the provider
+// it was given about, and what was left was friction protecting them from a
+// charge that does not exist. `Caps.StoresFree` is the gate, and it is a
+// storage claim rather than `Caps.Free`'s renting one, because a provider
+// could charge for one and not the other.
+//
+// IT IS STILL THE OPERATOR'S SIZE AND SITE. Creating one does not invent its
+// shape: `size_gib`, `region` and the name come from the file, so this makes
+// the thing the configuration already described rather than guessing at one.
+func AttachStore(ctx context.Context, p provider.Provider, cfg config.Config, mayCreate bool) (Attached, error) {
 	if !cfg.HasStore() {
 		return Attached{}, nil
 	}
@@ -70,9 +84,26 @@ func AttachStore(ctx context.Context, p provider.Provider, cfg config.Config) (A
 		return Attached{}, err
 	}
 	if !found {
-		return Attached{}, fmt.Errorf("no store named %q at %s. Create it with:\n  ember store create\n"+
-			"Nothing here will make one for you: a store bills by the month and nothing destroys it on a deadline",
-			cfg.Store.Name, p.Name())
+		if !mayCreate {
+			return Attached{}, fmt.Errorf("no store named %q at %s. Create it with:\n"+
+				"  ember store create\n"+
+				"This plan may not make one: it is a dry run or a costing, and both promise "+
+				"to change nothing",
+				cfg.Store.Name, p.Name())
+		}
+		if !p.Caps().StoresFree {
+			return Attached{}, fmt.Errorf("no store named %q at %s, and a store there bills by "+
+				"the gibibyte-month with no deadline, reaper or Ctrl-C that ends it. Create it "+
+				"deliberately with:\n  ember store create\n"+
+				"Nothing here will make one for you: that charge has to be one somebody chose",
+				cfg.Store.Name, p.Name())
+		}
+		made, cerr := sp.StoreCreate(ctx, cfg.Store.Name, cfg.Store.SizeGiB, cfg.Store.Region)
+		if cerr != nil {
+			return Attached{}, fmt.Errorf("no store named %q at %s and creating one failed: %w",
+				cfg.Store.Name, p.Name(), cerr)
+		}
+		s = made
 	}
 
 	mount, err := cfg.StoreMount()

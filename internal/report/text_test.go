@@ -28,6 +28,18 @@ var renderings = map[Kind]struct {
 	event Event
 	want  string
 }{
+	// NOT SILENT, unlike the three the switch groups at the end. This one
+	// happens in a web handler and `ember up` never produces it, so there is
+	// no slog spelling anywhere -- a reader of `ember history` for a request
+	// that failed and was retried has nothing else that would say so.
+	//
+	// The status it replaced is in the text, because "requeued" alone does
+	// not say what was there, and a failure, a cancellation and an
+	// interruption are three different reasons to be reading this line.
+	KindRequeued: {
+		event: Event{Kind: KindRequeued, Text: "failed"},
+		want:  "requeued from failed\n",
+	},
 	KindLog: {
 		// Verbatim, terminator included, no prefix. These bytes came off a
 		// machine ember rented.
@@ -242,6 +254,7 @@ func kindByName(t *testing.T, name string) Kind {
 		"KindNodeReady":     KindNodeReady, "KindNodeMemory": KindNodeMemory,
 		"KindRunCost":       KindRunCost,
 		"KindDestroyFailed": KindDestroyFailed,
+		"KindRequeued":      KindRequeued,
 	}
 	k, ok := byName[name]
 	if !ok {

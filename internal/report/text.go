@@ -135,6 +135,13 @@ func render(e Event) string {
 			cgroupName(e.MemCgroup), limitName(e.MemLimit), HumanBytes(e.MemCurrent),
 			HumanBytes(e.MemTotal), HumanBytes(e.MemCached), HumanBytes(e.Bytes))
 
+	case KindRequeued:
+		// PRINTED, unlike the three below it, because this one has no slog
+		// spelling anywhere: it happens in a web handler and `ember up` never
+		// produces it. A reader of `ember history` for a request that failed
+		// and was retried has nothing else that would say so.
+		return fmt.Sprintf("requeued from %s\n", e.Text)
+
 	case KindNodeReady, KindRunCost, KindDestroyFailed:
 		// Deliberately silent. The CLI already reports all three through its
 		// slog handler, and test/integration/lifecycle_test.go greps for the

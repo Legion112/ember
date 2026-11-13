@@ -241,11 +241,11 @@ func fleet(t *testing.T, p *fleetPlanner, maxNodes int) (*Queue, genstore.Store)
 	t.Helper()
 	st := genstore.NewRecordingStore()
 	return &Queue{
-		Store:    st,
-		Planner:  p,
-		Voices:   queueVoices(),
-		Outputs:  filepath.Join(t.TempDir(), "outputs"),
-		MaxNodes: maxNodes,
+		Store:     st,
+		Planner:   p,
+		Workloads: speechWorkloads(t),
+		Outputs:   filepath.Join(t.TempDir(), "outputs"),
+		MaxNodes:  maxNodes,
 	}, st
 }
 

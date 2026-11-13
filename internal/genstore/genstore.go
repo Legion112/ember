@@ -255,7 +255,36 @@ type Request struct {
 	// defending: every row written before this column existed is an image
 	// generation, and a migration that guessed otherwise would mislabel an
 	// operator's whole history. KindOf is the one place that reading lives.
+	//
+	// IT IS NO LONGER WHAT Compat READS, and the reason is one line down.
 	Kind string `json:"kind,omitempty"`
+
+	// Workload is the declared entry the operator's file names, and it is
+	// what Compat reads.
+	//
+	// A DIFFERENT QUESTION FROM Kind, ANSWERED BY A DIFFERENT AUTHORITY. Kind
+	// is the driver, which this store knows on its own: it is what the ledger
+	// prints about a row whose entry has since been renamed or deleted, and
+	// what `validate` holds the jobs' shape to. Workload is the entry id, and
+	// it means nothing at all without ember.yaml -- it is what resolves to an
+	// image. So a row carries both: one survives the file, the other is how
+	// the file is consulted.
+	//
+	// WITHOUT IT, TWO WORKLOADS SHARING A DRIVER WOULD SHARE A RENTAL. A
+	// declared file may hold two `sd` entries pointing at different images --
+	// one FLUX, one SD1.5 -- and a Compat keyed on the driver would match
+	// them: the provider and the GPU agree, the claim succeeds, and the drain
+	// loop hands a request for one model to a resident server holding the
+	// other, after a card has been paid for. That is the defect Compat.Kind
+	// was added to prevent, one layer finer, and it is the thing that makes a
+	// per-entry image safe.
+	//
+	// EMPTY NAMES THE IMPLICIT ENTRY, which is every row written before
+	// schema version 7 and every request against a file that declares no
+	// `workloads:`. WorkloadOf is the one place that reading lives, and it
+	// resolves to KindOf(kind) precisely because an implicit entry is named
+	// after its own driver.
+	Workload string `json:"workload,omitempty"`
 
 	// Provider and GPU are the selection. They are also what decides whether
 	// a queued request can join a rental that is already up -- see Compat.
@@ -568,17 +597,29 @@ func NewShape(kind, provider, gpu string) Shape {
 // The zero Compat means no rental is up, and ClaimNext will then take the
 // oldest queued request whatever it asked for.
 type Compat struct {
-	// Kind is read through KindOf, so a row written before the column
-	// existed and a row that says "sd" are the same rental to this.
+	// Workload and Kind are read together through WorkloadOf, so a row
+	// written before either column existed, a row that says "sd", and a row
+	// naming the implicit sd entry are all the same rental to this.
 	//
-	// WITHOUT IT A SPEECH REQUEST COULD RIDE AN sd RENTAL. The provider and
-	// the GPU would match, the claim would succeed, and the drain loop would
-	// hand an utterance to a resident sd-server that has no route for it --
-	// after a card had been paid for. The voice does NOT appear here, and
-	// that is the measurement rather than an omission: a one-shot piper names
-	// its own model per invocation, so two requests wanting different voices
-	// are compatible and a resident driver is the only shape that would
-	// change it.
+	// THE ENTRY AND NOT THE DRIVER, which is finer than it reads. Keying on
+	// the driver alone was enough while one configuration had one image: it
+	// stopped a speech request riding an sd rental, which is the defect it
+	// was added for. A declared `workloads:` list may hold two entries with
+	// the same driver and different images, and then the driver no longer
+	// identifies the rental -- the provider and the GPU would match, the
+	// claim would succeed, and a request for one model would be handed to a
+	// resident server holding another. The entry id is what identifies an
+	// image, so the entry id is what has to agree.
+	//
+	// It is strictly narrower than the driver and never wider: two entries
+	// with different drivers necessarily have different ids, so every refusal
+	// the driver made is still made.
+	//
+	// The voice does NOT appear here, and that is the measurement rather than
+	// an omission: a one-shot piper names its own model per invocation, so two
+	// requests wanting different voices are compatible and a resident driver
+	// is the only shape that would change it.
+	Workload string
 	Kind     string
 	Provider string
 	GPU      string
@@ -1306,6 +1347,27 @@ type Store interface {
 	// exactly as the blanket sweep did for its old rows -- and the dangerous
 	// default, a row nothing will ever reclaim, is unrepresentable.
 	Reclaim(ctx context.Context) (int, error)
+
+	// Retry puts a terminal request back on the queue, answering whether it
+	// did. False means the row was not there or was not terminal.
+	//
+	// ONE STATEMENT, which is ClaimNext's discipline in the other direction:
+	// two operators pressing retry on one row, or a retry racing the drain
+	// loop, must not both succeed, and the status condition is what decides.
+	//
+	// ONLY failed, cancelled AND interrupted. A `done` request has nothing to
+	// retry and a queued or running one is already live -- and `done` is the
+	// reason this is three names rather than "not queued or running", because
+	// the two readings differ on exactly the row an operator is most likely to
+	// press by accident.
+	//
+	// THE CALLER APPENDS A KindRequeued EVENT. The row is reused rather than
+	// replaced by a new request, so its status, error and node are overwritten
+	// -- and the event stream, which only appends, is what keeps a request
+	// that failed and was then retried from reading as one that simply
+	// succeeded. The cost on the row survives, because it is the total this
+	// request has spent across every attempt.
+	Retry(ctx context.Context, id ReqID) (bool, error)
 
 	// PruneEvents drops the events of finished requests that ended before the
 	// horizon, keeping the request, its jobs, its costs and its images.

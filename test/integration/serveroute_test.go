@@ -206,9 +206,19 @@ func TestServe_UINavigatesWithoutReloadingTheApp(t *testing.T) {
 	if err := shortWait(ctx, composePanel, 30*time.Second); err != nil {
 		t.Fatalf("the landing page is not the compose page: %v\n%s", err, console.text())
 	}
-	if got := whereIs(t, ctx); got != "/" {
-		t.Fatalf("the one-time URL left the browser on %q rather than the root, so the "+
-			"token exchange's own 303 is what is being measured below", got)
+	// `/generate/sd` AND NOT `/`, which is #200's one routing change here: the
+	// root is an alias that renders the first workload this server declares,
+	// canonicalised away with `replace_state` the moment `/api/config`
+	// answers. This config declares no `workloads:`, so the entry is the
+	// implicit one named after its own driver -- which is what makes a row
+	// written before the column resolve to it.
+	//
+	// IT IS A REPLACE AND NOT A PUSH, so the history still has one entry for
+	// the landing page and the two back presses below land on this address
+	// rather than walking through an alias that redirects forward again.
+	if got := whereIs(t, ctx); got != "/generate/sd" {
+		t.Fatalf("the one-time URL left the browser on %q rather than the first workload's "+
+			"own address, so the token exchange's own 303 is what is being measured below", got)
 	}
 	wasm := plantSentinel(t, ctx)
 
@@ -263,8 +273,9 @@ func TestServe_UINavigatesWithoutReloadingTheApp(t *testing.T) {
 		t.Fatalf("the back button did not return to the compose page: %v\n%s",
 			err, console.text())
 	}
-	if got := whereIs(t, ctx); got != "/" {
-		t.Errorf("two back presses left the browser at %q rather than the root", got)
+	if got := whereIs(t, ctx); got != "/generate/sd" {
+		t.Errorf("two back presses left the browser at %q rather than the workload's own "+
+			"address, which is what the root was replaced with", got)
 	}
 	sameDocument(t, ctx, "the second back press", wasm)
 
@@ -557,7 +568,10 @@ func TestServe_UILeavingAReconnectingWatcherDoesNotTrapTheWasm(t *testing.T) {
 	// NOT CLAIMED AS THE DISCRIMINATOR. A wasm trap does not poison the
 	// instance, so whether a later click still works is not something this lab
 	// decides; `pageErrors` above is the assertion and this is cheap.
-	navTo(t, ctx, "generate", composePanel)
+	// "images" AND NOT "generate", because the nav's generate tabs are the
+	// operator's own labels now: this config declares no `workloads:`, so the
+	// implicit image entry is labelled `images`.
+	navTo(t, ctx, "images", composePanel)
 	sameDocument(t, ctx, "navigating after the window closed", wasm)
 
 	// AND THE RE-OPENS STOPPED. A watcher nobody is watching must not go on

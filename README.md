@@ -69,7 +69,7 @@ the node — including after Ctrl-C.
 
 ```
 make docker-build
-ember up --config ember.local.sd-server.example.yaml
+ember up --workload free
 ```
 
 ember runs **one container that is both the node and the workload**, so the
@@ -568,19 +568,105 @@ whoever else is on that host, and on this one readable by every other account.
 `serve_token`, which is `ember serve`'s own credential, lives in the same file
 for that reason and has no flag either.
 
+### Declaring what this ember serve can run
+
+One `ember.yaml` names one `image:`, and each workload image carries exactly
+one binary — measured: `ember:sd` has `/usr/local/bin/sd-server` and no piper,
+`ember:tts` has `/usr/local/bin/piper` and no sd-server. So one `ember serve`
+serves one workload, and until
+[#200](https://github.com/Legion112/ember/issues/200) the web UI did not know
+that: `/api/config` published every workload *this build* knows, so a
+speech-only server offered an image tab and then explained itself in a red
+banner.
+
+A workload is a declared entry now. Each entry has its own id, its own image
+and its own driver block:
+
+```yaml
+# ember.yaml
+provider: local
+ttl: 1h
+
+workloads:
+  - id: image
+    label: Images
+    driver: sd
+    image: ghcr.io/legion112/ember-sd:v3-sm89@sha256:...
+    sd:
+      serve: ["sd-server", "--diffusion-model", "/models/flux2-dev.gguf"]
+      preview: proj
+      preview_interval: 5
+
+  - id: speech
+    label: Speech
+    driver: tts
+    image: ghcr.io/legion112/ember-tts:v1@sha256:...
+    tts:
+      voices:
+        - id: lessac
+          name: Lessac (en_US, medium)
+          voice: /opt/voices/en_US-lessac-medium.onnx
+```
+
+- `id` is the opaque string a request names: lowercase letters, digits, dot,
+  underscore and dash, at most 64 bytes. It is what the web UI's address bar
+  carries (`/generate/speech`) and what `POST /api/requests` sends as
+  `workload`. It never reaches a path, and an id that is nothing but dots is
+  refused rather than cleaned.
+- `label` is what the nav prints. Free text; it defaults to the id.
+- `driver` is which typed code path runs it: `sd` or `tts`. These are ember's
+  and not the operator's — a driver is what ember knows how to speak.
+- `image` and `images` mean exactly what the top-level keys mean, including
+  that they are not alternatives and that a card with no `images:` entry
+  refuses rather than falling back to `image:`.
+- `sd:` and `tts:` are the driver's own block. A block the entry's driver does
+  not read is refused rather than ignored.
+
+**A file either declares workloads or writes the top-level keys, never both.**
+`workloads:` beside a top-level `image:`, `images:`, `sd:`, `tts:`, `cmd:` or
+`cmds:` is refused naming each key it found: the top-level keys *are* the one
+unnamed workload a file without `workloads:` describes, so a file with both
+declares a workload no request can name beside ones it can. `cmd` and `cmds`
+have no entry form yet, so a file that runs argv does not declare workloads.
+
+**Every configuration committed here declares none, and nothing about them
+changed.** A file with `image:` and an `sd:` block describes one image
+workload; one with `tts.voices` describes one speech workload; one with both
+describes both, sharing the one image, which is what it always did. The
+implicit entries are named after their own drivers — `sd` and `tts` — which is
+also what a request stored before this change named, so an upgrade claims the
+queue it already had.
+
+`ember up` and `ember store sync` rent one machine with one image, so a file
+declaring more than one workload is asked which: `--workload <id>`. A file
+declaring none needs nothing, which is why no measurement in this document
+changed.
+
+The web UI shows one tab per workload **this server can actually serve**, with
+the operator's own label on it. An entry whose driver is `sd` and which has no
+`sd.serve`, or whose driver is `tts` and which publishes no `tts.voices`, is
+left out of `/api/config` entirely — so there is no tab for it and
+`POST /api/requests` answers 409 naming the key if anything asks. `ember serve`
+refuses to start only when *no* entry can be served, and then prints each
+entry's own reason.
+
 ### The committed configurations
 
-Every command reads `ember.yaml` in the working directory by default, so
-`--config` is for naming one of the others rather than for ordinary use. Four
-are committed: the starter, and FLUX.2 on a rented card, on the card in this
-machine, and sd15 on this machine for nothing.
+Every command reads `ember.yaml` in the working directory by default. **One
+configuration is committed**, and it declares three workloads: `--workload` on a
+command, or a tab in the browser.
 
-| file | runs on | job shape |
+There were four files, and they differed in what a workload is rather than in
+what an operator wants — so three of them were wrong about any given machine,
+and the choice had to be made before the question was known. A declared entry
+carries its own image, driver block, store, assets, `verify`, VRAM floor, TTL
+and probe, which is exactly where the four differed.
+
+| `--workload` | runs on | what it is |
 |---|---|---|
-| `ember.example.yaml` | a rented 4090 | none — rent, prove the card, fetch `outputs:`, destroy |
-| `ember.sd-server.example.yaml` | a rented 80 GiB card, on a store | `sd:` — one `sd-server`, a list of jobs |
-| `ember.local.example.yaml` | the GPU in this machine | `sd:` — the same weights, streamed off this disk |
-| `ember.local.sd-server.example.yaml` | this machine, free | `sd:` — what `ember serve` needs |
+| `free` | this machine, for nothing | sd15 baked into `ember:sd` — no store, no assets, what `ember serve` needs |
+| `flux2-local` | the GPU in this machine | the same FLUX.2 weights and digests as below, streamed off this disk |
+| `flux2` | a rented 80 GiB card, on a store | one `sd-server` holding FLUX.2 for a list of jobs |
 
 A configuration holds configuration: a comment in one says what a wrong value
 costs, in a line or two. Every measurement that chose a value — the store's
@@ -1161,22 +1247,28 @@ tts:
       voice: /opt/voices/de_DE-thorsten-high.onnx
 ```
 
-`GET /api/config` publishes `kinds` and `voices` — the ids and their display
-names, and **not** the paths — so a UI can offer a list it could not have
-guessed. The compose panel's kind selector and voice chooser are built from
-those two lists and from nothing else; see
+`GET /api/config` publishes a `workloads` list, and each entry carries its own
+`voices` — the ids and their display names, and **not** the paths — so a UI can
+offer a list it could not have guessed. The nav's tabs and each page's voice
+chooser are built from that list and from nothing else; see
 [speaking instead of generating](#speaking-instead-of-generating). A request
 then looks like this:
 
 ```json
 {
-  "kind": "tts",
+  "workload": "tts",
   "provider": "local",
   "jobs": [
     {"tts": {"text": "Hello from ember.", "voice_id": "lessac", "output": "greeting"}}
   ]
 }
 ```
+
+`workload` is the declared entry's id. A file that declares no `workloads:`
+names its entries after their own drivers, so `tts` is the id on every
+configuration committed here — which is also why a request stored before
+the field existed resolves to the same entry. See
+[declaring what this ember serve can run](#declaring-what-this-ember-serve-can-run).
 
 `id` is lowercase letters, digits, dot, underscore and dash, and an id that is
 nothing but dots is refused: it reaches no path today, and the allow-list is
@@ -1198,10 +1290,10 @@ argv, an image, a store, a mount, a port, a probe, assets or `extra`. Every one
 of those stays in `ember.yaml`, which is what keeps the exposure and
 containment rules upstream of anything a browser can say.
 
-The two shapes cannot be mixed. `kind` is on the **request** and not on a job,
-so one rental runs one driver and a batch holding an image job and an utterance
-is not something a body can express; a job carrying the other kind's fields is
-refused in both directions, naming the index.
+The two shapes cannot be mixed. `workload` is on the **request** and not on a
+job, so one rental runs one driver and one image and a batch holding an image
+job and an utterance is not something a body can express; a job carrying the
+other driver's fields is refused in both directions, naming the index.
 
 | what | `sd` | `tts` |
 |---|---|---|
@@ -1280,12 +1372,11 @@ A100.
 
 ```bash
 make workload-sd-cuda-local          # builds for the card in this machine
-ember up --config ember.local.example.yaml   # same assets, same digests, free
+ember up --workload flux2-local      # same assets, same digests, free
 ```
 
-[`ember.local.example.yaml`](ember.local.example.yaml) is the same
-configuration as the rented one with the provider changed and
-`--offload-to-cpu` added. The store is a Docker named volume — the same code
+The `flux2-local` entry in [`ember.example.yaml`](ember.example.yaml) is the
+same workload as `flux2` with the image changed and `--offload-to-cpu` added. The store is a Docker named volume — the same code
 path a rented network volume uses, costing nothing and surviving between runs.
 
 `make workload-sd-cuda-local` reads this machine's compute capability from
@@ -1532,10 +1623,28 @@ store:
   mount: /models        # default; /workspace and /root are refused
 ```
 
-Naming a store here does **not** create it — `ember store create` does, and
-nothing that rents a node will bring one into existence as a side effect. A
-store is a standing monthly charge with no deadline, no reaper and no Ctrl-C
-that ends it, so it takes a command somebody typed.
+**Naming a store that bills does not create it** — `ember store create` does,
+and nothing that rents a node will bring one into existence as a side effect. At
+a paid provider a store is a standing monthly charge with no deadline, no reaper
+and no Ctrl-C that ends it, so it takes a command somebody typed.
+
+**Where nothing bills for one, ember makes it.** On the local provider a store
+is a Docker named volume: it costs nothing, and `ember store rm` removes it. The
+refusal's own sentence was *"a store bills by the month and nothing destroys it
+on a deadline"* — true of a network volume and false of the thing it was being
+said about, so what remained was friction protecting an operator from a charge
+that does not exist. `Caps.StoresFree` is the gate, and it is a claim about
+storage rather than about renting, because a provider could charge for one and
+not the other. The name, the size and the region still come from your file:
+ember makes the store the configuration described, not one it guessed at.
+
+**A dry run still makes nothing, free or not.** `ember up --dry-run` says what
+would be rented and creates nothing, and so does a web request asking what a
+run would cost — free is not the same as nothing, and a `docker volume create`
+would be a side effect in a command that promised none. So on the local
+provider `up` makes a missing store and `up --dry-run` refuses, naming `ember
+store create`: creating one takes both a provider nothing bills at and a caller
+that is about to rent.
 
 `ember ls` prints every store ember owns and what it costs per month, on every
 run, including the run where there are no nodes at all — the clean-bill-of-
@@ -1945,10 +2054,34 @@ make web                 # builds the Rust/WASM frontend
 ember serve              # http://127.0.0.1:7777/
 ```
 
+### The card list, and what the offers panel adds to it
+
+**The card field is a list of what the provider actually holds.** It was a
+free-text box with the placeholder `any`: the cards RunPod sells were knowable
+and were not shown, so finding one meant pressing **what is available**, reading
+a table and typing back what it said — and typing a card RunPod does not sell
+was accepted by `POST /api/requests` and refused after. `ember serve` asks each
+provider once at startup, because the set of card *models* does not change for
+the life of a process, and a catalogue read runs no machine and spends nothing.
+
+The ids are **normalised** — `a100-80g`, not `NVIDIA A100-SXM4-80GB` — because
+that is what a request's `gpu` field carries and what the scheduler compares. A
+list offering the provider's own spelling would offer values that do not match
+the row posting them produces.
+
+A provider ember could not ask falls back to the free-text field **and says
+which provider and why**, because a list that is short because nobody asked must
+not read as a provider that has nothing. So does a provider that keeps no
+catalogue: the local one has exactly one card, this machine's, which `ember
+offers` reports from `nvidia-smi`. The free-text field is also what keeps the
+prefix match usable — `a100` accepts `a100-40g` and `a100-80g`, which a list of
+exact ids cannot express.
+
 ### What the offers panel shows
 
-Pressing **what is available** shows what each provider answered to *that*
-press. Narrowing the card filter and pressing again replaces the table with
+Which cards *exist* is the list above; which of them can be had right now, and
+for how much, is this. Pressing **what is available** shows what each provider
+answered to *that* press. Narrowing the card filter and pressing again replaces the table with
 the new answer — `local has nothing matching` when the filter excludes
 everything it has, and `runpod could not be asked: <why>` when the provider
 could not be reached at all.
@@ -2406,14 +2539,21 @@ least. Every field in the form explains itself on hover.
 | a request may narrow | only `ember.yaml` decides |
 |---|---|
 | provider, card, region | `image:` and the `images:` map |
-| `ttl`, up to the config's | `store:` and its mount |
+| `ttl`, up to the entry's | `store:` and its mount |
 | `max_hourly_usd` and `max_run_usd`, up to the config's | `max_day_usd` and `max_month_usd` |
 | prompt, size, steps, batch count, seed, sampler, scheduler, cfg, guidance, output name | `sd.serve`, `gpu_probe`, `assets:`, `verify:` |
 | clip skip, eta, flow shift, shifted timestep, output format and compression | `extra` |
 | the `hires`, `vae_tiling` and `slg` blocks | `lora` |
 | an image it has already uploaded, by digest, and its `strength` | the voice **file** and espeak's data directory |
 | preview mode and interval | piper's `speaker`, `length_scale`, `noise_scale`, `noise_w` and `sentence_silence` |
-| the `kind`, and for speech the text and a **voice id** from `tts.voices` | |
+| the declared `workload`'s id, and for speech the text and a **voice id** from that entry's `tts.voices` | the entry's `image:`, `driver:` and driver block |
+
+**A request that names no `ttl` gets the workload entry's, not the file's.**
+An entry sets `ttl:` when its own work needs longer than the file's default --
+weights that take two and a half hours to fetch are the case this exists for -- and a form
+that sent no deadline meant that entry's, which is why the file's `ttl:` is
+reached only for an entry declaring none. A `ttl` a request *does* send still
+has to be smaller: the entry is the ceiling, the request narrows it.
 
 **A bad sampler is refused before a card is rented, per card.** ember caches
 what each generation server reported it can do and checks a queued batch
@@ -2499,18 +2639,18 @@ does not.
 
 ### Speaking instead of generating
 
-The compose panel's first control is **kind**, and choosing `tts` replaces the
-image controls with a text area and a voice chooser. The geometry, the sampler,
-the steps, the seed and the preview mode go: they are parameters of a sampling
-pass and piper has no pass, so a control for them over a speech request would
-accept a value the server refuses — `kind` is on the request, and a job setting
-the other kind's fields is rejected naming its index — or, worse, one the
-server drops, which reads as a model that ignored it. Choosing `sd` gives back
-exactly the panel that was there before. The submit button says **speak**.
+Speech is a tab of its own, labelled with the operator's own name for the
+workload, at its own address (`/generate/speech`). The page has a text area and
+a voice chooser and nothing else: the geometry, the sampler, the steps, the
+seed and the preview mode are not hidden, they are not on that page — they are
+parameters of a sampling pass and piper has no pass, so a control for them over
+a speech request would accept a value the server refuses, or worse one the
+server drops, which reads as a model that ignored it. The submit button says
+**speak**.
 
 ```bash
 make web
-ember serve        # pick tts, type a sentence, press speak
+ember serve        # click the speech tab, type a sentence, press speak
 ```
 
 The chooser's entries are the `tts.voices` list from `GET /api/config`, by
@@ -2523,26 +2663,23 @@ a blank voice id, and the refusal for that arrives after the operator has typed
 their sentence. A client that names the kind anyway — a `?kind=` in a URL, or a
 page older than the server — still gets a refusal that names the key.
 
-**Changing the kind empties the batch.** One rental runs one driver, so a batch
-holding an image job and an utterance is not something the wire can carry; the
-page not building one is cheaper than a 400 naming a job index nobody can see.
+**A batch does not survive leaving the page.** One rental runs one driver and
+one image, so a batch holding an image job and an utterance is not something
+the wire can carry; a workload is a page of its own, so navigating to another
+one disposes the batch rather than mixing it. That disposal is the same known
+gap the image page has — the form comes back empty and nothing says why — and
+[#139](https://github.com/Legion112/ember/issues/139) is where lifting the
+draft above the route lives.
 
-**The selector offers the kinds your configuration can run, and nothing else.**
-`GET /api/config`'s `kinds` used to be the static list of everything the build
-knows, so a server publishing no voices offered a pickable `tts` and then
-answered *this ember serve publishes no voices, so it serves no speech* once
-somebody chose it — a choice offered in order to be refused, which is worse
-than no choice, because the refusal lands after the deciding is done. A
-speech-only configuration had it worse in the other direction: `sd` was
-offered, nothing refused it, and the request failed once a node was up. One
-option is no choice, so a configuration that runs a single kind shows no
-selector at all — and in its place a line saying which kind this serve runs and
-which key would add the other, because a panel with no selector is otherwise
-indistinguishable from a build with one workload. `GET /api/config` carries
-both halves: `kinds` is what this configuration runs and `unoffered` is what
-the build could run and this file does not ask for. A configuration that can
-run **neither** cannot start: `ember serve` refuses it at launch and names both
-keys.
+**The tabs are what this server can serve, not what this build knows.** That is
+[#200](https://github.com/Legion112/ember/issues/200), and before it the
+selector offered every kind ember was compiled with: a speech-only
+configuration still offered a pickable `sd`, picking it gave the image controls
+and a request that failed once a node was up, and what warned you was a red line
+under the header. `GET /api/config` publishes the declared entries this server
+can actually run, so an entry with no `sd.serve` or no `tts.voices` has no tab
+— and `POST /api/requests` answers 409 naming the key if anything asks for it
+anyway, which is the same method deciding both.
 
 **The artifact plays in the page.** A finished utterance is an `<audio
 controls>` beside the gallery's `<img>` for an image, and the element is chosen
@@ -2556,8 +2693,8 @@ declares no type for is **said** rather than guessed at, because an `<img>` and
 an `<audio>` both render perfectly over a fetch that failed and show nothing.
 
 **What the page cannot do is show an utterance's own text back.** A request's
-jobs are projected to the browser in the image shape — no `tts`, and no `kind`
-on the request view either — so a finished speech request arrives as one job
+jobs are projected to the browser in the image shape — no `tts`, and no
+`workload` on the request view either — so a finished speech request arrives as one job
 with every field at its zero, and the page cannot tell it from an empty one.
 Its **what it ran with** block says the parameters were not sent rather than
 printing seven rows of dashes under an empty prompt. Queueing and playing work;
@@ -3211,6 +3348,27 @@ live in a request, so draining connections would say nothing about a node.
 
 Cancelling a request is a button whether it is **queued** or **generating**.
 `POST /api/requests/{id}/cancel` takes both.
+
+**Retrying one is a button beside its reason**, where a reason is the sentence
+explaining why it needs retrying. `POST /api/requests/{id}/retry` takes a
+**failed**, **cancelled** or **interrupted** request and puts it back on the
+queue — not a finished one, which has nothing to retry and is the row easiest
+to press by accident.
+
+It **reuses the row** rather than queueing a copy, so the queue does not fill
+with retries of the same work. That makes two things deliberate. The **cost
+survives**: a request that failed after renting has already spent money, and
+the row is the total across every attempt rather than the last one. And a
+`requeued` event is appended, because the status, error and node on the row are
+a derived index that a retry overwrites, where the event stream only appends —
+without it, a request that failed, was retried and then succeeded would read as
+one that simply succeeded. `ember history` prints it as `requeued from failed`.
+
+The statement is **one `UPDATE` whose `WHERE` carries the status condition**, so
+two operators pressing the button on one row, or a retry racing the drain
+loop's own claim, cannot both win. It also clears the lease: a queued row
+holding a live one is skipped by the claim and ignored by the reaper, so the
+retry would look like it worked and the request would sit there.
 
 **It does not take a run submitted by `ember up`.** Such a row is `running`
 from the moment it is adopted and never becomes *generating* — there is no

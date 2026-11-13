@@ -126,6 +126,24 @@ const (
 	// is destroyed.
 	KindRunCost Kind = "run_cost"
 
+	// KindRequeued is a terminal request put back on the queue by an
+	// operator.
+	//
+	// IT EXISTS BECAUSE THE ROW IS REUSED. A retry could have been a new
+	// request, which would have left the failure in the ledger untouched and
+	// needed no event at all -- the operator chose one row instead, so the
+	// queue does not fill with retries of the same work. That makes this
+	// event the thing that keeps the history: the row's status, error and
+	// node are a derived index and the retry overwrites them, where the event
+	// stream is the truth about what happened and only ever appends. Without
+	// this, a request that failed, was retried and then succeeded would read
+	// as one that simply succeeded.
+	//
+	// Text carries the status it is replacing, because "requeued" alone does
+	// not say what was there -- a failure, a cancellation and an interruption
+	// are three different reasons to be looking at this line.
+	KindRequeued Kind = "requeued"
+
 	// KindDestroyFailed is the one event an operator must not miss: the node
 	// may still be running, and running means billing.
 	KindDestroyFailed Kind = "destroy_failed"
@@ -175,6 +193,7 @@ func Kinds() []Kind {
 		KindUnitStarted, KindJobProgress, KindJobImages, KindUnitCost,
 		KindJobCancelled, KindPreviewFailed,
 		KindNodeReady, KindNodeMemory, KindRunCost, KindDestroyFailed,
+		KindRequeued,
 	}
 }
 
@@ -390,6 +409,26 @@ type Stream struct {
 // internal/provision.
 func NewStream(now func() time.Time, outs ...Sink) *Stream {
 	return &Stream{now: now, outs: outs}
+}
+
+// NewStreamFrom is NewStream continuing somebody else's numbering.
+//
+// WHY A REQUEST CAN ALREADY HAVE EVENTS. A retry reuses the row rather than
+// queueing a copy, so a second attempt writes into a stream a first attempt
+// already filled -- and `AppendEvents` REPLACES on seq, which is correct for a
+// re-delivered event and ruinous for a restarted counter. Measured on a real
+// retry: the second attempt emitted the same eight kinds at seqs 1 to 8 and
+// overwrote the first attempt's eight exactly, and on a request whose only
+// event was the `requeued` marker at seq 1, the retried run's first event
+// replaced the marker. The history the event stream exists to keep was being
+// deleted by the thing that was supposed to preserve it.
+//
+// SO THE COUNTER IS SEEDED, and the caller reads the seed from the store. A
+// first attempt seeds from zero and numbers from 1 exactly as before, which is
+// why this is a second constructor rather than a changed one: every existing
+// caller means "there is nothing before this".
+func NewStreamFrom(seq int64, now func() time.Time, outs ...Sink) *Stream {
+	return &Stream{now: now, outs: outs, seq: seq}
 }
 
 // Emit numbers e, timestamps it and passes it to every sink.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,7 +20,6 @@ import (
 	"github.com/Legion112/ember/internal/loopback"
 	"github.com/Legion112/ember/internal/node"
 	"github.com/Legion112/ember/internal/queue"
-	"github.com/Legion112/ember/internal/tts"
 	"github.com/Legion112/ember/internal/webapi"
 )
 
@@ -86,15 +86,23 @@ func runServe(args []string, out io.Writer, d deps) error {
 	// It names BOTH keys, because an operator who has written neither needs to
 	// know there are two and an operator who has written one of them has a
 	// working server.
-	voices, err := cfg.TTSCatalogue()
+	//
+	// PER DECLARED WORKLOAD NOW, which is what replaced the two-key check: a
+	// file declares entries, each entry carries its own image and driver
+	// block, and `Unservable` is the one answer to "can this one be asked
+	// for" -- the same method `/api/config` leaves an entry out by and the
+	// same one `POST /api/requests` refuses with. The refusal names each
+	// entry and its own reason, because a file with two entries of which one
+	// is wrong is not a file whose problem a single sentence can describe.
+	workloads, err := cfg.WorkloadCatalogue()
 	if err != nil {
 		return err
 	}
-	if len(cfg.SD.Serve) == 0 && len(voices) == 0 {
-		return usageError{fmt.Errorf("%s has no sd.serve block and publishes no tts.voices, so "+
-			"this server could offer nothing: a queued request would have nowhere to run. See the "+
-			"sd: and tts: sections of README.md, or ember.local.sd-server.example.yaml for a "+
-			"configuration that costs nothing", *cfgPath)}
+	if why := unservableAll(workloads); why != "" {
+		return usageError{fmt.Errorf("%s declares nothing this server could offer, so a queued "+
+			"request would have nowhere to run: %s.\nSee the sd: and tts: sections of README.md, "+
+			"or ember.example.yaml, whose `free` workload costs nothing",
+			*cfgPath, why)}
 	}
 
 	// Installed here and nowhere lower. internal/app takes a context and
@@ -106,15 +114,15 @@ func runServe(args []string, out io.Writer, d deps) error {
 
 	return serveUntil(ctx, out, d, cfg, serveOptions{
 		Port: uint16(*port), AllowPaid: *allowPaid, Dist: *dist, Log: logOpts,
-		Voices: voices,
+		Workloads: workloads,
 	})
 }
 
 // serveOptions are what the flags decided.
 type serveOptions struct {
-	// Voices is the catalogue runServe already built and validated, so this
-	// process reads the key once.
-	Voices tts.Catalogue
+	// Workloads is the catalogue runServe already built and validated, so
+	// this process reads the key once.
+	Workloads []config.Workload
 
 	Port      uint16
 	AllowPaid bool
@@ -215,10 +223,10 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 	// so it derives its own when handed none -- which is the one place two
 	// readings are unavoidable and is why it is a parameter rather than a
 	// field somebody can forget.
-	voices := o.Voices
-	if voices == nil {
+	workloads := o.Workloads
+	if workloads == nil {
 		var err error
-		if voices, err = cfg.TTSCatalogue(); err != nil {
+		if workloads, err = cfg.WorkloadCatalogue(); err != nil {
 			return err
 		}
 	}
@@ -240,6 +248,11 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 
 	q := &queue.Queue{
 		Store: store,
+		// The declared workloads a stored entry id is resolved against. This
+		// is the only thing on the drain loop that can turn an id into a
+		// voice path, and it comes from the config this process was started
+		// with.
+		Workloads: workloads,
 		// THE NODE CEILING, from the operator's own file. Any value below 1
 		// reads as 1 inside the queue, so a zero here would silently pin an
 		// operator who wrote `max_nodes: 2` to one node with nothing
@@ -247,10 +260,6 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		// TestServe_WiresTheNodeCeilingIntoTheDrainLoop parses this file.
 		MaxNodes: cfg.MaxNodes,
 		Commit:   commit,
-		// The catalogue a stored voice id is resolved against. This is the
-		// only thing on the drain loop that can turn an id into a path, and
-		// it comes from the config this process was started with.
-		Voices: voices,
 		// Ledger is the same store, as a reader: the period ceilings are
 		// checked against what the generation history says was spent, which
 		// is the one number that is already recorded, numbered and durable.
@@ -368,10 +377,35 @@ func serveUntil(ctx context.Context, out io.Writer, d deps, cfg config.Config, o
 		return app.ScanWith(ctx, reg, journal, cfg)
 	}
 
+	// ASKED ONCE, HERE, AND NEVER FROM A HANDLER. The set of card models a
+	// provider sells does not change during an `ember serve`, so a list
+	// collected at startup is as good as one fetched per page load and costs
+	// one call per provider instead of one per visit. What changes -- which
+	// cards can be had, and for how much -- is what `what is available` asks
+	// on the press, and that stays a press.
+	//
+	// BOUNDED, because this is on the path to a URL an operator is waiting
+	// for. A provider that hangs must not hold the server down: the list is a
+	// convenience and the field falls back to free text without it.
+	cardCtx, cancelCards := context.WithTimeout(ctx, 30*time.Second)
+	cards, cardErrs := app.CollectCards(cardCtx, reg, time.Now())
+	cancelCards()
+	// A PROVIDER THAT COULD NOT BE ASKED IS SAID OUT LOUD, twice: in the log
+	// here, where an operator reading startup output sees it, and on the wire
+	// below, where the page can say the field is short rather than offering a
+	// quietly truncated list as if it were the whole catalogue.
+	cardErrText := map[node.ProviderID]string{}
+	for prov, cerr := range cardErrs {
+		cardErrText[prov] = cerr.Error()
+		logger.Warn("could not ask a provider which cards it has, so the card list is short",
+			"provider", prov, "err", cerr)
+	}
+
 	srv, err := webapi.New(webapi.Options{
 		Config: cfg, Registry: reg, Store: store, Blobs: blobs, Inputs: inputs, Queue: q,
 		AllowPaid: o.AllowPaid, Port: o.Port, Dist: o.Dist, Log: logger,
-		Token: token, Socket: sock, Runs: runs, Scan: scan, Voices: voices,
+		Token: token, Socket: sock, Runs: runs, Scan: scan, Workloads: workloads,
+		Cards: cards, CardErrors: cardErrText,
 	})
 	if err != nil {
 		return err
@@ -656,4 +690,39 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.w.Write(p)
+}
+
+// unservableAll says why no declared workload can be offered, or "".
+//
+// EVERY ENTRY AND ITS OWN REASON, which is what the old two-key sentence could
+// not do. That one said "no sd.serve block and no tts.voices" because a file
+// described one unnamed workload and the check could only name the two blocks
+// it might have held. A file declaring `images` and `speech` of which the
+// second publishes no voices has one working tab and one mistake, and an
+// operator reading a single sentence about two keys cannot tell which entry
+// theirs is about.
+//
+// IT REFUSES ONLY WHEN NOTHING IS SERVABLE, and one bad entry beside a good
+// one is NOT a refusal: `ember serve` can still do the thing the operator
+// started it for, the page leaves the broken entry out, and failing to start
+// over an entry nothing has asked for yet would make a typo in the second
+// workload cost the first one. The entry's own reason is still reachable --
+// `POST /api/requests` answers it as a 409 the moment anything names it.
+func unservableAll(ws []config.Workload) string {
+	if len(ws) == 0 {
+		// Unreachable from a loaded config: WorkloadCatalogue answers at
+		// least the implicit entry. Answered rather than reported as "all of
+		// zero workloads are fine", which is how a process with nothing to do
+		// would start.
+		return "it declares no workload at all"
+	}
+	var why []string
+	for _, w := range ws {
+		u := w.Unservable()
+		if u == "" {
+			return ""
+		}
+		why = append(why, fmt.Sprintf("workload %q cannot be served because %s", w.ID, u))
+	}
+	return strings.Join(why, "; ")
 }

@@ -96,6 +96,11 @@ type RunBody struct {
 	// relative is refused rather than resolved.
 	Config string `json:"config"`
 
+	// Workload is which declared workload the run is for, a selection rather
+	// than a replacement. It names an id in the file above and nothing else;
+	// see app.Overrides.Workload.
+	Workload string `json:"workload,omitempty"`
+
 	Provider     string `json:"provider,omitempty"`
 	Image        string `json:"image,omitempty"`
 	GPU          string `json:"gpu,omitempty"`
@@ -122,6 +127,7 @@ func (b RunBody) toAsk() (app.RunAsk, error) {
 	ask := app.RunAsk{
 		Config: b.Config,
 		Overrides: app.Overrides{
+			Workload:     b.Workload,
 			Provider:     b.Provider,
 			Image:        b.Image,
 			GPU:          b.GPU,

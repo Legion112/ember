@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Legion112/ember/internal/config"
 	"github.com/Legion112/ember/internal/genstore"
 	"github.com/Legion112/ember/internal/tts"
 )
@@ -13,6 +14,28 @@ func queueVoices() tts.Catalogue {
 	return tts.Catalogue{
 		{ID: "lessac", Name: "Lessac", Voice: "/opt/voices/lessac.onnx", EspeakData: "/e"},
 	}
+}
+
+// speechWorkloads is the one implicit speech entry such a config describes.
+//
+// DERIVED FROM A CONFIG AND NOT WRITTEN AS A CATALOGUE, which is the harness
+// doing what cmd_serve does -- one reading of the file, handed to the loop.
+// The id is `tts` because that is what the implicit derivation names an entry
+// after, and it is what `genstore.WorkloadOf` resolves a row with no workload
+// and kind `tts` to.
+func speechWorkloads(t *testing.T) []config.Workload {
+	t.Helper()
+	v := queueVoices()[0]
+	ws, err := config.Config{
+		Image: "ghcr.io/example/tts@sha256:" + strings.Repeat("a", 64),
+		TTS: config.TTSConfig{Voices: []config.TTSVoice{
+			{ID: v.ID, Name: v.Name, Voice: v.Voice, EspeakData: v.EspeakData},
+		}},
+	}.WorkloadCatalogue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ws
 }
 
 func spokenRequest(text, voice string) genstore.Request {
@@ -40,7 +63,7 @@ func TestDrain_ASpeechRequestReachesTheSpeechRentalAndResolvesItsVoice(t *testin
 	sp := newRecordingSpoken()
 	pl := &fakePlanner{served: &fakeServed{}, spoken: sp}
 	q, _ := newQueueOver(t, st, pl)
-	q.Voices = queueVoices()
+	q.Workloads = speechWorkloads(t)
 
 	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatalf("once: %v", err)
@@ -99,7 +122,7 @@ func TestDrain_ASpeechRequestWhoseVoiceVanishedFailsAndSaysSo(t *testing.T) {
 	sp := newRecordingSpoken()
 	pl := &fakePlanner{served: &fakeServed{}, spoken: sp}
 	q, _ := newQueueOver(t, st, pl)
-	q.Voices = queueVoices()
+	q.Workloads = speechWorkloads(t)
 
 	// The rental is opened and then fails, which is the honest shape: the
 	// catalogue is this process's and the id was stored earlier, so nothing
@@ -195,7 +218,7 @@ func TestDrain_ASpeechRequestRecordsItsArtifacts(t *testing.T) {
 	}
 	pl := &fakePlanner{served: &fakeServed{}, spoken: newRecordingSpoken()}
 	q, _ := newQueueOver(t, st, pl)
-	q.Voices = queueVoices()
+	q.Workloads = speechWorkloads(t)
 
 	if _, err := q.claimAndRun(t.Context()); err != nil {
 		t.Fatalf("once: %v", err)

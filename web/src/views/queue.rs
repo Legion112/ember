@@ -422,11 +422,55 @@ pub fn Queue(route: RwSignal<Route>) -> impl IntoView {
                                 // device and truncates differently per platform.
                                 {match why {
                                     None => ().into_any(),
-                                    Some(why) => view! {
-                                        <tr class="reason">
-                                            <td class="why" colspan="6">{why}</td>
-                                        </tr>
-                                    }.into_any(),
+                                    Some(why) => {
+                                        // THE BUTTON SITS WITH THE REASON,
+                                        // because the reason is why somebody
+                                        // is about to press it -- a retry
+                                        // control in the status column would
+                                        // be a click away from the sentence
+                                        // explaining what it is retrying.
+                                        //
+                                        // OFFERED ONLY WHERE THE SERVER WOULD
+                                        // ACCEPT IT: `is_retryable` spells the
+                                        // same three statuses as `Retry`'s own
+                                        // WHERE, so this is not a control that
+                                        // exists in order to be refused. A
+                                        // `done` row has a reason row of its
+                                        // own sometimes and no button.
+                                        let retryable = r.is_retryable();
+                                        let rid = r.id.clone();
+                                        view! {
+                                            <tr class="reason">
+                                                <td class="why" colspan="6">
+                                                    {why}
+                                                    <Show when=move || retryable>
+                                                        {
+                                                            let rid = rid.clone();
+                                                            view! {
+                                                                <button on:click=move |_| {
+                                                                    let rid = rid.clone();
+                                                                    spawn_local(async move {
+                                                                        // The answer is the next
+                                                                        // poll's: the row flips to
+                                                                        // `queued` from the store
+                                                                        // rather than from a word
+                                                                        // this page chose, which
+                                                                        // is the Stopping rule
+                                                                        // applied to the other
+                                                                        // direction.
+                                                                        let _ = api::post::<_, serde_json::Value>(
+                                                                            &format!("/api/requests/{rid}/retry"),
+                                                                            &serde_json::json!({}),
+                                                                        ).await;
+                                                                    });
+                                                                }>"retry"</button>
+                                                            }
+                                                        }
+                                                    </Show>
+                                                </td>
+                                            </tr>
+                                        }.into_any()
+                                    }
                                 }}
                             </tbody>
                         }

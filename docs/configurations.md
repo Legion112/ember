@@ -1,9 +1,8 @@
-# The committed configurations, and what each one measured
+# The committed configuration, and what each workload measured
 
-**Status: this is the reasoning half of the four `ember*.yaml` files at the
-repository root. The files themselves hold configuration and one-line notes
-about what a wrong value costs; everything that argues, measures or compares
-is here.**
+**Status: this is the reasoning half of `ember.example.yaml` at the repository
+root. The file itself holds configuration and one-line notes about what a wrong
+value costs; everything that argues, measures or compares is here.**
 
 Why the split exists at all: the files this document was extracted from were
 1,158 lines of which 329 were configuration — 71% comment. One file was doing
@@ -16,24 +15,43 @@ several model stacks in one file, and `SDConfig.Serve` is a single `[]string`
 — but it makes the configuration readable, and it puts the measurements
 somewhere a reader can find them without opening a YAML file.
 
+**Half of that sentence has stopped being true and is corrected here rather
+than left to be contradicted by the code.** `workloads:`
+([#200](https://github.com/Legion112/ember/issues/200)) is a list of declared
+entries, each with its own `image:`, `images:` and driver block — so two `sd`
+entries in one file ARE two model stacks, with two `sd.serve` argvs, and
+`SDConfig.Serve` being a single `[]string` is no longer the bound. What is
+still unfixed is the ephemeral half: a declared entry's `sd.jobs` and
+`tts.jobs` are the job, so one file still describes one batch per workload,
+and `cmd`/`cmds` have been deleted from the config entirely. The entries
+below are what the four files became.
+
 **The rule, so the next reader does not have to guess it.** A comment in a
 committed configuration says what a wrong value costs, in a line or two.
 Anything that argues, measures or compares belongs here.
 
-## The four files
+## The three workloads
 
-| file | provider | weights | job shape | costs |
+| `--workload` | provider | weights | job shape | costs |
 |---|---|---|---|---|
-| `ember.example.yaml` | runpod | none | none — a provider smoke test | a minute of a 4090 |
-| `ember.sd-server.example.yaml` | runpod | FLUX.2 [dev] Q8_0, on a store | `sd:` — one `sd-server`, a list of jobs | ~$2.49/hr divided over the batch, plus the store |
-| `ember.local.example.yaml` | local | the same weights, a Docker volume | `sd:` | nothing |
-| `ember.local.sd-server.example.yaml` | local | sd15, baked into `ember:sd` | `sd:` — what `ember serve` needs | nothing |
+| `free` | local | sd15, baked into `ember:sd` | `sd:` — what `ember serve` needs | nothing |
+| `flux2-local` | local | FLUX.2 [dev] Q8_0, a Docker volume | `sd:` | nothing |
+| `flux2` | runpod | the same weights, on a network volume | `sd:` — one `sd-server`, a list of jobs | ~$2.49/hr divided over the batch, plus the store |
 
-The count cannot go below four. `{local, rented}` is two profiles, the two
-local files differ in which weights they hold — 56 GiB streamed off this
-machine's disk against sd15 baked into the image — and the starter names no
-jobs at all, which is what makes it a credentials-and-image check rather than
-a generation.
+**"The count cannot go below four" is what this section used to say, and it was
+wrong.** The argument was that `{local, rented}` is two profiles, that the two
+local files differ in which weights they hold, and that the starter names no
+jobs at all — all three still true, and none of them an argument for four
+FILES. What made them files was that a declared entry carried only `image:`,
+`images:` and the driver block, so the keys those three actually differ in —
+`store`, `assets`, `verify`, `min_vram_gib`, `ttl` and the probe — were shared
+across every entry in a file. One file could hold three entries and only one
+of them could work.
+
+So the entry was widened to carry those six, and the count went to one. The
+starter is the casualty and is not missed: a configuration naming no jobs was a
+credentials-and-image check, and `ember up --workload free` is that check for
+nothing instead of a minute of a rented 4090.
 
 **A configuration names one kind of job, and the refusal is
 `node.NewSpec`'s.** `sd.serve` and `sd.jobs` come as a pair, `tts.jobs` is the
@@ -41,7 +59,7 @@ other kind, and a file naming both is refused by `app.NewPlan` before
 anything is rented — a run with two answers to "what does this node generate"
 is one where an operator watches the wrong thing execute.
 
-## `ember.sd-server.example.yaml` — FLUX.2 [dev] on a store
+## `flux2` — FLUX.2 [dev] on a store
 
 ### What is on the store, and why it could not be anywhere else
 
@@ -252,7 +270,7 @@ A key ember already set is refused rather than resolved. `extra` is reachable
 from a config and **not** from the web UI — the field does not exist on the
 wire type.
 
-## `ember.local.example.yaml` — the same weights, on the card in this machine
+## `flux2-local` — the same weights, on the card in this machine
 
 **The point is not that this is fast.** It is not: the weights do not fit in an
 11 GiB card, so `sd-server` keeps them in system RAM and streams them into
@@ -262,7 +280,7 @@ rented A100 does the same image in minutes.
 The point is that it costs nothing. Most iterations of a prompt are asking "is
 the composition right", and that question does not need an A100. Get the prompt
 and the seed right here for free, then render once on a rented card with
-`ember.sd-server.example.yaml` — same assets, same digests, same jobs, one
+the `flux2` entry — same assets, same digests, same jobs, one
 line different.
 
 `--offload-to-cpu` is what makes it possible at all: **56 GiB of weights in a
@@ -293,7 +311,7 @@ image genuinely cannot run on this card: it is what turns that into a refusal
 instead of a silent CPU fallback. The two questions it asks are the ones
 written out under the rented configuration above.
 
-## `ember.local.sd-server.example.yaml` — the web UI, for nothing
+## `free` — the web UI, for nothing
 
 `ember serve` needs an `sd:` block, because the serve argv names the weights
 and a request arriving over HTTP may not. Neither other `sd:` example is
@@ -305,7 +323,7 @@ nothing.
 make docker-build
 make workload-sd MODEL=/path/to/v1-5-pruned_bf16.gguf
 make web
-ember serve --config ember.local.sd-server.example.yaml
+ember serve   # the `free` workload is the one the UI needs
 ```
 
 **What it proves, which is why it is worth having beyond convenience:** the
@@ -333,6 +351,5 @@ configuration that is not free.
 `sd.jobs` there is a placeholder: `ember serve` replaces it with whatever the
 browser queues. It cannot be *empty*, because `ParseSD` refuses a server with
 no jobs — that configuration rents a card, loads the weights and generates
-nothing. It is also what `ember up --config
-ember.local.sd-server.example.yaml` would run, which is a useful way to check
-the configuration without a browser.
+nothing. It is also what `ember up --workload free` would run, which is a useful way to
+check the configuration without a browser.

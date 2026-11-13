@@ -178,6 +178,7 @@ func upOverSocket(ctx context.Context, out io.Writer, sock loopback.Socket, ask 
 func submitRun(ctx context.Context, c *http.Client, ask app.RunAsk) (genstore.ReqID, error) {
 	body, err := json.Marshal(webapi.RunBody{
 		Config:       ask.Config,
+		Workload:     ask.Overrides.Workload,
 		Provider:     ask.Overrides.Provider,
 		Image:        ask.Overrides.Image,
 		GPU:          ask.Overrides.GPU,

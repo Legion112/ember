@@ -163,6 +163,13 @@ func (p *Provider) Caps() provider.Caps {
 		// rented one uses.
 		Stores: true,
 
+		// AND NOTHING BILLS FOR ONE, which is what lets AttachStore make a
+		// missing one rather than refusing. `docker volume create` allocates
+		// no space and charges nothing; the data in it occupies this disk and
+		// `ember store rm` removes it. There is no monthly charge to leak, so
+		// there is nothing for the refusal to protect.
+		StoresFree: true,
+
 		// A node here is two objects: the container and the bridge network it
 		// sits on. The network is the only thing in ember that can be left
 		// behind by a *successful* destroy, so this is the one provider with

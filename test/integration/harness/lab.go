@@ -819,6 +819,23 @@ func (l *Lab) CreateStore(ctx context.Context, name string) {
 	if out := l.RunSub(ctx, "store", "create"); out.ExitCode != 0 {
 		l.t.Fatalf("store create exited %d: %s", out.ExitCode, out.Combined())
 	}
+	l.OwnStore(name)
+}
+
+// OwnStore has the lab remove a store at the daemon when it finishes.
+//
+// Split out of CreateStore for the store a lab does not create and still
+// means to exist: `ember up` makes a missing store where nothing bills for
+// one, so the lab asserting that has a volume to answer for and no
+// CreateStore call to have registered the cleanup. Without this the
+// surviving-volume check at the end of New reports it, and the only other way
+// to quiet that check is to teach it to tolerate a volume -- which is the
+// check that catches a leak.
+//
+// The name is ember's, not the volume's: StoreLabel is what turns one into
+// the other, the same way `ember store rm` takes the name `ember ls` printed.
+func (l *Lab) OwnStore(name string) {
+	l.t.Helper()
 	l.t.Cleanup(func() {
 		rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

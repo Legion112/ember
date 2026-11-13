@@ -244,9 +244,9 @@ func (s *RecordingStore) ClaimNext(_ context.Context, runID string, c Compat) (R
 		if r.Status != StatusQueued {
 			continue
 		}
-		// Through KindOf on BOTH sides, which is what the sqlite store's
-		// CASE does in SQL: a row written before the kind column holds '',
-		// and a compat built from one holds 'sd', so comparing the raw
+		// Through WorkloadOf on BOTH sides, which is what the sqlite store's
+		// nested CASE does in SQL: a row written before either column holds
+		// '', and a compat built from one holds 'sd', so comparing the raw
 		// strings would make an upgraded queue unclaimable. A fake that got
 		// this right by comparing raw strings while the real store normalised
 		// -- or the other way round -- is the divergence the conformance
@@ -255,9 +255,10 @@ func (s *RecordingStore) ClaimNext(_ context.Context, runID string, c Compat) (R
 			continue
 		}
 		// AND THE CREATE SIDE: a request some live rental can serve is not
-		// taken by a claim looking for work none of them can. Through KindOf
-		// on both sides for the reason the ride check is -- see the SQL store,
-		// where a raw comparison here hands a migrated row a second card.
+		// taken by a claim looking for work none of them can. Through
+		// WorkloadOf on both sides for the reason the ride check is -- see the
+		// SQL store, where a raw comparison here hands a migrated row a second
+		// card.
 		if servedByLive(*r, c.Live) {
 			continue
 		}
@@ -305,7 +306,16 @@ func (s *RecordingStore) ClaimNext(_ context.Context, runID string, c Compat) (R
 // so it does. Writing the prefix rule a second time is how two copies of one
 // rule drift, and the copy in SQL is already as far as that had to go.
 func serves(c Compat, r Request) bool {
-	if KindOf(r.Kind) != KindOf(c.Kind) || r.Provider != c.Provider {
+	// THROUGH WorkloadOf AND NOT KindOf, which is this branch's narrowing
+	// applied where master moved the comparison. A declared file may hold two
+	// `sd` entries pointing at different images, and a match on the driver
+	// alone admits both: same provider, same card, the claim succeeds, and the
+	// drain loop hands a request for one model to a resident server holding
+	// the other -- after a card has been paid for. Strictly narrower and never
+	// wider, because two entries with different drivers necessarily have
+	// different ids, so every refusal the driver made is still made.
+	if WorkloadOf(r.Workload, r.Kind) != WorkloadOf(c.Workload, c.Kind) ||
+		r.Provider != c.Provider {
 		return false
 	}
 	return r.GPU == "" || r.GPU == c.GPU ||
@@ -317,7 +327,8 @@ func serves(c Compat, r Request) bool {
 // in it.
 func servesPending(c Compat, r Request) bool {
 	if !c.CardKnown {
-		return KindOf(r.Kind) == KindOf(c.Kind) && r.Provider == c.Provider
+		return WorkloadOf(r.Workload, r.Kind) == WorkloadOf(c.Workload, c.Kind) &&
+			r.Provider == c.Provider
 	}
 	return serves(c, r)
 }
@@ -544,6 +555,41 @@ func (s *RecordingStore) Renew(_ context.Context, ids []ReqID) (int, error) {
 }
 
 // Reclaim marks interrupted every running request whose lease has expired.
+// Retry is the fake's half of the one-statement rule, spelled as the same
+// condition the SQL store's WHERE is.
+//
+// THE THREE TERMINAL STATUSES AND NOT "NOT QUEUED OR RUNNING", because the
+// two readings differ on `done`: a finished request has nothing to retry, and
+// a fake that let one through would disagree with the SQL store on the row an
+// operator is most likely to press by accident. The conformance table is what
+// holds the two to each other.
+func (s *RecordingStore) Retry(_ context.Context, id ReqID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.record("Retry", string(id)); err != nil {
+		return false, err
+	}
+	r, ok := s.reqs[id]
+	if !ok {
+		return false, nil
+	}
+	switch r.Status {
+	case StatusFailed, StatusCancelled, StatusInterrupted:
+	default:
+		return false, nil
+	}
+	r.Status = StatusQueued
+	r.Err = ""
+	r.Node = ""
+	r.Offer = ""
+	r.Started = time.Time{}
+	r.Ended = time.Time{}
+	// THE COST SURVIVES. A request that failed after renting has already spent
+	// money, and the row is the total across every attempt.
+	delete(s.leases, id)
+	return true, nil
+}
+
 func (s *RecordingStore) Reclaim(_ context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

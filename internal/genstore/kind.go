@@ -55,3 +55,23 @@ func KindOf(k string) string {
 	}
 	return k
 }
+
+// WorkloadOf is the declared workload a stored row names, resolving empty.
+//
+// ONE PLACE, AND IT IS THE ONLY PLACE THAT KNOWS AN EMPTY WORKLOAD NAMES THE
+// IMPLICIT ENTRY. A configuration that declares no `workloads:` describes one
+// entry per driver out of its top-level keys, and each of those entries is
+// named after its own driver -- so a row with no workload names the entry
+// `KindOf(kind)` identifies, which is "sd" for every row written before the
+// kind column existed and for every image generation since.
+//
+// The cost of the two absences is that three spellings mean one thing, and the
+// way that cost is paid once is that nothing else compares against `""`. The
+// SQL in ClaimNext is the one unavoidable second copy and says so where it is
+// written.
+func WorkloadOf(workload, kind string) string {
+	if workload != "" {
+		return workload
+	}
+	return KindOf(kind)
+}

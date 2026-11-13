@@ -35,7 +35,7 @@ const FileName = "generations.db"
 // internal/statestore's reason: reading a newer layout as an older one drops
 // columns, and the column it would drop is the one that says a request is
 // still running.
-const schemaVersion = 7
+const schemaVersion = 8
 
 // migrations takes an existing file forward, one version per entry:
 // migrations[0] moves a version-1 file to version 2.
@@ -242,6 +242,21 @@ var migrations = [][]string{
 		`ALTER TABLE requests ADD COLUMN lease_until_unix INTEGER NOT NULL DEFAULT 0`,
 		`DELETE FROM meta WHERE key = 'caps'`,
 	},
+
+	// 7 -> 8: which declared workload the request named.
+	//
+	// AN EMPTY `workload` NAMES THE IMPLICIT ENTRY, which is why the default
+	// is '' and nothing is backfilled. A configuration that declares no
+	// `workloads:` describes one entry per driver out of its top-level keys,
+	// and each of those entries is named after its own driver -- so
+	// WorkloadOf resolves '' to KindOf(kind), which is exactly the id of the
+	// entry such a row would have named. A migration that stamped a literal
+	// would be guessing at an id the operator may since have chosen for
+	// themselves, which is the `UPDATE requests SET kind='sd'` mistake one
+	// column over.
+	{
+		`ALTER TABLE requests ADD COLUMN workload TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 // defaultLimit bounds a listing that did not ask for one.
@@ -320,10 +335,20 @@ CREATE TABLE IF NOT EXISTS requests (
 	id            TEXT PRIMARY KEY,
 	created_unix  INTEGER NOT NULL,
 	status        TEXT    NOT NULL,
-	-- Which workload this request is for. '' is an image generation, which
-	-- is every row written before schema version 6; see KindOf, which is the
-	-- one place that reading lives.
+	-- Which DRIVER this request is for. '' is an image generation, which is
+	-- every row written before schema version 6; see KindOf, which is the one
+	-- place that reading lives.
 	kind          TEXT    NOT NULL DEFAULT '',
+	-- Which declared workload the operator's file named, which is a different
+	-- question from the one above and is answered by a different authority.
+	-- kind is what the STORE knows without reading ember.yaml -- it is what
+	-- the ledger prints about a row whose entry has since been renamed or
+	-- deleted. workload is the entry id, and it means nothing without the
+	-- operator's file: it is what resolves to an image. '' is every row
+	-- written before schema version 7 and every request against a file that
+	-- declares no workloads; see WorkloadOf, which is the one place that
+	-- reading lives.
+	workload      TEXT    NOT NULL DEFAULT '',
 	provider      TEXT    NOT NULL,
 	gpu           TEXT    NOT NULL DEFAULT '',
 	offer         TEXT    NOT NULL DEFAULT '',
@@ -698,10 +723,11 @@ func (s *SQLite) insert(ctx context.Context, r Request, started, leaseUntil time
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO requests
-			(id, created_unix, status, kind, provider, gpu, offer, ttl_ns, max_hourly, max_run,
-			 preview, preview_every, started_unix, lease_until_unix)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		string(r.ID), r.Created.UnixMilli(), string(r.Status), r.Kind, r.Provider, r.GPU, r.Offer,
+			(id, created_unix, status, kind, workload, provider, gpu, offer, ttl_ns, max_hourly,
+			 max_run, preview, preview_every, started_unix, lease_until_unix)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		string(r.ID), r.Created.UnixMilli(), string(r.Status), r.Kind, r.Workload,
+		r.Provider, r.GPU, r.Offer,
 		int64(r.TTL), int64(r.MaxHourly), int64(r.MaxRun), r.Preview, r.PreviewInterval,
 		unixOrZero(started), unixOrZero(leaseUntil))
 	if err != nil {
@@ -758,7 +784,7 @@ const requestColumns = `id, created_unix, status, kind, provider, gpu, offer, tt
 	started_unix, ended_unix, cost, rate, elapsed_ns, billable_ns,
 	load_measured_ns, load_reported_ns,
 	mem_cgroup, mem_limit, mem_current, mem_total, mem_cached, asset_bytes,
-	model, err`
+	model, err, workload`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -777,7 +803,7 @@ func scanRequest(sc scanner) (Request, error) {
 		memCgroup                     int
 		provider, gpu, offer          string
 		preview, runID, nodeID, errTx string
-		model, kind                   string
+		model, kind, workload         string
 		previewEvery                  int
 	)
 	if err := sc.Scan(&id, &created, &status, &kind, &provider, &gpu, &offer, &ttl,
@@ -785,7 +811,7 @@ func scanRequest(sc scanner) (Request, error) {
 		&started, &ended, &cost, &rate, &elapsed, &billable,
 		&loadMeasured, &loadReported,
 		&memCgroup, &memLimit, &memCurrent, &memTotal, &memCached, &assets,
-		&model, &errTx); err != nil {
+		&model, &errTx, &workload); err != nil {
 		return Request{}, err
 	}
 	r = Request{
@@ -793,6 +819,7 @@ func scanRequest(sc scanner) (Request, error) {
 		Created:         time.UnixMilli(created).UTC(),
 		Status:          Status(status),
 		Kind:            kind,
+		Workload:        workload,
 		Provider:        provider,
 		GPU:             gpu,
 		Offer:           offer,
@@ -1001,14 +1028,26 @@ func (s *SQLite) List(ctx context.Context, f Filter) ([]Request, error) {
 // containing one would quietly match more than it should -- parse, don't
 // grep, and never build a pattern out of stored text.
 func servesClause(c Compat) (string, []any) {
-	args := []any{KindSD, KindOf(c.Kind), c.Provider, c.GPU}
+	args := []any{KindSD, WorkloadOf(c.Workload, c.Kind), c.Provider, c.GPU}
 	cards := cardAdmits(c)
 	in := ""
 	for _, name := range cards {
 		in += " OR gpu = ?"
 		args = append(args, name)
 	}
-	return `((CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ?` +
+	// THE WORKLOAD IS COMPARED THROUGH WorkloadOf AND NOT AS A COLUMN, which
+	// is the one place the two empty-means rules reach into SQL. A plain
+	// `AND workload = ?` would refuse every row written before schema version
+	// 8 to any rental at all -- they hold '' and the compat holds an entry id
+	// -- so a restart after an upgrade would leave an operator's queue
+	// permanently unclaimable. Rewriting the rows was the alternative and is
+	// the thing this schema never does.
+	//
+	// The nested CASE is WorkloadOf spelled in SQL: an empty workload falls
+	// back to the kind, and an empty kind to 'sd'. Both stores spell the same
+	// rule, which is what the conformance table exists to hold.
+	return `((CASE WHEN workload = '' THEN ` +
+		`(CASE WHEN kind = '' THEN ? ELSE kind END) ELSE workload END) = ? AND provider = ?` +
 		` AND (gpu = '' OR gpu = ?` + in + `))`, args
 }
 
@@ -1028,8 +1067,10 @@ func servesClause(c Compat) (string, []any) {
 // lookup rather than at the next poll.
 func servesPendingClause(c Compat) (string, []any) {
 	if !c.CardKnown {
-		return `((CASE WHEN kind = '' THEN ? ELSE kind END) = ? AND provider = ?)`,
-			[]any{KindSD, KindOf(c.Kind), c.Provider}
+		return `((CASE WHEN workload = '' THEN ` +
+				`(CASE WHEN kind = '' THEN ? ELSE kind END) ELSE workload END) = ? ` +
+				`AND provider = ?)`,
+			[]any{KindSD, WorkloadOf(c.Workload, c.Kind), c.Provider}
 	}
 	return servesClause(c)
 }
@@ -1384,6 +1425,52 @@ func (s *SQLite) Renew(ctx context.Context, ids []ReqID) (int, error) {
 //
 // See Store.Reclaim for why this is keyed on the lease rather than sweeping
 // every running row, and why a reclaimed request is not re-queued.
+// Retry puts a terminal request back on the queue.
+//
+// ONE STATEMENT AND NOT A READ THEN A WRITE, which is ClaimNext's discipline
+// applied to the other direction. Two operators pressing retry on one row, or
+// a retry racing the drain loop's own claim, must not both succeed -- the
+// `WHERE status IN (...)` is what decides, and `RowsAffected` is the answer.
+// A read-then-write would leave exactly the window that made ClaimNext one
+// statement.
+//
+// THE ROW IS REUSED, WHICH IS WHAT THE EVENT IS FOR. The alternative was a new
+// request, leaving the failure in the ledger untouched; one row was chosen so
+// the queue does not fill with retries of the same work. So the caller appends
+// a KindRequeued event: the status, error and node here are a derived index
+// and this overwrites them, where the event stream only appends and is the
+// truth about what happened.
+//
+// THE COST IS KEPT. A request that failed after renting has already spent
+// money, and a retry adds to it rather than starting from nothing -- the row
+// is the total this request has cost across every attempt, which is the only
+// reading that does not lose money somebody paid. `started_unix` and
+// `ended_unix` are cleared because they describe an attempt rather than the
+// request, and the event stream has both.
+//
+// THE LEASE IS CLEARED, and that is not tidiness. A row left queued with a
+// live lease is one ClaimNext's `NOT (...)` arm skips and Reclaim will not
+// take either, because Reclaim only looks at running rows -- so the retry
+// would appear to work and the request would sit there until the lease aged
+// out.
+func (s *SQLite) Retry(ctx context.Context, id ReqID) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE requests
+			SET status = ?, run_id = '', lease_until_unix = 0, err = '',
+			    node = '', offer = '', started_unix = 0, ended_unix = 0
+			WHERE id = ? AND status IN (?,?,?)`,
+		string(StatusQueued), string(id),
+		string(StatusFailed), string(StatusCancelled), string(StatusInterrupted))
+	if err != nil {
+		return false, fmt.Errorf("retry request %s in %s: %w", id, s.path, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count the retried request: %w", err)
+	}
+	return n == 1, nil
+}
+
 func (s *SQLite) Reclaim(ctx context.Context) (int, error) {
 	now := s.at().UnixMilli()
 	res, err := s.db.ExecContext(ctx,

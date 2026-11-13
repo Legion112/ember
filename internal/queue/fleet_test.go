@@ -208,7 +208,7 @@ func TestFleet_ARentalBeingCreatedIsAlreadyARow(t *testing.T) {
 	p := &creatingPlanner{started: make(chan struct{}), release: make(chan struct{})}
 	st := genstore.NewRecordingStore()
 	q := &Queue{
-		Store: st, Planner: p, Voices: queueVoices(),
+		Store: st, Planner: p, Workloads: speechWorkloads(t),
 		Outputs: filepath.Join(t.TempDir(), "outputs"), MaxNodes: 1,
 	}
 	opener := enqueue(t, st, "rtx2080ti", "first")

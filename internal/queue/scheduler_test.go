@@ -164,7 +164,7 @@ func (s *leaseStore) counts() (sweeps, renewals int) {
 func TestRun_RenewsTheLeaseOfARentalItIsStillHolding(t *testing.T) {
 	p := newFleetPlanner()
 	st := newLeaseStore()
-	q := &Queue{Store: st, Planner: p, Voices: queueVoices(), Outputs: t.TempDir(), MaxNodes: 2}
+	q := &Queue{Store: st, Planner: p, Workloads: speechWorkloads(t), Outputs: t.TempDir(), MaxNodes: 2}
 
 	// A row claimed by an ember that is gone: it has a lease and nothing will
 	// renew it.

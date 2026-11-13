@@ -29,6 +29,27 @@ type Request struct {
 	Config config.Config
 	Deps   Deps
 
+	// MayCreateStore permits this plan to bring a store into existence where
+	// nothing bills for one.
+	//
+	// A PERMISSION AND NOT A SETTING, which is why it is here rather than in
+	// the config: the caller that is about to RENT grants it, and the two that
+	// are not do not. `ember up --dry-run` promises in its own flag help to
+	// "say what would be rented and create nothing", and a web request asking
+	// what a run would cost needs the same answer without changing anything --
+	// so a `docker volume create` on either path is a side effect in a command
+	// that promised none, even though the volume itself is free.
+	//
+	// IT CANNOT PERMIT A CHARGE. AttachStore refuses a missing store at any
+	// provider that bills for one whatever this says; the gate for that is
+	// Caps.StoresFree and this is the second condition, not a way past the
+	// first.
+	//
+	// THE DEFAULT IS THE SAFE ONE. A zero value plans without creating, so a
+	// caller added later gets the dry run's behaviour until somebody decides
+	// otherwise, and the refusal it gets names the command that makes one.
+	MayCreateStore bool
+
 	// CPUOnly narrows this run to a machine with no card, which is what
 	// `ember store sync` rents: a GPU idling while a download runs is a GPU
 	// being paid for to do nothing.
@@ -177,7 +198,7 @@ func NewPlan(ctx context.Context, req Request, out io.Writer) (Plan, error) {
 	// It also happens before anything is rented, because a run that
 	// discovers its store is missing after creating a node has already
 	// started paying for the discovery.
-	store, err := AttachStore(ctx, p, cfg)
+	store, err := AttachStore(ctx, p, cfg, req.MayCreateStore)
 	if err != nil {
 		return Plan{}, err
 	}
