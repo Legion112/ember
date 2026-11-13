@@ -1733,3 +1733,126 @@ func TestPostRequest_NormalisesTheCardNameItStores(t *testing.T) {
 			"own way is a card the scheduler cannot match and the ledger counts twice", got.GPU)
 	}
 }
+
+// localOnly is a server declaring two entries: one that may be rented only on
+// the local provider, and one that names no providers at all.
+//
+// A DECLARED LIST RATHER THAN THE HARNESS'S IMPLICIT ENTRY, because the
+// implicit one is derived from `image:` and `sd:` and cannot carry a
+// `providers:` -- the key exists on an entry, which is the whole shape of
+// #200.
+func localOnly(t *testing.T) func(*Options) {
+	t.Helper()
+	return func(o *Options) {
+		reg := provider.NewRegistry()
+		if err := reg.Add(local.New(dockerengine.NewRecordingEngine())); err != nil {
+			t.Fatal(err)
+		}
+		// Paid, which is the zero value of Caps().Free.
+		if err := reg.Add(providertest.NewRecordingProvider("runpod")); err != nil {
+			t.Fatal(err)
+		}
+		o.Registry = reg
+		// THE FLAG IS ON, which is the state the defect needs: without it the
+		// paid provider is refused by `refusePaid` for a different reason and
+		// the arm under test is never reached.
+		o.AllowPaid = true
+		serve := config.SDConfig{Serve: []string{"sd-server", "--model", "/m.gguf"}}
+		o.Config.Workloads = []config.Workload{
+			// `ember:sd` is the image the defect was found with: a tag in this
+			// machine's own Docker daemon, which a rented node resolves
+			// against Docker Hub.
+			{ID: "free", Driver: config.DriverSD, Image: "ember:sd",
+				Providers: []string{config.ProviderLocal}, SD: serve},
+			{ID: "rented", Driver: config.DriverSD, Image: o.Config.Image, SD: serve},
+		}
+	}
+}
+
+// TestPostRequest_RefusesAWorkloadOnAProviderItsEntryDoesNotName.
+//
+// THE DEFECT, found by driving the page with `ember serve --allow-paid`: on
+// the `sd15 (this machine)` tab the provider select offered `runpod (paid)`
+// and this handler accepted it. The entry's image is `ember:sd`, which exists
+// in this machine's Docker daemon and in no registry, so nothing refused the
+// combination until a pod had been created and was billing.
+//
+// IT NAMES BOTH, which is what an operator needs to read: the entry, because
+// a file may declare several and only one of them is restricted, and the
+// provider, because the remedy is either a different provider or a different
+// `providers:` line.
+func TestPostRequest_RefusesAWorkloadOnAProviderItsEntryDoesNotName(t *testing.T) {
+	h := newHarness(t, localOnly(t))
+
+	w := h.do(t, "POST", "/api/requests",
+		`{"workload":"free","provider":"runpod","jobs":[{"prompt":"a"}]}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	got := decode[map[string]string](t, w)["error"]
+	if !strings.Contains(got, "free") || !strings.Contains(got, "runpod") {
+		t.Errorf("error = %q, want it to name the entry and the provider", got)
+	}
+
+	// AND THE PROVIDER IT DOES NAME IS ACCEPTED, which is the half that says
+	// this is a filter and not a wall.
+	if w := h.do(t, "POST", "/api/requests",
+		`{"workload":"free","provider":"local","jobs":[{"prompt":"a"}]}`); w.Code != http.StatusAccepted {
+		t.Errorf("status = %d on the provider the entry names, want 202: %s", w.Code, w.Body.String())
+	}
+	// And so is an entry that names no providers, on the paid one: absent
+	// means every provider, which is what keeps every committed configuration
+	// unchanged.
+	if w := h.do(t, "POST", "/api/requests",
+		`{"workload":"rented","provider":"runpod","jobs":[{"prompt":"a"}]}`); w.Code != http.StatusAccepted {
+		t.Errorf("status = %d for an entry that names no providers, want 202: %s",
+			w.Code, w.Body.String())
+	}
+}
+
+// TestConfig_PublishesEachEntrysProviders, so the page can disable the option
+// rather than discovering the refusal on POST.
+//
+// ONE ANSWER AND TWO READERS is the rule this field keeps: the sentence above
+// is what `POST /api/requests` refuses with, and this is the same fact
+// published early enough that the operator is never offered the button. The
+// list is the operator's own and empty means every provider, which is the
+// config key's contract carried unchanged.
+func TestConfig_PublishesEachEntrysProviders(t *testing.T) {
+	h := newHarness(t, localOnly(t))
+	got := decode[configView](t, h.do(t, "GET", "/api/config", ""))
+	if len(got.Workloads) != 2 {
+		t.Fatalf("workloads = %+v, want both entries offered", got.Workloads)
+	}
+	if ps := got.Workloads[0].Providers; len(ps) != 1 || ps[0] != config.ProviderLocal {
+		t.Errorf("the local-only entry publishes %v, want [local]", ps)
+	}
+	if ps := got.Workloads[1].Providers; len(ps) != 0 {
+		t.Errorf("an entry that names no providers publishes %v, want the empty list that "+
+			"means every provider", ps)
+	}
+}
+
+// TestConfig_LeavesOutAnEntryNoReachableProviderMayRent.
+//
+// THE TAB WOULD BE A DEAD ONE: an entry with `providers: [runpod]` on a
+// process that found no RunPod credential has a provider select whose every
+// option is disabled and a 409 for every POST. That is a button that fails
+// after nothing, which is worse than the tab not being there -- the same
+// argument `Unservable` leaves an entry out by, on the key that made "can
+// this be served" two questions.
+func TestConfig_LeavesOutAnEntryNoReachableProviderMayRent(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.Config.Workloads = []config.Workload{{
+			ID: "rented", Driver: config.DriverSD, Image: o.Config.Image,
+			Providers: []string{config.ProviderRunPod},
+			SD:        config.SDConfig{Serve: []string{"sd-server", "--model", "/m.gguf"}},
+		}}
+	})
+	// The harness registry holds the local provider and nothing else, which
+	// is what a machine with no RunPod token has.
+	if got := decode[configView](t, h.do(t, "GET", "/api/config", "")); len(got.Workloads) != 0 {
+		t.Errorf("workloads = %+v, want none offered: no reachable provider may rent it",
+			got.Workloads)
+	}
+}

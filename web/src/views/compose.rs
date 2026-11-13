@@ -78,6 +78,10 @@ pub fn Compose(
     // did: two declared image workloads are two servers with two preview
     // settings, and a page-wide default would start the second one's controls
     // at the first one's value.
+    // Cloned for the provider select's own closure, which reads the config
+    // reactively and so cannot borrow the entry -- see the select below.
+    let wl_select = wl.clone();
+
     let wl_preview = wl.preview.clone();
     let wl_preview_default = wl.preview.clone();
     let wl_preview_every = wl.preview_interval;
@@ -108,11 +112,23 @@ pub fn Compose(
 
     // The provider defaults to the config's first one that can actually be
     // rented from, so the form is usable without a choice being made.
+    //
+    // AND THAT IS THE FIRST ONE THIS WORKLOAD RUNS ON, not the first one this
+    // server may spend at. An entry with `providers: [local]` on a server
+    // started with --allow-paid would otherwise open with `runpod` already in
+    // the field and the only disabled option in the select selected -- a form
+    // whose default is refused, which is the defect `providers:` is for
+    // arriving one click earlier.
+    let wl_default = wl.clone();
     Effect::new(move |_| {
         let c = config.get();
         if provider.get().is_empty() {
-            if let Some(p) = c.providers.iter().find(|p| c.can_rent(&p.name)) {
-                provider.set(p.name.clone());
+            if let Some(o) = c
+                .provider_options(&wl_default)
+                .into_iter()
+                .find(|o| o.usable)
+            {
+                provider.set(o.name);
             }
         }
     });
@@ -284,27 +300,51 @@ pub fn Compose(
             <div class="row">
                 <label>
                     <Help text="provider" title="Which account the card is rented from. A provider marked (needs --allow-paid) costs money and this server was started without that flag, so it is refused."/>
+                    // A PLAIN REACTIVE MAP AND NO LONGER A KEYED `<For>`,
+                    // which closes #183 in the lines this workload filter
+                    // lands in. The `<For>` keyed each row on the provider's
+                    // name and read the config in the row BODY, so `usable`
+                    // and the `(paid)` / `(needs --allow-paid)` note beside
+                    // each name were computed once at mount and never again:
+                    // the key cannot change, so nothing rebuilt the row. It
+                    // was latent on an accident -- `/api/config` is fetched
+                    // exactly once -- and this filter is exactly the change
+                    // that gives it a second input to be stale about.
+                    //
+                    // NOT KEYED ON THE DATA INSTEAD, which AGENTS.md settles
+                    // for the two keyed-list defects before it: a key is
+                    // stable identity, so one built out of the row's values
+                    // rebuilds the DOM for every change and leaves the next
+                    // field somebody adds in the same hole. A map with no key
+                    // is the offers panel's own resolution, and it is right
+                    // here too -- the list is one `<option>` per provider
+                    // with no state of its own, and the sibling card select
+                    // below is already written this way.
+                    //
+                    // `selected` IS READ FROM THE SIGNAL so that a rebuild
+                    // keeps the operator's choice: the options are recreated
+                    // when the config changes, and a browser resets a select
+                    // whose chosen option was replaced.
                     <select on:change=move |ev| {
                         provider.set(event_target_value(&ev));
                         offers.set(Offers::default());
                     }>
-                        <For
-                            each=move || config.get().providers
-                            key=|p| p.name.clone()
-                            let:p
-                        >
-                            {
-                                let c = config.get();
-                                let usable = c.can_rent(&p.name);
+                        {move || {
+                            config.get().provider_options(&wl_select).into_iter().map(|o| {
+                                let name = o.name.clone();
+                                let chosen = o.name.clone();
                                 view! {
-                                    <option value=p.name.clone() disabled=!usable>
-                                        {p.name.clone()}
-                                        {if p.free { " (free)" } else if usable { " (paid)" }
-                                         else { " (needs --allow-paid)" }}
+                                    <option
+                                        value=o.name
+                                        disabled=!o.usable
+                                        selected=move || provider.get() == chosen
+                                    >
+                                        {name}
+                                        {o.note}
                                     </option>
                                 }
-                            }
-                        </For>
+                            }).collect::<Vec<_>>()
+                        }}
                     </select>
                 </label>
 

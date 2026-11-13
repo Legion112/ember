@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Legion112/ember/internal/node"
 )
 
 // load puts a config on disk and reads it back, which is the only path that
@@ -637,5 +639,117 @@ workloads:
 	if sel.GPUProbeTimeout != 9*time.Minute {
 		t.Errorf("the probe timeout is %v, want the entry's 9m over the file's 1m",
 			sel.GPUProbeTimeout)
+	}
+}
+
+// TestWorkload_ProvidersIsAnAllowListAndAbsentMeansEveryProvider.
+//
+// THE DEFECT: `ember serve --allow-paid` offered `runpod (paid)` on the
+// `sd15 (this machine)` tab and accepted it, for an entry whose image is
+// `ember:sd` -- a tag in this machine's own Docker daemon, which a rented node
+// resolves against Docker Hub. Nothing refused the combination until a pod
+// existed and was billing.
+//
+// BOTH ARMS OF THE KEY, because the absent one is what every configuration
+// that exists depends on: the four committed files and every `ember up` ever
+// taken name no providers, and an allow-list read as empty-means-none would
+// refuse all of them.
+func TestWorkload_ProvidersIsAnAllowListAndAbsentMeansEveryProvider(t *testing.T) {
+	cfg, err := load(t, `ttl: 30m
+workloads:
+  - id: free
+    driver: sd
+    image: ember:sd
+    providers: [local]
+    sd:
+      serve: ["sd-server", "--model", "/m.gguf"]
+  - id: rented
+    driver: sd
+    image: `+ref+`
+    sd:
+      serve: ["sd-server", "--model", "/m.gguf"]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := cfg.WorkloadCatalogue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	here, anywhere := ws[0], ws[1]
+
+	if !here.AllowsProvider(ProviderLocal) {
+		t.Error("the entry that names local does not allow local")
+	}
+	if here.AllowsProvider(ProviderRunPod) {
+		t.Error("an entry with providers: [local] allows runpod")
+	}
+	for _, p := range Providers() {
+		if !anywhere.AllowsProvider(node.ProviderID(p)) {
+			t.Errorf("an entry that names no providers refuses %s; absent means every provider", p)
+		}
+	}
+
+	// AND THE ONE ANSWER CARRIES IT. This is the sentence `POST /api/requests`
+	// refuses with, so what it names is what an operator reads instead of a
+	// bill.
+	if why := here.UnservableOn(ProviderLocal); why != "" {
+		t.Errorf("the local entry cannot be served on local: %s", why)
+	}
+	why := here.UnservableOn(ProviderRunPod)
+	if why == "" {
+		t.Fatal("renting a local-only workload on runpod was not refused")
+	}
+	if !strings.Contains(why, "runpod") || !strings.Contains(why, "local") {
+		t.Errorf("the refusal names neither the provider asked for nor the ones allowed: %q", why)
+	}
+	if u := anywhere.UnservableOn(ProviderRunPod); u != "" {
+		t.Errorf("an entry that names no providers was refused on runpod: %s", u)
+	}
+}
+
+// TestWorkload_AProviderNameThisBuildDoesNotHaveIsRefusedAtLoad.
+//
+// AN UNKNOWN NAME MATCHES NOTHING, so `providers: [runpd]` would be an entry
+// no provider may rent: a tab whose provider select is entirely disabled and a
+// 409 for every provider there is. That reads as ember being broken rather
+// than as a typo, which is the duplicate-id argument one key over -- so it is
+// a load refusal, naming what this build has.
+func TestWorkload_AProviderNameThisBuildDoesNotHaveIsRefusedAtLoad(t *testing.T) {
+	_, err := load(t, `ttl: 30m
+workloads:
+  - id: w
+    driver: sd
+    image: `+ref+`
+    providers: [runpd]
+    sd:
+      serve: ["sd-server", "--model", "/m.gguf"]
+`)
+	if err == nil {
+		t.Fatal("a provider name this build does not have was accepted")
+	}
+	if !strings.Contains(err.Error(), "runpd") || !strings.Contains(err.Error(), ProviderRunPod) {
+		t.Errorf("the refusal does not name the typo and what this build has: %v", err)
+	}
+}
+
+// TestWorkload_UnservableOnDoesNotJudgeAnEmptyProvider, which is
+// `webapi.refusePaid`'s own tolerance: a request that names no provider is
+// refused by `genstore.Request.validate` with "a request names no provider",
+// and answering "" is not one of its providers would replace the sentence that
+// helps with one that does not.
+func TestWorkload_UnservableOnDoesNotJudgeAnEmptyProvider(t *testing.T) {
+	w := Workload{ID: "w", Driver: DriverSD, Providers: []string{ProviderLocal},
+		SD: SDConfig{Serve: []string{"sd-server"}}}
+	if why := w.UnservableOn(""); why != "" {
+		t.Errorf("an empty provider was judged: %q", why)
+	}
+	// AND THE INTRINSIC ARM STILL ANSWERS FIRST, whatever the provider is: an
+	// entry with no server to start cannot be served on local either, and
+	// naming `providers:` to an operator whose real problem is `sd.serve`
+	// would send them to the wrong key.
+	noServe := Workload{ID: "w", Driver: DriverSD, Providers: []string{ProviderLocal}}
+	if why := noServe.UnservableOn(ProviderRunPod); !strings.Contains(why, "sd.serve") {
+		t.Errorf("the reason does not name the key: %q", why)
 	}
 }

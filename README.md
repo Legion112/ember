@@ -619,6 +619,10 @@ workloads:
 - `image` and `images` mean exactly what the top-level keys mean, including
   that they are not alternatives and that a card with no `images:` entry
   refuses rather than falling back to `image:`.
+- `providers` is the allow-list of providers this entry may be rented on —
+  `providers: [local]`, say. **Absent means every provider**, so no
+  configuration that does not use it changes meaning, and a name this build
+  cannot rent from is refused at load naming what it has.
 - `sd:` and `tts:` are the driver's own block. A block the entry's driver does
   not read is refused rather than ignored.
 
@@ -649,6 +653,26 @@ left out of `/api/config` entirely — so there is no tab for it and
 `POST /api/requests` answers 409 naming the key if anything asks. `ember serve`
 refuses to start only when *no* entry can be served, and then prints each
 entry's own reason.
+
+**`providers:` is the same answer on the other axis, and it is about money.**
+Two of the committed entries name an image that exists only in this machine's
+Docker daemon — `free` is `ember:sd` and `flux2-local` is
+`ember:sd-cuda-sm75` — and an unqualified name on a rented node is resolved
+against Docker Hub, so the pull fails after the pod has been created and is
+billing. Nothing in an image reference says which it is: `ember:sd` and
+`nginx:1.25` have the same shape, no registry host and a tag that is not
+`:latest`, and one is local-only while the other is pullable anywhere. So the
+allow-list is the operator's statement, and both entries set
+`providers: [local]`.
+
+Each entry's list is published in `/api/config`, so the provider select greys
+the ones this workload does not run on and says why beside each — the same
+place `(needs --allow-paid)` is said. `POST /api/requests` refuses the
+combination with a 409 naming the entry and the provider, which is the gate
+that holds for a client that is not the page. An entry no *reachable* provider
+may rent — `providers: [runpod]` on a machine with no RunPod credential — is
+left out of `/api/config` entirely, for the reason an unservable entry is:
+every option on its tab would be disabled and every request a 409.
 
 ### The committed configurations
 
@@ -1248,8 +1272,9 @@ tts:
 ```
 
 `GET /api/config` publishes a `workloads` list, and each entry carries its own
-`voices` — the ids and their display names, and **not** the paths — so a UI can
-offer a list it could not have guessed. The nav's tabs and each page's voice
+`voices` — the ids and their display names, and **not** the paths — and its own
+`providers`, the entry's allow-list with empty meaning every provider — so a UI
+can offer a list it could not have guessed. The nav's tabs and each page's voice
 chooser are built from that list and from nothing else; see
 [speaking instead of generating](#speaking-instead-of-generating). A request
 then looks like this:

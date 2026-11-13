@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -38,6 +39,35 @@ const (
 
 // Drivers is every driver ember has typed code for, in no particular order.
 func Drivers() []string { return []string{DriverSD, DriverTTS} }
+
+// ProviderLocal and ProviderRunPod are the providers this build has a
+// Provider implementation for.
+//
+// A SECOND SPELLING OF `local.Name` AND `runpod.Name`, FOR `Drivers`' REASON
+// ONE PROVIDER OVER. The names are constants in `internal/provider/local` and
+// `internal/provider/runpod`, and `internal/config` cannot read them:
+// `local.New` takes a `dockerengine.API`, so importing that package would put
+// a Docker client into the dependency graph of the package every command
+// starts by loading a file with -- and the reverse, a provider that reads
+// ember.yaml, is worse. The registry cannot be read either, because it is
+// built per run from whatever credentials exist and an entry's `providers:` is
+// validated at LOAD, before a credential has been looked for: validating
+// against the registry would mean a file that is refused on a machine with no
+// RunPod token and accepted on one with it.
+//
+// So the two lists are held equal in both directions by
+// `TestProviders_AreTheOnesBuildRegistryCanRegister`, which lives in
+// `internal/app` because that is where a provider name becomes a registered
+// provider -- the shape `TestDrivers_AreTheKindsTheStoreKnows` already uses
+// for the driver names.
+const (
+	ProviderLocal  = "local"
+	ProviderRunPod = "runpod"
+)
+
+// Providers is every provider this build can rent from, in no particular
+// order.
+func Providers() []string { return []string{ProviderLocal, ProviderRunPod} }
 
 // Workload is one declared workload: an id a request may name, a driver, the
 // image that carries that driver's binary, and the driver's own block.
@@ -90,6 +120,34 @@ type Workload struct {
 	Image  string            `yaml:"image"`
 	Images map[string]string `yaml:"images"`
 
+	// Providers is the allow-list of providers this entry may be rented on.
+	// Absent means every provider, so no committed configuration changes
+	// meaning.
+	//
+	// THE KEY EXISTS BECAUSE AN IMAGE REFERENCE CANNOT ANSWER THIS, and that
+	// was the defect: `ember serve --allow-paid` offered `runpod (paid)` on
+	// the `sd15 (this machine)` tab and accepted it, for an entry whose image
+	// is `ember:sd` -- a tag in this machine's Docker daemon and in no
+	// registry, which a rented node resolves against Docker Hub. Nothing
+	// refused the combination until a pod existed and was billing.
+	//
+	// NOT DERIVED FROM THE IMAGE STRING, which is the option refused rather
+	// than missed. `ember:sd` and `nginx:1.25` have the same shape -- no
+	// registry host, a tag, not `:latest` -- and one is local-only while the
+	// other is pullable anywhere, so no parse separates them. Where a
+	// workload can run is a fact about the operator's registry and their
+	// account, which only the operator holds; the allow-list is their
+	// statement of it, and an allow-list is the house shape for the dangerous
+	// direction regardless.
+	//
+	// ABSENT MEANS EVERY PROVIDER AND NOT NONE, which is the one reading that
+	// keeps this invisible to every file that exists: the four committed
+	// configurations and every `ember up` ever taken name no providers, and
+	// the empty-means-none reading would refuse all of them. The same
+	// sentence is what `workloadView.Providers` publishes and what the page
+	// reads, so the three layers hold one meaning rather than three.
+	Providers []string `yaml:"providers"`
+
 	// WHAT AN ENTRY MAY ALSO REPLACE, and why these six and not every key.
 	//
 	// IT WAS image/images/sd/tts ALONE, and that was not enough to hold one
@@ -139,7 +197,7 @@ type Workload struct {
 // LabelOrID is what a UI prints for this entry.
 func (w Workload) LabelOrID() string { return firstNonEmpty(w.Label, w.ID) }
 
-// Unservable says why a browser cannot be offered this workload, or "".
+// Unservable says why a browser cannot be offered this workload at all, or "".
 //
 // PER ENTRY, WHICH IS THE WHOLE OF WHY THE RED BANNER GOES. The two drivers
 // need different things and a configuration with one of them can serve one of
@@ -155,6 +213,18 @@ func (w Workload) LabelOrID() string { return firstNonEmpty(w.Label, w.ID) }
 // older one -- and the entry beside it may be perfectly runnable. The load
 // refusal is in Validate and catches the typo; this is what keeps the rest of
 // the file working if somebody skips a version.
+//
+// IT ASKS NOTHING ABOUT THE PROVIDER, AND THAT IS THE SPLIT RATHER THAN THE
+// OMISSION. `providers:` made "can this be served" two questions: an entry
+// with no `sd.serve` can be served by nobody, and an entry whose image lives
+// only in this machine's Docker daemon can be served here and on no rented
+// card. The first is the one `/api/config` leaves a TAB out for and the one
+// `ember serve` refuses to start over; answering the second here would hide
+// the free tab from a server that can run it. So the provider axis is
+// `UnservableOn`, which is this answer plus one arm, and the two readers of
+// the original sentence read the one that matches the question they are
+// asking: a page asks which tabs exist, and a POST asks whether THIS rental
+// can happen.
 func (w Workload) Unservable() string {
 	switch w.Driver {
 	case DriverSD:
@@ -171,6 +241,50 @@ func (w Workload) Unservable() string {
 			"this build runs %s", w.Driver, strings.Join(Drivers(), " and "))
 	}
 	return ""
+}
+
+// UnservableOn says why this workload cannot be rented on p, or "".
+//
+// THE ONE ANSWER, CARRYING THE PROVIDER, which is `Unservable`'s own argument
+// followed one axis over: that method exists so that "a page cannot offer a
+// button that fails after a card is rented", and the button being offered was
+// `runpod (paid)` on an entry whose image is a tag in this machine's Docker
+// daemon. The refusal arrived when the pod was already billing, which is the
+// defect `providers:` is for and this is the method that enforces it.
+//
+// IT IS `Unservable` PLUS ONE ARM AND NOT A SECOND SWITCH. An entry that can
+// be served by nobody cannot be served on p either, and saying "runpod is not
+// in its providers:" to an operator whose real problem is a missing
+// `sd.serve` would send them to the wrong key.
+//
+// AN EMPTY PROVIDER IS NOT JUDGED, exactly as `webapi.refusePaid` does not
+// judge one: a request that names no provider is refused by
+// `genstore.Request.validate` with "a request names no provider", which is
+// the sentence that helps, and answering "" is not one of its providers here
+// would replace it with a worse one.
+func (w Workload) UnservableOn(p node.ProviderID) string {
+	if why := w.Unservable(); why != "" {
+		return why
+	}
+	if p == "" || w.AllowsProvider(p) {
+		return ""
+	}
+	return fmt.Sprintf("it declares providers: [%s] and %q is not one of them, so its image "+
+		"is not one that provider can pull; rent it on %s, or add %s to that entry's "+
+		"providers: if the image really is pullable there",
+		strings.Join(w.Providers, ", "), p, strings.Join(w.Providers, " or "), p)
+}
+
+// AllowsProvider reports whether this entry may be rented on p.
+//
+// AN EMPTY LIST IS EVERY PROVIDER, which is the field's own contract and the
+// line that makes `providers:` invisible to every configuration that does not
+// use it. See the field.
+func (w Workload) AllowsProvider(p node.ProviderID) bool {
+	if len(w.Providers) == 0 {
+		return true
+	}
+	return slices.Contains(w.Providers, string(p))
 }
 
 // WorkloadCatalogue is the workloads this configuration declares, in the order
@@ -257,6 +371,20 @@ func (w Workload) validate() error {
 	// a top-level one cannot come to disagree about what a key means.
 	if _, err := (Config{Images: w.Images}).ParseImages(); err != nil {
 		return err
+	}
+
+	// A PROVIDER NAME NOBODY HAS IS REFUSED HERE AND NOT READ AS "NONE".
+	// `providers:` is an allow-list and an unknown name matches nothing, so
+	// `providers: [runpd]` would be an entry no provider may rent: a tab the
+	// page draws with an empty provider select and a 409 for every provider
+	// there is. That is a typo an operator reads as ember being broken, which
+	// is the duplicate-id argument one key over -- so it is a load refusal,
+	// loudly, naming what this build has.
+	for _, p := range w.Providers {
+		if !slices.Contains(Providers(), p) {
+			return fmt.Errorf("providers names %q, which is not a provider this build can rent "+
+				"from; it has %s", p, strings.Join(Providers(), " and "))
+		}
 	}
 
 	// A DEADLINE IN THE PAST IS REFUSED HERE RATHER THAN NARROWED LATER. Zero

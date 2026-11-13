@@ -722,12 +722,24 @@ func (s *Server) postRequest(w http.ResponseWriter, r *http.Request) {
 	// `webapi.Options` directly and never asks whether the configuration
 	// behind it could serve anything.
 	//
-	// ONE ANSWER AND TWO READERS: `config.Workload.Unservable` is the same
-	// method `/api/config` leaves an entry out of what it offers by, so a
-	// page cannot show a tab this will then refuse. The 409 is for a client
-	// that is not that page.
-	if why := wl.Unservable(); why != "" {
-		s.fail(w, http.StatusConflict, fmt.Errorf("workload %q cannot be served: %s", wl.ID, why))
+	// ONE ANSWER AND TWO READERS: `config.Workload.UnservableOn` is
+	// `Unservable` plus the provider arm, and `/api/config` leaves an entry
+	// out of what it offers by the same two answers -- the tab by
+	// `Unservable`, the provider option by the entry's published
+	// `providers:`. So a page cannot show a button this will then refuse. The
+	// 409 is for a client that is not that page.
+	//
+	// AND IT CARRIES THE PROVIDER, which is the arm that was missing while
+	// `--allow-paid` was reachable: the page offered `runpod (paid)` on the
+	// `sd15 (this machine)` tab and this accepted it, for an entry whose
+	// image is `ember:sd` -- a tag in this machine's Docker daemon that a
+	// rented node resolves against Docker Hub. The refusal arrived when the
+	// pod was already billing, and `refusePaid` above cannot see it: that
+	// gate is about whether this server may spend at all, and this one is
+	// about whether THIS workload can run where the money would go.
+	if why := wl.UnservableOn(node.ProviderID(req.Provider)); why != "" {
+		s.fail(w, http.StatusConflict, fmt.Errorf("workload %q cannot be served on provider %s: %s",
+			wl.ID, req.Provider, why))
 		return
 	}
 	if err := s.validateJobs(r.Context(), req, wl); err != nil {
